@@ -1,0 +1,42 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: stash
+      POSTGRES_USER: stash
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stash-development-only}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stash -d stash"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    volumes:
+      - stash-postgres:/var/lib/postgresql/data
+
+  stash:
+    build: .
+    environment:
+      DATABASE_URL: postgres://stash:${POSTGRES_PASSWORD:-stash-development-only}@postgres:5432/stash
+      INSTANCE_ADMIN_TOKEN: ${INSTANCE_ADMIN_TOKEN:?Set INSTANCE_ADMIN_TOKEN to a strong secret}
+      HOST: 0.0.0.0
+      PORT: 3000
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "${STASH_PORT:-3000}:3000"
+    restart: unless-stopped
+
+volumes:
+  stash-postgres:
