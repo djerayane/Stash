@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { normalizeExplicitOffsetTimestamp } from "./explicit-offset-timestamp.js";
 import type { PortableIdentity } from "./workspaces-projects.js";
 import { isRichTextDocument, paragraphDocument, type RichTextBlock, type RichTextDocument } from "./rich-text.js";
@@ -65,6 +65,18 @@ export type NoteEditOperation =
   | { id: string; type: "insert_block"; blockKey: string; afterBlockKey: string | null; block: RichTextBlock }
   | { id: string; type: "delete_block"; blockKey: string };
 export interface NoteEditBatch { baseRevision: number; operations: NoteEditOperation[] }
+function canonicalJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (value !== null && typeof value === "object") return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => left.localeCompare(right)).map(([key, nested]) => [key, canonicalJson(nested)]));
+  return value;
+}
+export function noteOperationDigest(operation: NoteEditOperation): string {
+  const canonical = operation.type === "delete_block" ? { type: operation.type, blockKey: operation.blockKey }
+    : operation.type === "insert_block" ? { type: operation.type, blockKey: operation.blockKey, afterBlockKey: operation.afterBlockKey, block: operation.block }
+      : { type: operation.type, blockKey: operation.blockKey, block: operation.block };
+  return createHash("sha256").update(JSON.stringify(canonicalJson(canonical))).digest("hex");
+}
 export type NoteEditOutcome = { status: "updated" | "duplicate"; note: NoteRecord; projection: PortableNoteProjection }
   | { status: "not_found" | "conflict_preserved" | "invalid_reference" };
 
@@ -83,7 +95,7 @@ export interface NoteRepository {
     | { status: "workspace_forbidden" | "project_forbidden" | "note_not_found" | "target_note_not_found" }
   >;
   findNoteForMember(memberId: string, noteId: string): Promise<NoteRecord | undefined>;
-  applyNoteOperations(memberId: string, noteId: string, batch: NoteEditBatch, createdBy: PortableIdentity): Promise<NoteEditOutcome>;
+  applyNoteOperations(memberId: string, noteId: string, batch: NoteEditBatch): Promise<NoteEditOutcome>;
 }
 
 export class InvalidNoteInput extends Error {}
@@ -215,9 +227,7 @@ export class NoteService {
       operations.push(operation as unknown as NoteEditOperation);
     }
     if (new Set(operations.map(({ id }) => id)).size !== operations.length) throw new InvalidNoteEdit();
-    const createdBy = await this.#repository.findPortableMemberIdentity(memberId);
-    if (!createdBy) throw new Error("member_identity_unavailable");
-    return this.#repository.applyNoteOperations(memberId, noteId, { baseRevision: value.baseRevision as number, operations }, createdBy);
+    return this.#repository.applyNoteOperations(memberId, noteId, { baseRevision: value.baseRevision as number, operations });
   }
 }
 

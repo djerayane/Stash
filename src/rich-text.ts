@@ -103,11 +103,30 @@ export function paragraphDocument(content: string, blockKey?: string): RichTextD
 export class UnsupportedMarkdown extends Error {}
 
 function parseInline(text: string): RichTextSpan[] {
-  const link = text.match(/^\[([^\]]+)\]\(<([^>]+)>\)$/);
-  if (link) return [{ text: link[1]!, href: link[2]! }];
-  const wrappers: Array<[RegExp, RichTextMark]> = [[/^\*\*(.*)\*\*$/, "bold"], [/^_(.*)_$/, "italic"], [/^`([^`]*)`$/, "code"]];
-  for (const [pattern, mark] of wrappers) { const match = text.match(pattern); if (match) return [{ text: match[1]!, marks: [mark] }]; }
-  return [{ text: text.replace(/\\([\\`*_{}\[\]<>])/g, "$1") }];
+  const spans: RichTextSpan[] = [];
+  const append = (span: RichTextSpan) => {
+    if (span.marks) span = { ...span, marks: [...span.marks].sort((left, right) => ["bold", "italic", "code"].indexOf(left) - ["bold", "italic", "code"].indexOf(right)) };
+    const previous = spans.at(-1);
+    if (previous && JSON.stringify(previous.marks ?? []) === JSON.stringify(span.marks ?? []) && previous.href === span.href) previous.text += span.text;
+    else spans.push(span);
+  };
+  let index = 0;
+  while (index < text.length) {
+    if (text[index] === "\\" && index + 1 < text.length) { append({ text: text[index + 1]! }); index += 2; continue; }
+    const link = text.slice(index).match(/^\[([\s\S]*?)\]\(<([^>]+)>\)/);
+    if (link) { for (const span of parseInline(link[1]!)) append({ ...span, href: link[2]! }); index += link[0].length; continue; }
+    if (text.startsWith("**", index)) { const end = text.indexOf("**", index + 2); if (end >= 0) {
+      for (const span of parseInline(text.slice(index + 2, end))) append({ ...span, marks: [...new Set([...(span.marks ?? []), "bold" as const])] }); index = end + 2; continue; } }
+    if (text[index] === "_") { const end = text.indexOf("_", index + 1); if (end >= 0) {
+      for (const span of parseInline(text.slice(index + 1, end))) append({ ...span, marks: [...new Set([...(span.marks ?? []), "italic" as const])] }); index = end + 1; continue; } }
+    if (text[index] === "`") { const run = text.slice(index).match(/^`+/)![0]; const end = text.indexOf(run, index + run.length); if (end >= 0) {
+      let content = text.slice(index + run.length, end); if (content.startsWith(" ") && content.endsWith(" ") && content.trim()) content = content.slice(1, -1);
+      append({ text: content, marks: ["code"] }); index = end + run.length; continue; } }
+    let end = index + 1;
+    while (end < text.length && !["\\", "[", "_", "`"].includes(text[end]!) && !text.startsWith("**", end)) end += 1;
+    append({ text: text.slice(index, end) }); index = end;
+  }
+  return spans;
 }
 
 export function markdownToRichText(markdown: string): RichTextDocument {

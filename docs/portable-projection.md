@@ -134,6 +134,11 @@ preserved in `stash_note_edit_conflicts` for focused resolution rather than choo
 An operation may preserve an existing portable Block `id`, but cannot move it to another Block,
 mint a linked identity, or delete a linked Block. Missing or ambiguous references are rejected
 visibly; linking capabilities own the sparse portable-identity lifecycle.
+Operation UUIDs are bound to a canonical SHA-256 digest of their type, target, placement, and full
+payload. Reusing an ID with altered intent is rejected visibly and the attempted contribution is
+retained for investigation; property ordering does not affect the digest. Edit projections always
+retain the immutable original Note creator resolved from the locked Note row. The editing Member
+is authorization and activity context, never a replacement for `createdBy`.
 
 The rich-text foundation round-trips paragraphs, headings (levels one through three), bold,
 italic, inline code, links, quotes, bullet items, checklists, and fenced code through documented

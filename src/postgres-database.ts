@@ -2,7 +2,7 @@ import { randomUUID, timingSafeEqual } from "node:crypto";
 import { Pool, type PoolClient } from "pg";
 
 import type { DatabaseProbe } from "./instance.js";
-import type { NoteEditBatch, NoteRecord, NoteRepository, NoteTriageChange, NoteTriageResult, PortableNoteProjection, PortableTaskProjection, TaskCreation } from "./notes.js";
+import { noteOperationDigest, type NoteEditBatch, type NoteRecord, type NoteRepository, type NoteTriageChange, type NoteTriageResult, type PortableNoteProjection, type PortableTaskProjection, type TaskCreation } from "./notes.js";
 import { richTextToMarkdown } from "./rich-text.js";
 import type { BootstrapRecord, OwnerBootstrapRepository } from "./owner-bootstrap.js";
 import type { AccountAuthenticationRecord, PasswordAuthRepository, SessionRecord } from "./password-auth.js";
@@ -425,18 +425,32 @@ export class PostgresDatabase implements
     } : undefined;
   }
 
-  async applyNoteOperations(memberId: string, noteId: string, batch: NoteEditBatch, createdBy: import("./workspaces-projects.js").PortableIdentity) {
+  async applyNoteOperations(memberId: string, noteId: string, batch: NoteEditBatch) {
     return this.#withTransaction(async (client) => {
       await this.#ensureNoteSchema(client);
-      const access = await client.query<any>(`SELECT note.* FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id = note.workspace_id
+      const access = await client.query<any>(`SELECT note.*, creator.name AS creator_name FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id = note.workspace_id
+        JOIN stash_accounts creator ON creator.id = note.created_by_account_id
         WHERE note.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2)
         OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
         WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2))) FOR UPDATE OF note`, [noteId, memberId]);
       const row = access.rows[0];
       if (!row) return { status: "not_found" as const };
-      const existing = await client.query<{ operation_id: string }>("SELECT operation_id FROM stash_note_operations WHERE note_id = $1 AND operation_id = ANY($2::uuid[])", [noteId, batch.operations.map(({ id }) => id)]);
+      const createdBy = { localAccountId: row.created_by_account_id, displayName: row.creator_name };
+      const existing = await client.query<{ operation_id: string; operation_digest: string | null }>("SELECT operation_id, operation_digest FROM stash_note_operations WHERE note_id = $1 AND operation_id = ANY($2::uuid[])", [noteId, batch.operations.map(({ id }) => id)]);
+      const knownDigests = new Map(existing.rows.map(({ operation_id, operation_digest }) => [operation_id, operation_digest]));
+      const reused = batch.operations.find((operation) => knownDigests.has(operation.id) && knownDigests.get(operation.id) !== noteOperationDigest(operation));
+      if (reused) {
+        await client.query("INSERT INTO stash_note_edit_conflicts (id,note_id,base_revision,document,markdown,operations,created_by_account_id) VALUES ($1,$2,$3,$4::jsonb,$5,$6::jsonb,$7)", [randomUUID(),noteId,batch.baseRevision,JSON.stringify(row.document),row.content,JSON.stringify([reused]),memberId]);
+        return { status: "invalid_reference" as const };
+      }
       const applied = new Set(existing.rows.map(({ operation_id }) => operation_id));
-      const conflicted = await client.query<{ operation_id: string }>("SELECT operation_id FROM stash_note_conflict_operations WHERE note_id = $1 AND operation_id = ANY($2::uuid[])", [noteId, batch.operations.map(({ id }) => id)]);
+      const conflicted = await client.query<{ operation_id: string; operation_digest: string | null }>("SELECT operation_id, operation_digest FROM stash_note_conflict_operations WHERE note_id = $1 AND operation_id = ANY($2::uuid[])", [noteId, batch.operations.map(({ id }) => id)]);
+      const conflictDigests = new Map(conflicted.rows.map(({ operation_id, operation_digest }) => [operation_id, operation_digest]));
+      const reusedConflict = batch.operations.find((operation) => conflictDigests.has(operation.id) && conflictDigests.get(operation.id) !== noteOperationDigest(operation));
+      if (reusedConflict) {
+        await client.query("INSERT INTO stash_note_edit_conflicts (id,note_id,base_revision,document,markdown,operations,created_by_account_id) VALUES ($1,$2,$3,$4::jsonb,$5,$6::jsonb,$7)", [randomUUID(),noteId,batch.baseRevision,JSON.stringify(row.document),row.content,JSON.stringify([reusedConflict]),memberId]);
+        return { status: "invalid_reference" as const };
+      }
       const conflictIds = new Set(conflicted.rows.map(({ operation_id }) => operation_id));
       const pending = batch.operations.filter(({ id }) => !applied.has(id) && !conflictIds.has(id));
       const current: NoteRecord = { id: row.id, workspaceId: row.workspace_id, content: row.content, document: row.document,
@@ -454,7 +468,7 @@ export class PostgresDatabase implements
         const conflictId = randomUUID();
         await client.query("INSERT INTO stash_note_edit_conflicts (id, note_id, base_revision, document, markdown, operations, created_by_account_id) VALUES ($1,$2,$3,$4::jsonb,$5,$6::jsonb,$7)",
           [conflictId, noteId, batch.baseRevision, JSON.stringify(current.document), current.content, JSON.stringify(pending), memberId]);
-        for (const operation of pending) await client.query("INSERT INTO stash_note_conflict_operations (note_id,operation_id,conflict_id) VALUES ($1,$2,$3)", [noteId, operation.id, conflictId]);
+        for (const operation of pending) await client.query("INSERT INTO stash_note_conflict_operations (note_id,operation_id,conflict_id,operation_digest) VALUES ($1,$2,$3,$4)", [noteId, operation.id, conflictId, noteOperationDigest(operation)]);
         return { status: "conflict_preserved" as const };
       }
       const blocks = [...current.document.blocks];
@@ -478,7 +492,7 @@ export class PostgresDatabase implements
       const note = { ...current, document, content: richTextToMarkdown(document), revision: current.revision + 1 };
       const projection = projectionFor(note);
       await client.query("UPDATE stash_notes SET content=$2, document=$3::jsonb, revision=$4 WHERE id=$1", [noteId, note.content, JSON.stringify(document), note.revision]);
-      for (const operation of pending) await client.query("INSERT INTO stash_note_operations (note_id,operation_id,base_revision,applied_revision,block_key) VALUES ($1,$2,$3,$4,$5)", [noteId, operation.id, batch.baseRevision, note.revision, operation.blockKey]);
+      for (const operation of pending) await client.query("INSERT INTO stash_note_operations (note_id,operation_id,base_revision,applied_revision,block_key,operation_digest) VALUES ($1,$2,$3,$4,$5,$6)", [noteId, operation.id, batch.baseRevision, note.revision, operation.blockKey, noteOperationDigest(operation)]);
       await this.#recordPortableProjection(client, "Note", note.id, "stash.note.v1", projection);
       return { status: "updated" as const, note, projection };
     });
@@ -1319,8 +1333,10 @@ export class PostgresDatabase implements
       base_revision INTEGER NOT NULL CHECK (base_revision > 0),
       applied_revision INTEGER NOT NULL CHECK (applied_revision > 0),
       block_key UUID NOT NULL,
+      operation_digest TEXT,
       PRIMARY KEY (note_id, operation_id)
     )`);
+    await client.query("ALTER TABLE stash_note_operations ADD COLUMN IF NOT EXISTS operation_digest TEXT");
     await client.query(`CREATE TABLE IF NOT EXISTS stash_note_edit_conflicts (
       id UUID PRIMARY KEY,
       note_id UUID NOT NULL REFERENCES stash_notes(id) ON DELETE CASCADE,
@@ -1337,8 +1353,10 @@ export class PostgresDatabase implements
       note_id UUID NOT NULL REFERENCES stash_notes(id) ON DELETE CASCADE,
       operation_id UUID NOT NULL,
       conflict_id UUID NOT NULL REFERENCES stash_note_edit_conflicts(id) ON DELETE CASCADE,
+      operation_digest TEXT,
       PRIMARY KEY (note_id, operation_id)
     )`);
+    await client.query("ALTER TABLE stash_note_conflict_operations ADD COLUMN IF NOT EXISTS operation_digest TEXT");
   }
 
   async #ensureNoteSchemaForPool(): Promise<void> {

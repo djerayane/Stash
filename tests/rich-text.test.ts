@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { markdownToRichText, richTextToMarkdown, UnsupportedMarkdown, type RichTextDocument } from "../src/rich-text.js";
+import { markdownToRichText, richTextToMarkdown, UnsupportedMarkdown, type RichTextDocument, type RichTextSpan } from "../src/rich-text.js";
 
 describe("portable rich-text Markdown", () => {
   it("round-trips every supported foundation construct", () => {
@@ -23,5 +23,17 @@ describe("portable rich-text Markdown", () => {
   it("surfaces unsupported downstream constructs instead of discarding them", () => {
     for (const markdown of ["| A | B |\n| - | - |", "![image](photo.png)", "> [!NOTE]\n> callout", ":::callout\ntext"])
       assert.throws(() => markdownToRichText(markdown), UnsupportedMarkdown);
+  });
+
+  it("round-trips mixed and nested inline content without delimiter guessing", () => {
+    const cases: RichTextSpan[][] = [
+      [{ text: "plain " }, { text: "bold", marks: ["bold"] }, { text: " tail" }],
+      [{ text: "nested", marks: ["bold", "italic"] }, { text: " and " }, { text: "a`b", marks: ["code"] }],
+      [{ text: "escaped *_[]<>" }, { text: "linked", marks: ["italic"], href: "https://example.test/a(b)" }],
+    ];
+    for (const content of cases) {
+      const document = { type: "doc" as const, blocks: [{ type: "paragraph" as const, content }] };
+      assert.deepEqual(markdownToRichText(richTextToMarkdown(document)), document);
+    }
   });
 });

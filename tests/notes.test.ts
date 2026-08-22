@@ -4,6 +4,7 @@ import { afterEach, describe, it } from "node:test";
 import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
 import {
   NoteService,
+  noteOperationDigest,
   type NoteEditBatch,
   type NoteRecord,
   type NoteRepository,
@@ -20,7 +21,7 @@ class ProtocolCompatibleNoteDatabase implements DatabaseProbe, NoteRepository {
   readonly notes = new Map<string, NoteRecord>();
   readonly portableProjectionOutbox: PortableNoteProjection[] = [];
   readonly conflicts: NoteEditBatch[] = [];
-  readonly applied = new Map<string, { revision: number; blockKey: string }>();
+  readonly applied = new Map<string, { revision: number; blockKey: string; digest: string }>();
   readonly conflictIds = new Set<string>();
   failure: Error | undefined;
   projectionFailure: Error | undefined;
@@ -49,14 +50,17 @@ class ProtocolCompatibleNoteDatabase implements DatabaseProbe, NoteRepository {
   async triageNote() { return { status: "note_not_found" as const }; }
 
   async findNoteForMember(memberId: string, noteId: string) {
-    if (memberId !== "ada") return undefined;
+    if (memberId !== "ada" && memberId !== "grace") return undefined;
     return this.notes.get(noteId);
   }
 
-  async applyNoteOperations(memberId: string, noteId: string, batch: NoteEditBatch, createdBy: { localAccountId: string; displayName: string }) {
+  async applyNoteOperations(memberId: string, noteId: string, batch: NoteEditBatch) {
     if (this.updateFailure) throw this.updateFailure;
     const current = this.notes.get(noteId);
-    if (memberId !== "ada" || !current) return { status: "not_found" as const };
+    if ((memberId !== "ada" && memberId !== "grace") || !current) return { status: "not_found" as const };
+    const reused = batch.operations.find((operation) => this.applied.has(operation.id) && this.applied.get(operation.id)!.digest !== noteOperationDigest(operation));
+    if (reused) { this.conflicts.push(batch); return { status: "invalid_reference" as const }; }
+    const createdBy = { localAccountId: current.createdByMemberId, displayName: "Ada Lovelace" };
     const pending = batch.operations.filter(({ id }) => !this.applied.has(id) && !this.conflictIds.has(id));
     const projection = (note: NoteRecord): PortableNoteProjection => ({ schema: "stash.note.v1", id: note.id, workspaceId: note.workspaceId,
       content: note.content, tags: note.tags, createdAt: note.createdAt, createdBy });
@@ -73,7 +77,7 @@ class ProtocolCompatibleNoteDatabase implements DatabaseProbe, NoteRepository {
         if (operation.afterBlockKey !== null && after < 0) return { status: "invalid_reference" as const }; blocks.splice(after + 1, 0, operation.block); }
       else { if (index < 0 || blocks[index]!.id !== operation.block.id) return { status: "invalid_reference" as const }; blocks[index] = operation.block; } }
     const document = { type: "doc" as const, blocks }; const note = { ...current, document, content: richTextToMarkdown(document), revision: current.revision + 1 };
-    for (const operation of pending) this.applied.set(operation.id, { revision: note.revision, blockKey: operation.blockKey });
+    for (const operation of pending) this.applied.set(operation.id, { revision: note.revision, blockKey: operation.blockKey, digest: noteOperationDigest(operation) });
     this.notes.set(note.id, note); this.portableProjectionOutbox.push(projection(note));
     return { status: "updated" as const, note, projection: projection(note) };
   }
@@ -83,6 +87,7 @@ const access: MemberAccessResolver = {
   async authenticateBearer(authorization) {
     return authorization === "Bearer member-ada"
       ? { accountId: "ada", sessionId: "session-ada" }
+      : authorization === "Bearer member-grace" ? { accountId: "grace", sessionId: "session-grace" }
       : undefined;
   },
 };
@@ -306,7 +311,7 @@ describe("editing Notes", () => {
       block: { type: "heading", level: 2, blockKey, id: blockId, content: [{ text: "Release notes", marks: ["bold"] }] } }] };
     const response = await fetch(`${baseUrl}/api/notes/${note.id}`, {
       method: "PUT",
-      headers: { authorization: "Bearer member-ada", "content-type": "application/json" },
+      headers: { authorization: "Bearer member-grace", "content-type": "application/json" },
       body: JSON.stringify(body),
     });
     assert.equal(response.status, 200);
@@ -315,10 +320,19 @@ describe("editing Notes", () => {
     assert.equal(edited.content, `## **Release notes**\n<!-- stash-block:${blockId} -->`);
     assert.deepEqual(database.notes.get(note.id)?.document, edited.document);
     assert.equal(database.portableProjectionOutbox.at(-1)?.content, edited.content);
+    assert.deepEqual(database.portableProjectionOutbox.at(-1)?.createdBy, { localAccountId: "ada", displayName: "Ada Lovelace" });
     const retry = await fetch(`${baseUrl}/api/notes/${note.id}`, { method: "PUT",
-      headers: { authorization: "Bearer member-ada", "content-type": "application/json" }, body: JSON.stringify(body) });
+      headers: { authorization: "Bearer member-grace", "content-type": "application/json" }, body: JSON.stringify(body) });
     assert.equal(retry.status, 200);
     assert.equal((await retry.json() as NoteRecord).revision, 2);
+    const reused = { baseRevision: 2, operations: [{ ...body.operations[0], block: { ...body.operations[0]!.block, content: [{ text: "Changed reuse" }] } }] };
+    const changedTarget = "77777777-7777-4777-8777-777777777777";
+    const reuses = [reused, { baseRevision: 2, operations: [{ ...body.operations[0], blockKey: changedTarget,
+      block: { ...body.operations[0]!.block, blockKey: changedTarget } }] },
+    { baseRevision: 2, operations: [{ id: operationId, type: "delete_block", blockKey }] }];
+    for (const reuse of reuses) assert.equal((await fetch(`${baseUrl}/api/notes/${note.id}`, { method: "PUT",
+      headers: { authorization: "Bearer member-grace", "content-type": "application/json" }, body: JSON.stringify(reuse) })).status, 422);
+    assert.equal(database.conflicts.length, 3);
   });
 
   it("merges concurrent operations on different Blocks and preserves same-Block conflicts", async () => {
