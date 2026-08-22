@@ -433,7 +433,8 @@ describe("offline mobile capture synchronization", () => {
   it("keeps permanent attention visible when a later capture is retriable", async () => {
     const { database, baseUrl } = await run();
     const store = new MemoryEncryptedStore();
-    const client = new MobileCaptureClient(store, fetch, { allowInsecureInstanceForTest: true });
+    let now = Date.parse("2026-08-22T10:00:00Z");
+    const client = new MobileCaptureClient(store, fetch, { allowInsecureInstanceForTest: true, now: () => now });
     await client.pair({ instanceUrl: baseUrl, memberToken: "member-ada", workspaceId });
     await client.captureText("Permanent rejection", { projectId: "33333333-3333-4333-8333-333333333333" });
     await client.captureText("Transient rejection");
@@ -445,6 +446,12 @@ describe("offline mobile capture synchronization", () => {
     assert.equal(outbox.length, 2);
     assert.equal(outbox[1]?.attempts, 1);
     assert.ok(outbox[1]?.nextRetryAt);
+
+    now += 500;
+    const secondPass = await client.sync();
+    const reordered = await client.outbox();
+    assert.equal(reordered[0]?.content, "Transient rejection");
+    assert.match(presentMobileSyncResult(secondPass, reordered), /cannot capture/i);
   });
 
   it("keeps permanent attention visible when a later request loses the network", async () => {
