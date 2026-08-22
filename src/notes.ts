@@ -165,50 +165,101 @@ export class NoteService {
     }
     const createdBy = await this.#repository.findPortableMemberIdentity(memberId);
     if (!createdBy) throw new Error("member_identity_unavailable");
-    const now = new Date().toISOString();
-    let change: NoteTriageChange;
-    if (value.action === "organize") {
-      if (typeof value.projectId !== "string" || !isUuid(value.projectId)
-        || value.tags !== undefined && (!Array.isArray(value.tags) || value.tags.length > 50
-          || value.tags.some((tag) => typeof tag !== "string" || !tag.trim() || tag.trim().length > 100))) {
-        throw new InvalidNoteTriageInput();
-      }
-      const found = await this.#findInboxNote(memberId, workspaceId, noteId);
-      if (found.status !== "found") return { status: found.status };
-      const note = found.note;
-      const organized = { ...note, projectId: value.projectId, tags: [...new Set((value.tags as string[] | undefined ?? note.tags).map((tag) => tag.trim()))] };
-      const noteCreator = await this.#repository.findPortableMemberIdentity(note.createdByMemberId);
-      if (!noteCreator) throw new Error("member_identity_unavailable");
-      change = { kind: "organized", note: organized, projections: [{ schema: "stash.note.v2", note: publicNote(organized), createdBy: noteCreator }] };
-    } else if (value.action === "archive" && Object.keys(value).length === 1) {
-      const found = await this.#findInboxNote(memberId, workspaceId, noteId);
-      if (found.status !== "found") return { status: found.status };
-      const note = found.note;
-      const archived = { ...note, archivedAt: now };
-      const noteCreator = await this.#repository.findPortableMemberIdentity(note.createdByMemberId);
-      if (!noteCreator) throw new Error("member_identity_unavailable");
-      change = { kind: "archived", note: archived, projections: [{ schema: "stash.note.v2", note: publicNote(archived), createdBy: noteCreator }] };
-    } else if (value.action === "link" && typeof value.targetNoteId === "string" && isUuid(value.targetNoteId)
-      && value.targetNoteId !== noteId && Object.keys(value).length === 2) {
-      const link = { schema: "stash.note-link.v1" as const, id: randomUUID(), workspaceId, sourceNoteId: noteId, targetNoteId: value.targetNoteId };
-      change = { kind: "linked", link, projections: [link] };
-    } else if (value.action === "create_task" && typeof value.projectId === "string" && isUuid(value.projectId)
-      && typeof value.title === "string" && value.title.trim().length > 0 && value.title.trim().length <= 500 && Object.keys(value).every((key) => ["action", "projectId", "title"].includes(key))) {
-      const task = { id: randomUUID(), workspaceId, projectId: value.projectId,
-        title: value.title.trim(), sourceNoteIds: [noteId], createdAt: now, createdBy };
-      change = { kind: "task_created", task, projections: [] };
-    } else throw new InvalidNoteTriageInput();
+    const variant = triageVariants[value.action];
+    if (!variant) throw new InvalidNoteTriageInput();
+    const prepared = await variant.prepare({ repository: this.#repository, memberId, workspaceId, noteId, actor: createdBy }, value);
+    if ("status" in prepared) return prepared;
+    const change = prepared.change;
     return this.#repository.triageNote(memberId, workspaceId, noteId, change);
   }
+}
 
-  async #findInboxNote(memberId: string, workspaceId: string, noteId: string): Promise<
-    { status: "found"; note: NoteRecord } | { status: "workspace_forbidden" | "note_not_found" }
-  > {
-    const inbox = await this.#repository.listInboxNotes(memberId, workspaceId);
-    if (inbox.status === "workspace_forbidden") return inbox;
-    const note = inbox.notes.find(({ id }) => id === noteId);
-    return note ? { status: "found", note } : { status: "note_not_found" };
-  }
+type PrepareFailure = { status: "workspace_forbidden" | "note_not_found" };
+interface TriageContext { repository: NoteRepository; memberId: string; workspaceId: string; noteId: string; actor: PortableIdentity }
+interface TriageVariant {
+  resultKind: NoteTriageResult["kind"];
+  prepare(context: TriageContext, value: Record<string, unknown>): Promise<{ change: NoteTriageChange } | PrepareFailure>;
+  present(result: NoteTriageResult): object;
+}
+
+async function findInboxNote(context: TriageContext): Promise<{ note: NoteRecord } | PrepareFailure> {
+  const inbox = await context.repository.listInboxNotes(context.memberId, context.workspaceId);
+  if (inbox.status === "workspace_forbidden") return inbox;
+  const note = inbox.notes.find(({ id }) => id === context.noteId);
+  return note ? { note } : { status: "note_not_found" };
+}
+
+async function noteStateChange(context: TriageContext, transform: (note: NoteRecord) => NoteRecord) {
+  const found = await findInboxNote(context);
+  if ("status" in found) return found;
+  const note = transform(found.note);
+  const creator = await context.repository.findPortableMemberIdentity(note.createdByMemberId);
+  if (!creator) throw new Error("member_identity_unavailable");
+  return { note, projection: { schema: "stash.note.v2" as const, note: publicNote(note), createdBy: creator } };
+}
+
+const notePresenter = (result: NoteTriageResult): object => {
+  if (result.kind !== "organized" && result.kind !== "archived") throw new Error("triage_variant_mismatch");
+  return { result: result.kind, note: publicNote(result.note) };
+};
+
+const triageVariants: Record<string, TriageVariant> = {
+  organize: {
+    resultKind: "organized",
+    async prepare(context, value) {
+      if (typeof value.projectId !== "string" || !isUuid(value.projectId)
+        || value.tags !== undefined && (!Array.isArray(value.tags) || value.tags.length > 50
+          || value.tags.some((tag) => typeof tag !== "string" || !tag.trim() || tag.trim().length > 100))) throw new InvalidNoteTriageInput();
+      const changed = await noteStateChange(context, (note) => ({ ...note, projectId: value.projectId as string,
+        tags: [...new Set(((value.tags as string[] | undefined) ?? note.tags).map((tag) => tag.trim()))] }));
+      return "status" in changed ? changed : { change: { kind: "organized", note: changed.note, projections: [changed.projection] } };
+    },
+    present: notePresenter,
+  },
+  archive: {
+    resultKind: "archived",
+    async prepare(context, value) {
+      if (Object.keys(value).length !== 1) throw new InvalidNoteTriageInput();
+      const changed = await noteStateChange(context, (note) => ({ ...note, archivedAt: new Date().toISOString() }));
+      return "status" in changed ? changed : { change: { kind: "archived", note: changed.note, projections: [changed.projection] } };
+    },
+    present: notePresenter,
+  },
+  link: {
+    resultKind: "linked",
+    async prepare(context, value) {
+      if (typeof value.targetNoteId !== "string" || !isUuid(value.targetNoteId)
+        || value.targetNoteId === context.noteId || Object.keys(value).length !== 2) throw new InvalidNoteTriageInput();
+      const link = { schema: "stash.note-link.v1" as const, id: randomUUID(), workspaceId: context.workspaceId,
+        sourceNoteId: context.noteId, targetNoteId: value.targetNoteId };
+      return { change: { kind: "linked", link, projections: [link] } };
+    },
+    present(result) {
+      if (result.kind !== "linked") throw new Error("triage_variant_mismatch");
+      return { result: result.kind, link: result.link };
+    },
+  },
+  create_task: {
+    resultKind: "task_created",
+    async prepare(context, value) {
+      if (typeof value.projectId !== "string" || !isUuid(value.projectId) || typeof value.title !== "string"
+        || !value.title.trim() || value.title.trim().length > 500
+        || !Object.keys(value).every((key) => ["action", "projectId", "title"].includes(key))) throw new InvalidNoteTriageInput();
+      return { change: { kind: "task_created", task: { id: randomUUID(), workspaceId: context.workspaceId,
+        projectId: value.projectId, title: value.title.trim(), sourceNoteIds: [context.noteId],
+        createdAt: new Date().toISOString(), createdBy: context.actor }, projections: [] } };
+    },
+    present(result) {
+      if (result.kind !== "task_created") throw new Error("triage_variant_mismatch");
+      return { result: result.kind, task: result.task };
+    },
+  },
+};
+
+export function presentNoteTriageResult(result: NoteTriageResult): object {
+  const variant = Object.values(triageVariants).find(({ resultKind }) => resultKind === result.kind);
+  if (!variant) throw new Error("unknown_triage_variant");
+  return variant.present(result);
 }
 
 function publicNote(note: NoteRecord): Omit<NoteRecord, "createdByMemberId"> {

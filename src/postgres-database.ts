@@ -323,31 +323,9 @@ export class PostgresDatabase implements
         OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
           WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $3))) FOR UPDATE`, [noteId, workspaceId, memberId]);
       if (!source.rowCount) return { status: "note_not_found" as const };
-      if (change.kind === "organized" || change.kind === "task_created") {
-        const projectId = change.kind === "organized" ? change.note.projectId! : change.task.projectId;
-        const project = await client.query("SELECT 1 FROM stash_projects WHERE id = $1 AND workspace_id = $2", [projectId, workspaceId]);
-        if (!project.rowCount) return { status: "project_forbidden" as const };
-      }
-      let result: NoteTriageResult;
-      if (change.kind === "linked") {
-        const target = await client.query("SELECT 1 FROM stash_notes WHERE id = $1 AND workspace_id = $2", [change.link.targetNoteId, workspaceId]);
-        if (!target.rowCount) return { status: "target_note_not_found" as const };
-        await client.query("INSERT INTO stash_note_links (id, workspace_id, source_note_id, target_note_id) VALUES ($1, $2, $3, $4)",
-          [change.link.id, workspaceId, noteId, change.link.targetNoteId]);
-        result = change;
-      } else if (change.kind === "organized") {
-        await client.query("UPDATE stash_notes SET project_id = $2, tags = $3::jsonb WHERE id = $1", [noteId, change.note.projectId, JSON.stringify(change.note.tags)]);
-        result = change;
-      } else if (change.kind === "archived") {
-        await client.query("UPDATE stash_notes SET archived_at = $2 WHERE id = $1", [noteId, change.note.archivedAt]);
-        result = change;
-      } else {
-        const task = await this.#createTask(client, memberId, change.task);
-        await client.query("INSERT INTO stash_tasks (id, workspace_id, project_id, task_key, workflow_status_id, title, created_by_account_id, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
-          [task.id, workspaceId, task.projectId, task.key, task.status.id, task.title, memberId, task.createdAt]);
-        await client.query("INSERT INTO stash_task_note_sources (task_id, note_id) VALUES ($1,$2)", [change.task.id, noteId]);
-        result = { kind: "task_created", task, projections: [task] };
-      }
+      const applied = await this.#applyTriageChange(client, memberId, workspaceId, noteId, change);
+      if ("status" in applied) return applied;
+      const result = applied.result;
       for (const projection of result.projections) await this.#recordPortableProjection(client,
         triageObjectKind(result), triageObjectId(result, noteId),
         projection.schema, projection);
@@ -355,11 +333,50 @@ export class PostgresDatabase implements
     });
   }
 
-  async #createTask(client: PoolClient, _memberId: string, draft: TaskCreation): Promise<PortableTaskProjection> {
-    const defaultStatusId = randomUUID();
-    await client.query(`INSERT INTO stash_workflow_statuses (id, project_id, name, category, position)
-      VALUES ($1, $2, 'Backlog', 'unstarted', 0) ON CONFLICT (project_id, name) DO NOTHING`,
-    [defaultStatusId, draft.projectId]);
+  async #applyTriageChange(client: PoolClient, memberId: string, workspaceId: string, noteId: string, change: NoteTriageChange): Promise<
+    { result: NoteTriageResult } | { status: "project_forbidden" | "target_note_not_found" }
+  > {
+    switch (change.kind) {
+      case "organized": return this.#organizeInboxNote(client, workspaceId, noteId, change);
+      case "archived": return this.#archiveInboxNote(client, noteId, change);
+      case "linked": return this.#linkInboxNote(client, workspaceId, noteId, change);
+      case "task_created": return this.#createTaskFromInbox(client, memberId, workspaceId, noteId, change);
+    }
+  }
+
+  async #organizeInboxNote(client: PoolClient, workspaceId: string, noteId: string, change: Extract<NoteTriageChange, { kind: "organized" }>) {
+    const project = await client.query("SELECT 1 FROM stash_projects WHERE id = $1 AND workspace_id = $2", [change.note.projectId, workspaceId]);
+    if (!project.rowCount) return { status: "project_forbidden" as const };
+    await client.query("UPDATE stash_notes SET project_id = $2, tags = $3::jsonb WHERE id = $1", [noteId, change.note.projectId, JSON.stringify(change.note.tags)]);
+    return { result: change };
+  }
+
+  async #archiveInboxNote(client: PoolClient, noteId: string, change: Extract<NoteTriageChange, { kind: "archived" }>) {
+    await client.query("UPDATE stash_notes SET archived_at = $2 WHERE id = $1", [noteId, change.note.archivedAt]);
+    return { result: change };
+  }
+
+  async #linkInboxNote(client: PoolClient, workspaceId: string, noteId: string, change: Extract<NoteTriageChange, { kind: "linked" }>) {
+    const target = await client.query("SELECT 1 FROM stash_notes WHERE id = $1 AND workspace_id = $2", [change.link.targetNoteId, workspaceId]);
+    if (!target.rowCount) return { status: "target_note_not_found" as const };
+    await client.query("INSERT INTO stash_note_links (id, workspace_id, source_note_id, target_note_id) VALUES ($1, $2, $3, $4)",
+      [change.link.id, workspaceId, noteId, change.link.targetNoteId]);
+    return { result: change };
+  }
+
+  async #createTaskFromInbox(client: PoolClient, memberId: string, workspaceId: string, noteId: string, change: Extract<NoteTriageChange, { kind: "task_created" }>) {
+    const project = await client.query("SELECT 1 FROM stash_projects WHERE id = $1 AND workspace_id = $2", [change.task.projectId, workspaceId]);
+    if (!project.rowCount) return { status: "project_forbidden" as const };
+    const task = await this.#createTask(client, change.task);
+    await client.query("INSERT INTO stash_tasks (id, workspace_id, project_id, task_key, workflow_status_id, title, created_by_account_id, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+      [task.id, workspaceId, task.projectId, task.key, task.status.id, task.title, memberId, task.createdAt]);
+    await client.query("INSERT INTO stash_task_note_sources (task_id, note_id) VALUES ($1,$2)", [change.task.id, noteId]);
+    return { result: { kind: "task_created" as const, task, projections: [task] as [PortableTaskProjection] } };
+  }
+
+  async #createTask(client: PoolClient, draft: TaskCreation): Promise<PortableTaskProjection> {
+    await client.query("SELECT id FROM stash_projects WHERE id = $1 FOR UPDATE", [draft.projectId]);
+    await this.#ensureDefaultWorkflow(client, draft.projectId);
     const status = await client.query<{ id: string; name: string; category: "unstarted" }>(
       "SELECT id, name, category FROM stash_workflow_statuses WHERE project_id = $1 AND name = 'Backlog'",
       [draft.projectId],
@@ -372,6 +389,19 @@ export class PostgresDatabase implements
     const key = allocation.rows[0];
     if (!workflowStatus || !key) throw new Error("task_project_unavailable");
     return { schema: "stash.task.v1", ...draft, key: `${key.project_key}-${key.task_number}`, status: workflowStatus };
+  }
+
+  async #ensureDefaultWorkflow(client: PoolClient, projectId: string): Promise<void> {
+    const statuses = [
+      [randomUUID(), projectId, "Backlog", "unstarted", 0],
+      [randomUUID(), projectId, "Ready", "unstarted", 1],
+      [randomUUID(), projectId, "In Progress", "started", 2],
+      [randomUUID(), projectId, "In Review", "started", 3],
+      [randomUUID(), projectId, "Done", "completed", 4],
+    ] as const;
+    await client.query(`INSERT INTO stash_workflow_statuses (id, project_id, name, category, position)
+      VALUES ${statuses.map((_, index) => `($${index * 5 + 1}, $${index * 5 + 2}, $${index * 5 + 3}, $${index * 5 + 4}, $${index * 5 + 5})`).join(", ")}
+      ON CONFLICT DO NOTHING`, statuses.flat());
   }
 
   async close(): Promise<void> {

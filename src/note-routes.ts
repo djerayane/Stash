@@ -1,5 +1,5 @@
 import { json, readJson, type HttpRoute } from "./http-routing.js";
-import { InvalidNoteInput, InvalidNoteTriageInput, type NoteService, type NoteTriageResult } from "./notes.js";
+import { InvalidNoteInput, InvalidNoteTriageInput, presentNoteTriageResult, type NoteService } from "./notes.js";
 import type { MemberAccessResolver } from "./workspaces-projects.js";
 
 export function noteRoutes(service: NoteService, memberAccess: MemberAccessResolver): HttpRoute {
@@ -31,7 +31,7 @@ export function noteRoutes(service: NoteService, memberAccess: MemberAccessResol
           try { noteId = decodeURIComponent(url.pathname.split("/")[5]!); } catch { throw new InvalidNoteTriageInput(); }
           const outcome = await service.triage(access.accountId, workspaceId, noteId, await readJson(request));
           if (outcome.status === "updated") {
-            json(response, 200, triageResponse(outcome.result)); return true;
+            json(response, 200, presentNoteTriageResult(outcome.result)); return true;
           }
           if (outcome.status === "note_not_found" || outcome.status === "target_note_not_found") {
             json(response, 404, { error: outcome.status, message: "The requested Note could not be found." }); return true;
@@ -76,13 +76,4 @@ export function noteRoutes(service: NoteService, memberAccess: MemberAccessResol
       return true;
     },
   };
-}
-
-function triageResponse(result: NoteTriageResult): object {
-  if (result.kind === "organized" || result.kind === "archived") {
-    const { createdByMemberId: _, ...note } = result.note;
-    return { result: result.kind, note };
-  }
-  if (result.kind === "linked") return { result: result.kind, link: result.link };
-  return { result: result.kind, task: result.task };
 }

@@ -104,8 +104,9 @@ path, but these identities remain authoritative for safe repair after a move.
 
 Creating actionable work records `stash.task.v1` with a stable Task identity, its Project and
 Workspace, Project-scoped Task Key, canonical Workflow status (including its stable status
-category), title, creator, creation time, and `sourceNoteIds`. The first Task creation initializes
-the Project's Backlog/unstarted status when needed, and Task Key sequence allocation is serialized
+category), title, creator, creation time, and `sourceNoteIds`. The first Task creation atomically
+initializes the canonical Project Workflow—Backlog and Ready (`unstarted`), In Progress and In
+Review (`started`), then Done (`completed`)—and assigns Backlog. Task Key sequence allocation is serialized
 inside the same transaction so keys are never duplicated or reused. The source Note remains unchanged.
 All referenced Notes and Projects must exist in the same authorized Workspace; a failed validation
 or outbox write rolls back the whole triage operation.

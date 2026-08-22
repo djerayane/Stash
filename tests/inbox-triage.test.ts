@@ -25,6 +25,13 @@ class ProtocolCompatibleInboxDatabase implements DatabaseProbe, NoteRepository {
   readonly projections: object[] = [];
   archived = false;
   nextTaskNumber = 1;
+  readonly workflowStatuses = [
+    { id: "55555555-5555-4555-8555-555555555555", name: "Backlog", category: "unstarted", position: 0 },
+    { id: "66666666-6666-4666-8666-666666666666", name: "Ready", category: "unstarted", position: 1 },
+    { id: "77777777-7777-4777-8777-777777777777", name: "In Progress", category: "started", position: 2 },
+    { id: "88888888-8888-4888-8888-888888888888", name: "In Review", category: "started", position: 3 },
+    { id: "99999999-9999-4999-8999-999999999999", name: "Done", category: "completed", position: 4 },
+  ] as const;
   failure: Error | undefined;
 
   async verifyConnection() {}
@@ -82,7 +89,7 @@ describe("Inbox triage", () => {
   }
 
   it("lists only unorganized active Notes in a Member's Workspace Inbox", async () => {
-    const { baseUrl } = await run();
+    const { baseUrl, database } = await run();
     const response = await fetch(`${baseUrl}/api/workspaces/${workspaceId}/inbox`, {
       headers: { authorization: "Bearer member-ada" },
     });
@@ -133,18 +140,27 @@ describe("Inbox triage", () => {
     }
   });
 
-  it("allocates durable Project-scoped Task Keys and one canonical default Workflow status", async () => {
-    const { baseUrl } = await run();
-    const first = await triage(baseUrl, { action: "create_task", projectId, title: "Ship release" });
-    const second = await triage(baseUrl, { action: "create_task", projectId, title: "Publish notes" });
+  it("concurrently allocates Task Keys and initializes the complete default Workflow once", async () => {
+    const { baseUrl, database } = await run();
+    const [first, second] = await Promise.all([
+      triage(baseUrl, { action: "create_task", projectId, title: "Ship release" }),
+      triage(baseUrl, { action: "create_task", projectId, title: "Publish notes" }),
+    ]);
     assert.equal(first.status, 200);
     assert.equal(second.status, 200);
-    assert.equal(((await first.json()) as any).task.key, "REL-1");
+    const keys = [((await first.json()) as any).task.key, ((await second.clone().json()) as any).task.key].sort();
+    assert.deepEqual(keys, ["REL-1", "REL-2"]);
     const secondTask = (await second.json() as any).task;
-    assert.equal(secondTask.key, "REL-2");
     assert.deepEqual(secondTask.status, {
       id: "55555555-5555-4555-8555-555555555555", name: "Backlog", category: "unstarted",
     });
+    assert.deepEqual(database.workflowStatuses.map(({ name, category, position }) => ({ name, category, position })), [
+      { name: "Backlog", category: "unstarted", position: 0 },
+      { name: "Ready", category: "unstarted", position: 1 },
+      { name: "In Progress", category: "started", position: 2 },
+      { name: "In Review", category: "started", position: 3 },
+      { name: "Done", category: "completed", position: 4 },
+    ]);
   });
 
   it("exposes authorization, invalid input, missing objects, and recoverable failures without partial changes", async () => {
