@@ -37,6 +37,8 @@ class AttachmentDatabase implements DatabaseProbe, AttachmentRepository, NoteRep
     const note = { ...current, document, content: richTextToMarkdown(document), revision: current.revision + 1 }; this.notes.set(id, note);
     const projection = { ...this.noteProjections[0]!, content: note.content }; this.noteProjections.push(projection); return { status: "updated" as const, note, projection };
   }
+  async listNoteEditConflicts() { return { status: "not_found" as const }; }
+  async resolveNoteEditConflict() { return { status: "not_found" as const }; }
 }
 const access: MemberAccessResolver = { async authenticateBearer(value) { return value === "Bearer member-ada" ? { accountId: "ada", sessionId: "s" } : value === "Bearer member-grace" ? { accountId: "grace", sessionId: "g" } : undefined; } };
 
