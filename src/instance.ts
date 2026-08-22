@@ -10,6 +10,8 @@ import { createDiagnostics, type Diagnostics } from "./diagnostics.js";
 import { json, requireInstanceAdministrator } from "./http-routing.js";
 import { instanceAdminRoute } from "./instance-route.js";
 import type { OwnerBootstrapService } from "./owner-bootstrap.js";
+import { passwordAuthRoute } from "./password-auth-routes.js";
+import type { PasswordAuthService } from "./password-auth.js";
 
 export interface DatabaseProbe {
   verifyConnection(): Promise<void>;
@@ -27,6 +29,7 @@ interface InstanceOptions {
   port: number;
   instanceAdminToken: string;
   ownerBootstrap?: OwnerBootstrapService;
+  passwordAuth?: PasswordAuthService;
   diagnostics?: Diagnostics;
   acceleration?: OptionalRedisAcceleration;
 }
@@ -62,6 +65,7 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
   diagnostics.record({ kind: "instance_started", occurredAt: new Date().toISOString() });
   const acceleration = options.acceleration ?? createOptionalRedisAcceleration();
   const routes = [
+    ...(options.passwordAuth ? [passwordAuthRoute(options.passwordAuth)] : []),
     diagnosticsSchemaRoute(diagnostics),
     requireInstanceAdministrator(options.instanceAdminToken, diagnosticsAdminRoute(diagnostics)),
     requireInstanceAdministrator(options.instanceAdminToken, instanceAdminRoute(acceleration)),

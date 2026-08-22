@@ -8,6 +8,7 @@ Docker Compose starts the supported baseline: one Stash application container an
 
 ```sh
 export INSTANCE_ADMIN_TOKEN="replace-with-a-long-random-secret"
+export INSTANCE_MASTER_KEY="$(openssl rand -base64 32)"
 docker compose up --build -d
 npm ci
 npm run smoke
@@ -25,11 +26,19 @@ The application fails at startup with a clear error when required configuration 
 | --- | --- | --- |
 | `DATABASE_URL` | yes | PostgreSQL connection URL |
 | `INSTANCE_ADMIN_TOKEN` | yes | Bearer token for Instance Administrator surfaces; keep it outside Workspace content |
+| `INSTANCE_MASTER_KEY` | yes | Base64-encoded 32-byte key used to protect authentication material; store it outside PostgreSQL and Workspace exports |
 | `HOST` | no | Bind address, defaults to `0.0.0.0` |
 | `PORT` | no | TCP port, defaults to `3000` |
 | `REDIS_URL` | no | Redis connection URL for best-effort acceleration; PostgreSQL remains authoritative |
 
 Never commit production secrets or include them in a Portable Workspace Export.
+
+`INSTANCE_MASTER_KEY` is part of the Instance's restore contract even though it is stored outside
+PostgreSQL. Instance backup procedures must preserve this exact key separately and operators must
+resupply the same key when restoring the Instance. If the key is missing or wrong, encrypted
+authentication state is unreadable; restore preflight must fail visibly rather than starting with
+partially usable or silently discarded authentication data. Portable Workspace Exports must never
+contain the key or other Instance authentication secrets.
 
 ### Optional Redis acceleration
 
