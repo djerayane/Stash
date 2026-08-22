@@ -91,11 +91,13 @@ export class TaskService {
       || typeof input.blockKey !== "string" || !uuid.test(input.blockKey)
       || !Object.keys(input).every((key) => key === "noteId" || key === "blockKey"))
       throw new InvalidTaskFromBlockInput();
+    if (!this.tasks.linkTaskToBlock) throw new Error("task_link_unavailable");
     return this.tasks.linkTaskToBlock(memberId, taskId, input.noteId, input.blockKey);
   }
 
   async listSourceBlocks(memberId: string, taskId: string) {
     if (!uuid.test(taskId)) throw new InvalidTaskFromBlockInput();
+    if (!this.tasks.listTaskSourceBlocks) throw new Error("task_read_unavailable");
     return this.tasks.listTaskSourceBlocks(memberId, taskId);
   }
   async findByKey(memberId: string, projectId: string, taskKey: string) {
