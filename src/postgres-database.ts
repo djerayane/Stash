@@ -688,7 +688,8 @@ export class PostgresDatabase implements
         await client.query("UPDATE stash_notes SET content=$2, document=$3::jsonb, revision=$4 WHERE id=$1", [noteId, note.content, JSON.stringify(document), note.revision]);
         for (const operation of operations) await client.query(`INSERT INTO stash_note_operations
           (note_id,operation_id,base_revision,applied_revision,block_key,operation_digest) VALUES ($1,$2,$3,$4,$5,$6)
-          ON CONFLICT (note_id, operation_id) DO NOTHING`, [noteId, operation.id, current.revision, note.revision, operation.blockKey, noteOperationDigest(operation)]);
+          ON CONFLICT (note_id, operation_id) DO NOTHING`, [noteId, operation.id, conflict.base_revision, note.revision, operation.blockKey, noteOperationDigest(operation)]);
+        await client.query("DELETE FROM stash_note_conflict_operations WHERE conflict_id = $1 AND note_id = $2", [conflictId, noteId]);
         await this.#recordPortableProjection(client, "Note", note.id, "stash.note.v1", projectionFor(note));
       }
       await client.query(`UPDATE stash_note_edit_conflicts SET resolved_at = CURRENT_TIMESTAMP, resolution = $3,

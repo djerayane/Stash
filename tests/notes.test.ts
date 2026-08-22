@@ -119,6 +119,8 @@ class ProtocolCompatibleNoteDatabase implements DatabaseProbe, NoteRepository {
       else return { status: "invalid_reference" as const }; }
     const document = { type: "doc" as const, blocks }; const note = { ...current, document, content: richTextToMarkdown(document), revision: current.revision + 1 };
     this.notes.set(noteId, note); conflict.resolvedAt = "2026-08-22T10:01:00.000Z"; conflict.resolution = resolution;
+    for (const operation of conflict.operations) { this.applied.set(operation.id, { revision: note.revision, blockKey: operation.blockKey, digest: noteOperationDigest(operation) });
+      this.conflictIds.delete(operation.id); this.conflictByOperation.delete(operation.id); }
     const projection = { ...this.portableProjectionOutbox.at(-1)!, content: note.content }; this.portableProjectionOutbox.push(projection);
     return { status: "resolved" as const, note, projection };
   }
@@ -442,6 +444,10 @@ describe("editing Notes", () => {
     assert.equal((await fetch(`${baseUrl}/api/notes/${note.id}/conflicts/${conflictBody.conflictId}`, { method: "PUT",
       headers: { authorization: "Bearer member-grace", "content-type": "application/json" }, body: JSON.stringify({ resolution: "apply_contribution", expectedRevision: 2 }) })).status, 409);
     assert.deepEqual((await (await fetch(`${baseUrl}/api/notes/${note.id}/conflicts`, { headers: { authorization: "Bearer member-grace" } })).json() as { conflicts: unknown[] }).conflicts, []);
+    const retryOriginal = await update(conflictOperationId, "Preserved contribution", "member-grace");
+    assert.equal(retryOriginal.status, 200);
+    assert.equal((await retryOriginal.json() as NoteRecord).revision, 3);
+    assert.equal(database.notes.get(note.id)!.revision, 3);
   });
 
   it("returns the original conflict identity on duplicate delivery and preserves invalidated insert anchors", async () => {
