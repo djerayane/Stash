@@ -28,11 +28,12 @@ import type { PortableRepositoryConnectionProjection, RepositoryConnectionRecord
 import type { CreateTaskFromBlockDraft, LinkedTaskReadModel, TaskFromBlockRepository, TaskPlanningReadModel, TaskPlanningRepository, TaskPlanningUpdate, TaskSourceBlockReference } from "./tasks.js";
 import type { AttachmentRecord, AttachmentRepository, PortableAttachmentProjection } from "./attachments.js";
 import type { MobileCaptureRepository } from "./mobile-captures.js";
+import type { DiscussionDraft, DiscussionMessage, DiscussionRecord, DiscussionRepository, DiscussionTarget, PortableDiscussionProjection, PortableDiscussionTarget } from "./discussions.js";
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
 const authenticationKeyCheckLockId = 795_541_992;
-const portableProjectionObjectKinds = ["Workspace", "Project", "Note", "NoteLink", "Task", "GuestProjectAccess", "RepositoryConnection", "Attachment"] as const;
+const portableProjectionObjectKinds = ["Workspace", "Project", "Note", "NoteLink", "Task", "GuestProjectAccess", "RepositoryConnection", "Attachment", "Discussion"] as const;
 const portableProjectionObjectKindSql = portableProjectionObjectKinds.map((kind) => `'${kind}'`).join(", ");
 const repositoryConnectionSelect = `SELECT connection.id, connection.organization_id, connection.provider, connection.installation_id,
   connection.repository_id, connection.repository_url, connection.created_by_account_id, connection.created_by_attribution,
@@ -103,7 +104,8 @@ export class PostgresDatabase implements
   TaskFromBlockRepository,
   TaskPlanningRepository,
   AttachmentRepository,
-  MobileCaptureRepository
+  MobileCaptureRepository,
+  DiscussionRepository
 {
   readonly #pool: Pool;
   readonly #authenticationSecrets: AuthenticationSecretCodec;
@@ -527,6 +529,158 @@ export class PostgresDatabase implements
       await this.#recordPortableProjection(client, "Task", task.id, task.schema, task);
       const sourceBlock: TaskSourceBlockReference = { noteId, blockId };
       return { status: "created" as const, task, sourceBlock };
+    });
+  }
+
+  async createDiscussion(memberId: string, draft: DiscussionDraft) {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureDiscussionSchema(client);
+      let workspaceId: string;
+      let target: DiscussionTarget;
+      if (draft.target.kind === "task") {
+        const task = await client.query<{ workspace_id: string; can_write: boolean; guest_can_read: boolean }>(`SELECT task.workspace_id,
+          ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR EXISTS (
+            SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id = workspace.organization_owner_id
+              AND membership.account_id = $2)) AS can_write,
+          EXISTS (SELECT 1 FROM stash_project_guests guest WHERE guest.project_id = task.project_id AND guest.account_id = $2) AS guest_can_read
+          FROM stash_tasks task JOIN stash_workspaces workspace ON workspace.id = task.workspace_id
+          WHERE task.id = $1 FOR UPDATE OF task`, [draft.target.taskId, memberId]);
+        const taskRow = task.rows[0];
+        if (!taskRow) return { status: "target_not_found" as const };
+        if (!taskRow.can_write) return { status: taskRow.guest_can_read ? "forbidden" as const : "target_not_found" as const };
+        workspaceId = taskRow.workspace_id;
+        target = draft.target;
+      } else {
+        const note = await client.query<any>(`SELECT note.*, creator.name AS created_by_name,
+          ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR EXISTS (
+            SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id = workspace.organization_owner_id
+              AND membership.account_id = $2)) AS can_write,
+          (note.project_id IS NOT NULL AND EXISTS (SELECT 1 FROM stash_project_guests guest
+            WHERE guest.project_id = note.project_id AND guest.account_id = $2)) AS guest_can_read
+          FROM stash_notes note
+          JOIN stash_accounts creator ON creator.id = note.created_by_account_id
+          JOIN stash_workspaces workspace ON workspace.id = note.workspace_id WHERE note.id = $1 FOR UPDATE OF note`, [draft.target.noteId, memberId]);
+        const row = note.rows[0];
+        if (!row) return { status: "target_not_found" as const };
+        if (!row.can_write) return { status: row.guest_can_read ? "forbidden" as const : "target_not_found" as const };
+        workspaceId = row.workspace_id;
+        if (draft.target.kind === "note") target = draft.target;
+        else {
+          const blockTarget = draft.target;
+          const blocks = Array.isArray(row.document?.blocks) ? row.document.blocks as Array<{ blockKey?: string; id?: string }> : [];
+          const matches = blocks.filter((block) => block.blockKey === blockTarget.blockKey);
+          if (matches.length !== 1) return { status: "target_not_found" as const };
+          const block = matches[0]!;
+          const blockId = block.id ?? randomUUID();
+          if (block.id && blocks.filter((candidate) => candidate.id === blockId).length !== 1)
+            return { status: "ambiguous_block" as const };
+          if (!block.id) {
+            block.id = blockId;
+            const content = richTextToMarkdown(row.document);
+            await client.query("UPDATE stash_notes SET document = $2::jsonb, content = $3, revision = revision + 1 WHERE id = $1",
+              [draft.target.noteId, JSON.stringify(row.document), content]);
+            const noteProjection = { schema: "stash.note.v1" as const, id: draft.target.noteId, workspaceId,
+              content, tags: row.tags, createdAt: new Date(row.created_at).toISOString(),
+              createdBy: { localAccountId: row.created_by_account_id, displayName: row.created_by_name },
+              ...(row.project_id ? { projectId: row.project_id } : {}),
+              ...(row.reminder_at ? { reminder: { at: new Date(row.reminder_at).toISOString() } } : {}) };
+            await this.#recordPortableProjection(client, "Note", draft.target.noteId, "stash.note.v1", noteProjection);
+          }
+          target = { kind: "block", noteId: draft.target.noteId, blockId };
+        }
+      }
+      const discussion: DiscussionRecord = { ...draft, workspaceId, target };
+      await client.query(`INSERT INTO stash_discussions
+        (id, workspace_id, target_kind, note_id, block_id, task_id, created_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7)`, [discussion.id, workspaceId, target.kind,
+        target.kind === "note" || target.kind === "block" ? target.noteId : null,
+        target.kind === "block" ? target.blockId : null, target.kind === "task" ? target.taskId : null, discussion.createdAt]);
+      const first = discussion.messages[0]!;
+      await client.query(`INSERT INTO stash_discussion_messages (id, discussion_id, content, author_account_id, created_at)
+        VALUES ($1,$2,$3,$4,$5)`, [first.id, discussion.id, first.content, first.author.localAccountId, first.createdAt]);
+      const projection = this.#portableDiscussion(discussion);
+      await this.#recordPortableProjection(client, "Discussion", discussion.id, projection.schema, projection);
+      return { status: "created" as const, discussion, projection };
+    });
+  }
+
+  async findDiscussion(memberId: string, discussionId: string) {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureDiscussionSchema(client);
+      const discussion = await this.#readDiscussion(client, memberId, discussionId, false);
+      return discussion ? { status: "found" as const, discussion } : { status: "not_found" as const };
+    } finally { client.release(); }
+  }
+
+  async listNoteDiscussions(memberId: string, noteId: string) {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureDiscussionSchema(client);
+      const access = await client.query(`SELECT 1 FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id = note.workspace_id
+        WHERE note.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR EXISTS (
+          SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id = workspace.organization_owner_id
+            AND membership.account_id = $2) OR (note.project_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM stash_project_guests guest WHERE guest.project_id = note.project_id AND guest.account_id = $2)))`, [noteId, memberId]);
+      if (!access.rowCount) return { status: "not_found" as const };
+      const ids = await client.query<{ id: string }>("SELECT id FROM stash_discussions WHERE note_id = $1 ORDER BY created_at, id", [noteId]);
+      const discussions: DiscussionRecord[] = [];
+      for (const { id } of ids.rows) {
+        const discussion = await this.#readDiscussion(client, memberId, id, false);
+        if (discussion) discussions.push(discussion);
+      }
+      return { status: "found" as const, discussions };
+    } finally { client.release(); }
+  }
+
+  async listTaskDiscussions(memberId: string, taskId: string) {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureDiscussionSchema(client);
+      const access = await client.query(`SELECT 1 FROM stash_tasks task JOIN stash_workspaces workspace ON workspace.id = task.workspace_id
+        WHERE task.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR EXISTS (
+          SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id = workspace.organization_owner_id
+            AND membership.account_id = $2) OR EXISTS (
+          SELECT 1 FROM stash_project_guests guest WHERE guest.project_id = task.project_id AND guest.account_id = $2))`, [taskId, memberId]);
+      if (!access.rowCount) return { status: "not_found" as const };
+      const ids = await client.query<{ id: string }>("SELECT id FROM stash_discussions WHERE task_id = $1 ORDER BY created_at, id", [taskId]);
+      const discussions: DiscussionRecord[] = [];
+      for (const { id } of ids.rows) {
+        const discussion = await this.#readDiscussion(client, memberId, id, false);
+        if (discussion) discussions.push(discussion);
+      }
+      return { status: "found" as const, discussions };
+    } finally { client.release(); }
+  }
+
+  async addMessage(memberId: string, discussionId: string, message: DiscussionMessage) {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureDiscussionSchema(client);
+      const discussion = await this.#readDiscussion(client, memberId, discussionId, true);
+      if (!discussion) return { status: "not_found" as const };
+      if (!await this.#canWriteDiscussion(client, memberId, discussion.workspaceId)) return { status: "forbidden" as const };
+      if (discussion.resolvedAt) return { status: "resolved" as const };
+      await client.query(`INSERT INTO stash_discussion_messages (id, discussion_id, content, author_account_id, created_at)
+        VALUES ($1,$2,$3,$4,$5)`, [message.id, discussionId, message.content, message.author.localAccountId, message.createdAt]);
+      discussion.messages.push(message);
+      const projection = this.#portableDiscussion(discussion);
+      await this.#recordPortableProjection(client, "Discussion", discussionId, projection.schema, projection);
+      return { status: "updated" as const, discussion, projection };
+    });
+  }
+
+  async resolveDiscussion(memberId: string, discussionId: string, resolvedAt: string) {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureDiscussionSchema(client);
+      const discussion = await this.#readDiscussion(client, memberId, discussionId, true);
+      if (!discussion) return { status: "not_found" as const };
+      if (!await this.#canWriteDiscussion(client, memberId, discussion.workspaceId)) return { status: "forbidden" as const };
+      if (discussion.resolvedAt) return { status: "already_resolved" as const, discussion };
+      await client.query("UPDATE stash_discussions SET resolved_at = $2 WHERE id = $1", [discussionId, resolvedAt]);
+      discussion.resolvedAt = resolvedAt;
+      const projection = this.#portableDiscussion(discussion);
+      await this.#recordPortableProjection(client, "Discussion", discussionId, projection.schema, projection);
+      return { status: "resolved" as const, discussion, projection };
     });
   }
 
@@ -1967,6 +2121,76 @@ export class PostgresDatabase implements
     await client.query(`CREATE TABLE IF NOT EXISTS stash_attachments (id UUID PRIMARY KEY, workspace_id UUID NOT NULL REFERENCES stash_workspaces(id), filename TEXT NOT NULL, content_type TEXT NOT NULL, byte_size BIGINT NOT NULL CHECK (byte_size > 0), relative_path TEXT NOT NULL, storage_key TEXT NOT NULL UNIQUE, source TEXT NOT NULL CHECK (source IN ('upload','paste')), created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id), created_at TIMESTAMPTZ NOT NULL)`);
   }
 
+  async #ensureDiscussionSchema(client: PoolClient): Promise<void> {
+    await this.#ensureNoteSchema(client);
+    await client.query(`CREATE TABLE IF NOT EXISTS stash_discussions (
+      id UUID PRIMARY KEY, workspace_id UUID NOT NULL REFERENCES stash_workspaces(id),
+      target_kind TEXT NOT NULL CHECK (target_kind IN ('note','block','task')),
+      note_id UUID REFERENCES stash_notes(id), block_id UUID, task_id UUID REFERENCES stash_tasks(id),
+      created_at TIMESTAMPTZ NOT NULL, resolved_at TIMESTAMPTZ,
+      CHECK ((target_kind = 'note' AND note_id IS NOT NULL AND block_id IS NULL AND task_id IS NULL)
+        OR (target_kind = 'block' AND note_id IS NOT NULL AND block_id IS NOT NULL AND task_id IS NULL)
+        OR (target_kind = 'task' AND note_id IS NULL AND block_id IS NULL AND task_id IS NOT NULL))
+    )`);
+    await client.query(`CREATE TABLE IF NOT EXISTS stash_discussion_messages (
+      id UUID PRIMARY KEY, discussion_id UUID NOT NULL REFERENCES stash_discussions(id) ON DELETE CASCADE,
+      content TEXT NOT NULL CHECK (char_length(content) BETWEEN 1 AND 20000),
+      author_account_id UUID NOT NULL REFERENCES stash_accounts(id), created_at TIMESTAMPTZ NOT NULL
+    )`);
+  }
+
+  async #readDiscussion(client: PoolClient, memberId: string, discussionId: string, lock: boolean): Promise<DiscussionRecord | undefined> {
+    const result = await client.query<any>(`SELECT discussion.*, note.document FROM stash_discussions discussion
+      JOIN stash_workspaces workspace ON workspace.id = discussion.workspace_id
+      LEFT JOIN stash_notes note ON note.id = discussion.note_id
+      LEFT JOIN stash_tasks target_task ON target_task.id = discussion.task_id
+      WHERE discussion.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR EXISTS (
+        SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id = workspace.organization_owner_id
+          AND membership.account_id = $2) OR (discussion.target_kind IN ('note','block') AND note.project_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM stash_project_guests guest WHERE guest.project_id = note.project_id AND guest.account_id = $2
+      )) OR (discussion.target_kind = 'task' AND EXISTS (
+        SELECT 1 FROM stash_project_guests guest WHERE guest.project_id = target_task.project_id AND guest.account_id = $2
+      )))${lock ? " FOR UPDATE OF discussion" : ""}`, [discussionId, memberId]);
+    const row = result.rows[0];
+    if (!row) return undefined;
+    const messages = await client.query<any>(`SELECT message.id, message.content, message.created_at,
+      account.id AS author_id, account.name AS author_name FROM stash_discussion_messages message
+      JOIN stash_accounts account ON account.id = message.author_account_id
+      WHERE message.discussion_id = $1 ORDER BY message.created_at, message.id`, [discussionId]);
+    let target: DiscussionTarget;
+    if (row.target_kind === "task") target = { kind: "task", taskId: row.task_id };
+    else if (row.target_kind === "note") target = { kind: "note", noteId: row.note_id };
+    else {
+      const matches = Array.isArray(row.document?.blocks)
+        ? row.document.blocks.filter((block: { id?: string }) => block.id === row.block_id).length : 0;
+      target = { kind: "block", noteId: row.note_id, blockId: row.block_id,
+        state: matches === 1 ? "attached" : matches > 1 ? "ambiguous" : "block_missing" };
+    }
+    return { id: row.id, workspaceId: row.workspace_id, target,
+      messages: messages.rows.map((message: any) => ({ id: message.id, content: message.content,
+        author: { localAccountId: message.author_id, displayName: message.author_name },
+        createdAt: new Date(message.created_at).toISOString() })),
+      createdAt: new Date(row.created_at).toISOString(), ...(row.resolved_at ? { resolvedAt: new Date(row.resolved_at).toISOString() } : {}) };
+  }
+
+  async #canWriteDiscussion(client: PoolClient, memberId: string, workspaceId: string): Promise<boolean> {
+    const result = await client.query(`SELECT 1 FROM stash_workspaces workspace WHERE workspace.id = $1
+      AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR
+        (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)))`,
+    [workspaceId, memberId]);
+    return result.rowCount === 1;
+  }
+
+  #portableDiscussion(discussion: DiscussionRecord): PortableDiscussionProjection {
+    const target: PortableDiscussionTarget = discussion.target.kind === "block"
+      ? { kind: "block", noteId: discussion.target.noteId, blockId: discussion.target.blockId }
+      : discussion.target;
+    return { schema: "stash.discussion.v1", id: discussion.id, workspaceId: discussion.workspaceId,
+      target, messages: discussion.messages, createdAt: discussion.createdAt,
+      ...(discussion.resolvedAt ? { resolvedAt: discussion.resolvedAt } : {}) };
+  }
+
   async #ensureMemberLocalizationSchema(): Promise<void> {
     const client = await this.#pool.connect();
     try {
@@ -2065,9 +2289,9 @@ export class PostgresDatabase implements
 
   async #recordPortableProjection(
     client: PoolClient,
-    objectKind: "Workspace" | "Project" | "Note" | "NoteLink" | "Task" | "GuestProjectAccess" | "RepositoryConnection" | "Attachment",
+    objectKind: "Workspace" | "Project" | "Note" | "NoteLink" | "Task" | "GuestProjectAccess" | "RepositoryConnection" | "Attachment" | "Discussion",
     objectId: string,
-    projectionSchema: "stash.workspace.v1" | "stash.project.v1" | "stash.note.v1" | "stash.note.v2" | "stash.note-link.v1" | "stash.task.v1" | "stash.guest-project-access.v1" | "stash.repository-connection.v1" | "stash.attachment.v1",
+    projectionSchema: "stash.workspace.v1" | "stash.project.v1" | "stash.note.v1" | "stash.note.v2" | "stash.note-link.v1" | "stash.task.v1" | "stash.guest-project-access.v1" | "stash.repository-connection.v1" | "stash.attachment.v1" | "stash.discussion.v1",
     payload: object,
   ): Promise<void> {
     await client.query(
