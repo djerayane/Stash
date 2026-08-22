@@ -23,6 +23,8 @@ export function taskRoutes(service: TaskService, memberAccess: MemberAccessResol
           const result = await service.linkBlock(access.accountId, taskId, await readJson(request));
           if (result.status === "linked" || result.status === "already_linked")
             json(response, result.status === "linked" ? 201 : 200, { result: result.status, task: result.task, sourceBlock: result.sourceBlock });
+          else if (result.status === "ambiguous_block") json(response, 422, { error: result.status,
+            message: "That Block identity occurs more than once. Repair the Note before linking it." });
           else json(response, 404, { error: result.status, message: result.status === "task_not_found" ? "This Task is unavailable."
             : result.status === "note_not_found" ? "This Note is unavailable." : "That Block does not exist in this Note." });
           return true;
@@ -45,6 +47,8 @@ export function taskRoutes(service: TaskService, memberAccess: MemberAccessResol
         const result = await service.createFromBlock(access.accountId, noteId!, blockKey!, await readJson(request));
         if (result.status === "created") json(response, 201, { task: result.task, sourceBlock: result.sourceBlock });
         else if (result.status === "project_forbidden") json(response, 403, { error: result.status, message: "This Member cannot create a Task in that Project." });
+        else if (result.status === "ambiguous_block") json(response, 422, { error: result.status,
+          message: "That Block identity occurs more than once. Repair the Note before creating a Task." });
         else json(response, 404, { error: result.status, message: result.status === "note_not_found" ? "This Note is unavailable." : "That Block does not exist in this Note." });
       } catch (error) {
         if (error instanceof InvalidTaskFromBlockInput) json(response, 422, { error: "invalid_input", message: "A Task requires a valid Project, Block, and title." });

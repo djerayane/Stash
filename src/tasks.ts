@@ -17,19 +17,19 @@ export interface LinkedTaskReadModel {
   sourceBlock: TaskSourceBlockReference;
 }
 export interface TaskSourceBlockReadModel extends TaskSourceBlockReference {
-  state: "linked" | "broken";
+  state: "linked" | "broken" | "ambiguous";
 }
 
 export type CreateTaskFromBlockOutcome =
   | { status: "created"; task: PortableTaskProjection; sourceBlock: TaskSourceBlockReference }
-  | { status: "note_not_found" | "block_not_found" | "project_forbidden" };
+  | { status: "note_not_found" | "block_not_found" | "project_forbidden" | "ambiguous_block" };
 
 export interface TaskFromBlockRepository {
   createTaskFromBlock(memberId: string, noteId: string, blockKey: string, draft: CreateTaskFromBlockDraft): Promise<CreateTaskFromBlockOutcome>;
   listLinkedTasks(memberId: string, noteId: string): Promise<{ status: "found"; tasks: LinkedTaskReadModel[] } | { status: "note_not_found" }>;
   linkTaskToBlock(memberId: string, taskId: string, noteId: string, blockKey: string): Promise<
     | { status: "linked" | "already_linked"; task: PortableTaskProjection; sourceBlock: TaskSourceBlockReference }
-    | { status: "task_not_found" | "note_not_found" | "block_not_found" }
+    | { status: "task_not_found" | "note_not_found" | "block_not_found" | "ambiguous_block" }
   >;
   listTaskSourceBlocks(memberId: string, taskId: string): Promise<
     { status: "found"; sourceBlocks: TaskSourceBlockReadModel[] } | { status: "task_not_found" }

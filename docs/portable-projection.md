@@ -142,8 +142,9 @@ An existing Task can gain another source relationship through
 requires access to both objects, rejects cross-Workspace and ambiguous references, sparsely assigns
 the Block identity, and records a new complete `stash.task.v1` projection atomically. Repeating the
 same relationship is idempotent. `GET /api/tasks/{taskId}/source-blocks` reports every relationship
-as `linked` while its exact Block identity is still present or `broken` after the source disappears;
-Stash never guesses that a different Block is the intended replacement.
+as `linked` only while its exact Block identity occurs once, `broken` after the source disappears,
+or `ambiguous` when malformed imported content repeats the identity. Linking rejects that ambiguity
+without mutation; Stash never guesses which Block is the intended target.
 
 The operational Note body is a versioned rich-text document rendered by Stash's WYSIWYG editor.
 Every successful edit atomically increments the Note revision and records another `stash.note.v1`

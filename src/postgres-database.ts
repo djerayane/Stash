@@ -453,6 +453,8 @@ export class PostgresDatabase implements
       if (matches.length !== 1) return { status: "block_not_found" as const };
       const block = matches[0]!;
       const blockId = block.id ?? randomUUID();
+      if (block.id && blocks.filter((candidate) => candidate.id === blockId).length !== 1)
+        return { status: "ambiguous_block" as const };
       const noteProjection = () => ({ schema: "stash.note.v1" as const, id: noteId, workspaceId: row.workspace_id,
         content: row.content, tags: row.tags, createdAt: new Date(row.created_at).toISOString(),
         createdBy: { localAccountId: row.created_by_account_id, displayName: row.created_by_name },
@@ -521,6 +523,8 @@ export class PostgresDatabase implements
       if (matches.length !== 1) return { status: "block_not_found" as const };
       const block = matches[0]!;
       const blockId = block.id ?? randomUUID();
+      if (block.id && blocks.filter((candidate) => candidate.id === blockId).length !== 1)
+        return { status: "ambiguous_block" as const };
       const existing = await client.query("SELECT 1 FROM stash_task_block_sources WHERE task_id = $1 AND note_id = $2 AND block_id = $3",
         [taskId, noteId, blockId]);
       const sourceBlock: TaskSourceBlockReference = { noteId, blockId };
@@ -568,10 +572,11 @@ export class PostgresDatabase implements
           WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)))
         ORDER BY source.note_id NULLS FIRST, source.block_id NULLS FIRST`, [taskId, memberId]);
       if (!result.rowCount) return { status: "task_not_found" as const };
-      return { status: "found" as const, sourceBlocks: result.rows.filter((row: any) => row.note_id !== null).map((row: any) => ({
-        noteId: row.note_id, blockId: row.block_id,
-        state: Array.isArray(row.document?.blocks) && row.document.blocks.some((block: any) => block.id === row.block_id) ? "linked" as const : "broken" as const,
-      })) };
+      return { status: "found" as const, sourceBlocks: result.rows.filter((row: any) => row.note_id !== null).map((row: any) => {
+        const matches = Array.isArray(row.document?.blocks) ? row.document.blocks.filter((block: any) => block.id === row.block_id).length : 0;
+        return { noteId: row.note_id, blockId: row.block_id,
+          state: matches === 1 ? "linked" as const : matches > 1 ? "ambiguous" as const : "broken" as const };
+      }) };
     } finally { client.release(); }
   }
 
