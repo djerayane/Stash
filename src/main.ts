@@ -2,6 +2,7 @@ import { startInstance } from "./instance.js";
 import { OwnerBootstrapService } from "./owner-bootstrap.js";
 import { PostgresDatabase } from "./postgres-database.js";
 import { PasswordAuthService } from "./password-auth.js";
+import { createAuthenticationSecretCodec } from "./authentication-secrets.js";
 import { startRedisAcceleration, type RunningRedisAcceleration } from "./redis-acceleration.js";
 
 function requiredEnvironment(name: string): string {
@@ -11,7 +12,8 @@ function requiredEnvironment(name: string): string {
 }
 
 async function main(): Promise<void> {
-  const database = new PostgresDatabase(requiredEnvironment("DATABASE_URL"));
+  const authenticationSecrets = createAuthenticationSecretCodec(requiredEnvironment("INSTANCE_MASTER_KEY"));
+  const database = new PostgresDatabase(requiredEnvironment("DATABASE_URL"), authenticationSecrets);
   const redisUrl = process.env.REDIS_URL?.trim();
   let redis: RunningRedisAcceleration | undefined;
   if (redisUrl) {

@@ -1,7 +1,5 @@
-import { randomBytes, randomUUID, scrypt as nodeScrypt } from "node:crypto";
-import { promisify } from "node:util";
-
-const scrypt = promisify(nodeScrypt);
+import { randomUUID } from "node:crypto";
+import { passwordHashCodec, type PasswordHashCodec } from "./password-hash.js";
 
 export interface BootstrapRecord {
   organizationId: string;
@@ -47,17 +45,13 @@ function validInput(value: unknown): value is BootstrapInput {
   );
 }
 
-async function hashPassword(password: string): Promise<string> {
-  const salt = randomBytes(16);
-  const derivedKey = (await scrypt(password, salt, 64)) as Buffer;
-  return `scrypt$${salt.toString("base64")}$${derivedKey.toString("base64")}`;
-}
-
 export class OwnerBootstrapService {
   readonly #repository: OwnerBootstrapRepository;
+  readonly #passwords: PasswordHashCodec;
 
-  constructor(repository: OwnerBootstrapRepository) {
+  constructor(repository: OwnerBootstrapRepository, passwords: PasswordHashCodec = passwordHashCodec) {
     this.#repository = repository;
+    this.#passwords = passwords;
   }
 
   async bootstrap(value: unknown): Promise<BootstrapResult | undefined> {
@@ -69,7 +63,7 @@ export class OwnerBootstrapService {
       ownerId: randomUUID(),
       ownerName: value.ownerName.trim(),
       ownerEmail: value.ownerEmail.trim().toLowerCase(),
-      passwordHash: await hashPassword(value.password),
+      passwordHash: await this.#passwords.hash(value.password),
       role: "Owner",
     };
 

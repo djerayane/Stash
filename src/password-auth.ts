@@ -1,7 +1,5 @@
-import { createHash, randomBytes, randomUUID, scrypt as nodeScrypt, timingSafeEqual } from "node:crypto";
-import { promisify } from "node:util";
-
-const scrypt = promisify(nodeScrypt);
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { passwordHashCodec, type PasswordHashCodec } from "./password-hash.js";
 
 export interface AccountAuthenticationRecord {
   id: string;
@@ -37,23 +35,10 @@ export interface AuthenticatedMember {
 export class InvalidAuthenticationInput extends Error {}
 export class InvalidCredentials extends Error {}
 
-export async function hashPassword(password: string): Promise<string> {
-  const salt = randomBytes(16);
-  const derivedKey = (await scrypt(password, salt, 64)) as Buffer;
-  return `scrypt$${salt.toString("base64")}$${derivedKey.toString("base64")}`;
-}
+export const hashPassword = passwordHashCodec.hash;
 
-async function passwordMatches(password: string, encoded: string): Promise<boolean> {
-  const [algorithm, saltValue, keyValue] = encoded.split("$");
-  if (algorithm !== "scrypt" || !saltValue || !keyValue) return false;
-  try {
-    const expected = Buffer.from(keyValue, "base64");
-    const actual = (await scrypt(password, Buffer.from(saltValue, "base64"), expected.length)) as Buffer;
-    return actual.length === expected.length && timingSafeEqual(actual, expected);
-  } catch {
-    return false;
-  }
-}
+// A valid fixed hash makes unknown-account sign-in perform the same password-verification work.
+const missingAccountPasswordHash = "scrypt$AAAAAAAAAAAAAAAAAAAAAA==$yCvCoaHtjw7z6fOfWQ8q3OfYpwNSa4I0i5cQ0Pxy2K7jNUI0yTY0hFL7bqLq9qJ4PqVBv8jAXXb4hkOqjQvVTg==";
 
 function tokenHash(token: string): string {
   return createHash("sha256").update(token).digest("base64");
@@ -69,15 +54,18 @@ function validCredentials(value: unknown): value is { email: string; password: s
 
 export class PasswordAuthService {
   readonly #repository: PasswordAuthRepository;
+  readonly #passwords: PasswordHashCodec;
 
-  constructor(repository: PasswordAuthRepository) {
+  constructor(repository: PasswordAuthRepository, passwords: PasswordHashCodec = passwordHashCodec) {
     this.#repository = repository;
+    this.#passwords = passwords;
   }
 
   async signIn(value: unknown, userAgent?: string) {
     if (!validCredentials(value)) throw new InvalidAuthenticationInput();
     const account = await this.#repository.findAccountByEmail(value.email.trim().toLowerCase());
-    if (!account || !(await passwordMatches(value.password, account.passwordHash))) {
+    const matches = await this.#passwords.matches(value.password, account?.passwordHash ?? missingAccountPasswordHash);
+    if (!account || !matches) {
       throw new InvalidCredentials();
     }
     const token = randomBytes(32).toString("base64url");
@@ -122,17 +110,11 @@ export class PasswordAuthService {
     const current = sessions.find(({ id }) => id === member.sessionId);
     if (!current) throw new InvalidCredentials();
     // The account lookup uses the identity attached to the authenticated session.
-    const account = await this.#accountForSession(member.accountId);
-    if (!account || !(await passwordMatches(input.currentPassword, account.passwordHash))) throw new InvalidCredentials();
+    const account = await this.#repository.findAccountById(member.accountId);
+    if (!account || !(await this.#passwords.matches(input.currentPassword, account.passwordHash))) throw new InvalidCredentials();
     await this.#repository.changePasswordAndDeleteOtherSessions(
-      member.accountId, member.sessionId, await hashPassword(input.newPassword),
+      member.accountId, member.sessionId, await this.#passwords.hash(input.newPassword),
     );
-  }
-
-  async #accountForSession(accountId: string) {
-    const sessions = await this.#repository.listSessions(accountId);
-    if (!sessions.length) return undefined;
-    return this.#repository.findAccountById(accountId);
   }
 
   private presentSession(session: SessionRecord, currentSessionId: string) {
