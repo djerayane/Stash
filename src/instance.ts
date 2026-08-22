@@ -40,6 +40,8 @@ import { discussionRoutes } from "./discussion-routes.js";
 import type { DiscussionService } from "./discussions.js";
 import { projectWorkflowRoutes } from "./project-workflow-routes.js";
 import type { ProjectWorkflowService } from "./project-workflows.js";
+import { portableWorkspaceExportRoute } from "./portable-workspace-export-route.js";
+import type { PortableWorkspaceExportService } from "./portable-workspace-export.js";
 
 export interface DatabaseProbe {
   verifyConnection(): Promise<void>;
@@ -77,6 +79,7 @@ export interface InstanceOptions {
   mobileCaptures?: MobileCaptureService;
   discussions?: DiscussionService;
   projectWorkflows?: ProjectWorkflowService;
+  portableWorkspaceExports?: PortableWorkspaceExportService;
 }
 
 const browserSurface = `<!doctype html>
@@ -170,6 +173,8 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
       : []),
     ...(options.discussions && (options.memberAccess ?? options.passwordAuth)
       ? [discussionRoutes(options.discussions, (options.memberAccess ?? options.passwordAuth)!)] : []),
+    ...(options.portableWorkspaceExports && (options.memberAccess ?? options.passwordAuth)
+      ? [portableWorkspaceExportRoute(options.portableWorkspaceExports, (options.memberAccess ?? options.passwordAuth)!)] : []),
     ...(options.repositoryConnections && (options.memberAccess ?? options.passwordAuth)
       ? [repositoryConnectionRoutes(options.repositoryConnections, (options.memberAccess ?? options.passwordAuth)!)]
       : []),
