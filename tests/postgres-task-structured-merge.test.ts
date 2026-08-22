@@ -11,6 +11,7 @@ import { PostgresDatabase } from "../src/postgres-database.js";
 import { ProjectWorkflowService } from "../src/project-workflows.js";
 import { TaskService } from "../src/tasks.js";
 import { WorkspaceProjectService } from "../src/workspaces-projects.js";
+import { BoardService } from "../src/boards.js";
 
 const databaseUrl = process.env.STASH_TEST_DATABASE_URL;
 
@@ -49,6 +50,7 @@ describe("PostgreSQL structured Task collaboration", { skip: !databaseUrl }, () 
     const differentTask = await createTask("Concurrent different fields"); const sameTask = await createTask("Concurrent same field");
     const retryTask = await createTask("Concurrent retry"); const workflowTask = await createTask("Workflow revision");
     const workflowOverlapTask = await createTask("Workflow overlap");
+    const boardOverlapTask = await createTask("Board overlap");
     const workflowService = new ProjectWorkflowService(database); const workflowResult = await workflowService.find(owner.ownerId, project.project.id);
     assert.equal(workflowResult.status, "found"); if (workflowResult.status !== "found") return;
     const archivedStatus = workflowResult.workflow.statuses.find(({ name }) => name === "Ready")!;
@@ -62,12 +64,23 @@ describe("PostgreSQL structured Task collaboration", { skip: !databaseUrl }, () 
       BEGIN PERFORM pg_sleep(0.08); RETURN NEW; END $$;
       CREATE TRIGGER stash_test_delay_task_receipt BEFORE INSERT ON stash_task_edit_operations
       FOR EACH ROW EXECUTE FUNCTION stash_test_delay_task_receipt()`); await setup.end();
-    instance = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin", tasks,
+    const boardService = new BoardService(database);
+    const boardResult = await boardService.create(owner.ownerId, project.project.id, { name: "Delivery", groupBy: "status" });
+    assert.equal(boardResult.status, "created"); if (boardResult.status !== "created") return;
+    instance = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin", tasks, boards: boardService,
       memberAccess: { async authenticateBearer(value) { return value === "Bearer test" ? { accountId: owner.ownerId, sessionId: "test" } : undefined; } } });
     const base = `${instance.url}/api/projects/${project.project.id}/tasks/${created.task.key}`;
     const taskBase = (key: string, selectedProjectId = project.project.id) => `${instance.url}/api/projects/${selectedProjectId}/tasks/${key}`;
     const concurrentEdit = (key: string, operationId: string, changes: unknown, revision = 1) => fetch(`${taskBase(key)}/edits`, { method: "POST",
       headers: { authorization: "Bearer test", "content-type": "application/json" }, body: JSON.stringify({ operationId, baseRevision: revision, changes }) });
+    const activeInProgress = workflowResult.workflow.statuses.find(({ name }) => name === "In Progress")!;
+    const boardMove = await fetch(`${instance.url}/api/projects/${project.project.id}/boards/${boardResult.board.id}/tasks/${boardOverlapTask.key}`, {
+      method: "PATCH", headers: { authorization: "Bearer test", "content-type": "application/json" }, body: JSON.stringify({ statusId: activeInProgress.id }) });
+    assert.equal(boardMove.status, 200);
+    const boardStale = await concurrentEdit(boardOverlapTask.key, randomUUID(), { statusId: workflowResult.workflow.statuses[0]!.id }, 1);
+    assert.equal(boardStale.status, 409); assert.deepEqual((await boardStale.json() as any).conflict.fields, ["statusId"]);
+    const boardRead = await (await fetch(taskBase(boardOverlapTask.key), { headers: { authorization: "Bearer test" } })).json() as any;
+    assert.equal(boardRead.task.revision, 2); assert.equal(boardRead.task.status.id, activeInProgress.id);
     const future = await concurrentEdit(created.task.key, randomUUID(), { title: "Must not overwrite" }, Number.MAX_SAFE_INTEGER);
     assert.equal(future.status, 409); assert.equal((await future.json() as any).error, "invalid_revision");
     const archivedEdit = await concurrentEdit(created.task.key, randomUUID(), { statusId: archivedStatus.id });

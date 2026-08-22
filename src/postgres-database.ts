@@ -1065,7 +1065,8 @@ export class PostgresDatabase implements
       if (board.rows[0]!.group_by !== "status") return { status: "unsupported_group" as const };
       const status = await client.query<any>("SELECT id, name, category FROM stash_workflow_statuses WHERE id = $1 AND project_id = $2 AND archived = FALSE", [statusId, projectId]);
       if (!status.rowCount) return { status: "invalid_status" as const };
-      const changed = await client.query<any>(`UPDATE stash_tasks SET workflow_status_id = $3 WHERE project_id = $1 AND task_key = $2
+      const changed = await client.query<any>(`UPDATE stash_tasks SET workflow_status_id = $3, revision = revision + 1,
+        field_revisions = jsonb_set(field_revisions, '{statusId}', to_jsonb(revision + 1), true) WHERE project_id = $1 AND task_key = $2
         RETURNING id, task_key, title, assignee_ids, priority, label_names`, [projectId, taskKey, statusId]);
       if (!changed.rowCount) return { status: "not_found" as const };
       const row = changed.rows[0]; const task: BoardTask = { id: row.id, key: row.task_key, title: row.title,
@@ -2887,6 +2888,7 @@ export class PostgresDatabase implements
       await this.#ensureNoteSchema(setup);
       await this.#ensureAttachmentSchema(setup);
       await this.#ensureInvitationSchema(setup);
+      await this.#ensureBoardSchema(setup);
     } finally { setup.release(); }
 
     const client = await this.#pool.connect();
@@ -2923,6 +2925,13 @@ export class PostgresDatabase implements
            WHERE object_kind = 'Task' AND object_id = task.id ORDER BY revision DESC LIMIT 1) projection ON TRUE
          WHERE task.workspace_id = $1 AND ($2::boolean OR task.project_id = ANY($3::uuid[]))
          ORDER BY task.id`, [workspaceId, permission.member, guestProjectIds]);
+      const boards = await client.query<{ id: string; payload: Board | null }>(
+        `SELECT board.id, projection.payload FROM stash_boards board
+         JOIN stash_projects project ON project.id = board.project_id
+         LEFT JOIN LATERAL (SELECT payload FROM stash_portable_projection_outbox
+           WHERE object_kind = 'Board' AND object_id = board.id ORDER BY revision DESC LIMIT 1) projection ON TRUE
+         WHERE project.workspace_id = $1 AND ($2::boolean OR board.project_id = ANY($3::uuid[]))
+         ORDER BY board.id`, [workspaceId, permission.member, guestProjectIds]);
       const attachments = await client.query<{ id: string; storage_key: string; payload: PortableAttachmentProjection | null }>(
         `SELECT attachment.id, attachment.storage_key, projection.payload FROM stash_attachments attachment
          LEFT JOIN LATERAL (SELECT payload FROM stash_portable_projection_outbox
@@ -2934,6 +2943,7 @@ export class PostgresDatabase implements
                OR strpos(note.content, replace(attachment.relative_path, '%', '%25')) > 0)))
          ORDER BY attachment.id`, [workspaceId, permission.member, guestProjectIds]);
       if (notes.rows.some(({ payload }) => !payload) || tasks.rows.some(({ payload }) => !payload)
+        || boards.rows.some(({ payload }) => !payload)
         || attachments.rows.some(({ payload }) => !payload)) throw new Error("portable_projection_unavailable");
       await client.query("COMMIT");
       const noteProjections = notes.rows.map(({ payload }) => payload!); const taskProjections = tasks.rows.map(({ payload }) => payload!);
@@ -2952,6 +2962,7 @@ export class PostgresDatabase implements
         workspace: permission.workspace_projection,
         notes: noteProjections,
         tasks: visibleTasks,
+        boards: boards.rows.map(({ payload }) => payload!),
         attachments: attachments.rows.map(({ storage_key, payload }) => ({ storageKey: storage_key, projection: payload! })),
       } };
     } catch (error) {
