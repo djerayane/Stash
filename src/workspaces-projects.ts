@@ -53,13 +53,13 @@ export interface PortableProjectProjection {
 
 export interface WorkspaceProjectRepository {
   findPortableMemberIdentity(memberId: string): Promise<PortableIdentity | undefined>;
-  findPortableOrganizationIdentity(
-    organizationId: string,
-  ): Promise<PortableOrganizationIdentity | undefined>;
   createWorkspace(
     record: WorkspaceRecord,
-    projection: PortableWorkspaceProjection,
-  ): Promise<"created" | "organization_forbidden">;
+    createdBy: PortableIdentity,
+  ): Promise<
+    | { status: "created"; projection: PortableWorkspaceProjection }
+    | { status: "organization_forbidden" }
+  >;
   createProject(
     memberId: string,
     record: WorkspaceProjectRecord,
@@ -129,16 +129,6 @@ export class WorkspaceProjectService {
     if (!isWorkspaceInput(value)) throw new InvalidWorkspaceInput();
     const createdBy = await this.#repository.findPortableMemberIdentity(memberId);
     if (!createdBy) throw new Error("member_identity_unavailable");
-    let portableOwner: PortableWorkspaceProjection["owner"];
-    if (value.owner.type === "personal") {
-      portableOwner = { type: "personal", identity: createdBy };
-    } else {
-      const identity = await this.#repository.findPortableOrganizationIdentity(
-        value.owner.organizationId,
-      );
-      if (!identity) return { status: "organization_forbidden" };
-      portableOwner = { type: "organization", identity };
-    }
     const workspace: WorkspaceRecord = {
       id: randomUUID(),
       name: value.name.trim(),
@@ -147,15 +137,10 @@ export class WorkspaceProjectService {
         : { type: "organization", id: value.owner.organizationId },
       createdByMemberId: memberId,
     };
-    const projection: PortableWorkspaceProjection = {
-      schema: "stash.workspace.v1",
-      id: workspace.id,
-      name: workspace.name,
-      owner: portableOwner,
-      createdBy,
-    };
-    const status = await this.#repository.createWorkspace(workspace, projection);
-    return status === "created" ? { status, workspace, projection } : { status };
+    const result = await this.#repository.createWorkspace(workspace, createdBy);
+    return result.status === "created"
+      ? { status: result.status, workspace, projection: result.projection }
+      : result;
   }
 
   async createProject(memberId: string, workspaceId: string, value: unknown): Promise<

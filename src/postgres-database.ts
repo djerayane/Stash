@@ -10,7 +10,6 @@ import {
 } from "./authentication-secrets.js";
 import type {
   PortableIdentity,
-  PortableOrganizationIdentity,
   PortableProjectProjection,
   PortableWorkspaceProjection,
   WorkspaceProjectRecord,
@@ -93,39 +92,43 @@ export class PostgresDatabase implements
     }
   }
 
-  async findPortableOrganizationIdentity(
-    organizationId: string,
-  ): Promise<PortableOrganizationIdentity | undefined> {
-    const client = await this.#pool.connect();
-    try {
-      await this.#ensureBootstrapSchema(client);
-      const result = await client.query<{ id: string; name: string }>(
-        "SELECT id, name FROM stash_organizations WHERE id = $1",
-        [organizationId],
-      );
-      const organization = result.rows[0];
-      return organization
-        ? { localOrganizationId: organization.id, displayName: organization.name }
-        : undefined;
-    } finally {
-      client.release();
-    }
-  }
-
   async createWorkspace(
     record: WorkspaceRecord,
-    projection: PortableWorkspaceProjection,
-  ): Promise<"created" | "organization_forbidden"> {
+    createdBy: PortableIdentity,
+  ): Promise<
+    | { status: "created"; projection: PortableWorkspaceProjection }
+    | { status: "organization_forbidden" }
+  > {
     return this.#withTransaction(async (client) => {
       await this.#ensureWorkspaceProjectSchema(client);
+      let owner: PortableWorkspaceProjection["owner"];
       if (record.owner.type === "organization") {
-        const membership = await client.query(
-          `SELECT 1 FROM stash_organization_memberships
-           WHERE organization_id = $1 AND account_id = $2`,
+        const authorizedOrganization = await client.query<{ id: string; name: string }>(
+          `SELECT organization.id, organization.name
+           FROM stash_organization_memberships membership
+           JOIN stash_organizations organization ON organization.id = membership.organization_id
+           WHERE membership.organization_id = $1 AND membership.account_id = $2`,
           [record.owner.id, record.createdByMemberId],
         );
-        if (!membership.rowCount) return "organization_forbidden";
+        const organization = authorizedOrganization.rows[0];
+        if (!organization) return { status: "organization_forbidden" };
+        owner = {
+          type: "organization",
+          identity: {
+            localOrganizationId: organization.id,
+            displayName: organization.name,
+          },
+        };
+      } else {
+        owner = { type: "personal", identity: createdBy };
       }
+      const projection: PortableWorkspaceProjection = {
+        schema: "stash.workspace.v1",
+        id: record.id,
+        name: record.name,
+        owner,
+        createdBy,
+      };
       await client.query(
         `INSERT INTO stash_workspaces
           (id, name, owner_type, personal_owner_id, organization_owner_id, created_by_account_id)
@@ -146,7 +149,7 @@ export class PostgresDatabase implements
         "stash.workspace.v1",
         projection,
       );
-      return "created";
+      return { status: "created", projection };
     });
   }
 

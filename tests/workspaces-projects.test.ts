@@ -30,6 +30,7 @@ class ProtocolCompatibleDatabase implements DatabaseProbe, WorkspaceProjectRepos
   readonly workspaces = new Map<string, WorkspaceRecord>();
   readonly projects = new Map<string, WorkspaceProjectRecord>();
   readonly portableProjectionOutbox: object[] = [];
+  readonly organizationAuthorizationAttempts: string[] = [];
   failure: Error | undefined;
   projectionFailure: Error | undefined;
 
@@ -40,23 +41,37 @@ class ProtocolCompatibleDatabase implements DatabaseProbe, WorkspaceProjectRepos
     return this.members.get(memberId);
   }
 
-  async findPortableOrganizationIdentity(organizationId: string) {
-    return this.organizations.get(organizationId);
-  }
-
   async createWorkspace(
     record: WorkspaceRecord,
-    projection: PortableWorkspaceProjection,
-  ): Promise<"created" | "organization_forbidden"> {
+    createdBy: PortableIdentity,
+  ): Promise<
+    | { status: "created"; projection: PortableWorkspaceProjection }
+    | { status: "organization_forbidden" }
+  > {
     if (this.failure) throw this.failure;
-    if (
-      record.owner.type === "organization"
-      && !this.organizationMembers.get(record.owner.id)?.has(record.createdByMemberId)
-    ) return "organization_forbidden";
+    let owner: PortableWorkspaceProjection["owner"];
+    if (record.owner.type === "organization") {
+      this.organizationAuthorizationAttempts.push(record.owner.id);
+      const authorized = this.organizationMembers.get(record.owner.id)?.has(
+        record.createdByMemberId,
+      ) === true;
+      const identity = authorized ? this.organizations.get(record.owner.id) : undefined;
+      if (!identity) return { status: "organization_forbidden" };
+      owner = { type: "organization", identity };
+    } else {
+      owner = { type: "personal", identity: createdBy };
+    }
+    const projection: PortableWorkspaceProjection = {
+      schema: "stash.workspace.v1",
+      id: record.id,
+      name: record.name,
+      owner,
+      createdBy,
+    };
     if (this.projectionFailure) throw this.projectionFailure;
     this.portableProjectionOutbox.push(projection);
     this.workspaces.set(record.id, record);
-    return "created";
+    return { status: "created", projection };
   }
 
   async createProject(
@@ -205,7 +220,7 @@ describe("creating Workspaces and Projects", () => {
   });
 
   it("does not reveal whether a Workspace belongs to another Organization", async () => {
-    const { baseUrl } = await run();
+    const { baseUrl, database } = await run();
     const workspaceResponse = await createWorkspace(baseUrl, "member-ada", {
       name: "Acme Product",
       owner: { type: "organization", organizationId: acmeOrganizationId },
@@ -224,6 +239,7 @@ describe("creating Workspaces and Projects", () => {
       message: "This Member cannot create Projects in that Workspace.",
     });
 
+    const authorizationWorkBeforeDeniedRequests = database.organizationAuthorizationAttempts.length;
     const foreignOwner = await createWorkspace(baseUrl, "member-grace", {
       name: "Not Grace's Organization",
       owner: { type: "organization", organizationId: acmeOrganizationId },
@@ -233,6 +249,23 @@ describe("creating Workspaces and Projects", () => {
       error: "organization_forbidden",
       message: "This Member cannot create Workspaces for that Organization.",
     });
+
+    const missingOwner = await createWorkspace(baseUrl, "member-grace", {
+      name: "Missing Organization",
+      owner: {
+        type: "organization",
+        organizationId: "33333333-3333-4333-8333-333333333333",
+      },
+    });
+    assert.equal(missingOwner.status, 403);
+    assert.deepEqual(await missingOwner.json(), {
+      error: "organization_forbidden",
+      message: "This Member cannot create Workspaces for that Organization.",
+    });
+    assert.deepEqual(
+      database.organizationAuthorizationAttempts.slice(authorizationWorkBeforeDeniedRequests),
+      [acmeOrganizationId, "33333333-3333-4333-8333-333333333333"],
+    );
   });
 
   it("makes missing access, invalid input, conflicts, and persistence failures visible and safe", async () => {
