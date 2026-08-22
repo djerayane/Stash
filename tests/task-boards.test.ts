@@ -90,6 +90,8 @@ describe("Task board views", () => {
     assert.match(surface, /prefers-reduced-motion/); assert.match(surface, /gsap\.from/);
     assert.match(surface, /message\.textContent=body\.board\.name\+' loaded\.'/);
     assert.doesNotMatch(surface, /if\(!message\.textContent\)/);
+    assert.match(surface, /boards\.replaceChildren\(\);current=undefined;columns\.replaceChildren\(\);message\.dataset\.error='false';/);
+    assert.match(surface, /if\(!body\.boards\.length\)\{message\.textContent='No board views exist yet\.';return\}/);
   });
 
   it("moves the canonical Task through a status board and exposes the result in every view", async () => {
