@@ -35,6 +35,8 @@ export function noteRoutes(service: NoteService, memberAccess: MemberAccessResol
             const { createdByMemberId: _, ...note } = result.note;
             json(response, 200, { ...note, portableProjection: { format: result.projection.schema, state: "recorded" } });
           } else if (result.status === "already_resolved") json(response, 409, { error: "conflict_already_resolved", message: "This conflict has already been resolved." });
+          else if (result.status === "conflict_changed") json(response, 409, { error: "conflict_changed", message: "The Note changed again. Review the refreshed conflict before resolving it.", conflict: result.conflict });
+          else if (result.status === "invalid_operation_identity") json(response, 422, { error: "invalid_operation_identity", message: "This preserved edit reused an operation identity and cannot be applied safely." });
           else if (result.status === "invalid_reference") json(response, 422, { error: "invalid_block_reference", message: "The preserved contribution no longer has an unambiguous Block target." });
           else json(response, 404, { error: result.status, message: "The requested Note conflict could not be found." });
           return true;
