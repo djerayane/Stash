@@ -33,6 +33,13 @@ The application fails at startup with a clear error when required configuration 
 
 Never commit production secrets or include them in a Portable Workspace Export.
 
+`INSTANCE_MASTER_KEY` is part of the Instance's restore contract even though it is stored outside
+PostgreSQL. Instance backup procedures must preserve this exact key separately and operators must
+resupply the same key when restoring the Instance. If the key is missing or wrong, encrypted
+authentication state is unreadable; restore preflight must fail visibly rather than starting with
+partially usable or silently discarded authentication data. Portable Workspace Exports must never
+contain the key or other Instance authentication secrets.
+
 ### Optional Redis acceleration
 
 Redis is never required for correctness or for an application feature. When `REDIS_URL` is absent, Stash reads authoritative data directly. When it is configured, cache hits may accelerate reads; cache misses, invalid cached values, and Redis outages fall back to PostgreSQL and are reported in the Instance logs.
