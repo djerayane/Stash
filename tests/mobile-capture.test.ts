@@ -197,10 +197,11 @@ describe("offline mobile capture synchronization", () => {
     assert.deepEqual(retained, { status: "attention_required", count: 0, error: "capture_pairing_mismatch" });
     assert.deepEqual(requestedUrls, []);
     assert.equal(database.notes.size, 0);
-    assert.equal((await client.outbox())[0]?.id, queued.id);
-    assert.match((await client.outbox())[0]?.lastError ?? "", /originating Instance/i);
+    assert.deepEqual(await client.outbox(), []);
+    assert.equal((await store.listCaptures())[0]?.id, queued.id);
 
     await client.pair({ instanceUrl: baseUrl, memberToken: "member-ada", workspaceId });
+    assert.equal((await client.outbox())[0]?.id, queued.id);
     assert.deepEqual(await client.sync(), { status: "synced", count: 1 });
     assert.equal(database.notes.size, 1);
     assert.equal((await client.outbox()).length, 0);
@@ -223,11 +224,13 @@ describe("offline mobile capture synchronization", () => {
       { id: "week", label: "In one week", offsetMinutes: 10_080 },
     ] };
     assert.deepEqual(await client.options(), graceOptions);
+    assert.deepEqual(await client.outbox(), []);
     const gracePairing = await store.loadPairing();
     await store.savePairing({ ...gracePairing!, memberToken: "revoked-grace" });
     await assert.rejects(() => client.refreshOptions(), /valid Member session/i);
     assert.deepEqual(await client.options(), graceOptions);
     assert.deepEqual(await client.sync(), { status: "attention_required", count: 0, error: "capture_pairing_mismatch" });
+    assert.deepEqual(await client.outbox(), []);
     assert.equal(database.notes.size, 0);
 
     await client.pair({ instanceUrl: baseUrl, memberToken: "member-ada-rotated", workspaceId });
@@ -236,6 +239,25 @@ describe("offline mobile capture synchronization", () => {
         { id: "tomorrow", label: "Tomorrow", offsetMinutes: 1_440 },
         { id: "week", label: "In one week", offsetMinutes: 10_080 }] });
     assert.deepEqual(await client.sync(), { status: "synced", count: 1 });
+  });
+
+  it("authenticates and adopts a legacy destination-bound capture without guessing across Members", async () => {
+    const { database, baseUrl } = await run();
+    const store = new MemoryEncryptedStore();
+    await store.savePairing({ instanceUrl: baseUrl, memberToken: "member-ada", workspaceId });
+    const legacy: MobileCapture = { id: "55555555-5555-4555-8555-555555555555", kind: "text",
+      content: "Legacy offline thought", createdAt: "2026-08-22T10:00:00.000Z", attempts: 0,
+      origin: { instanceUrl: baseUrl, workspaceId } };
+    await store.saveCapture(legacy);
+    const client = new MobileCaptureClient(store, fetch, { allowInsecureInstanceForTest: true });
+
+    await client.pair({ instanceUrl: baseUrl, memberToken: "member-ada", workspaceId });
+
+    const [adopted] = await client.outbox();
+    assert.equal(adopted?.id, legacy.id);
+    assert.equal(adopted?.origin?.memberId, "ada");
+    assert.deepEqual(await client.sync(), { status: "synced", count: 1 });
+    assert.equal(database.notes.size, 1);
   });
 
   it("returns a visible conflict and retains a reused capture ID with different content", async () => {

@@ -78,13 +78,28 @@ export class MobileCaptureClient {
       });
       const body = await response.json().catch(() => ({})) as MobileCaptureOptions & { memberId?: string; message?: string };
       if (!response.ok || !body.memberId) throw new Error(body.message ?? "The Member pairing could not be authenticated.");
+      const previous = await this.#store.loadPairing();
       const authenticated = { ...pairing, instanceUrl: url.origin, memberId: body.memberId };
+      if (previous?.instanceUrl === authenticated.instanceUrl && previous.workspaceId === authenticated.workspaceId
+        && previous.memberToken === authenticated.memberToken) {
+        for (const capture of await this.#store.listCaptures()) {
+          if (capture.origin && !capture.origin.memberId && capture.origin.instanceUrl === authenticated.instanceUrl
+            && capture.origin.workspaceId === authenticated.workspaceId) {
+            await this.#store.saveCapture({ ...capture, origin: { ...capture.origin, memberId: authenticated.memberId } });
+          }
+        }
+      }
       await this.#store.savePairing(authenticated);
       await this.#store.saveOptions(pairingScope(authenticated), { projects: body.projects, tags: body.tags, reminders: body.reminders });
     } finally { this.#refreshControllers.delete(controller); }
   }
 
-  outbox() { return this.#store.listCaptures(); }
+  async outbox() {
+    const pairing = await this.#store.loadPairing();
+    if (!pairing?.memberId) return [];
+    return (await this.#store.listCaptures()).filter((capture) => capture.origin?.instanceUrl === pairing.instanceUrl
+      && capture.origin.workspaceId === pairing.workspaceId && capture.origin.memberId === pairing.memberId);
+  }
   async options() {
     const pairing = await this.#store.loadPairing();
     return pairing?.memberId ? this.#store.loadOptions(pairingScope(pairing)) : emptyOptions();
@@ -198,17 +213,14 @@ export class MobileCaptureClient {
     const activeMemberId = pairing.memberId;
     for (const capture of await this.#store.listCaptures()) {
       if (!capture.origin?.memberId) {
-        await this.#store.saveCapture({ ...capture, lastError: "This legacy capture has no authenticated pairing identity and cannot be synchronized automatically." });
         attentionError ??= "capture_origin_unknown";
         continue;
       }
       if (capture.origin.instanceUrl !== pairing.instanceUrl || capture.origin.workspaceId !== pairing.workspaceId) {
-        await this.#store.saveCapture({ ...capture, lastError: "This capture is retained for its originating Instance and Workspace. Pair with them to synchronize it." });
         attentionError ??= "capture_pairing_mismatch";
         continue;
       }
       if (capture.origin.memberId !== activeMemberId) {
-        await this.#store.saveCapture({ ...capture, lastError: "This capture is retained for its originating Member pairing. Restore that pairing to synchronize it." });
         attentionError ??= "capture_pairing_mismatch";
         continue;
       }
