@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import type { PortableIdentity } from "./workspaces-projects.js";
 
 export type AttachmentSource = "upload" | "paste";
 export interface AttachmentRecord { id: string; workspaceId: string; filename: string; contentType: string; size: number; relativePath: string; storageKey: string; source: AttachmentSource; createdByMemberId: string; createdAt: string }
-export interface PortableAttachmentProjection { schema: "stash.attachment.v1"; id: string; workspaceId: string; filename: string; contentType: string; size: number; relativePath: string; createdAt: string }
+export interface PortableAttachmentProjection { schema: "stash.attachment.v1"; id: string; workspaceId: string; filename: string; contentType: string; size: number; relativePath: string; source: AttachmentSource; createdAt: string; createdBy: PortableIdentity }
 export interface AttachmentRepository {
+  findPortableMemberIdentity(memberId: string): Promise<PortableIdentity | undefined>;
   createAttachment(memberId: string, record: AttachmentRecord, projection: PortableAttachmentProjection): Promise<"created" | "workspace_forbidden">;
   findAttachmentForMember(memberId: string, attachmentId: string): Promise<AttachmentRecord | undefined>;
 }
@@ -17,7 +19,7 @@ export interface AttachmentStorage {
 export class LocalAttachmentStorage implements AttachmentStorage {
   constructor(private readonly root: string) {}
   private path(key: string) { if (!/^[0-9a-f-]+\/[0-9a-f-]+$/i.test(key)) throw new Error("invalid_storage_key"); return join(this.root, ...key.split("/")); }
-  async put(key: string, content: Buffer) { const target = this.path(key); await mkdir(dirname(target), { recursive: true }); const temporary = `${target}.${randomUUID()}.tmp`; const file = await open(temporary, "wx", 0o600); try { await file.writeFile(content); await file.sync(); } finally { await file.close(); } await rename(temporary, target); }
+  async put(key: string, content: Buffer) { const target = this.path(key); await mkdir(dirname(target), { recursive: true }); const temporary = `${target}.${randomUUID()}.tmp`; try { const file = await open(temporary, "wx", 0o600); try { await file.writeFile(content); await file.sync(); } finally { await file.close(); } await rename(temporary, target); } catch (error) { await rm(temporary, { force: true }).catch(() => undefined); throw error; } }
   get(key: string) { return readFile(this.path(key)); }
   async delete(key: string) { await rm(this.path(key), { force: true }); }
 }
@@ -30,9 +32,11 @@ export class AttachmentService {
     if (!uuid.test(workspaceId) || !input.filename || input.filename.length > 255 || input.filename !== input.filename.trim() || /[\/\\\0]/.test(input.filename) || input.filename === "." || input.filename === "..") throw new InvalidAttachment("filename");
     if (!allowedTypes.test(input.contentType)) throw new InvalidAttachment("content_type");
     if (!input.content.length || input.content.length > this.limits.maxBytes) throw new InvalidAttachment("size");
+    const createdBy = await this.repository.findPortableMemberIdentity(memberId);
+    if (!createdBy) throw new Error("member_identity_unavailable");
     const id = randomUUID(); const storageKey = `${workspaceId}/${id}`; const relativePath = `attachments/${id}/${encodeURIComponent(input.filename)}`;
     const record: AttachmentRecord = { id, workspaceId, filename: input.filename, contentType: input.contentType, size: input.content.length, relativePath, storageKey, source: input.source, createdByMemberId: memberId, createdAt: new Date().toISOString() };
-    const projection: PortableAttachmentProjection = { schema: "stash.attachment.v1", id, workspaceId, filename: record.filename, contentType: record.contentType, size: record.size, relativePath, createdAt: record.createdAt };
+    const projection: PortableAttachmentProjection = { schema: "stash.attachment.v1", id, workspaceId, filename: record.filename, contentType: record.contentType, size: record.size, relativePath, source: record.source, createdAt: record.createdAt, createdBy };
     await this.storage.put(storageKey, input.content);
     try { const status = await this.repository.createAttachment(memberId, record, projection); if (status !== "created") await this.storage.delete(storageKey); return status === "created" ? { status, record, projection } : { status }; }
     catch (error) { await this.storage.delete(storageKey).catch(() => undefined); throw error; }

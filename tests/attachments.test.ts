@@ -13,6 +13,7 @@ class AttachmentDatabase implements DatabaseProbe, AttachmentRepository {
   records = new Map<string, AttachmentRecord>(); projections: PortableAttachmentProjection[] = [];
   fail = false;
   async verifyConnection() {} async close() {}
+  async findPortableMemberIdentity(memberId: string) { return memberId === "ada" ? { localAccountId: "ada", displayName: "Ada Lovelace" } : undefined; }
   async createAttachment(memberId: string, record: AttachmentRecord, projection: PortableAttachmentProjection) {
     if (memberId !== "ada" || record.workspaceId !== workspaceId) return "workspace_forbidden" as const;
     if (this.fail) throw new Error("database unavailable");
@@ -36,13 +37,18 @@ describe("Workspace Attachments", () => {
   it("uploads pasted bytes, records a portable relative link, and serves them only to Workspace Members", async () => {
     const { baseUrl, database, directory } = await run();
     const response = await upload(baseUrl, "member-ada", "hello stash"); assert.equal(response.status, 201);
-    const attachment = await response.json() as AttachmentRecord & { contentUrl: string; portableProjection: object };
+    const attachment = await response.json() as AttachmentRecord & { contentUrl: string; portableLink: string; portableProjection: object };
     assert.equal(attachment.source, "paste"); assert.equal(attachment.relativePath.startsWith("attachments/"), true);
+    assert.equal(attachment.portableLink, `[design notes.txt](<${attachment.relativePath}>)`);
     assert.equal(await readFile(join(directory, workspaceId, attachment.id), "utf8"), "hello stash");
-    assert.deepEqual(database.projections[0], { schema: "stash.attachment.v1", id: attachment.id, workspaceId, filename: "design notes.txt", contentType: "text/plain", size: 11, relativePath: attachment.relativePath, createdAt: attachment.createdAt });
+    assert.deepEqual(database.projections[0], { schema: "stash.attachment.v1", id: attachment.id, workspaceId, filename: "design notes.txt", contentType: "text/plain", size: 11, relativePath: attachment.relativePath, source: "paste", createdAt: attachment.createdAt, createdBy: { localAccountId: "ada", displayName: "Ada Lovelace" } });
     const served = await fetch(`${baseUrl}${attachment.contentUrl}`, { headers: { authorization: "Bearer member-ada" } });
     assert.equal(served.status, 200); assert.equal(served.headers.get("content-type"), "text/plain"); assert.equal(served.headers.get("x-content-type-options"), "nosniff"); assert.equal(await served.text(), "hello stash");
     assert.equal((await fetch(`${baseUrl}${attachment.contentUrl}`, { headers: { authorization: "Bearer member-grace" } })).status, 404);
+
+    const uploaded = await fetch(`${baseUrl}/api/workspaces/${workspaceId}/attachments`, { method: "POST", headers: { authorization: "Bearer member-ada", "content-type": "application/pdf", "x-stash-filename": "brief.pdf" }, body: "%PDF" });
+    assert.equal(uploaded.status, 201);
+    assert.equal((await uploaded.json() as { source: string }).source, "upload");
   });
 
   it("rejects unsafe names, unsupported types, oversized bodies, and cleans stored bytes after metadata failure", async () => {
