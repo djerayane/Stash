@@ -2,6 +2,8 @@ import { startInstance } from "./instance.js";
 import { OwnerBootstrapService } from "./owner-bootstrap.js";
 import { PostgresDatabase } from "./postgres-database.js";
 import { PasswordAuthService } from "./password-auth.js";
+import { OidcAuthService } from "./oidc-auth.js";
+import { OidcManagementService } from "./oidc-management.js";
 import { createAuthenticationSecretCodec } from "./authentication-secrets.js";
 import { startRedisAcceleration, type RunningRedisAcceleration } from "./redis-acceleration.js";
 import { WorkspaceProjectService } from "./workspaces-projects.js";
@@ -37,6 +39,9 @@ async function main(): Promise<void> {
     ownerBootstrap: new OwnerBootstrapService(database),
     passwordAuth,
     workspaceProjects: new WorkspaceProjectService(database),
+    oidcAuth: new OidcAuthService(database),
+    oidcManagement: new OidcManagementService(database),
+    oidcCallbackOrigin: requiredEnvironment("PUBLIC_ORIGIN"),
     ...(redis ? { acceleration: redis.acceleration } : {}),
   });
   console.log(`Stash Instance listening on ${instance.url}`);

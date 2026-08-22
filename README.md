@@ -9,6 +9,7 @@ Docker Compose starts the supported baseline: one Stash application container an
 ```sh
 export INSTANCE_ADMIN_TOKEN="replace-with-a-long-random-secret"
 export INSTANCE_MASTER_KEY="$(openssl rand -base64 32)"
+export PUBLIC_ORIGIN="https://stash.example.com"
 docker compose up --build -d
 npm ci
 npm run smoke
@@ -27,11 +28,28 @@ The application fails at startup with a clear error when required configuration 
 | `DATABASE_URL` | yes | PostgreSQL connection URL |
 | `INSTANCE_ADMIN_TOKEN` | yes | Bearer token for Instance Administrator surfaces; keep it outside Workspace content |
 | `INSTANCE_MASTER_KEY` | yes | Base64-encoded 32-byte key used to protect authentication material; store it outside PostgreSQL and Workspace exports |
+| `PUBLIC_ORIGIN` | yes | Canonical HTTPS origin used for OIDC callbacks, such as `https://stash.example.com` |
 | `HOST` | no | Bind address, defaults to `0.0.0.0` |
 | `PORT` | no | TCP port, defaults to `3000` |
 | `REDIS_URL` | no | Redis connection URL for best-effort acceleration; PostgreSQL remains authoritative |
 
 Never commit production secrets or include them in a Portable Workspace Export.
+
+### Optional OpenID Connect
+
+Built-in password authentication remains available when OIDC is enabled. An authenticated Organization Owner or Admin enables a provider through the Organization API:
+
+```sh
+curl -X PUT http://localhost:3000/api/organizations/<organizationId>/auth/oidc \
+  -H "Authorization: Bearer <member-session>" -H "Content-Type: application/json" \
+  -d '{"issuer":"https://login.example.com","clientId":"stash","clientSecret":"replace-me"}'
+```
+
+Provider identities are explicitly linked to an existing Organization Member with `POST /api/organizations/<organizationId>/auth/oidc/identities` and a JSON body containing `accountId` and provider `subject`; matching an email address never creates or links an account implicitly. Begin authentication at `GET /api/auth/oidc/<organizationId>`. The returned authorization URL uses Authorization Code flow with PKCE, state, and nonce, and its callback issues the same kind of Stash session used by built-in authentication. Provider client secrets are encrypted under `INSTANCE_MASTER_KEY` and excluded from Portable Workspace Exports.
+
+OIDC issuer, discovery, token, and JWKS endpoints must use HTTPS and resolve only to public addresses. Stash pins each validated DNS result to the outbound connection, revalidates controlled discovery/JWKS redirects, rejects token-endpoint redirects, and bounds response time and size. The plain-HTTP/private-address exception exists only as an explicitly injected test adapter and is not available through Instance configuration.
+
+OIDC callback URLs always use `PUBLIC_ORIGIN`; request `Host` and forwarding headers never influence them. Deployments behind a proxy must preserve the configured public URL when forwarding the callback. Production callback origins require HTTPS. The insecure-origin exception is injectable only by acceptance tests and is not available from environment configuration.
 
 `INSTANCE_MASTER_KEY` is part of the Instance's restore contract even though it is stored outside
 PostgreSQL. Instance backup procedures must preserve this exact key separately and operators must

@@ -1,4 +1,5 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
+import { issueSession, presentSession } from "./auth-session.js";
 import { passwordHashCodec, type PasswordHashCodec } from "./password-hash.js";
 
 export interface AccountAuthenticationRecord {
@@ -68,18 +69,7 @@ export class PasswordAuthService {
     if (!account || !matches) {
       throw new InvalidCredentials();
     }
-    const token = randomBytes(32).toString("base64url");
-    const now = new Date().toISOString();
-    const session: SessionRecord = {
-      id: randomUUID(), accountId: account.id, tokenHash: tokenHash(token), createdAt: now, lastSeenAt: now,
-      ...(userAgent ? { userAgent: userAgent.slice(0, 500) } : {}),
-    };
-    await this.#repository.createSession(session);
-    return {
-      token,
-      member: { id: account.id, name: account.name, email: account.email },
-      session: this.presentSession(session, session.id),
-    };
+    return issueSession(this.#repository, { id: account.id, name: account.name, email: account.email }, userAgent);
   }
 
   async authenticateBearer(authorization: string | undefined): Promise<AuthenticatedMember | undefined> {
@@ -92,7 +82,7 @@ export class PasswordAuthService {
 
   async sessions(member: AuthenticatedMember) {
     return (await this.#repository.listSessions(member.accountId))
-      .map((session) => this.presentSession(session, member.sessionId));
+      .map((session) => presentSession(session, member.sessionId));
   }
 
   revoke(member: AuthenticatedMember, sessionId: string) {
@@ -117,10 +107,4 @@ export class PasswordAuthService {
     );
   }
 
-  private presentSession(session: SessionRecord, currentSessionId: string) {
-    return {
-      id: session.id, createdAt: session.createdAt, lastSeenAt: session.lastSeenAt,
-      ...(session.userAgent ? { userAgent: session.userAgent } : {}), current: session.id === currentSessionId,
-    };
-  }
 }
