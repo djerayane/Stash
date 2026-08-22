@@ -13,7 +13,7 @@ export interface MobileCaptureOptions {
 
 export interface MobileCapture {
   id: string;
-  kind: "text" | "checklist";
+  kind: "text" | "checklist" | "photo" | "file" | "voice";
   content: string;
   checklist?: { text: string; checked: boolean }[];
   projectId?: string;
@@ -24,6 +24,13 @@ export interface MobileCapture {
   attempts: number;
   nextRetryAt?: string;
   lastError?: string;
+  source?: "app" | "share_sheet" | "widget";
+  attachment?: {
+    filename: string;
+    contentType: string;
+    base64: string;
+    remote?: { id: string; portableLink: string };
+  };
 }
 
 export interface EncryptedMobileCaptureStore {
@@ -204,11 +211,39 @@ export class MobileCaptureClient {
     return this.#enqueue("checklist", title, items.map((text) => ({ text: text.trim(), checked: false })), structure);
   }
 
+  async captureMedia(
+    media: { kind: "photo" | "file" | "voice"; filename: string; contentType: string; base64: string },
+    caption = "",
+    structure: Pick<MobileCapture, "projectId" | "tags" | "reminder"> = {},
+  ): Promise<MobileCapture> {
+    if (!validPortableFilename(media.filename)) throw new Error("The original filename is invalid.");
+    if (!/^(?:image\/(?:png|jpeg|gif|webp)|audio\/(?:mp4|m4a|mpeg|wav|x-wav)|application\/(?:pdf|octet-stream)|text\/plain)$/.test(media.contentType)) {
+      throw new Error("The original file type is not supported.");
+    }
+    if (!validBase64(media.base64)) throw new Error("The original file is empty or invalid.");
+    const pairing = await this.#pairingForCapture();
+    const capture: MobileCapture = {
+      id: crypto.randomUUID(), kind: media.kind, content: caption.trim() || media.filename,
+      createdAt: new Date().toISOString(), attempts: 0, source: "app",
+      origin: { instanceUrl: pairing.instanceUrl, workspaceId: pairing.workspaceId, memberId: pairing.memberId },
+      attachment: { filename: media.filename, contentType: media.contentType, base64: media.base64 },
+      ...(structure.projectId ? { projectId: structure.projectId } : {}),
+      ...(structure.tags ? { tags: structure.tags } : {}), ...(structure.reminder ? { reminder: structure.reminder } : {}),
+    };
+    await this.#store.saveCapture(capture);
+    return capture;
+  }
+
+  async captureSharedContent(content: string, source: "share_sheet" | "widget", structure: Pick<MobileCapture, "projectId" | "tags" | "reminder"> = {}) {
+    const capture = await this.#enqueue("text", content, undefined, structure);
+    const sourced = { ...capture, source };
+    await this.#store.saveCapture(sourced);
+    return sourced;
+  }
+
   async #enqueue(kind: MobileCapture["kind"], content: string, checklist: MobileCapture["checklist"], structure: Pick<MobileCapture, "projectId" | "tags" | "reminder">) {
     if (!content.trim()) throw new Error("A capture requires content.");
-    const pairing = await this.#store.loadPairing();
-    if (!pairing) throw new Error("Pair the app before saving a capture.");
-    if (!pairing.memberId) throw new Error("Pair the app again before saving a capture.");
+    const pairing = await this.#pairingForCapture();
     const capture: MobileCapture = {
       id: crypto.randomUUID(), kind, content: content.trim(), createdAt: new Date().toISOString(), attempts: 0,
       origin: { instanceUrl: pairing.instanceUrl, workspaceId: pairing.workspaceId, memberId: pairing.memberId },
@@ -217,6 +252,13 @@ export class MobileCaptureClient {
     };
     await this.#store.saveCapture(capture);
     return capture;
+  }
+
+  async #pairingForCapture() {
+    const pairing = await this.#store.loadPairing();
+    if (!pairing) throw new Error("Pair the app before saving a capture.");
+    if (!pairing.memberId) throw new Error("Pair the app again before saving a capture.");
+    return pairing as MobileCapturePairing & { memberId: string };
   }
 
   sync(signal?: AbortSignal): Promise<MobileSyncResult> {
@@ -248,18 +290,39 @@ export class MobileCaptureClient {
       }
       if (capture.nextRetryAt && Date.parse(capture.nextRetryAt) > this.#now()) { retryPending = true; continue; }
       let response: Response;
+      let currentCapture = capture;
       try {
+        if (currentCapture.attachment && !currentCapture.attachment.remote) {
+          const upload = await this.#fetch(`${pairing.instanceUrl}/api/workspaces/${pairing.workspaceId}/attachments`, {
+            method: "POST",
+            headers: { authorization: `Bearer ${pairing.memberToken}`, "content-type": currentCapture.attachment.contentType,
+              "x-stash-filename": encodePortableFilename(currentCapture.attachment.filename), "x-stash-source": "upload" },
+            body: decodeBase64(currentCapture.attachment.base64), signal: controller.signal,
+          });
+          const uploaded = await upload.json().catch(() => ({})) as { id?: string; portableLink?: string; error?: string; message?: string };
+          if (!upload.ok || !uploaded.id || !uploaded.portableLink) {
+            response = new Response(JSON.stringify(uploaded), { status: upload.status, headers: upload.headers });
+            throw new UploadRejected(response);
+          }
+          currentCapture = { ...currentCapture, attachment: { ...currentCapture.attachment,
+            remote: { id: uploaded.id, portableLink: uploaded.portableLink } } };
+          await this.#store.saveCapture(currentCapture);
+        }
+        const noteContent = currentCapture.attachment?.remote
+          ? `${currentCapture.content}\n\n${currentCapture.attachment.remote.portableLink}` : currentCapture.content;
         response = await this.#fetch(`${pairing.instanceUrl}/api/mobile/v1/workspaces/${pairing.workspaceId}/captures`, {
           method: "POST",
           headers: { authorization: `Bearer ${pairing.memberToken}`, "content-type": "application/json" },
-          body: JSON.stringify({ protocol: "stash.mobile-capture.v1", ...capture, origin: undefined,
-            lastError: undefined, attempts: undefined, nextRetryAt: undefined }),
+          body: JSON.stringify(mobileProtocolPayload(currentCapture, noteContent)),
           signal: controller.signal,
         });
       } catch (error) {
-        if (controller.signal.aborted) return { status: "cancelled", count };
-        if (attentionError) return { status: "attention_required", count, error: attentionError, retryPending: true };
-        return { status: "offline", count };
+        if (error instanceof UploadRejected) response = error.response;
+        else {
+          if (controller.signal.aborted) return { status: "cancelled", count };
+          if (attentionError) return { status: "attention_required", count, error: attentionError, retryPending: true };
+          return { status: "offline", count };
+        }
       }
       const body = await response.json().catch(() => ({})) as { error?: string; message?: string };
       if (response.ok) {
@@ -267,9 +330,9 @@ export class MobileCaptureClient {
         count += 1;
         continue;
       }
-      const attempts = capture.attempts + 1;
+      const attempts = currentCapture.attempts + 1;
       const retriable = response.status >= 500 || response.status === 429;
-      const { nextRetryAt: _staleRetryAt, ...captureWithoutRetry } = capture;
+      const { nextRetryAt: _staleRetryAt, ...captureWithoutRetry } = currentCapture;
       const failed = { ...captureWithoutRetry, attempts, lastError: body.message ?? "Synchronization failed.",
         ...(retriable ? { nextRetryAt: new Date(this.#now()
           + retryDelay(response.headers.get("retry-after"), attempts, this.#now())).toISOString() } : {}) };
@@ -294,6 +357,25 @@ export class MobileCaptureClient {
         && capture.origin.workspaceId === pairing.workspaceId));
   }
 }
+
+class UploadRejected extends Error { constructor(readonly response: Response) { super("upload_rejected"); } }
+
+function mobileProtocolPayload(capture: MobileCapture, content: string) {
+  return {
+    protocol: "stash.mobile-capture.v1", id: capture.id, kind: capture.kind === "checklist" ? "checklist" : "text",
+    content, createdAt: capture.createdAt,
+    ...(capture.checklist ? { checklist: capture.checklist } : {}), ...(capture.projectId ? { projectId: capture.projectId } : {}),
+    ...(capture.tags ? { tags: capture.tags } : {}), ...(capture.reminder ? { reminder: capture.reminder } : {}),
+  };
+}
+
+function validPortableFilename(value: string) {
+  return Boolean(value && value.length <= 255 && value === value.trim() && !/[\/\\\u0000-\u001f\u007f]/.test(value)
+    && !/[. ]$/.test(value) && value !== "." && value !== ".." && !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(value));
+}
+function validBase64(value: string) { return value.length > 0 && value.length <= 14_000_000 && /^[A-Za-z0-9+/]+={0,2}$/.test(value) && value.length % 4 === 0; }
+function decodeBase64(value: string) { const binary = atob(value); return Uint8Array.from(binary, (character) => character.charCodeAt(0)); }
+function encodePortableFilename(value: string) { return encodeURIComponent(value).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`); }
 
 function emptyOptions(): MobileCaptureOptions { return { projects: [], tags: [], reminders: [] }; }
 function pairingScope(pairing: MobileCapturePairing): string { return `${pairing.instanceUrl}\n${pairing.workspaceId}\n${pairing.memberId}`; }

@@ -1,4 +1,5 @@
 import { Link, useFocusEffect } from "expo-router";
+import * as Linking from "expo-linking";
 import NetInfo from "@react-native-community/netinfo";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppState, Pressable, ScrollView, Text, TextInput, View, useColorScheme } from "react-native";
@@ -9,6 +10,7 @@ import type { MobileCaptureOptions } from "../../src/mobile-capture-client";
 import { NativeActionButton, NativeToggle } from "@/components/native-controls";
 import { NativeChoice } from "@/components/native-choice";
 import { StatusFeedback } from "@/components/status-feedback";
+import { MediaCaptureControls } from "@/components/media-capture-controls";
 import { colors } from "@/theme/colors";
 import { presentMobileSyncResult } from "@/src/sync-status";
 import {
@@ -18,10 +20,12 @@ import {
   loadCachedOptionsOnFocus,
   reconcileCaptureSelections,
 } from "@/src/capture-options-focus";
+import { parseIncomingCapture } from "@/src/incoming-capture";
 
 export default function CaptureScreen() {
   useColorScheme();
   const mounted = useRef(true);
+  const handledIncoming = useRef(new Set<string>());
   const client = useMemo(() => new MobileCaptureClient(new SecureMobileCaptureStore(), fetch), []);
   const [content, setContent] = useState("");
   const [checklist, setChecklist] = useState(false);
@@ -74,6 +78,23 @@ export default function CaptureScreen() {
     const subscription = AppState.addEventListener("change", (state) => { if (state === "active") synchronize(); else client.cancelRequests(); });
     return () => { subscription.remove(); client.cancelRequests(); };
   }, [client]);
+  useEffect(() => {
+    const handle = async (url: string | null) => {
+      if (!url || handledIncoming.current.has(url)) return;
+      const incoming = parseIncomingCapture(url);
+      if (!incoming) return;
+      handledIncoming.current.add(url);
+      try {
+        await client.captureSharedContent(incoming.content, incoming.source);
+        if (mounted.current) setStatus(incoming.source === "widget" ? "Widget input saved securely on this device." : "Shared content saved securely on this device.");
+        const result = await client.sync();
+        if (mounted.current) setStatus(presentMobileSyncResult(result, await client.outbox()));
+      } catch (error) { if (mounted.current) setStatus(error instanceof Error ? error.message : "Shared content could not be saved."); }
+    };
+    void Linking.getInitialURL().then(handle);
+    const subscription = Linking.addEventListener("url", ({ url }) => { void handle(url); });
+    return () => subscription.remove();
+  }, [client]);
 
   const save = async () => {
     try {
@@ -93,6 +114,15 @@ export default function CaptureScreen() {
     ...(projectId ? { projectId } : {}), ...(tag ? { tags: [tag] } : {}),
     ...(reminderOffset ? { reminder: { at: new Date(Date.now() + reminderOffset * 60_000).toISOString() } } : {}),
   });
+  const saveMedia = async (media: Parameters<MobileCaptureClient["captureMedia"]>[0]) => {
+    ensureCaptureOptionsReady(optionsReady.current);
+    const capture = await client.captureMedia(media, content, structure());
+    if (!mounted.current) return capture;
+    setContent(""); setStatus(`${media.filename} saved securely on this device.`);
+    const result = await client.sync();
+    if (mounted.current) setStatus(presentMobileSyncResult(result, await client.outbox()));
+    return capture;
+  };
 
   return (
     <ScrollView contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled"
@@ -113,6 +143,7 @@ export default function CaptureScreen() {
         />
         <NativeToggle label={checklist ? "Checklist capture" : "Text capture"} value={checklist} onChange={setChecklist} />
       </View>
+      <MediaCaptureControls onPicked={saveMedia} onError={setStatus} />
       {options.projects.length ? <NativeChoice label="Project" value={projectId} onChange={setProjectId}
         items={options.projects.map(({ id, name }) => ({ value: id, label: name }))} /> : null}
       {options.tags.length ? <NativeChoice label="Tag" value={tag} onChange={setTag}

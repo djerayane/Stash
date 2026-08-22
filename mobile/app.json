@@ -5,8 +5,17 @@
     "scheme": "stash",
     "version": "0.1.0",
     "orientation": "portrait",
-    "plugins": ["expo-router", "expo-secure-store"],
-    "experiments": { "typedRoutes": true },
-    "web": { "bundler": "metro" }
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      ["expo-audio", { "microphonePermission": "Allow Stash to record voice captures you explicitly start." }],
+      ["expo-image-picker", { "photosPermission": "Allow Stash to attach the original photos you choose." }]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "web": {
+      "bundler": "metro"
+    }
   }
 }

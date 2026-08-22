@@ -26,7 +26,7 @@ export class LocalAttachmentStorage implements AttachmentStorage {
 }
 export class InvalidAttachment extends Error { constructor(readonly kind: "filename" | "content_type" | "size") { super(kind); } }
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const allowedTypes = /^(image\/(?:png|jpeg|gif|webp)|application\/pdf|application\/octet-stream|text\/plain)$/;
+const allowedTypes = /^(image\/(?:png|jpeg|gif|webp)|audio\/(?:mp4|m4a|mpeg|wav|x-wav)|application\/pdf|application\/octet-stream|text\/plain)$/;
 const windowsDeviceName = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
 export function encodePortableFilename(filename: string): string {
   return encodeURIComponent(filename).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
