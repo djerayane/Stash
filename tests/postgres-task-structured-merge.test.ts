@@ -15,11 +15,15 @@ import { WorkspaceProjectService } from "../src/workspaces-projects.js";
 const databaseUrl = process.env.STASH_TEST_DATABASE_URL;
 
 describe("PostgreSQL structured Task collaboration", { skip: !databaseUrl }, () => {
-  let database: PostgresDatabase; let instance: RunningInstance;
-  after(async () => { if (instance) await instance.close(); else await database?.close(); });
+  let database: PostgresDatabase; let instance: RunningInstance; let admin: Pool; let schema: string; let testDatabaseUrl: string;
+  after(async () => { if (instance) await instance.close(); else await database?.close();
+    if (admin) { await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); await admin.end(); } });
 
   it("persists merged fields, retry receipts, conflicts, attribution, and resolution through the running Instance", async () => {
-    database = new PostgresDatabase(databaseUrl!, createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
+    admin = new Pool({ connectionString: databaseUrl! }); schema = `task_merge_${randomUUID().replaceAll("-", "")}`;
+    await admin.query(`CREATE SCHEMA ${schema}`); const scopedUrl = new URL(databaseUrl!); scopedUrl.searchParams.set("options", `-csearch_path=${schema}`);
+    testDatabaseUrl = scopedUrl.toString();
+    database = new PostgresDatabase(testDatabaseUrl, createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
     const owner = await new OwnerBootstrapService(database).bootstrap({ organizationName: "Merge Test", ownerName: "Ada Lovelace",
       ownerEmail: `ada-${randomUUID()}@example.test`, password: "test-password-long-enough" }); assert.ok(owner);
     const workspaces = new WorkspaceProjectService(database);
@@ -43,15 +47,18 @@ describe("PostgreSQL structured Task collaboration", { skip: !databaseUrl }, () 
       const task = await tasks.createFromBlock(owner.ownerId, captured.note.id, captured.note.document.blocks[0]!.blockKey!, { projectId: project.project.id, title });
       assert.equal(task.status, "created"); if (task.status !== "created") throw new Error("task creation failed"); return task.task; };
     const differentTask = await createTask("Concurrent different fields"); const sameTask = await createTask("Concurrent same field");
-    const retryTask = await createTask("Concurrent retry");
+    const retryTask = await createTask("Concurrent retry"); const workflowTask = await createTask("Workflow revision");
+    const workflowOverlapTask = await createTask("Workflow overlap");
     const workflowService = new ProjectWorkflowService(database); const workflowResult = await workflowService.find(owner.ownerId, project.project.id);
     assert.equal(workflowResult.status, "found"); if (workflowResult.status !== "found") return;
     const archivedStatus = workflowResult.workflow.statuses.find(({ name }) => name === "Ready")!;
     const archived = await workflowService.replace(owner.ownerId, project.project.id, { expectedRevision: workflowResult.workflow.revision,
       statuses: workflowResult.workflow.statuses.map(({ id, name, category, archived }) => ({ id, name, category,
         archived: id === archivedStatus.id ? true : archived })) }); assert.equal(archived.status, "updated");
-    const setup = new Pool({ connectionString: databaseUrl! });
-    await setup.query(`CREATE OR REPLACE FUNCTION stash_test_delay_task_receipt() RETURNS trigger LANGUAGE plpgsql AS $$
+    const setup = new Pool({ connectionString: testDatabaseUrl });
+    await setup.query(`DROP TRIGGER IF EXISTS stash_test_delay_task_receipt ON stash_task_edit_operations;
+      DROP FUNCTION IF EXISTS stash_test_delay_task_receipt();
+      CREATE FUNCTION stash_test_delay_task_receipt() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN PERFORM pg_sleep(0.08); RETURN NEW; END $$;
       CREATE TRIGGER stash_test_delay_task_receipt BEFORE INSERT ON stash_task_edit_operations
       FOR EACH ROW EXECUTE FUNCTION stash_test_delay_task_receipt()`); await setup.end();
@@ -101,7 +108,7 @@ describe("PostgreSQL structured Task collaboration", { skip: !databaseUrl }, () 
       body: JSON.stringify({ operationId: randomUUID(), baseRevision: 3, changes: { priority: "high" } }) }); assert.equal(collision.status, 409);
     const conflict = (await collision.json() as any).conflict; assert.equal(conflict.createdBy.displayName, "Ada Lovelace"); assert.equal(conflict.createdBy.localAccountId, undefined);
     assert.equal(conflict.currentRevision, 4);
-    const probe = new Pool({ connectionString: databaseUrl! }); await probe.query("UPDATE stash_accounts SET name='Ada Changed' WHERE id=$1", [owner.ownerId]); await probe.end();
+    const probe = new Pool({ connectionString: testDatabaseUrl }); await probe.query("UPDATE stash_accounts SET name='Ada Changed' WHERE id=$1", [owner.ownerId]); await probe.end();
     const listed = await fetch(`${base}/conflicts`, { headers: { authorization: "Bearer test" } });
     assert.equal(((await listed.json() as any).conflicts[0]).createdBy.displayName, "Ada Lovelace");
     assert.equal((await fetch(base, { method: "PATCH", headers: { authorization: "Bearer test", "content-type": "application/json" }, body: JSON.stringify({ labelNames: ["release"] }) })).status, 200);
@@ -123,5 +130,24 @@ describe("PostgreSQL structured Task collaboration", { skip: !databaseUrl }, () 
       headers: { authorization: "Bearer test", "content-type": "application/json" },
       body: JSON.stringify({ operationId: randomUUID(), baseRevision: 7, changes: { statusId: created.task.status.id } }) });
     assert.equal(staleStatus.status, 409); assert.deepEqual((await staleStatus.json() as any).conflict.fields, ["statusId"]);
+
+    const beforeRename = await workflowService.find(owner.ownerId, project.project.id); assert.equal(beforeRename.status, "found"); if (beforeRename.status !== "found") return;
+    const backlog = beforeRename.workflow.statuses.find(({ name }) => name === "Backlog")!;
+    const renamed = await workflowService.replace(owner.ownerId, project.project.id, { expectedRevision: beforeRename.workflow.revision,
+      statuses: beforeRename.workflow.statuses.map(({ id, name, category, archived }) => ({ id, name: id === backlog.id ? "Ideas" : name, category, archived })) });
+    assert.equal(renamed.status, "updated");
+    const workflowStale = await concurrentEdit(workflowTask.key, randomUUID(), { statusId: backlog.id }, 1);
+    assert.equal(workflowStale.status, 409); assert.deepEqual((await workflowStale.json() as any).conflict.fields, ["statusId"]);
+    const freshTask = await (await fetch(taskBase(workflowTask.key), { headers: { authorization: "Bearer test" } })).json() as any;
+    assert.equal(freshTask.task.revision, 2);
+    assert.equal((await concurrentEdit(workflowTask.key, randomUUID(), { title: "Uses GET revision" }, freshTask.task.revision)).status, 200);
+
+    const overlapWorkflow = await workflowService.find(owner.ownerId, project.project.id); assert.equal(overlapWorkflow.status, "found"); if (overlapWorkflow.status !== "found") return;
+    const inProgress = overlapWorkflow.workflow.statuses.find(({ name }) => name === "In Progress")!;
+    const overlapRevision = ((await (await fetch(taskBase(workflowOverlapTask.key), { headers: { authorization: "Bearer test" } })).json() as any).task.revision);
+    const workflowAndEdit = await Promise.all([workflowService.replace(owner.ownerId, project.project.id, { expectedRevision: overlapWorkflow.workflow.revision,
+      statuses: overlapWorkflow.workflow.statuses.map(({ id, name, category, archived }) => ({ id, name, category, archived: id === inProgress.id ? true : archived })) }),
+    concurrentEdit(workflowOverlapTask.key, randomUUID(), { statusId: inProgress.id }, overlapRevision)]);
+    assert.equal(workflowAndEdit[0].status, "updated"); assert.ok([200, 422].includes(workflowAndEdit[1].status));
   });
 });

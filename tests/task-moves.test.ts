@@ -11,7 +11,7 @@ const destinationProjectId = "77777777-7777-4777-8777-777777777777";
 const forbiddenProjectId = "99999999-9999-4999-8999-999999999999";
 
 class TaskMoveFake implements DatabaseProbe, TaskMoveRepository {
-  task: TaskPlanningReadModel = {
+  task: TaskPlanningReadModel = { revision: 1,
     schema: "stash.task.v1", id: "33333333-3333-4333-8333-333333333333",
     workspaceId: "88888888-8888-4888-8888-888888888888", projectId: sourceProjectId,
     key: "SOURCE-4", keyAliases: [], title: "Move release work",

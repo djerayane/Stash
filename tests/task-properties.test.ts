@@ -18,13 +18,13 @@ const dependencyTaskId = "99999999-9999-4999-8999-999999999999";
 const thirdTaskId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 
 class TaskPlanningFake implements DatabaseProbe, TaskPlanningRepository {
-  task: PortableTaskProjection = {
+  task: PortableTaskProjection & { revision: number } = { revision: 1,
     schema: "stash.task.v1", id: taskId, workspaceId: "88888888-8888-4888-8888-888888888888", projectId,
     key: "STASH-12", title: "Plan release", status: { id: statusId, name: "Backlog", category: "unstarted" },
     assigneeIds: [], priority: "none", labelNames: [], sourceNoteIds: [], linkedNoteIds: [], dependencies: [], developmentLinks: [],
     createdAt: "2026-08-22T08:00:00.000Z", createdBy: { localAccountId: "ada", displayName: "Ada Lovelace" },
   };
-  readonly otherTasks: PortableTaskProjection[] = [
+  readonly otherTasks: Array<PortableTaskProjection & { revision: number }> = [
     { ...structuredClone(this.task), id: dependencyTaskId, key: "STASH-13", title: "Publish release" },
     { ...structuredClone(this.task), id: thirdTaskId, key: "STASH-14", title: "Announce release" },
   ];
@@ -51,7 +51,7 @@ class TaskPlanningFake implements DatabaseProbe, TaskPlanningRepository {
       || update.dependencies?.some(({ taskId: id }) => ![this.task, ...this.otherTasks].some((task) => task.id === id) || id === found.task.id))
       return { status: "invalid_reference" as const };
     const { statusId: nextStatusId, dueDate, estimate, dependencies: proposedDependencies, ...properties } = update;
-    const next = { ...found.task, ...properties,
+    const next = { ...found.task, revision: found.task.revision + 1, ...properties,
       ...(nextStatusId ? { status: nextStatusId === doneStatusId
         ? { id: nextStatusId, name: "Done", category: "completed" as const }
         : { id: nextStatusId, name: "In Progress", category: "started" as const } } : {}),

@@ -13,7 +13,7 @@ class StructuredTaskFake implements DatabaseProbe, StructuredTaskEditRepository 
   task: TaskPlanningReadModel = { schema: "stash.task.v1", id: "33333333-3333-4333-8333-333333333333", workspaceId: "88888888-8888-4888-8888-888888888888",
     projectId, key: "STASH-12", title: "Plan release", status: { id: "44444444-4444-4444-8444-444444444444", name: "Backlog", category: "unstarted" },
     assigneeIds: [], priority: "none", labelNames: [], linkedNoteIds: [], dependencies: [], developmentLinks: [], sourceNoteIds: [],
-    createdAt: "2026-08-22T08:00:00.000Z", createdBy: { localAccountId: "ada", displayName: "Ada Lovelace" }, dependencyWarnings: [] };
+    createdAt: "2026-08-22T08:00:00.000Z", createdBy: { localAccountId: "ada", displayName: "Ada Lovelace" }, revision: 1, dependencyWarnings: [] };
   revision = 1; fieldRevisions = new Map<string, number>(); receipts = new Map<string, { digest: string; outcome: any }>(); conflicts = new Map<string, TaskEditConflict>(); fail = false;
   async verifyConnection() {} async close() {}
   async applyStructuredTaskEdit(memberId: string, requestedProjectId: string, key: string, batch: TaskEditBatch) {
@@ -25,7 +25,7 @@ class StructuredTaskFake implements DatabaseProbe, StructuredTaskEditRepository 
     const fields = Object.keys(batch.changes); const incompatible = fields.filter((field) => (this.fieldRevisions.get(field) ?? 0) > batch.baseRevision);
     if (incompatible.length) {
       const compatible = fields.filter((field) => !incompatible.includes(field));
-      if (compatible.length) { this.revision++; for (const field of compatible) {
+      if (compatible.length) { this.revision++; this.task.revision = this.revision; for (const field of compatible) {
         Object.assign(this.task, { [field]: (batch.changes as Record<string, unknown>)[field] }); this.fieldRevisions.set(field, this.revision);
       } }
       const conflict: TaskEditConflict = { id: "99999999-9999-4999-8999-999999999999", taskId: this.task.id, baseRevision: batch.baseRevision,
@@ -36,7 +36,7 @@ class StructuredTaskFake implements DatabaseProbe, StructuredTaskEditRepository 
       this.conflicts.set(conflict.id, conflict); const outcome = { status: "conflict_preserved" as const, conflict };
       this.receipts.set(batch.operationId, { digest, outcome }); return outcome;
     }
-    this.revision++; Object.assign(this.task, batch.changes); for (const field of fields) this.fieldRevisions.set(field, this.revision);
+    this.revision++; this.task.revision = this.revision; Object.assign(this.task, batch.changes); for (const field of fields) this.fieldRevisions.set(field, this.revision);
     const outcome = { status: "applied" as const, task: structuredClone(this.task), revision: this.revision, appliedFields: fields };
     this.receipts.set(batch.operationId, { digest, outcome }); return outcome;
   }
@@ -50,7 +50,7 @@ class StructuredTaskFake implements DatabaseProbe, StructuredTaskEditRepository 
     const conflict = this.conflicts.get(conflictId); if (!conflict) return { status: "conflict_not_found" as const };
     if (conflict.resolvedAt) return { status: "already_resolved" as const };
     if (expectedRevision !== this.revision) return { status: "conflict_changed" as const, conflict: { ...conflict, currentRevision: this.revision } };
-    if (resolution === "apply_contribution") { this.revision++; Object.assign(this.task, conflict.contribution); }
+    if (resolution === "apply_contribution") { this.revision++; this.task.revision = this.revision; Object.assign(this.task, conflict.contribution); }
     conflict.resolvedAt = "2026-08-23T09:05:00.000Z"; conflict.resolution = resolution;
     return { status: "resolved" as const, task: structuredClone(this.task), revision: this.revision,
       activity: { actor: { displayName: "Ada Lovelace" }, cause: { kind: "member" }, before: { conflictId }, after: { resolution } } };

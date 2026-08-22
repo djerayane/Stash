@@ -26,7 +26,7 @@ export interface TaskDependencyWarning {
   taskId: string;
 }
 
-export type TaskPlanningReadModel = PortableTaskProjection & { dependencyWarnings: TaskDependencyWarning[] };
+export type TaskPlanningReadModel = PortableTaskProjection & { revision: number; dependencyWarnings: TaskDependencyWarning[] };
 
 export interface TaskMoveActivity {
   schema: "stash.activity.v1";
