@@ -14,6 +14,8 @@ import {
 } from "../src/mobile-captures.js";
 import type { NoteRecord, PortableNoteProjection } from "../src/notes.js";
 import type { MemberAccessResolver } from "../src/workspaces-projects.js";
+import { EncryptedStateMobileCaptureStore, type CiphertextStateRepository, type MobileCipher } from "../mobile/src/encrypted-mobile-store.js";
+import { presentMobileSyncResult } from "../mobile/src/sync-status.js";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const projectId = "22222222-2222-4222-8222-222222222222";
@@ -34,6 +36,16 @@ class MemoryEncryptedStore implements EncryptedMobileCaptureStore {
   async loadOptions() { return structuredClone(this.options); }
   async saveOptions(options: typeof this.options) { this.options = structuredClone(options); }
 }
+
+class RecordingCiphertextRepository implements CiphertextStateRepository {
+  readonly ciphertext = new Map<string, string>();
+  async read(key: string) { return this.ciphertext.get(key); }
+  async write(key: string, value: string) { this.ciphertext.set(key, value); }
+}
+const testCipher: MobileCipher = {
+  async encrypt(value) { return Buffer.from([...value].reverse().join("")).toString("base64"); },
+  async decrypt(value) { return [...Buffer.from(value, "base64").toString()].reverse().join(""); },
+};
 
 class MobileProtocolDatabase implements DatabaseProbe, MobileCaptureRepository {
   readonly notes = new Map<string, NoteRecord>();
@@ -85,7 +97,8 @@ describe("offline mobile capture synchronization", () => {
 
   it("queues text offline, retries, and treats duplicate delivery as one Note", async () => {
     const { database, baseUrl } = await run();
-    const store = new MemoryEncryptedStore();
+    const ciphertext = new RecordingCiphertextRepository();
+    const store = new EncryptedStateMobileCaptureStore(ciphertext, testCipher);
     let online = false;
     const client = new MobileCaptureClient(store, async (input, init) => {
       if (!online) throw new TypeError("Network request failed");
@@ -99,9 +112,11 @@ describe("offline mobile capture synchronization", () => {
         { id: "tomorrow", label: "Tomorrow", offsetMinutes: 1_440 },
         { id: "week", label: "In one week", offsetMinutes: 10_080 }],
     });
+    assert.doesNotMatch([...ciphertext.ciphertext.values()].join(" "), /Launch|mobile|member-ada/);
     online = false;
 
     const queued = await client.captureText("Follow up after the retrospective.");
+    assert.doesNotMatch([...ciphertext.ciphertext.values()].join(" "), /retrospective/);
     assert.equal((await client.outbox()).length, 1);
     assert.equal((await client.sync()).status, "offline");
     assert.equal((await client.outbox()).length, 1);
@@ -201,5 +216,52 @@ describe("offline mobile capture synchronization", () => {
     assert.equal(invalid.status, "attention_required");
     assert.equal(invalid.status === "attention_required" && invalid.error, "invalid_input");
     assert.match((await client.outbox())[0]!.lastError!, /invalid/i);
+  });
+
+  it("retains a rejected capture without blocking a later valid capture", async () => {
+    const { database, baseUrl } = await run();
+    const store = new MemoryEncryptedStore();
+    const client = new MobileCaptureClient(store, fetch, { allowInsecureInstanceForTest: true });
+    await client.pair({ instanceUrl: baseUrl, memberToken: "member-ada", workspaceId });
+    const rejected = await client.captureText("Keep this visible", {
+      projectId: "33333333-3333-4333-8333-333333333333",
+    });
+    await client.captureText("This one should synchronize");
+
+    const result = await client.sync();
+
+    assert.equal(result.status, "attention_required");
+    assert.equal(result.count, 1);
+    assert.equal(database.notes.size, 1);
+    assert.deepEqual((await client.outbox()).map(({ id }) => id), [rejected.id]);
+    assert.match((await client.outbox())[0]!.lastError!, /cannot capture/i);
+    assert.match(presentMobileSyncResult(result, await client.outbox()), /cannot capture/i);
+  });
+
+  it("aborts an in-flight synchronization and suppresses callbacks after cleanup", async () => {
+    const store = new MemoryEncryptedStore();
+    await store.savePairing({ instanceUrl: "https://stash.example", memberToken: "member-ada", workspaceId });
+    await store.saveCapture({ id: "44444444-4444-4444-8444-444444444444", kind: "text", content: "Wait",
+      createdAt: new Date().toISOString(), attempts: 0 });
+    let requestSignal: AbortSignal | undefined;
+    const client = new MobileCaptureClient(store, async (_input, init) => {
+      requestSignal = init?.signal ?? undefined;
+      return new Promise<Response>((_resolve, reject) => requestSignal!.addEventListener("abort", () => reject(requestSignal!.reason)));
+    });
+    let listener: ((online: boolean) => void) | undefined;
+    let callbacks = 0;
+    const cleanup = client.watchConnectivity(
+      (next) => { listener = next; return () => undefined; },
+      () => { callbacks += 1; },
+    );
+    listener!(true);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    cleanup();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(requestSignal?.aborted, true);
+    assert.equal(callbacks, 0);
+    assert.equal((await store.listCaptures()).length, 1);
   });
 });

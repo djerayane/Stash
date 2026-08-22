@@ -1,14 +1,20 @@
 import { Link } from "expo-router";
 import NetInfo from "@react-native-community/netinfo";
-import { useEffect, useMemo, useState } from "react";
-import { Pressable, ScrollView, Text, TextInput, View, useColorScheme } from "react-native";
+import { Picker } from "@react-native-picker/picker";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { AppState, Pressable, ScrollView, Text, TextInput, View, useColorScheme } from "react-native";
 
 import { MobileCaptureClient } from "../../src/mobile-capture-client";
 import { SecureMobileCaptureStore } from "../src/secure-mobile-store";
 import type { MobileCaptureOptions } from "../../src/mobile-capture-client";
+import { NativeActionButton, NativeToggle } from "@/components/native-controls";
+import { StatusFeedback } from "@/components/status-feedback";
+import { colors } from "@/theme/colors";
+import { presentMobileSyncResult } from "@/src/sync-status";
 
 export default function CaptureScreen() {
   useColorScheme();
+  const mounted = useRef(true);
   const client = useMemo(() => new MobileCaptureClient(new SecureMobileCaptureStore(), fetch), []);
   const [content, setContent] = useState("");
   const [checklist, setChecklist] = useState(false);
@@ -17,13 +23,21 @@ export default function CaptureScreen() {
   const [projectId, setProjectId] = useState<string>();
   const [tag, setTag] = useState<string>();
   const [reminderOffset, setReminderOffset] = useState<number>();
-  useEffect(() => { void client.options().then(setOptions); }, [client]);
+  useEffect(() => { mounted.current = true; void client.options().then((value) => { if (mounted.current) setOptions(value); }); return () => { mounted.current = false; }; }, [client]);
   useEffect(() => client.watchConnectivity(
     (listener) => NetInfo.addEventListener((state) => listener(Boolean(state.isConnected && state.isInternetReachable !== false))),
     (result) => {
-      if (result.status === "synced" && result.count) setStatus("Queued captures synchronized with your Instance.");
+      if (mounted.current && result.status === "synced" && result.count) setStatus("Queued captures synchronized with your Instance.");
     },
   ), [client]);
+  useEffect(() => {
+    const synchronize = () => { void client.sync().then((result) => {
+      if (mounted.current && result.status === "synced" && result.count) setStatus("Queued captures synchronized with your Instance.");
+    }); };
+    synchronize();
+    const subscription = AppState.addEventListener("change", (state) => { if (state === "active") synchronize(); else client.cancelRequests(); });
+    return () => { subscription.remove(); client.cancelRequests(); };
+  }, [client]);
 
   const save = async () => {
     try {
@@ -31,17 +45,12 @@ export default function CaptureScreen() {
         const [title = "Checklist", ...items] = content.split("\n").filter((line) => line.trim());
         await client.captureChecklist(title, items, structure());
       } else await client.captureText(content, structure());
-      setContent("");
-      setStatus("Saved securely on this device.");
+      if (!mounted.current) return;
+      setContent(""); setStatus("Saved securely on this device.");
       const result = await client.sync();
-      if (result.status === "synced") setStatus("Synchronized with your Instance.");
-      else if (result.status === "offline") setStatus("Saved securely. Your Instance is offline; synchronization will retry.");
-      else if (result.status === "retry_pending") setStatus("Saved securely. The Instance asked the app to retry later.");
-      else if (result.status === "attention_required") {
-        const failed = (await client.outbox()).find(({ lastError }) => lastError);
-        setStatus(failed?.lastError ?? `Saved locally. Synchronization needs attention: ${result.error}.`);
-      }
-    } catch (error) { setStatus(error instanceof Error ? error.message : "The capture could not be saved."); }
+      if (!mounted.current) return;
+      setStatus(presentMobileSyncResult(result, await client.outbox()));
+    } catch (error) { if (mounted.current) setStatus(error instanceof Error ? error.message : "The capture could not be saved."); }
   };
   const structure = () => ({
     ...(projectId ? { projectId } : {}), ...(tag ? { tags: [tag] } : {}),
@@ -51,10 +60,10 @@ export default function CaptureScreen() {
   return (
     <ScrollView contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled"
       contentContainerStyle={{ padding: 20, gap: 20 }}>
-      <Text selectable style={{ color: "#6b6b70", fontSize: 15, lineHeight: 21 }}>{status}</Text>
+      <StatusFeedback message={status} />
       <Link href="/pairing" asChild>
         <Pressable accessibilityRole="link" style={{ minHeight: 44, justifyContent: "center" }}>
-          <Text style={{ color: "#2463eb", fontSize: 16 }}>Pair or update Instance</Text>
+          <Text style={{ color: colors.accent, fontSize: 16 }}>Pair or update Instance</Text>
         </Pressable>
       </Link>
       <View style={{ gap: 10 }}>
@@ -62,37 +71,27 @@ export default function CaptureScreen() {
           accessibilityLabel={checklist ? "Checklist title and items" : "Note text"}
           multiline autoFocus value={content} onChangeText={setContent}
           placeholder={checklist ? "Title, then one item per line" : "What do you want to remember?"}
-          style={{ minHeight: 190, borderWidth: 1, borderColor: "#c7c7cc", borderRadius: 18,
+          style={{ minHeight: 190, borderWidth: 1, borderColor: colors.separator, color: colors.label, backgroundColor: colors.background, borderRadius: 18,
             borderCurve: "continuous", padding: 16, fontSize: 18, lineHeight: 26, textAlignVertical: "top" }}
         />
-        <Pressable accessibilityRole="switch" accessibilityState={{ checked: checklist }} onPress={() => setChecklist((value) => !value)}
-          style={{ minHeight: 48, justifyContent: "center" }}>
-          <Text style={{ fontSize: 16, color: "#2463eb" }}>{checklist ? "Checklist capture" : "Text capture"}</Text>
-        </Pressable>
+        <NativeToggle label={checklist ? "Checklist capture" : "Text capture"} value={checklist} onChange={setChecklist} />
       </View>
-      {options.projects.length ? <Choice label="Project" value={options.projects.find(({ id }) => id === projectId)?.name}
-        onPress={() => setProjectId(nextValue(options.projects.map(({ id }) => id), projectId))} /> : null}
-      {options.tags.length ? <Choice label="Tag" value={tag}
-        onPress={() => setTag(nextValue(options.tags, tag))} /> : null}
-      {options.reminders.length ? <Choice label="Reminder" value={options.reminders.find(({ offsetMinutes }) => offsetMinutes === reminderOffset)?.label}
-        onPress={() => setReminderOffset(nextValue(options.reminders.map(({ offsetMinutes }) => offsetMinutes), reminderOffset))} /> : null}
-      <Pressable accessibilityRole="button" disabled={!content.trim()} onPress={save}
-        style={({ pressed }) => ({ minHeight: 52, alignItems: "center", justifyContent: "center", borderRadius: 16,
-          borderCurve: "continuous", backgroundColor: content.trim() ? "#2463eb" : "#a8a8ad", opacity: pressed ? 0.75 : 1 })}>
-        <Text style={{ color: "white", fontSize: 17, fontWeight: "600" }}>Save capture</Text>
-      </Pressable>
+      {options.projects.length ? <Choice label="Project" value={projectId} onChange={setProjectId}
+        items={options.projects.map(({ id, name }) => ({ value: id, label: name }))} /> : null}
+      {options.tags.length ? <Choice label="Tag" value={tag} onChange={setTag}
+        items={options.tags.map((value) => ({ value, label: value }))} /> : null}
+      {options.reminders.length ? <Choice label="Reminder" value={reminderOffset?.toString()} onChange={(value) => setReminderOffset(value ? Number(value) : undefined)}
+        items={options.reminders.map(({ offsetMinutes, label }) => ({ value: offsetMinutes.toString(), label }))} /> : null}
+      <NativeActionButton label="Save capture" disabled={!content.trim()} onPress={save} />
     </ScrollView>
   );
 }
 
-function nextValue<T>(values: T[], current: T | undefined): T | undefined {
-  if (current === undefined) return values[0];
-  const next = values.indexOf(current) + 1;
-  return next < values.length ? values[next] : undefined;
-}
-
-function Choice({ label, value, onPress }: { label: string; value?: string; onPress: () => void }) {
-  return <Pressable accessibilityRole="button" onPress={onPress} style={{ minHeight: 48, justifyContent: "center" }}>
-    <Text style={{ color: "#2463eb", fontSize: 16 }}>{label}: {value ?? "None"}</Text>
-  </Pressable>;
+function Choice({ label, value, items, onChange }: { label: string; value?: string; items: { value: string; label: string }[]; onChange: (value?: string) => void }) {
+  return <View accessibilityLabel={label} style={{ borderWidth: 1, borderColor: colors.separator, borderRadius: 14, borderCurve: "continuous" }}>
+    <Picker selectedValue={value ?? ""} onValueChange={(next) => onChange(next || undefined)}>
+      <Picker.Item label={`${label}: None`} value="" />
+      {items.map((item) => <Picker.Item key={item.value} label={`${label}: ${item.label}`} value={item.value} />)}
+    </Picker>
+  </View>;
 }

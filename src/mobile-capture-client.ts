@@ -44,6 +44,7 @@ export class MobileCaptureClient {
   readonly #store: EncryptedMobileCaptureStore;
   readonly #fetch: Fetch;
   readonly #allowInsecureInstanceForTest: boolean;
+  #activeRequest: AbortController | undefined;
 
   constructor(store: EncryptedMobileCaptureStore, fetchImplementation: Fetch, options: { allowInsecureInstanceForTest?: boolean } = {}) {
     this.#store = store;
@@ -82,6 +83,7 @@ export class MobileCaptureClient {
     const synchronize = () => {
       if (!online) return;
       void this.sync().then((result) => {
+        if (!online) return;
         onResult(result);
         if (result.status === "retry_pending" && online) {
           const delay = Math.min(1_000 * 2 ** retryNumber, 60_000);
@@ -94,16 +96,20 @@ export class MobileCaptureClient {
       online = isOnline;
       cancelRetry?.();
       cancelRetry = undefined;
-      if (online) synchronize();
+      if (online) synchronize(); else this.cancelRequests();
     });
-    return () => { online = false; cancelRetry?.(); unsubscribe(); };
+    return () => { online = false; cancelRetry?.(); this.cancelRequests(); unsubscribe(); };
   }
 
-  async refreshOptions(): Promise<MobileCaptureOptions> {
+  cancelRequests(): void { this.#activeRequest?.abort(new DOMException("Request cancelled", "AbortError")); }
+
+  async refreshOptions(signal?: AbortSignal): Promise<MobileCaptureOptions> {
+    const controller = this.#beginRequest(signal);
     const pairing = await this.#store.loadPairing();
     if (!pairing) throw new Error("Pair the app before refreshing capture options.");
     const response = await this.#fetch(`${pairing.instanceUrl}/api/mobile/v1/workspaces/${pairing.workspaceId}/capture-options`, {
       headers: { authorization: `Bearer ${pairing.memberToken}` },
+      signal: controller.signal,
     });
     const body = await response.json().catch(() => ({})) as MobileCaptureOptions & { message?: string };
     if (!response.ok) throw new Error(body.message ?? "Capture options could not be refreshed.");
@@ -132,10 +138,12 @@ export class MobileCaptureClient {
     return capture;
   }
 
-  async sync(): Promise<MobileSyncResult> {
+  async sync(signal?: AbortSignal): Promise<MobileSyncResult> {
+    const controller = this.#beginRequest(signal);
     const pairing = await this.#store.loadPairing();
     if (!pairing) return { status: "attention_required", count: 0, error: "not_paired" };
     let count = 0;
+    let attentionError: string | undefined;
     for (const capture of await this.#store.listCaptures()) {
       let response: Response;
       try {
@@ -143,8 +151,10 @@ export class MobileCaptureClient {
           method: "POST",
           headers: { authorization: `Bearer ${pairing.memberToken}`, "content-type": "application/json" },
           body: JSON.stringify({ protocol: "stash.mobile-capture.v1", ...capture, lastError: undefined, attempts: undefined }),
+          signal: controller.signal,
         });
-      } catch {
+      } catch (error) {
+        if (controller.signal.aborted) return { status: "offline", count };
         return { status: "offline", count };
       }
       const body = await response.json().catch(() => ({})) as { error?: string; message?: string };
@@ -156,9 +166,18 @@ export class MobileCaptureClient {
       const failed = { ...capture, attempts: capture.attempts + 1, lastError: body.message ?? "Synchronization failed." };
       await this.#store.saveCapture(failed);
       if (response.status >= 500 || response.status === 429) return { status: "retry_pending", count };
-      return { status: "attention_required", count, error: body.error ?? "sync_rejected" };
+      attentionError ??= body.error ?? "sync_rejected";
     }
-    return { status: "synced", count };
+    return attentionError ? { status: "attention_required", count, error: attentionError } : { status: "synced", count };
+  }
+
+  #beginRequest(externalSignal?: AbortSignal): AbortController {
+    this.cancelRequests();
+    const controller = new AbortController();
+    this.#activeRequest = controller;
+    if (externalSignal?.aborted) controller.abort(externalSignal.reason);
+    else externalSignal?.addEventListener("abort", () => controller.abort(externalSignal.reason), { once: true });
+    return controller;
   }
 }
 
