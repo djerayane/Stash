@@ -217,7 +217,9 @@ export class MobileCaptureClient {
     structure: Pick<MobileCapture, "projectId" | "tags" | "reminder"> = {},
   ): Promise<MobileCapture> {
     if (!validPortableFilename(media.filename)) throw new Error("The original filename is invalid.");
-    if (!/^(?:image\/(?:png|jpeg|gif|webp)|audio\/(?:mp4|m4a|mpeg|wav|x-wav)|application\/(?:pdf|octet-stream)|text\/plain)$/.test(media.contentType)) {
+    const contentType = media.kind === "file" && !supportedAttachmentType.test(media.contentType)
+      ? "application/octet-stream" : media.contentType;
+    if (!supportedAttachmentType.test(contentType)) {
       throw new Error("The original file type is not supported.");
     }
     if (!validBase64(media.base64)) throw new Error("The original file is empty or invalid.");
@@ -226,7 +228,7 @@ export class MobileCaptureClient {
       id: crypto.randomUUID(), kind: media.kind, content: caption.trim() || media.filename,
       createdAt: new Date().toISOString(), attempts: 0, source: "app",
       origin: { instanceUrl: pairing.instanceUrl, workspaceId: pairing.workspaceId, memberId: pairing.memberId },
-      attachment: { filename: media.filename, contentType: media.contentType, base64: media.base64 },
+      attachment: { filename: media.filename, contentType, base64: media.base64 },
       ...(structure.projectId ? { projectId: structure.projectId } : {}),
       ...(structure.tags ? { tags: structure.tags } : {}), ...(structure.reminder ? { reminder: structure.reminder } : {}),
     };
@@ -373,6 +375,7 @@ function validPortableFilename(value: string) {
   return Boolean(value && value.length <= 255 && value === value.trim() && !/[\/\\\u0000-\u001f\u007f]/.test(value)
     && !/[. ]$/.test(value) && value !== "." && value !== ".." && !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(value));
 }
+const supportedAttachmentType = /^(?:image\/(?:png|jpeg|gif|webp|heic|heif)|audio\/(?:mp4|m4a|mpeg|wav|x-wav|aac|3gpp|ogg)|application\/(?:pdf|octet-stream)|text\/plain)$/;
 function validBase64(value: string) { return value.length > 0 && value.length <= 14_000_000 && /^[A-Za-z0-9+/]+={0,2}$/.test(value) && value.length % 4 === 0; }
 function decodeBase64(value: string) { const binary = atob(value); return Uint8Array.from(binary, (character) => character.charCodeAt(0)); }
 function encodePortableFilename(value: string) { return encodeURIComponent(value).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`); }

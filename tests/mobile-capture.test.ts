@@ -238,9 +238,14 @@ describe("offline mobile capture synchronization", () => {
     }), { status: 503, headers: { "content-type": "application/json" } }));
     await assert.rejects(() => client.captureMedia({ kind: "file", filename: "../secret.txt", contentType: "text/plain", base64: "YQ==" }),
       /filename/i);
+    const document = await client.captureMedia({ kind: "file", filename: "brief.docx",
+      contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", base64: "ZG9j" });
+    assert.equal(document.attachment?.contentType, "application/octet-stream");
+    const photo = await client.captureMedia({ kind: "photo", filename: "original.heic", contentType: "image/heic", base64: "aGVpYw==" });
+    assert.equal(photo.attachment?.contentType, "image/heic");
     await client.captureMedia({ kind: "voice", filename: "voice.m4a", contentType: "audio/mp4", base64: "dm9pY2U=" });
     assert.deepEqual(await client.sync(), { status: "retry_pending", count: 0 });
-    assert.equal((await client.outbox())[0]?.attachment?.base64, "dm9pY2U=");
+    assert.equal((await client.outbox()).find(({ kind }) => kind === "voice")?.attachment?.base64, "dm9pY2U=");
   });
 
   it("does not upload an original twice when Note synchronization retries", async () => {
