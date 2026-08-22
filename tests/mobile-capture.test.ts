@@ -25,7 +25,7 @@ import {
   reconcileCaptureSelections,
 } from "../mobile/src/capture-options-focus.js";
 import { IncomingCaptureDeliveryGate, parseIncomingCapture } from "../mobile/src/incoming-capture.js";
-import { IncomingShareDeliveryBatch, SerializedIncomingShareDrain, incomingShareFingerprint } from "../mobile/src/incoming-share-deliveries.js";
+import { IncomingShareDeliveryBatch, SerializedIncomingShareDrain, drainIncomingShares, incomingShareFingerprint } from "../mobile/src/incoming-share-deliveries.js";
 import { MAX_ATTACHMENT_BYTES, readBoundedOriginal } from "../mobile/src/media-input.js";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
@@ -58,6 +58,9 @@ class MemoryEncryptedStore implements EncryptedMobileCaptureStore {
   async acknowledgeNativeShares(fingerprint?: string) { if (!fingerprint || this.nativeShare?.fingerprint === fingerprint) this.nativeShare = undefined; }
   async listIncomingShares() { return structuredClone(this.incomingShares); }
   async removeIncomingShare(id: string) { this.incomingShares = this.incomingShares.filter((item) => item.id !== id); }
+  async saveIncomingShare(delivery: import("../src/mobile-capture-client.js").IncomingShareDelivery) {
+    this.incomingShares = [...this.incomingShares.filter(({ id }) => id !== delivery.id), structuredClone(delivery)];
+  }
 }
 
 class RecordingCiphertextRepository implements CiphertextStateRepository {
@@ -219,6 +222,44 @@ describe("offline mobile capture synchronization", () => {
     assert.deepEqual(captured, ["A", "B"]);
     assert.equal(errors.length, 1);
     assert.equal(attempts, 2);
+  });
+
+  it("quarantines permanent A without blocking B and requires explicit removal", async () => {
+    const store = new MemoryEncryptedStore();
+    store.incomingShares = [
+      { id: "11111111-1111-4111-8111-111111111111", payload: { shareType: "file", value: "A" } },
+      { id: "22222222-2222-4222-8222-222222222222", payload: { shareType: "text", value: "B" } },
+    ];
+    const captured: string[] = [];
+    await drainIncomingShares(store, async ({ payload }) => {
+      if (payload.value === "A") throw new Error("The original file type is not supported.");
+      captured.push(payload.value);
+    });
+    assert.deepEqual(captured, ["B"]);
+    assert.equal(store.incomingShares[0]?.status, "quarantined");
+    await store.removeIncomingShare(store.incomingShares[0]!.id);
+    assert.deepEqual(await store.listIncomingShares(), []);
+  });
+
+  it("retains transient A while processing B and retries A on the next drain", async () => {
+    const store = new MemoryEncryptedStore();
+    store.incomingShares = [
+      { id: "11111111-1111-4111-8111-111111111111", payload: { shareType: "file", value: "A" } },
+      { id: "22222222-2222-4222-8222-222222222222", payload: { shareType: "text", value: "B" } },
+    ];
+    let unavailable = true;
+    const captured: string[] = [];
+    const consume = async ({ payload }: import("../src/mobile-capture-client.js").IncomingShareDelivery) => {
+      if (payload.value === "A" && unavailable) throw new Error("The original could not be read right now.");
+      captured.push(payload.value);
+    };
+    await drainIncomingShares(store, consume);
+    assert.deepEqual(captured, ["B"]);
+    assert.equal(store.incomingShares[0]?.status, "retry_pending");
+    unavailable = false;
+    await drainIncomingShares(store, consume);
+    assert.deepEqual(captured, ["B", "A"]);
+    assert.deepEqual(await store.listIncomingShares(), []);
   });
   let instance: RunningInstance | undefined;
   afterEach(async () => { await instance?.close(); instance = undefined; });
@@ -430,6 +471,10 @@ describe("offline mobile capture synchronization", () => {
     assert.equal(gate.accept(url, "event", 1_200), true);
     assert.equal(gate.accept(url, "initial", 10_000), true);
     assert.equal(gate.accept(url, "event", 12_001), true);
+    const reverse = new IncomingCaptureDeliveryGate();
+    assert.equal(reverse.accept(url, "event", 20_000), true);
+    assert.equal(reverse.accept(url, "initial", 20_100), false);
+    assert.equal(reverse.accept(url, "event", 20_200), true, "later intentional event remains allowed");
   });
 
   it("rejects a reused capture ID when its creation timestamp changes", async () => {

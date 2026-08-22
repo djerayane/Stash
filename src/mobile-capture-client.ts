@@ -36,6 +36,8 @@ export interface MobileCapture {
 export interface IncomingShareDelivery {
   id: string;
   payload: { value: string; shareType: string; mimeType?: string };
+  status?: "retry_pending" | "quarantined";
+  lastError?: string;
 }
 
 export interface EncryptedMobileCaptureStore {
@@ -50,6 +52,7 @@ export interface EncryptedMobileCaptureStore {
   acknowledgeNativeShares(fingerprint?: string): Promise<void>;
   listIncomingShares(): Promise<IncomingShareDelivery[]>;
   removeIncomingShare(id: string): Promise<void>;
+  saveIncomingShare(delivery: IncomingShareDelivery): Promise<void>;
 }
 
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;

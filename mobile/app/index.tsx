@@ -24,7 +24,7 @@ import {
 import { IncomingCaptureDeliveryGate, parseIncomingCapture } from "@/src/incoming-capture";
 import { useIncomingSharePayloads } from "@/src/incoming-share";
 import { readBoundedOriginal } from "@/src/media-input";
-import { SerializedIncomingShareDrain } from "@/src/incoming-share-deliveries";
+import { SerializedIncomingShareDrain, drainIncomingShares } from "@/src/incoming-share-deliveries";
 
 export default function CaptureScreen() {
   useColorScheme();
@@ -44,6 +44,7 @@ export default function CaptureScreen() {
   const [optionsLoading, setOptionsLoading] = useState(true);
   const [optionsError, setOptionsError] = useState(false);
   const [optionsReload, setOptionsReload] = useState(0);
+  const [quarantinedShares, setQuarantinedShares] = useState(0);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useFocusEffect(useCallback(() => loadCachedOptionsOnFocus(client, (value) => {
     if (!mounted.current) return;
@@ -102,25 +103,32 @@ export default function CaptureScreen() {
     return () => subscription.remove();
   }, [client]);
   const shareDrain = useMemo(() => new SerializedIncomingShareDrain(async () => {
-        for (const { id, payload } of await store.listIncomingShares()) {
-          if (payload.shareType === "text" || payload.shareType === "url") {
-            await client.captureSharedContent(payload.value, "share_sheet", {}, id);
-          } else {
-            const filename = payload.value.split("/").pop() || `shared-${Date.now()}`;
-            const kind = payload.shareType === "image" ? "photo" : payload.shareType === "audio" ? "voice" : "file";
-            await client.captureMedia({ kind, filename, contentType: payload.mimeType ?? "application/octet-stream",
-              base64: await readBoundedOriginal(new File(payload.value)) }, "", {}, id);
-          }
-          await store.removeIncomingShare(id);
-        }
-        if (mounted.current) setStatus("Shared content saved securely on this device.");
+        await drainIncomingShares(store, async ({ id, payload }) => {
+            if (payload.shareType === "text" || payload.shareType === "url") {
+              await client.captureSharedContent(payload.value, "share_sheet", {}, id);
+            } else {
+              const filename = payload.value.split("/").pop() || `shared-${Date.now()}`;
+              const kind = payload.shareType === "image" ? "photo" : payload.shareType === "audio" ? "voice" : "file";
+              await client.captureMedia({ kind, filename, contentType: payload.mimeType ?? "application/octet-stream",
+                base64: await readBoundedOriginal(new File(payload.value)) }, "", {}, id);
+            }
+        });
+        const blocked = (await store.listIncomingShares()).filter(({ status }) => status === "quarantined");
         const result = await client.sync();
-        if (mounted.current) setStatus(presentMobileSyncResult(result, await client.outbox()));
+        if (mounted.current) {
+          setQuarantinedShares(blocked.length);
+          setStatus(blocked.length ? `${blocked.length} shared item needs attention. Other items continue saving.`
+            : presentMobileSyncResult(result, await client.outbox()));
+        }
   }, (error) => { if (mounted.current) setStatus(error instanceof Error ? error.message : "Shared content could not be saved."); }), [client, store]);
   useEffect(() => {
     if (incomingShare.error && mounted.current) setStatus("Shared content could not be read and was not saved.");
     shareDrain.request();
   }, [incomingShare.error, incomingShare.revision, shareDrain]);
+  const discardQuarantinedShares = async () => {
+    for (const item of await store.listIncomingShares()) if (item.status === "quarantined") await store.removeIncomingShare(item.id);
+    setQuarantinedShares(0); setStatus("Blocked shared items discarded.");
+  };
 
   const save = async () => {
     try {
@@ -170,6 +178,8 @@ export default function CaptureScreen() {
         <NativeToggle label={checklist ? "Checklist capture" : "Text capture"} value={checklist} onChange={setChecklist} />
       </View>
       <MediaCaptureControls onPicked={saveMedia} onError={setStatus} />
+      {quarantinedShares ? <NativeActionButton label={`Discard ${quarantinedShares} blocked shared item${quarantinedShares === 1 ? "" : "s"}`}
+        onPress={discardQuarantinedShares} /> : null}
       {options.projects.length ? <NativeChoice label="Project" value={projectId} onChange={setProjectId}
         items={options.projects.map(({ id, name }) => ({ value: id, label: name }))} /> : null}
       {options.tags.length ? <NativeChoice label="Tag" value={tag} onChange={setTag}

@@ -15,15 +15,14 @@ export function parseIncomingCapture(url: string): IncomingCaptureParseResult {
 }
 
 export class IncomingCaptureDeliveryGate {
-  #initial: { url: string; at: number } | undefined;
+  #candidate: { url: string; delivery: "initial" | "event"; at: number } | undefined;
   constructor(readonly duplicateWindowMs = 2_000) {}
   accept(url: string, delivery: "initial" | "event", now = Date.now()): boolean {
-    if (delivery === "initial") { this.#initial = { url, at: now }; return true; }
-    if (this.#initial?.url === url && now - this.#initial.at <= this.duplicateWindowMs) {
-      this.#initial = undefined;
+    if (this.#candidate?.url === url && this.#candidate.delivery !== delivery && now - this.#candidate.at <= this.duplicateWindowMs) {
+      this.#candidate = undefined;
       return false;
     }
-    this.#initial = undefined;
+    this.#candidate = { url, delivery, at: now };
     return true;
   }
 }

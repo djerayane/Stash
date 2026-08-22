@@ -38,6 +38,10 @@ export class EncryptedStateMobileCaptureStore implements EncryptedMobileCaptureS
   }
   async listIncomingShares() { await this.#writeBarrier; return (await this.#read<IncomingShareState>(incomingSharesKey, { pending: [] })).pending; }
   async removeIncomingShare(id: string) { await this.#mutateIncoming((state) => ({ ...state, pending: state.pending.filter((item) => item.id !== id) })); }
+  async saveIncomingShare(delivery: IncomingShareDelivery) {
+    await this.#mutateIncoming((state) => ({ ...state,
+      pending: [...state.pending.filter(({ id }) => id !== delivery.id), delivery] }));
+  }
   async #read<T>(key: string, fallback: T): Promise<T> {
     const ciphertext = await this.repository.read(key);
     return ciphertext ? JSON.parse(await this.cipher.decrypt(ciphertext)) as T : fallback;
