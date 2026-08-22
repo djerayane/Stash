@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { afterEach, describe, it } from "node:test";
+import { createAuthenticationSecretCodec } from "../src/authentication-secrets.js";
 
 import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
 import {
@@ -19,6 +19,7 @@ const secretProjectId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const foreignProjectId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 
 class ProtocolCompatibleDatabase implements DatabaseProbe, InvitationRepository {
+  readonly secrets = createAuthenticationSecretCodec(Buffer.alloc(32, 7).toString("base64"));
   readonly roles = new Map<string, Map<string, BuiltInOrganizationRole>>([
     [organizationId, new Map([["owner", "Owner"], ["admin", "Admin"], ["member", "Member"]])],
     [otherOrganizationId, new Map([["foreign-admin", "Admin"]])],
@@ -28,31 +29,45 @@ class ProtocolCompatibleDatabase implements DatabaseProbe, InvitationRepository 
     [secretProjectId, { id: secretProjectId, organizationId, name: "Secret", key: "SECRET", createdBy: { localAccountId: "owner", displayName: "Ada" } }],
     [foreignProjectId, { id: foreignProjectId, organizationId: otherOrganizationId, name: "Foreign", key: "FOREIGN", createdBy: { localAccountId: "foreign-admin", displayName: "Grace" } }],
   ]);
-  readonly invitations = new Map<string, InvitationRecord>();
+  readonly invitations = new Map<string, { record: InvitationRecord; tokenSecret: string }>();
   readonly guestProjects = new Map<string, Set<string>>();
+  readonly portableProjectionOutbox: object[] = [];
+  readonly names = new Map([["guest", "Katherine Johnson"], ["owner", "Ada"], ["admin", "Linus"]]);
   failure: Error | undefined;
+  projectionFailure: Error | undefined;
+  beforeCreate: (() => void) | undefined;
 
   async verifyConnection() {}
   async close() {}
-  async organizationRole(orgId: string, accountId: string) { return this.roles.get(orgId)?.get(accountId); }
-  async createInvitation(record: InvitationRecord) {
+  async createInvitation(record: InvitationRecord, token: string) {
     if (this.failure) throw this.failure;
-    if (!this.roles.get(record.organizationId)?.has(record.invitedByAccountId)) return "forbidden" as const;
-    if (record.kind === "guest" && record.projectIds.some((id) => this.projects.get(id)?.organizationId !== record.organizationId)) return "project_forbidden" as const;
-    this.invitations.set(record.tokenHash, record);
+    this.beforeCreate?.();
+    const actorRole = this.roles.get(record.organizationId)?.get(record.invitedByAccountId);
+    if (actorRole !== "Owner" && actorRole !== "Admin") return "forbidden" as const;
+    if (actorRole === "Admin" && record.access.kind === "member" && record.access.role !== "Member") return "forbidden" as const;
+    if (record.access.kind === "guest" && record.access.projectIds.some((id) => this.projects.get(id)?.organizationId !== record.organizationId)) return "project_forbidden" as const;
+    const lookup = this.secrets.blindIndex(token, "invitation-v1");
+    this.invitations.set(lookup, { record, tokenSecret: this.secrets.encrypt(token, "invitation-v1") });
     return "created" as const;
   }
-  async acceptInvitation(tokenHash: string, accountId: string, acceptedAt: string) {
+  async acceptInvitation(token: string, accountId: string, acceptedAt: string) {
     if (this.failure) throw this.failure;
-    const invitation = this.invitations.get(tokenHash);
-    if (!invitation || invitation.acceptedAt || invitation.expiresAt <= acceptedAt) return "invalid_invitation" as const;
-    invitation.acceptedAt = acceptedAt;
-    invitation.acceptedByAccountId = accountId;
-    if (invitation.kind === "member") this.roles.get(invitation.organizationId)!.set(accountId, invitation.role);
-    else this.guestProjects.set(accountId, new Set(invitation.projectIds));
-    return invitation.kind === "member"
-      ? { status: "accepted" as const, access: { kind: "member" as const, organizationId: invitation.organizationId, role: invitation.role } }
-      : { status: "accepted" as const, access: { kind: "guest" as const, organizationId: invitation.organizationId, projectIds: invitation.projectIds } };
+    const stored = this.invitations.get(this.secrets.blindIndex(token, "invitation-v1"));
+    if (!stored || this.secrets.decrypt(stored.tokenSecret, "invitation-v1") !== token || stored.record.acceptedAt || stored.record.expiresAt <= acceptedAt) return "invalid_invitation" as const;
+    const invitation = stored.record;
+    if (invitation.access.kind === "guest" && this.projectionFailure) throw this.projectionFailure;
+    invitation.acceptedAt = acceptedAt; invitation.acceptedByAccountId = accountId;
+    this.invitations.delete(this.secrets.blindIndex(token, "invitation-v1"));
+    if (invitation.access.kind === "member") {
+      const rank = { Member: 0, Admin: 1, Owner: 2 } as const;
+      const existing = this.roles.get(invitation.organizationId)!.get(accountId);
+      const role = existing && rank[existing] >= rank[invitation.access.role] ? existing : invitation.access.role;
+      this.roles.get(invitation.organizationId)!.set(accountId, role);
+      return { status: "accepted" as const, access: { kind: "member" as const, organizationId: invitation.organizationId, role } };
+    }
+    this.guestProjects.set(accountId, new Set(invitation.access.projectIds));
+    this.portableProjectionOutbox.push({ schema: "stash.guest-project-access.v1", organizationId: invitation.organizationId, guest: { localAccountId: accountId, displayName: this.names.get(accountId) ?? accountId }, projects: invitation.access.projectIds.map((projectId) => ({ projectId })), invitedBy: { localAccountId: invitation.invitedByAccountId, displayName: this.names.get(invitation.invitedByAccountId) ?? invitation.invitedByAccountId } });
+    return { status: "accepted" as const, access: { kind: "guest" as const, organizationId: invitation.organizationId, projectIds: invitation.access.projectIds } };
   }
   async readProject(accountId: string, projectId: string) {
     const project = this.projects.get(projectId);
@@ -94,13 +109,14 @@ describe("inviting Members and Project Guests", () => {
     assert.equal(created.status, 201);
     const invitation = await created.json() as { token: string; expiresAt: string };
     assert.match(invitation.token, /^[A-Za-z0-9_-]{40,}$/);
-    assert.equal([...database.invitations.values()][0]?.tokenHash, createHash("sha256").update(invitation.token).digest("hex"));
+    assert.ok(database.invitations.has(database.secrets.blindIndex(invitation.token, "invitation-v1")));
     assert.doesNotMatch(JSON.stringify([...database.invitations.values()]), new RegExp(invitation.token));
 
     const accepted = await request(baseUrl, "/api/invitations/accept", "new-member", { method: "POST", body: JSON.stringify({ token: invitation.token }) });
     assert.equal(accepted.status, 200);
     assert.deepEqual(await accepted.json(), { kind: "member", organizationId, role: "Member" });
     assert.equal(database.roles.get(organizationId)?.get("new-member"), "Member");
+    assert.equal(database.invitations.size, 0);
     assert.equal((await request(baseUrl, "/api/invitations/accept", "attacker", { method: "POST", body: JSON.stringify({ token: invitation.token }) })).status, 410);
   });
 
@@ -112,6 +128,7 @@ describe("inviting Members and Project Guests", () => {
     assert.equal(accepted.status, 200);
     assert.deepEqual(await accepted.json(), { kind: "guest", organizationId, projectIds: [launchProjectId] });
     assert.equal(database.roles.get(organizationId)?.has("guest"), false);
+    assert.deepEqual(database.portableProjectionOutbox, [{ schema: "stash.guest-project-access.v1", organizationId, guest: { localAccountId: "guest", displayName: "Katherine Johnson" }, projects: [{ projectId: launchProjectId }], invitedBy: { localAccountId: "admin", displayName: "Linus" } }]);
 
     const visible = await request(baseUrl, `/api/projects/${launchProjectId}`, "guest");
     assert.equal(visible.status, 200);
@@ -120,6 +137,33 @@ describe("inviting Members and Project Guests", () => {
     const write = await request(baseUrl, `/api/projects/${launchProjectId}`, "guest", { method: "PATCH", body: JSON.stringify({ name: "Taken over" }) });
     assert.equal(write.status, 403);
     assert.equal(database.projects.get(launchProjectId)?.name, "Launch");
+  });
+
+  it("preserves stronger existing membership and the sole Owner when invitations race", async () => {
+    const { baseUrl, database } = await run();
+    const adminInvite = await invite(baseUrl, "owner", { kind: "member", role: "Admin" });
+    const { token: adminToken } = await adminInvite.json() as { token: string };
+    assert.equal((await request(baseUrl, "/api/invitations/accept", "owner", { method: "POST", body: JSON.stringify({ token: adminToken }) })).status, 200);
+    assert.equal(database.roles.get(organizationId)?.get("owner"), "Owner");
+
+    const memberInvite = await invite(baseUrl, "admin", { kind: "member", role: "Member" });
+    const { token: memberToken } = await memberInvite.json() as { token: string };
+    await request(baseUrl, "/api/invitations/accept", "admin", { method: "POST", body: JSON.stringify({ token: memberToken }) });
+    assert.equal(database.roles.get(organizationId)?.get("admin"), "Admin");
+
+    database.beforeCreate = () => database.roles.get(organizationId)!.set("admin", "Member");
+    assert.equal((await invite(baseUrl, "admin", { kind: "guest", projectIds: [launchProjectId] })).status, 403);
+  });
+
+  it("rolls back Guest acceptance when its portable projection cannot be recorded", async () => {
+    const { baseUrl, database } = await run();
+    const created = await invite(baseUrl, "admin", { kind: "guest", projectIds: [launchProjectId] });
+    const { token } = await created.json() as { token: string };
+    database.projectionFailure = new Error("outbox unavailable");
+    assert.equal((await request(baseUrl, "/api/invitations/accept", "guest", { method: "POST", body: JSON.stringify({ token }) })).status, 503);
+    assert.equal(database.guestProjects.has("guest"), false);
+    database.projectionFailure = undefined;
+    assert.equal((await request(baseUrl, "/api/invitations/accept", "guest", { method: "POST", body: JSON.stringify({ token }) })).status, 200);
   });
 
   it("keeps Organization boundaries and permission, input, and persistence failures visible", async () => {

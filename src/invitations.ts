@@ -1,20 +1,21 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 
 import type { BuiltInOrganizationRole } from "./organization-roles.js";
 import type { PortableIdentity } from "./workspaces-projects.js";
 
-export type InvitationRecord = {
+export type InvitationAccess =
+  | { kind: "member"; role: BuiltInOrganizationRole }
+  | { kind: "guest"; projectIds: string[] };
+
+export interface InvitationRecord {
   id: string;
   organizationId: string;
-  tokenHash: string;
   invitedByAccountId: string;
   expiresAt: string;
   acceptedAt?: string;
   acceptedByAccountId?: string;
-} & (
-  | { kind: "member"; role: BuiltInOrganizationRole }
-  | { kind: "guest"; projectIds: string[] }
-);
+  access: InvitationAccess;
+}
 
 export interface ProjectAccessSummary {
   id: string;
@@ -25,9 +26,8 @@ export interface ProjectAccessSummary {
 }
 
 export interface InvitationRepository {
-  organizationRole(organizationId: string, accountId: string): Promise<BuiltInOrganizationRole | undefined>;
-  createInvitation(record: InvitationRecord): Promise<"created" | "forbidden" | "project_forbidden">;
-  acceptInvitation(tokenHash: string, accountId: string, acceptedAt: string): Promise<
+  createInvitation(record: InvitationRecord, token: string): Promise<"created" | "forbidden" | "project_forbidden">;
+  acceptInvitation(token: string, accountId: string, acceptedAt: string): Promise<
     | { status: "accepted"; access: { kind: "member"; organizationId: string; role: BuiltInOrganizationRole } | { kind: "guest"; organizationId: string; projectIds: string[] } }
     | "invalid_invitation"
   >;
@@ -47,20 +47,16 @@ export class InvitationService {
 
   async create(organizationId: string, actorId: string, value: unknown) {
     if (!isUuid(organizationId) || !isInvitationInput(value)) throw new InvalidInvitationInput();
-    const role = await this.#repository.organizationRole(organizationId, actorId);
-    if (role !== "Owner" && role !== "Admin") return { status: "forbidden" as const };
-    if (role === "Admin" && value.kind === "member" && value.role !== "Member") {
-      return { status: "forbidden" as const };
-    }
     const token = randomBytes(32).toString("base64url");
     const common = {
-      id: randomUUID(), organizationId, tokenHash: hashToken(token), invitedByAccountId: actorId,
+      id: randomUUID(), organizationId, invitedByAccountId: actorId,
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
     };
-    const record: InvitationRecord = value.kind === "member"
-      ? { ...common, kind: "member", role: value.role }
-      : { ...common, kind: "guest", projectIds: [...new Set(value.projectIds)] };
-    const status = await this.#repository.createInvitation(record);
+    const access: InvitationAccess = value.kind === "member"
+      ? { kind: "member", role: value.role }
+      : { kind: "guest", projectIds: [...new Set(value.projectIds)] };
+    const record: InvitationRecord = { ...common, access };
+    const status = await this.#repository.createInvitation(record, token);
     return status === "created" ? { status, token, invitation: record } : { status };
   }
 
@@ -68,7 +64,7 @@ export class InvitationService {
     if (!isPlainObject(value) || Object.keys(value).length !== 1 || typeof value.token !== "string" || !/^[A-Za-z0-9_-]{40,}$/.test(value.token)) {
       throw new InvalidInvitationInput();
     }
-    return this.#repository.acceptInvitation(hashToken(value.token), accountId, new Date().toISOString());
+    return this.#repository.acceptInvitation(value.token, accountId, new Date().toISOString());
   }
 
   readProject(accountId: string, projectId: string) {
@@ -82,7 +78,6 @@ export class InvitationService {
   }
 }
 
-function hashToken(token: string): string { return createHash("sha256").update(token).digest("hex"); }
 function isPlainObject(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value); }
 function isInvitationInput(value: unknown): value is { kind: "member"; role: BuiltInOrganizationRole } | { kind: "guest"; projectIds: string[] } {
   if (!isPlainObject(value)) return false;

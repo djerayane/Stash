@@ -89,3 +89,34 @@ degrades to an Identity Stub preserving `displayName`, without automatic name ma
 The Note row and its `stash.note.v1` outbox event commit in one transaction. A capture response
 reports the projection as `recorded` only after both writes succeed; it does not claim that a full
 Portable Workspace Export has already been generated.
+
+## `stash.guest-project-access.v1`
+
+Accepting a Guest invitation records the selected Project relationships and their containing
+Workspaces in the same transaction as the read-only grants:
+
+```json
+{
+  "schema": "stash.guest-project-access.v1",
+  "id": "8af04cac-5f50-4cc7-a5c6-9ae312b10aac",
+  "organizationId": "c4c75c6b-68f7-44e0-b6d3-89920d216dc9",
+  "guest": {
+    "localAccountId": "a86d4918-e5cb-4887-82c9-4d5646aa4578",
+    "displayName": "Katherine Johnson"
+  },
+  "projects": [{
+    "workspaceId": "89fa5772-0439-4cc1-b67a-bdeb12ae0ed5",
+    "projectId": "2a940fff-b3d9-4ef5-b55f-cc150b16b83e"
+  }],
+  "acceptedAt": "2026-08-22T18:42:03.193Z",
+  "invitedBy": {
+    "localAccountId": "dd24a52e-f591-42a8-90af-a981e1449877",
+    "displayName": "Ada Lovelace"
+  }
+}
+```
+
+Importers map `guest.localAccountId` only through an explicit stable-reference mapping. When no
+local account is mapped, they create an Identity Stub that preserves `displayName`; names alone
+never select or impersonate a local account. Projection failure rolls back both token acceptance
+and every Project grant, leaving the invitation retryable.
