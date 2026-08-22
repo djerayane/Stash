@@ -7,6 +7,7 @@ import {
   LegacyRecoveryRequired,
   type EncryptedMobileCaptureStore,
   type MobileCapture,
+  type MobileCaptureOptions,
   type MobileCapturePairing,
 } from "../src/mobile-capture-client.js";
 import {
@@ -17,6 +18,7 @@ import type { NoteRecord, PortableNoteProjection } from "../src/notes.js";
 import type { MemberAccessResolver } from "../src/workspaces-projects.js";
 import { EncryptedStateMobileCaptureStore, type CiphertextStateRepository, type MobileCipher } from "../mobile/src/encrypted-mobile-store.js";
 import { presentMobileSyncResult } from "../mobile/src/sync-status.js";
+import { loadCachedOptionsOnFocus } from "../mobile/src/capture-options-focus.js";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const projectId = "22222222-2222-4222-8222-222222222222";
@@ -428,6 +430,48 @@ describe("offline mobile capture synchronization", () => {
     assert.deepEqual(await client.sync(), { status: "synced", count: 1 });
     assert.equal(database.notes.size, 2);
     assert.equal((await client.outbox()).length, 0);
+  });
+
+  it("clears stale retry timing when a retried capture becomes terminal", async () => {
+    const { baseUrl } = await run();
+    const store = new MemoryEncryptedStore();
+    let now = Date.parse("2026-08-22T10:00:00Z");
+    let captureAttempts = 0;
+    const client = new MobileCaptureClient(store, async (input, init) => {
+      if (init?.method === "POST") {
+        captureAttempts += 1;
+        return captureAttempts === 1
+          ? new Response(JSON.stringify({ error: "capture_unavailable", message: "Try later." }), { status: 503 })
+          : new Response(JSON.stringify({ error: "invalid_input", message: "Fix this capture." }), { status: 422 });
+      }
+      return fetch(input, init);
+    }, { allowInsecureInstanceForTest: true, now: () => now });
+    await client.pair({ instanceUrl: baseUrl, memberToken: "member-ada", workspaceId });
+    await client.captureText("Changes failure class");
+    assert.equal((await client.sync()).status, "retry_pending");
+    now += 1_000;
+    assert.deepEqual(await client.sync(), { status: "attention_required", count: 0, error: "invalid_input" });
+    const [terminal] = await client.outbox();
+    assert.equal(terminal?.nextRetryAt, undefined);
+    assert.equal(terminal?.lastError, "Fix this capture.");
+  });
+
+  it("reloads paired cached options on focus while the Instance is offline", async () => {
+    const { baseUrl } = await run();
+    const store = new MemoryEncryptedStore();
+    let online = true;
+    const client = new MobileCaptureClient(store, async (input, init) => {
+      if (!online) throw new TypeError("Network request failed");
+      return fetch(input, init);
+    }, { allowInsecureInstanceForTest: true });
+    await client.pair({ instanceUrl: baseUrl, memberToken: "member-ada", workspaceId });
+    online = false;
+    const focused = new Promise<MobileCaptureOptions>((resolve) => {
+      loadCachedOptionsOnFocus(client, resolve);
+    });
+    const options = await focused;
+    assert.deepEqual(options.projects, [{ id: projectId, name: "Launch" }]);
+    assert.deepEqual(options.tags, ["mobile"]);
   });
 
   it("keeps permanent attention visible when a later capture is retriable", async () => {

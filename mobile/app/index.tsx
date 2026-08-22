@@ -1,6 +1,6 @@
-import { Link } from "expo-router";
+import { Link, useFocusEffect } from "expo-router";
 import NetInfo from "@react-native-community/netinfo";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppState, Pressable, ScrollView, Text, TextInput, View, useColorScheme } from "react-native";
 
 import { MobileCaptureClient } from "../../src/mobile-capture-client";
@@ -11,6 +11,7 @@ import { NativeChoice } from "@/components/native-choice";
 import { StatusFeedback } from "@/components/status-feedback";
 import { colors } from "@/theme/colors";
 import { presentMobileSyncResult } from "@/src/sync-status";
+import { loadCachedOptionsOnFocus } from "@/src/capture-options-focus";
 
 export default function CaptureScreen() {
   useColorScheme();
@@ -23,7 +24,8 @@ export default function CaptureScreen() {
   const [projectId, setProjectId] = useState<string>();
   const [tag, setTag] = useState<string>();
   const [reminderOffset, setReminderOffset] = useState<number>();
-  useEffect(() => { mounted.current = true; void client.options().then((value) => { if (mounted.current) setOptions(value); }); return () => { mounted.current = false; }; }, [client]);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useFocusEffect(useCallback(() => loadCachedOptionsOnFocus(client, (value) => { if (mounted.current) setOptions(value); }), [client]));
   useEffect(() => client.watchConnectivity(
     (listener) => NetInfo.addEventListener((state) => listener(Boolean(state.isConnected && state.isInternetReachable !== false))),
     (result) => {

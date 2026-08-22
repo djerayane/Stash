@@ -269,8 +269,10 @@ export class MobileCaptureClient {
       }
       const attempts = capture.attempts + 1;
       const retriable = response.status >= 500 || response.status === 429;
-      const failed = { ...capture, attempts, lastError: body.message ?? "Synchronization failed.",
-        ...(retriable ? { nextRetryAt: new Date(this.#now() + retryDelay(response.headers.get("retry-after"), attempts, this.#now())).toISOString() } : {}) };
+      const { nextRetryAt: _staleRetryAt, ...captureWithoutRetry } = capture;
+      const failed = { ...captureWithoutRetry, attempts, lastError: body.message ?? "Synchronization failed.",
+        ...(retriable ? { nextRetryAt: new Date(this.#now()
+          + retryDelay(response.headers.get("retry-after"), attempts, this.#now())).toISOString() } : {}) };
       await this.#store.saveCapture(failed);
       if (retriable) retryPending = true; else attentionError ??= body.error ?? "sync_rejected";
     }
