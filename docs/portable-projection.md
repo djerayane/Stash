@@ -1,7 +1,7 @@
 # Portable projection creation records
 
 Stash records a versioned JSON projection event whenever it creates portable domain state, including
-Workspaces, Projects, Notes, and Repository Connections. The
+Workspaces, Projects, Workflows, Notes, and Repository Connections. The
 event is inserted into `stash_portable_projection_outbox` in the same PostgreSQL transaction as
 the durable object. Creation succeeds only when both records commit; an outbox failure rolls back
 the object and the API reports a recoverable failure.
@@ -68,6 +68,37 @@ On import into another Instance, a matching stable local reference may be mapped
 matching account or Organization is available, importers preserve `displayName` so ownership and
 attribution remain intelligible without impersonating a local Member. Account identities degrade
 to Identity Stubs rather than being matched by name automatically.
+
+## `stash.workflow.v1`
+
+A Project Workflow is projected as one ordered list of statuses. Each status has a stable `id`, a
+Member-defined `name`, and exactly one semantic `category`: `unstarted`, `started`, or `completed`.
+`position` is the canonical order. Archiving sets `archived` without deleting the status, so
+existing Tasks retain a valid status identity while new transitions cannot select it.
+New and moved Tasks select the first non-archived `unstarted` status in Workflow order, so custom
+names and archived former defaults never become operational identifiers. A valid Workflow must
+therefore retain at least one active `unstarted` status.
+Project creation initializes and records the complete default Workflow in the same transaction as
+the Project projection, making a new Project immediately usable and exportable without a later read
+or Task creation side effect.
+
+```json
+{
+  "schema": "stash.workflow.v1",
+  "projectId": "2a940fff-b3d9-4ef5-b55f-cc150b16b83e",
+  "revision": 3,
+  "statuses": [
+    { "id": "4eac1c91-7092-48ce-a0bb-3f500bbb7b56", "name": "Queued", "category": "unstarted", "position": 0, "archived": false },
+    { "id": "f9682dad-706a-45c4-90e9-e28c2aa62ca7", "name": "Shipped", "category": "completed", "position": 1, "archived": false }
+  ]
+}
+```
+
+Replacing the Workflow is atomic, supplies `expectedRevision`, and includes every existing status
+identity; a concurrent revision, omission, or unknown claimed identity is treated as a stale edit.
+New statuses receive their identity at the domain boundary. Each successful replacement records a complete Workflow revision and fresh Task
+projection revisions in the same transaction, ensuring Task Markdown metadata reflects renamed or
+recategorized statuses without changing Task-to-status references.
 
 The outbox envelope stores `object_kind`, `object_id`, `revision`, `projection_schema`, the JSON
 `payload`, creation time, and processing `state`. Consumers select the format using

@@ -13,6 +13,7 @@ import {
   type WorkspaceProjectRepository,
   type WorkspaceRecord,
 } from "../src/workspaces-projects.js";
+import type { ProjectWorkflow } from "../src/project-workflows.js";
 
 const acmeOrganizationId = "11111111-1111-4111-8111-111111111111";
 const otherOrganizationId = "22222222-2222-4222-8222-222222222222";
@@ -29,6 +30,7 @@ class ProtocolCompatibleDatabase implements DatabaseProbe, WorkspaceProjectRepos
   readonly organizationMembers = new Map<string, Set<string>>();
   readonly workspaces = new Map<string, WorkspaceRecord>();
   readonly projects = new Map<string, WorkspaceProjectRecord>();
+  readonly workflows = new Map<string, ProjectWorkflow>();
   readonly portableProjectionOutbox: object[] = [];
   readonly organizationAuthorizationAttempts: string[] = [];
   failure: Error | undefined;
@@ -90,8 +92,17 @@ class ProtocolCompatibleDatabase implements DatabaseProbe, WorkspaceProjectRepos
       (project) => project.workspaceId === record.workspaceId && project.key === record.key,
     )) return "key_conflict";
     if (this.projectionFailure) throw this.projectionFailure;
+    const workflow: ProjectWorkflow = { schema: "stash.workflow.v1", projectId: record.id, revision: 1, statuses: [
+      { id: "55555555-5555-4555-8555-555555555555", name: "Backlog", category: "unstarted", position: 0, archived: false },
+      { id: "66666666-6666-4666-8666-666666666666", name: "Ready", category: "unstarted", position: 1, archived: false },
+      { id: "77777777-7777-4777-8777-777777777777", name: "In Progress", category: "started", position: 2, archived: false },
+      { id: "88888888-8888-4888-8888-888888888888", name: "In Review", category: "started", position: 3, archived: false },
+      { id: "99999999-9999-4999-8999-999999999999", name: "Done", category: "completed", position: 4, archived: false },
+    ] };
     this.portableProjectionOutbox.push(projection);
+    this.portableProjectionOutbox.push(workflow);
     this.projects.set(record.id, record);
+    this.workflows.set(record.id, workflow);
     return "created";
   }
 }
@@ -181,7 +192,7 @@ describe("creating Workspaces and Projects", () => {
   });
 
   it("lets an Organization Member create an Organization Workspace and Project", async () => {
-    const { baseUrl } = await run();
+    const { baseUrl, database } = await run();
     const workspaceResponse = await createWorkspace(baseUrl, "member-ada", {
       name: "Acme Product",
       owner: { type: "organization", organizationId: acmeOrganizationId },
@@ -217,6 +228,18 @@ describe("creating Workspaces and Projects", () => {
       state: "recorded",
       createdBy: { localAccountId: "ada", displayName: "Ada Lovelace" },
     });
+    const workflow = database.workflows.get(project.id as string);
+    assert.ok(workflow, "Project creation must initialize its Workflow before any Workflow or Task request");
+    assert.equal(workflow.revision, 1);
+    assert.deepEqual(workflow.statuses.map(({ name, category, position }) => ({ name, category, position })), [
+      { name: "Backlog", category: "unstarted", position: 0 },
+      { name: "Ready", category: "unstarted", position: 1 },
+      { name: "In Progress", category: "started", position: 2 },
+      { name: "In Review", category: "started", position: 3 },
+      { name: "Done", category: "completed", position: 4 },
+    ]);
+    assert.deepEqual(database.portableProjectionOutbox.slice(-2).map((item) => (item as { schema: string }).schema),
+      ["stash.project.v1", "stash.workflow.v1"]);
   });
 
   it("does not reveal whether a Workspace belongs to another Organization", async () => {

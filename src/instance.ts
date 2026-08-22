@@ -38,6 +38,8 @@ import { mobileCaptureRoutes } from "./mobile-capture-routes.js";
 import type { MobileCaptureService } from "./mobile-captures.js";
 import { discussionRoutes } from "./discussion-routes.js";
 import type { DiscussionService } from "./discussions.js";
+import { projectWorkflowRoutes } from "./project-workflow-routes.js";
+import type { ProjectWorkflowService } from "./project-workflows.js";
 
 export interface DatabaseProbe {
   verifyConnection(): Promise<void>;
@@ -74,6 +76,7 @@ export interface InstanceOptions {
   attachments?: AttachmentService;
   mobileCaptures?: MobileCaptureService;
   discussions?: DiscussionService;
+  projectWorkflows?: ProjectWorkflowService;
 }
 
 const browserSurface = `<!doctype html>
@@ -156,6 +159,9 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
       : []),
     ...(options.tasks && (options.memberAccess ?? options.passwordAuth)
       ? [taskRoutes(options.tasks, (options.memberAccess ?? options.passwordAuth)!)]
+      : []),
+    ...(options.projectWorkflows && (options.memberAccess ?? options.passwordAuth)
+      ? [projectWorkflowRoutes(options.projectWorkflows, (options.memberAccess ?? options.passwordAuth)!)]
       : []),
     ...(options.attachments && (options.memberAccess ?? options.passwordAuth)
       ? [attachmentRoutes(options.attachments, (options.memberAccess ?? options.passwordAuth)!)] : []),

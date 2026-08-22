@@ -29,12 +29,16 @@ import type { CreateTaskFromBlockDraft, LinkedTaskReadModel, TaskFromBlockReposi
 import type { AttachmentRecord, AttachmentRepository, PortableAttachmentProjection } from "./attachments.js";
 import type { MobileCaptureRepository } from "./mobile-captures.js";
 import type { CreateDiscussionWorkDraft, DiscussionDraft, DiscussionMessage, DiscussionRecord, DiscussionRepository, DiscussionTarget, DiscussionWorkActivity, DiscussionWorkOutcome, PortableDiscussionProjection, PortableDiscussionTarget, PortableDiscussionWorkLinkProjection } from "./discussions.js";
+import { initialWorkflowStatus, type ProjectWorkflow, type ProjectWorkflowRepository, type WorkflowStatus } from "./project-workflows.js";
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
 const authenticationKeyCheckLockId = 795_541_992;
-const portableProjectionObjectKinds = ["Workspace", "Project", "Note", "NoteLink", "Task", "GuestProjectAccess", "RepositoryConnection", "Attachment", "Discussion", "DiscussionWorkLink", "Activity"] as const;
+const portableProjectionObjectKinds = ["Workspace", "Project", "Workflow", "Note", "NoteLink", "Task", "GuestProjectAccess", "RepositoryConnection", "Attachment", "Discussion", "DiscussionWorkLink", "Activity"] as const;
 const portableProjectionObjectKindSql = portableProjectionObjectKinds.map((kind) => `'${kind}'`).join(", ");
+export const workflowTemporaryRenameSql = `UPDATE stash_workflow_statuses
+  SET position = -position - 1, name = repeat('__stash_workflow_transition__', 4) || id::text
+  WHERE project_id = $1`;
 const repositoryConnectionSelect = `SELECT connection.id, connection.organization_id, connection.provider, connection.installation_id,
   connection.repository_id, connection.repository_url, connection.created_by_account_id, connection.created_by_attribution,
   ARRAY(SELECT project_id FROM stash_repository_connection_projects link WHERE link.connection_id = connection.id ORDER BY project_id) AS project_ids
@@ -109,7 +113,8 @@ export class PostgresDatabase implements
   TaskMoveRepository,
   AttachmentRepository,
   MobileCaptureRepository,
-  DiscussionRepository
+  DiscussionRepository,
+  ProjectWorkflowRepository
 {
   readonly #pool: Pool;
   readonly #authenticationSecrets: AuthenticationSecretCodec;
@@ -276,7 +281,7 @@ export class PostgresDatabase implements
     projection: PortableProjectProjection,
   ): Promise<"created" | "workspace_forbidden" | "workspace_not_found" | "key_conflict"> {
     return this.#withTransaction(async (client) => {
-      await this.#ensureWorkspaceProjectSchema(client);
+      await this.#ensureNoteSchema(client);
       const access = await client.query<{ allowed: boolean }>(
         `SELECT (
            (owner_type = 'personal' AND personal_owner_id = $2)
@@ -306,6 +311,7 @@ export class PostgresDatabase implements
         "stash.project.v1",
         projection,
       );
+      await this.#ensureDefaultWorkflow(client, record.id);
       return "created";
     });
   }
@@ -909,6 +915,84 @@ export class PostgresDatabase implements
     } finally { client.release(); }
   }
 
+  async findWorkflow(memberId: string, projectId: string) {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureNoteSchema(client);
+      await this.#ensureInvitationSchema(client);
+      const access = await this.#findProjectWorkflowAccess(client, memberId, projectId, true);
+      if (access !== "member") return { status: access };
+      await this.#ensureDefaultWorkflow(client, projectId);
+      return { status: "found" as const, workflow: await this.#loadWorkflow(client, projectId) };
+    });
+  }
+
+  async replaceWorkflow(memberId: string, projectId: string, expectedRevision: number, statuses: WorkflowStatus[], newStatusIds: ReadonlySet<string>) {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureNoteSchema(client);
+      await this.#ensureInvitationSchema(client);
+      const access = await this.#findProjectWorkflowAccess(client, memberId, projectId, true);
+      if (access !== "member") return { status: access };
+      await this.#ensureDefaultWorkflow(client, projectId);
+      const currentRevision = await client.query<{ workflow_revision: number }>(
+        "SELECT workflow_revision FROM stash_projects WHERE id = $1", [projectId]);
+      if (currentRevision.rows[0]!.workflow_revision !== expectedRevision) return { status: "stale_status" as const };
+      const current = await client.query<{ id: string }>(
+        "SELECT id FROM stash_workflow_statuses WHERE project_id = $1 ORDER BY position FOR UPDATE", [projectId]);
+      const currentIds = new Set(current.rows.map(({ id }) => id));
+      if (statuses.filter(({ id }) => currentIds.has(id)).length !== currentIds.size
+        || statuses.some(({ id }) => !currentIds.has(id) && !newStatusIds.has(id)))
+        return { status: "stale_status" as const };
+      const currentWorkflow = await this.#loadWorkflow(client, projectId);
+      if (JSON.stringify(currentWorkflow.statuses) === JSON.stringify(statuses))
+        return { status: "updated" as const, workflow: currentWorkflow };
+      const collision = await client.query("SELECT 1 FROM stash_workflow_statuses WHERE id = ANY($1::uuid[]) AND project_id <> $2 LIMIT 1",
+        [statuses.map(({ id }) => id), projectId]);
+      if (collision.rowCount) return { status: "stale_status" as const };
+      await client.query(workflowTemporaryRenameSql, [projectId]);
+      for (const status of statuses) {
+        await client.query(`INSERT INTO stash_workflow_statuses (id, project_id, name, category, position, archived)
+          VALUES ($1,$2,$3,$4,$5,$6)
+          ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, category = EXCLUDED.category,
+            position = EXCLUDED.position, archived = EXCLUDED.archived
+          WHERE stash_workflow_statuses.project_id = EXCLUDED.project_id`,
+        [status.id, projectId, status.name, status.category, status.position, status.archived]);
+      }
+      await client.query("UPDATE stash_projects SET workflow_revision = workflow_revision + 1 WHERE id = $1", [projectId]);
+      const workflow = await this.#loadWorkflow(client, projectId);
+      await this.#recordPortableProjection(client, "Workflow", projectId, "stash.workflow.v1", workflow);
+      const affectedTasks = await client.query<{ id: string }>("SELECT id FROM stash_tasks WHERE project_id = $1 ORDER BY id", [projectId]);
+      for (const { id } of affectedTasks.rows) {
+        const taskRow = await client.query<any>(taskPlanningSelectById, [id, memberId]);
+        if (taskRow.rows[0]) {
+          const projection = taskProjectionFromRow(taskRow.rows[0]);
+          await this.#recordPortableProjection(client, "Task", projection.id, projection.schema, projection);
+        }
+      }
+      return { status: "updated" as const, workflow };
+    });
+  }
+
+  async #findProjectWorkflowAccess(client: PoolClient, memberId: string, projectId: string, lock = false): Promise<"member" | "forbidden" | "not_found"> {
+    const result = await client.query<{ member: boolean; guest: boolean }>(`SELECT
+      ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2)
+        OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2))) AS member,
+      EXISTS (SELECT 1 FROM stash_project_guests guest WHERE guest.project_id = project.id AND guest.account_id = $2) AS guest
+      FROM stash_projects project
+      JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
+      WHERE project.id = $1
+      ${lock ? "FOR UPDATE OF project" : ""}`, [projectId, memberId]);
+    const row = result.rows[0];
+    return !row ? "not_found" : row.member ? "member" : row.guest ? "forbidden" : "not_found";
+  }
+
+  async #loadWorkflow(client: PoolClient, projectId: string): Promise<ProjectWorkflow> {
+    const project = await client.query<{ workflow_revision: number }>("SELECT workflow_revision FROM stash_projects WHERE id = $1", [projectId]);
+    const statuses = await client.query<{ id: string; name: string; category: WorkflowStatus["category"]; position: number; archived: boolean }>(
+      "SELECT id, name, category, position, archived FROM stash_workflow_statuses WHERE project_id = $1 ORDER BY position, id", [projectId]);
+    return { schema: "stash.workflow.v1", projectId, revision: project.rows[0]!.workflow_revision, statuses: statuses.rows };
+  }
+
   async updateTaskByKey(memberId: string, projectId: string, taskKey: string, update: TaskPlanningUpdate) {
     return this.#withTransaction(async (client) => {
       await this.#ensureNoteSchema(client);
@@ -923,7 +1007,7 @@ export class PostgresDatabase implements
       const row = current.rows[0];
       if (!row) return { status: "not_found" as const };
       if (update.statusId) {
-        const status = await client.query("SELECT 1 FROM stash_workflow_statuses WHERE id = $1 AND project_id = $2", [update.statusId, projectId]);
+        const status = await client.query("SELECT 1 FROM stash_workflow_statuses WHERE id = $1 AND project_id = $2 AND archived = FALSE", [update.statusId, projectId]);
         if (!status.rowCount) return { status: "invalid_reference" as const };
       }
       if (update.assigneeIds) {
@@ -1005,15 +1089,14 @@ export class PostgresDatabase implements
         RETURNING project.project_key, project.next_task_number - 1 AS task_number`, [destinationProjectId, row.workspace_id, memberId]);
       if (!destination.rowCount) return { status: "destination_forbidden" as const };
       await this.#ensureDefaultWorkflow(client, destinationProjectId);
-      const backlog = await client.query<{ id: string }>(
-        "SELECT id FROM stash_workflow_statuses WHERE project_id = $1 AND name = 'Backlog' ORDER BY position LIMIT 1", [destinationProjectId]);
+      const destinationStatus = initialWorkflowStatus(await this.#loadWorkflow(client, destinationProjectId));
       const nextKey = `${destination.rows[0]!.project_key}-${destination.rows[0]!.task_number}`;
       const before = { projectId: row.project_id, key: row.task_key,
         status: { id: row.workflow_status_id, name: row.status_name, category: row.status_category } };
       await client.query(`INSERT INTO stash_task_key_aliases (project_id, task_key, task_id, created_at)
         VALUES ($1,$2,$3,now())`, [row.project_id, row.task_key, row.id]);
       await client.query("UPDATE stash_tasks SET project_id = $2, task_key = $3, workflow_status_id = $4 WHERE id = $1",
-        [row.id, destinationProjectId, nextKey, backlog.rows[0]!.id]);
+        [row.id, destinationProjectId, nextKey, destinationStatus.id]);
       const saved = await client.query<any>(taskPlanningSelect, [destinationProjectId, nextKey, memberId]);
       const task = taskPlanningReadModelFromRow(saved.rows[0]);
       await this.#recordPortableProjection(client, "Task", task.id, task.schema, taskProjectionFromRow(saved.rows[0]));
@@ -1077,17 +1160,13 @@ export class PostgresDatabase implements
   async #createTask(client: PoolClient, draft: TaskCreation): Promise<PortableTaskProjection> {
     await client.query("SELECT id FROM stash_projects WHERE id = $1 FOR UPDATE", [draft.projectId]);
     await this.#ensureDefaultWorkflow(client, draft.projectId);
-    const status = await client.query<{ id: string; name: string; category: "unstarted" }>(
-      "SELECT id, name, category FROM stash_workflow_statuses WHERE project_id = $1 AND name = 'Backlog'",
-      [draft.projectId],
-    );
+    const workflowStatus = initialWorkflowStatus(await this.#loadWorkflow(client, draft.projectId));
     const allocation = await client.query<{ project_key: string; task_number: number }>(
       `UPDATE stash_projects SET next_task_number = next_task_number + 1 WHERE id = $1
        RETURNING project_key, next_task_number - 1 AS task_number`, [draft.projectId],
     );
-    const workflowStatus = status.rows[0];
     const key = allocation.rows[0];
-    if (!workflowStatus || !key) throw new Error("task_project_unavailable");
+    if (!key) throw new Error("task_project_unavailable");
     return { schema: "stash.task.v1", ...draft, key: `${key.project_key}-${key.task_number}`, status: workflowStatus };
   }
 
@@ -1102,6 +1181,12 @@ export class PostgresDatabase implements
     await client.query(`INSERT INTO stash_workflow_statuses (id, project_id, name, category, position)
       VALUES ${statuses.map((_, index) => `($${index * 5 + 1}, $${index * 5 + 2}, $${index * 5 + 3}, $${index * 5 + 4}, $${index * 5 + 5})`).join(", ")}
       ON CONFLICT DO NOTHING`, statuses.flat());
+    const initialized = await client.query(`UPDATE stash_projects SET workflow_revision = 1
+      WHERE id = $1 AND workflow_revision = 0 RETURNING id`, [projectId]);
+    if (initialized.rowCount) {
+      const workflow = await this.#loadWorkflow(client, projectId);
+      await this.#recordPortableProjection(client, "Workflow", projectId, workflow.schema, workflow);
+    }
   }
 
   async findNoteForMember(memberId: string, noteId: string): Promise<NoteRecord | undefined> {
@@ -2080,9 +2165,11 @@ export class PostgresDatabase implements
         project_key TEXT NOT NULL,
         created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id),
         next_task_number INTEGER NOT NULL DEFAULT 1 CHECK (next_task_number > 0),
+        workflow_revision INTEGER NOT NULL DEFAULT 0 CHECK (workflow_revision >= 0),
         UNIQUE (workspace_id, project_key)
       );
       ALTER TABLE stash_projects ADD COLUMN IF NOT EXISTS next_task_number INTEGER NOT NULL DEFAULT 1 CHECK (next_task_number > 0);
+      ALTER TABLE stash_projects ADD COLUMN IF NOT EXISTS workflow_revision INTEGER NOT NULL DEFAULT 0 CHECK (workflow_revision >= 0);
     `);
     await this.#ensurePortableProjectionSchema(client);
   }
@@ -2120,8 +2207,10 @@ export class PostgresDatabase implements
       CREATE TABLE IF NOT EXISTS stash_workflow_statuses (
         id UUID PRIMARY KEY, project_id UUID NOT NULL REFERENCES stash_projects(id), name TEXT NOT NULL,
         category TEXT NOT NULL CHECK (category IN ('unstarted', 'started', 'completed')), position INTEGER NOT NULL,
+        archived BOOLEAN NOT NULL DEFAULT FALSE,
         UNIQUE (project_id, name), UNIQUE (project_id, position)
       );
+      ALTER TABLE stash_workflow_statuses ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT FALSE;
       CREATE TABLE IF NOT EXISTS stash_tasks (
         id UUID PRIMARY KEY, workspace_id UUID NOT NULL REFERENCES stash_workspaces(id), project_id UUID NOT NULL REFERENCES stash_projects(id),
         task_key TEXT NOT NULL, workflow_status_id UUID NOT NULL REFERENCES stash_workflow_statuses(id),
@@ -2480,9 +2569,9 @@ export class PostgresDatabase implements
 
   async #recordPortableProjection(
     client: PoolClient,
-    objectKind: "Workspace" | "Project" | "Note" | "NoteLink" | "Task" | "GuestProjectAccess" | "RepositoryConnection" | "Attachment" | "Discussion" | "DiscussionWorkLink" | "Activity",
+    objectKind: "Workspace" | "Project" | "Workflow" | "Note" | "NoteLink" | "Task" | "GuestProjectAccess" | "RepositoryConnection" | "Attachment" | "Discussion" | "DiscussionWorkLink" | "Activity",
     objectId: string,
-    projectionSchema: "stash.workspace.v1" | "stash.project.v1" | "stash.note.v1" | "stash.note.v2" | "stash.note-link.v1" | "stash.task.v1" | "stash.guest-project-access.v1" | "stash.repository-connection.v1" | "stash.attachment.v1" | "stash.discussion.v1" | "stash.discussion-work-link.v1" | "stash.activity.v1",
+    projectionSchema: "stash.workspace.v1" | "stash.project.v1" | "stash.workflow.v1" | "stash.note.v1" | "stash.note.v2" | "stash.note-link.v1" | "stash.task.v1" | "stash.guest-project-access.v1" | "stash.repository-connection.v1" | "stash.attachment.v1" | "stash.discussion.v1" | "stash.discussion-work-link.v1" | "stash.activity.v1",
     payload: object,
   ): Promise<void> {
     await client.query(

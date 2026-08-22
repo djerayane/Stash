@@ -21,6 +21,7 @@ import { TaskService } from "./tasks.js";
 import { AttachmentService, LocalAttachmentStorage } from "./attachments.js";
 import { MobileCaptureService } from "./mobile-captures.js";
 import { DiscussionService } from "./discussions.js";
+import { ProjectWorkflowService } from "./project-workflows.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -70,6 +71,7 @@ async function main(): Promise<void> {
     ...(githubApp ? { repositoryConnections: new RepositoryConnectionService(database, githubApp) } : {}),
     notes: new NoteService(database),
     tasks: new TaskService(database, database),
+    projectWorkflows: new ProjectWorkflowService(database),
     attachments: new AttachmentService(database, new LocalAttachmentStorage(process.env.ATTACHMENT_STORAGE_PATH?.trim() || "/var/lib/stash/attachments")),
     mobileCaptures: new MobileCaptureService(database),
     discussions: new DiscussionService(database),
