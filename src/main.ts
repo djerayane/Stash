@@ -41,6 +41,7 @@ async function main(): Promise<void> {
     workspaceProjects: new WorkspaceProjectService(database),
     oidcAuth: new OidcAuthService(database),
     oidcManagement: new OidcManagementService(database),
+    oidcCallbackOrigin: requiredEnvironment("PUBLIC_ORIGIN"),
     ...(redis ? { acceleration: redis.acceleration } : {}),
   });
   console.log(`Stash Instance listening on ${instance.url}`);

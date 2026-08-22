@@ -16,6 +16,7 @@ import type { SessionRecord } from "../src/password-auth.js";
 import { PasswordAuthService, type AccountAuthenticationRecord, type PasswordAuthRepository } from "../src/password-auth.js";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
+const canonicalCallbackOrigin = "http://stash.public.test";
 
 function identityMapKey(key: OidcIdentityKey): string {
   return `${key.organizationId}:${key.issuer}:${key.subject}`;
@@ -122,6 +123,13 @@ class ProtocolCompatibleOidcProvider {
       response.end(JSON.stringify({ token_type: "Bearer", id_token: `${encoded}.${signature}` }));
       return;
     }
+    if (url.pathname === "/slow") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.write("{");
+      const interval = setInterval(() => response.write(" "), 10);
+      response.once("close", () => clearInterval(interval));
+      return;
+    }
     response.writeHead(404).end();
   }
 }
@@ -148,7 +156,7 @@ describe("optional OpenID Connect authentication on a running Stash Instance", (
     database.configurations.set(organizationId, { organizationId, issuer: provider.issuer, clientId: "stash-client", clientSecret: "provider-secret" });
     const oidcHttp = createOidcHttpClient({ allowUnsafeForTest: (url) => url.hostname === "127.0.0.1" });
     const oidc = new OidcAuthService(database, oidcHttp);
-    instance = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin-token", oidcAuth: oidc, oidcManagement: new OidcManagementService(database, oidcHttp), passwordAuth: new PasswordAuthService(database) });
+    instance = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin-token", oidcAuth: oidc, oidcManagement: new OidcManagementService(database, oidcHttp), passwordAuth: new PasswordAuthService(database), oidcCallbackOrigin: canonicalCallbackOrigin, allowInsecureOidcCallbackOriginForTest: true });
     return { baseUrl: instance.url, database, provider, adminToken };
   }
 
@@ -186,14 +194,30 @@ describe("optional OpenID Connect authentication on a running Stash Instance", (
     assert.ok(database.identities.has(`${organizationId}:${provider.issuer}:provider-member-1`));
   });
 
+  it("fails startup visibly when the canonical OIDC callback origin is missing or invalid", async () => {
+    const database = new ProtocolCompatibleOidcDatabase();
+    const oidc = new OidcAuthService(database, createOidcHttpClient({ allowUnsafeForTest: () => true }));
+    await assert.rejects(
+      startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin", oidcAuth: oidc }),
+      /PUBLIC_ORIGIN must be configured/,
+    );
+    await assert.rejects(
+      startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin", oidcAuth: oidc, oidcCallbackOrigin: "http://stash.example" }),
+      /PUBLIC_ORIGIN must be an HTTPS origin/,
+    );
+  });
+
   it("signs a mapped Organization Member in through OIDC while built-in auth remains independently available", async () => {
     const { baseUrl, database, provider } = await run();
-    const start = await fetch(`${baseUrl}/api/auth/oidc/${organizationId}`);
+    const start = await fetch(`${baseUrl}/api/auth/oidc/${organizationId}`, {
+      headers: { host: "attacker.example", "x-forwarded-proto": "https", "x-forwarded-host": "attacker.example" },
+    });
     assert.equal(start.status, 200);
     const { authorizationUrl } = await start.json() as { authorizationUrl: string };
     const authorize = new URL(authorizationUrl);
     assert.equal(authorize.origin, provider.issuer);
     assert.equal(authorize.searchParams.get("code_challenge_method"), "S256");
+    assert.equal(authorize.searchParams.get("redirect_uri"), `${canonicalCallbackOrigin}/api/auth/oidc/${organizationId}/callback`);
     provider.expectedNonce = authorize.searchParams.get("nonce")!;
 
     const callback = await fetch(`${baseUrl}/api/auth/oidc/${organizationId}/callback?code=${randomUUID()}&state=${authorize.searchParams.get("state")}`);
@@ -203,6 +227,7 @@ describe("optional OpenID Connect authentication on a running Stash Instance", (
     assert.ok(result.token.length >= 32);
     assert.equal(database.sessions.size, 2);
     assert.equal(provider.tokenRequest?.get("client_secret"), "provider-secret");
+    assert.equal(provider.tokenRequest?.get("redirect_uri"), `${canonicalCallbackOrigin}/api/auth/oidc/${organizationId}/callback`);
     assert.equal(provider.tokenRequest?.get("code_verifier")?.length, 64);
 
     const local = await fetch(`${baseUrl}/api/auth/sessions`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
@@ -280,6 +305,7 @@ describe("optional OpenID Connect authentication on a running Stash Instance", (
       port: 0,
       instanceAdminToken: "admin-token",
       oidcAuth: new OidcAuthService(database, createOidcHttpClient({ resolve: async () => [{ address: "127.0.0.1", family: 4 }] })),
+      oidcCallbackOrigin: "https://stash.example.com",
     });
     assert.equal((await fetch(`${instance.url}/api/auth/oidc/${organizationId}`)).status, 502);
 
@@ -300,6 +326,33 @@ describe("OIDC outbound address policy", () => {
       "2001:db8::1", "2001::1", "2002::1", "3fff::1", "::ffff:127.0.0.1", "::ffff:7f00:1",
     ]) {
       assert.equal(isPublicOidcAddress(address), false, address);
+    }
+  });
+
+  it("applies one absolute deadline to stalled DNS resolution", async () => {
+    let resolverAborted = false;
+    const client = createOidcHttpClient({
+      timeoutMs: 30,
+      resolve: async (_hostname, signal) => new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => { resolverAborted = true; reject(signal.reason); }, { once: true });
+      }),
+    });
+    await assert.rejects(client.getJson("https://identity.example/config"), /deadline exceeded/);
+    assert.equal(resolverAborted, true);
+  });
+
+  it("applies the absolute deadline while a provider slowly streams a response", async () => {
+    const provider = await ProtocolCompatibleOidcProvider.start();
+    try {
+      const client = createOidcHttpClient({
+        timeoutMs: 40,
+        allowUnsafeForTest: (url) => url.hostname === "127.0.0.1",
+      });
+      const startedAt = Date.now();
+      await assert.rejects(client.getJson(`${provider.issuer}/slow`), /deadline exceeded/);
+      assert.ok(Date.now() - startedAt < 500);
+    } finally {
+      await provider.close();
     }
   });
 });

@@ -8,14 +8,6 @@ import {
 import { OidcManagementNotAuthorized, type OidcManagementService } from "./oidc-management.js";
 import type { PasswordAuthService } from "./password-auth.js";
 
-function callbackUri(request: Parameters<HttpRoute["handle"]>[0], organizationId: string): string {
-  const forwardedProtocol = request.headers["x-forwarded-proto"];
-  const protocol = typeof forwardedProtocol === "string" ? forwardedProtocol : "http";
-  const host = request.headers.host;
-  if (!host) throw new InvalidOidcRequest();
-  return `${protocol}://${host}/api/auth/oidc/${encodeURIComponent(organizationId)}/callback`;
-}
-
 function organizationId(encoded: string): string {
   let decoded: string;
   try { decoded = decodeURIComponent(encoded); } catch { throw new InvalidOidcRequest(); }
@@ -25,7 +17,7 @@ function organizationId(encoded: string): string {
   return decoded;
 }
 
-export function oidcAuthRoute(service: OidcAuthService): HttpRoute {
+export function oidcAuthRoute(service: OidcAuthService, callbackOrigin: string): HttpRoute {
   return {
     matches: (_request, url) => url.pathname.startsWith("/api/auth/oidc/"),
     async handle(request, response, url) {
@@ -45,7 +37,10 @@ export function oidcAuthRoute(service: OidcAuthService): HttpRoute {
         }
         if (request.method === "GET" && start) {
           const parsedOrganizationId = organizationId(start[1]!);
-          json(response, 200, await service.begin(parsedOrganizationId, callbackUri(request, parsedOrganizationId)));
+          json(response, 200, await service.begin(
+            parsedOrganizationId,
+            `${callbackOrigin}/api/auth/oidc/${encodeURIComponent(parsedOrganizationId)}/callback`,
+          ));
           return true;
         }
         return false;

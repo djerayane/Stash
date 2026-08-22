@@ -39,6 +39,8 @@ interface InstanceOptions {
   memberAccess?: MemberAccessResolver;
   oidcAuth?: OidcAuthService;
   oidcManagement?: OidcManagementService;
+  oidcCallbackOrigin?: string;
+  allowInsecureOidcCallbackOriginForTest?: boolean;
   diagnostics?: Diagnostics;
   acceleration?: OptionalRedisAcceleration;
 }
@@ -62,6 +64,17 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
   if (!options.instanceAdminToken) {
     throw new Error("INSTANCE_ADMIN_TOKEN must not be empty");
   }
+  let oidcCallbackOrigin: string | undefined;
+  if (options.oidcAuth) {
+    if (!options.oidcCallbackOrigin) throw new Error("PUBLIC_ORIGIN must be configured when OpenID Connect is enabled");
+    let origin: URL;
+    try { origin = new URL(options.oidcCallbackOrigin); } catch { throw new Error("PUBLIC_ORIGIN must be a valid absolute URL"); }
+    if (origin.origin !== origin.href.replace(/\/$/, "") || origin.username || origin.password
+      || (origin.protocol !== "https:" && !(options.allowInsecureOidcCallbackOriginForTest && origin.protocol === "http:"))) {
+      throw new Error("PUBLIC_ORIGIN must be an HTTPS origin without credentials, path, query, or fragment");
+    }
+    oidcCallbackOrigin = origin.origin;
+  }
 
   const diagnostics = options.diagnostics ?? createDiagnostics({
     instanceVersion: "0.1.0",
@@ -75,7 +88,7 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
   const acceleration = options.acceleration ?? createOptionalRedisAcceleration();
   const routes = [
     ...(options.oidcManagement && options.passwordAuth ? [oidcManagementRoute(options.oidcManagement, options.passwordAuth)] : []),
-    ...(options.oidcAuth ? [oidcAuthRoute(options.oidcAuth)] : []),
+    ...(options.oidcAuth && oidcCallbackOrigin ? [oidcAuthRoute(options.oidcAuth, oidcCallbackOrigin)] : []),
     ...(options.passwordAuth ? [passwordAuthRoute(options.passwordAuth)] : []),
     diagnosticsSchemaRoute(diagnostics),
     requireInstanceAdministrator(options.instanceAdminToken, diagnosticsAdminRoute(diagnostics)),
