@@ -150,6 +150,46 @@ The Note row and its `stash.note.v1` outbox event commit in one transaction. A c
 reports the projection as `recorded` only after both writes succeed; it does not claim that a full
 Portable Workspace Export has already been generated.
 
+## `stash.discussion-work-link.v1`
+
+Creating durable work from a Discussion records the new `stash.note.v1` or `stash.task.v1`
+projection and a separate `stash.discussion-work-link.v1` projection in the same transaction. The
+link contains stable Discussion and work identities plus complete snapshots of only the selected
+messages, in their original Discussion order. Each snapshot retains the message identity, content,
+portable author identity, and creation time. This preserves attribution and provenance without
+copying the unselected transcript into the new Note or Task.
+
+The client supplies a UUID idempotency key. Retrying the identical request returns the original
+work identity and records no duplicate Task key, Note, link, or projection. Reusing that key with a
+different Discussion, selection, work kind, destination Project, or Task title is rejected as a
+conflict. A projection failure rolls back the work, link, Task-key allocation, and receipt together,
+so the Member can safely retry.
+
+That transaction also appends one `stash.activity.v1` entry with the Member actor, `member` cause,
+UTC occurrence time, selected Discussion and message identities, and the created Note or Task state.
+An exact idempotent retry returns the original Activity without appending another; conflicts and
+rolled-back attempts record none. Creation requests serialize on Member and idempotency key before
+checking the receipt, so concurrent reuse across Discussions deterministically produces one creation
+and one conflict instead of partial work or a persistence outage.
+
+```json
+{
+  "schema": "stash.discussion-work-link.v1",
+  "id": "30f39bcc-bcd2-44dd-89f6-3be05772784b",
+  "workspaceId": "89fa5772-0439-4cc1-b67a-bdeb12ae0ed5",
+  "discussionId": "7d98727b-dd2d-4513-8a3d-763debbc84bd",
+  "work": { "kind": "task", "id": "79e5a600-23ee-482e-bfd7-c8b5fce45942" },
+  "selectedMessages": [{
+    "id": "a519b5b9-023b-41a8-85aa-dc22ba538e9d",
+    "content": "Should this include the rollback path?",
+    "author": { "localAccountId": "dd24a52e-f591-42a8-90af-a981e1449877", "displayName": "Ada Lovelace" },
+    "createdAt": "2026-08-22T18:42:03.193Z"
+  }],
+  "createdAt": "2026-08-23T10:00:00.000Z",
+  "createdBy": { "localAccountId": "dd24a52e-f591-42a8-90af-a981e1449877", "displayName": "Ada Lovelace" }
+}
+```
+
 ## Inbox triage projections
 
 Triage appends a new projection revision in the same transaction as the canonical change. Organizing
