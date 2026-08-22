@@ -168,6 +168,12 @@ Instances that briefly used the earlier per-Task dependency JSON upgrade it once
 edges (deduplicating equivalent inverse forms), then remove that operational column. It is never a
 second read or write source.
 
+Task API read models also include a derived `dependencyWarnings` array. Each incomplete direct
+prerequisite produces an `incomplete_dependency` warning carrying its stable Task identity. The
+warning disappears when that prerequisite enters a completed Status Category. Warnings are not
+portable Task state: creating or removing a Dependency and changing either Task's status are
+independent operations, and neither a warning nor a Dependency prevents an ordinary Task update.
+
 The operational Note body is a versioned rich-text document rendered by Stash's WYSIWYG editor.
 Every successful edit atomically increments the Note revision and records another `stash.note.v1`
 outbox revision whose `content` is the complete Markdown rendering. Ordinary Blocks have no

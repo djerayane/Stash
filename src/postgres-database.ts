@@ -25,7 +25,7 @@ import type {
 } from "./workspaces-projects.js";
 import type { MemberLocalizationPreferences, MemberLocalizationRepository } from "./member-localization.js";
 import type { PortableRepositoryConnectionProjection, RepositoryConnectionRecord, RepositoryConnectionRepository } from "./repository-connections.js";
-import type { CreateTaskFromBlockDraft, LinkedTaskReadModel, TaskFromBlockRepository, TaskPlanningRepository, TaskPlanningUpdate, TaskSourceBlockReference } from "./tasks.js";
+import type { CreateTaskFromBlockDraft, LinkedTaskReadModel, TaskFromBlockRepository, TaskPlanningReadModel, TaskPlanningRepository, TaskPlanningUpdate, TaskSourceBlockReference } from "./tasks.js";
 import type { AttachmentRecord, AttachmentRepository, PortableAttachmentProjection } from "./attachments.js";
 import type { MobileCaptureRepository } from "./mobile-captures.js";
 
@@ -50,6 +50,12 @@ const taskPlanningSelect = `SELECT task.*, status.name AS status_name, status.ca
       SELECT jsonb_build_object('taskId', edge.dependent_task_id, 'type', 'required_by') AS relation
       FROM stash_task_dependencies edge WHERE edge.prerequisite_task_id = task.id
     ) visible_dependencies), '[]'::jsonb) AS dependencies
+  , COALESCE((SELECT jsonb_agg(jsonb_build_object('code', 'incomplete_dependency', 'taskId', prerequisite.id)
+      ORDER BY prerequisite.id)
+      FROM stash_task_dependencies edge
+      JOIN stash_tasks prerequisite ON prerequisite.id = edge.prerequisite_task_id
+      JOIN stash_workflow_statuses prerequisite_status ON prerequisite_status.id = prerequisite.workflow_status_id
+      WHERE edge.dependent_task_id = task.id AND prerequisite_status.category <> 'completed'), '[]'::jsonb) AS dependency_warnings
   FROM stash_tasks task
   JOIN stash_workflow_statuses status ON status.id = task.workflow_status_id
   JOIN stash_accounts creator ON creator.id = task.created_by_account_id
@@ -76,6 +82,10 @@ function taskProjectionFromRow(row: any): PortableTaskProjection {
     createdAt: new Date(row.created_at).toISOString(),
     createdBy: { localAccountId: row.created_by_account_id, displayName: row.created_by_name },
   };
+}
+
+function taskPlanningReadModelFromRow(row: any): TaskPlanningReadModel {
+  return { ...taskProjectionFromRow(row), dependencyWarnings: row.dependency_warnings ?? [] };
 }
 
 export class PostgresDatabase implements
@@ -632,7 +642,7 @@ export class PostgresDatabase implements
       await this.#ensureInvitationSchema(client);
       const result = await client.query<any>(taskPlanningSelect, [projectId, taskKey, memberId]);
       const row = result.rows[0];
-      return row ? { status: "found" as const, task: taskProjectionFromRow(row) } : { status: "not_found" as const };
+      return row ? { status: "found" as const, task: taskPlanningReadModelFromRow(row) } : { status: "not_found" as const };
     } finally { client.release(); }
   }
 
@@ -702,8 +712,8 @@ export class PostgresDatabase implements
         JSON.stringify([...new Set((next.labelNames ?? []).map((label) => label.trim()))]), next.dueDate ?? null, next.estimate ?? null,
         JSON.stringify([...new Set(next.linkedNoteIds ?? [])]), JSON.stringify(next.developmentLinks ?? [])]);
       const saved = await client.query<any>(taskPlanningSelect, [projectId, taskKey, memberId]);
-      const task = taskProjectionFromRow(saved.rows[0]);
-      await this.#recordPortableProjection(client, "Task", task.id, task.schema, task);
+      const task = taskPlanningReadModelFromRow(saved.rows[0]);
+      await this.#recordPortableProjection(client, "Task", task.id, task.schema, taskProjectionFromRow(saved.rows[0]));
       for (const affectedId of (row.affected_dependency_task_ids ?? []).filter((id: string) => id !== task.id)) {
         const affected = await client.query<any>(taskPlanningSelectById, [affectedId, memberId]);
         if (affected.rows[0]) {
