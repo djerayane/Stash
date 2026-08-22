@@ -23,13 +23,12 @@ class ProtocolCompatibleOidcDatabase implements DatabaseProbe, OidcAuthRepositor
     if (this.failure) throw this.failure;
     return this.identities.get(`${organizationId}:${issuer}:${subject}`);
   }
-  async createOidcSession(session: SessionRecord) {
+  async findAccountByEmail(_email: string): Promise<AccountAuthenticationRecord | undefined> { return undefined; }
+  async findAccountById(_id: string): Promise<AccountAuthenticationRecord | undefined> { return undefined; }
+  async createSession(session: SessionRecord) {
     if (this.failure) throw this.failure;
     this.sessions.set(session.id, session);
   }
-  async findAccountByEmail(_email: string): Promise<AccountAuthenticationRecord | undefined> { return undefined; }
-  async findAccountById(_id: string): Promise<AccountAuthenticationRecord | undefined> { return undefined; }
-  async createSession(session: SessionRecord) { this.sessions.set(session.id, session); }
   async findSessionByTokenHash(_tokenHash: string) { return undefined; }
   async listSessions(_accountId: string) { return []; }
   async deleteSession(_accountId: string, _sessionId: string) { return false; }

@@ -231,10 +231,6 @@ export class PostgresDatabase implements
     );
   }
 
-  createOidcSession(session: SessionRecord): Promise<void> {
-    return this.createSession(session);
-  }
-
   async findOidcIdentity(organizationId: string, issuer: string, subject: string): Promise<OidcIdentityRecord | undefined> {
     await this.#ensureOidcSchema();
     const result = await this.#pool.query<OidcIdentityRow>(`

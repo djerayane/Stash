@@ -2,12 +2,12 @@ import {
   createHash,
   createPublicKey,
   randomBytes,
-  randomUUID,
   verify,
   type JsonWebKey,
 } from "node:crypto";
 
 import type { SessionRecord } from "./password-auth.js";
+import { issueSession } from "./auth-session.js";
 
 export interface OidcIdentityRecord {
   accountId: string;
@@ -17,7 +17,7 @@ export interface OidcIdentityRecord {
 
 export interface OidcAuthRepository {
   findOidcIdentity(organizationId: string, issuer: string, subject: string): Promise<OidcIdentityRecord | undefined>;
-  createOidcSession(session: SessionRecord): Promise<void>;
+  createSession(session: SessionRecord): Promise<void>;
 }
 
 export interface OidcOrganizationConfiguration {
@@ -143,22 +143,7 @@ export class OidcAuthService {
     const identity = await this.#repository.findOidcIdentity(organizationId, configuration.issuer, claims.subject);
     if (!identity) throw new OidcIdentityNotAuthorized();
 
-    const token = randomBytes(32).toString("base64url");
-    const now = new Date().toISOString();
-    const session: SessionRecord = {
-      id: randomUUID(),
-      accountId: identity.accountId,
-      tokenHash: encodeSha256(token),
-      createdAt: now,
-      lastSeenAt: now,
-      ...(userAgent ? { userAgent: userAgent.slice(0, 500) } : {}),
-    };
-    await this.#repository.createOidcSession(session);
-    return {
-      token,
-      member: { id: identity.accountId, name: identity.name, email: identity.email },
-      session: { id: session.id, createdAt: now, lastSeenAt: now, ...(session.userAgent ? { userAgent: session.userAgent } : {}), current: true },
-    };
+    return issueSession(this.#repository, { id: identity.accountId, name: identity.name, email: identity.email }, userAgent);
   }
 
   #configuration(organizationId: string): OidcOrganizationConfiguration {
