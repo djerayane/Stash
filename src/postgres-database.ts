@@ -498,6 +498,83 @@ export class PostgresDatabase implements
     } finally { client.release(); }
   }
 
+  async linkTaskToBlock(memberId: string, taskId: string, noteId: string, blockKey: string) {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureNoteSchema(client);
+      const taskResult = await client.query<any>(`SELECT task.*, status.name AS status_name, status.category,
+        creator.name AS created_by_name FROM stash_tasks task
+        JOIN stash_workflow_statuses status ON status.id = task.workflow_status_id
+        JOIN stash_accounts creator ON creator.id = task.created_by_account_id
+        JOIN stash_workspaces workspace ON workspace.id = task.workspace_id
+        WHERE task.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2)
+        OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2))) FOR UPDATE`, [taskId, memberId]);
+      const taskRow = taskResult.rows[0];
+      if (!taskRow) return { status: "task_not_found" as const };
+      const noteResult = await client.query<any>(`SELECT note.*, creator.name AS created_by_name FROM stash_notes note
+        JOIN stash_accounts creator ON creator.id = note.created_by_account_id
+        WHERE note.id = $1 AND note.workspace_id = $2 AND note.archived_at IS NULL FOR UPDATE`, [noteId, taskRow.workspace_id]);
+      const noteRow = noteResult.rows[0];
+      if (!noteRow) return { status: "note_not_found" as const };
+      const blocks = noteRow.document.blocks as Array<{ blockKey?: string; id?: string }>;
+      const matches = blocks.filter((block) => block.blockKey === blockKey);
+      if (matches.length !== 1) return { status: "block_not_found" as const };
+      const block = matches[0]!;
+      const blockId = block.id ?? randomUUID();
+      const existing = await client.query("SELECT 1 FROM stash_task_block_sources WHERE task_id = $1 AND note_id = $2 AND block_id = $3",
+        [taskId, noteId, blockId]);
+      const sourceBlock: TaskSourceBlockReference = { noteId, blockId };
+      if (!existing.rowCount) {
+        if (!block.id) {
+          block.id = blockId;
+          const content = richTextToMarkdown(noteRow.document);
+          await client.query("UPDATE stash_notes SET document = $2::jsonb, content = $3, revision = revision + 1 WHERE id = $1",
+            [noteId, JSON.stringify(noteRow.document), content]);
+          const noteProjection = { schema: "stash.note.v1" as const, id: noteId, workspaceId: noteRow.workspace_id,
+            content, tags: noteRow.tags, createdAt: new Date(noteRow.created_at).toISOString(),
+            createdBy: { localAccountId: noteRow.created_by_account_id, displayName: noteRow.created_by_name },
+            ...(noteRow.project_id ? { projectId: noteRow.project_id } : {}),
+            ...(noteRow.reminder_at ? { reminder: { at: new Date(noteRow.reminder_at).toISOString() } } : {}) };
+          await this.#recordPortableProjection(client, "Note", noteId, noteProjection.schema, noteProjection);
+        }
+        await client.query("INSERT INTO stash_task_note_sources (task_id, note_id) VALUES ($1,$2) ON CONFLICT DO NOTHING", [taskId, noteId]);
+        await client.query("INSERT INTO stash_task_block_sources (task_id, note_id, block_id) VALUES ($1,$2,$3)", [taskId, noteId, blockId]);
+      }
+      const noteSources = await client.query<{ note_id: string }>("SELECT note_id FROM stash_task_note_sources WHERE task_id = $1 ORDER BY note_id", [taskId]);
+      const blockSources = await client.query<{ note_id: string; block_id: string }>(
+        "SELECT note_id, block_id FROM stash_task_block_sources WHERE task_id = $1 ORDER BY note_id, block_id", [taskId]);
+      const task: PortableTaskProjection = { schema: "stash.task.v1", id: taskId, workspaceId: taskRow.workspace_id,
+        projectId: taskRow.project_id, title: taskRow.title, key: taskRow.task_key,
+        status: { id: taskRow.workflow_status_id, name: taskRow.status_name, category: taskRow.category },
+        sourceNoteIds: noteSources.rows.map((row) => row.note_id),
+        sourceBlocks: blockSources.rows.map((row) => ({ noteId: row.note_id, blockId: row.block_id })),
+        createdAt: new Date(taskRow.created_at).toISOString(),
+        createdBy: { localAccountId: taskRow.created_by_account_id, displayName: taskRow.created_by_name } };
+      if (!existing.rowCount) await this.#recordPortableProjection(client, "Task", task.id, task.schema, task);
+      return { status: existing.rowCount ? "already_linked" as const : "linked" as const, task, sourceBlock };
+    });
+  }
+
+  async listTaskSourceBlocks(memberId: string, taskId: string) {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureNoteSchema(client);
+      const result = await client.query<any>(`SELECT source.note_id, source.block_id, note.document
+        FROM stash_tasks task JOIN stash_workspaces workspace ON workspace.id = task.workspace_id
+        LEFT JOIN stash_task_block_sources source ON source.task_id = task.id
+        LEFT JOIN stash_notes note ON note.id = source.note_id
+        WHERE task.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2)
+        OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)))
+        ORDER BY source.note_id NULLS FIRST, source.block_id NULLS FIRST`, [taskId, memberId]);
+      if (!result.rowCount) return { status: "task_not_found" as const };
+      return { status: "found" as const, sourceBlocks: result.rows.filter((row: any) => row.note_id !== null).map((row: any) => ({
+        noteId: row.note_id, blockId: row.block_id,
+        state: Array.isArray(row.document?.blocks) && row.document.blocks.some((block: any) => block.id === row.block_id) ? "linked" as const : "broken" as const,
+      })) };
+    } finally { client.release(); }
+  }
+
   async #applyTriageChange(client: PoolClient, memberId: string, workspaceId: string, noteId: string, change: NoteTriageChange): Promise<
     { result: NoteTriageResult } | { status: "project_forbidden" | "target_note_not_found" }
   > {

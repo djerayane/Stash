@@ -137,6 +137,14 @@ Task's current canonical Workflow status at read time, and the WYSIWYG editor re
 title, and status adjacent to the referenced Block. This live state is never written into the Note's
 authored Markdown, so a reload can show status changes without content churn.
 
+An existing Task can gain another source relationship through
+`POST /api/tasks/{taskId}/source-blocks` with a stable `noteId` and editor `blockKey`. The operation
+requires access to both objects, rejects cross-Workspace and ambiguous references, sparsely assigns
+the Block identity, and records a new complete `stash.task.v1` projection atomically. Repeating the
+same relationship is idempotent. `GET /api/tasks/{taskId}/source-blocks` reports every relationship
+as `linked` while its exact Block identity is still present or `broken` after the source disappears;
+Stash never guesses that a different Block is the intended replacement.
+
 The operational Note body is a versioned rich-text document rendered by Stash's WYSIWYG editor.
 Every successful edit atomically increments the Note revision and records another `stash.note.v1`
 outbox revision whose `content` is the complete Markdown rendering. Ordinary Blocks have no
