@@ -28,7 +28,7 @@ import type { PortableRepositoryConnectionProjection, RepositoryConnectionRecord
 import type { CreateTaskFromBlockDraft, LinkedTaskReadModel, TaskFromBlockRepository, TaskMoveActivity, TaskMoveRepository, TaskPlanningReadModel, TaskPlanningRepository, TaskPlanningUpdate, TaskSourceBlockReference } from "./tasks.js";
 import type { AttachmentRecord, AttachmentRepository, PortableAttachmentProjection } from "./attachments.js";
 import type { MobileCaptureRepository } from "./mobile-captures.js";
-import type { CreateDiscussionWorkDraft, DiscussionDraft, DiscussionMessage, DiscussionRecord, DiscussionRepository, DiscussionTarget, DiscussionWorkOutcome, PortableDiscussionProjection, PortableDiscussionTarget, PortableDiscussionWorkLinkProjection } from "./discussions.js";
+import type { CreateDiscussionWorkDraft, DiscussionDraft, DiscussionMessage, DiscussionRecord, DiscussionRepository, DiscussionTarget, DiscussionWorkActivity, DiscussionWorkOutcome, PortableDiscussionProjection, PortableDiscussionTarget, PortableDiscussionWorkLinkProjection } from "./discussions.js";
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
@@ -694,6 +694,7 @@ export class PostgresDatabase implements
       const discussion = await this.#readDiscussion(client, memberId, discussionId, true);
       if (!discussion) return { status: "not_found" as const };
       if (!await this.#canWriteDiscussion(client, memberId, discussion.workspaceId)) return { status: "forbidden" as const };
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [memberId, draft.idempotencyKey]);
       const fingerprint = createHash("sha256").update(JSON.stringify({ discussionId, kind: draft.kind,
         messageIds: draft.messageIds, ...(draft.kind === "task" ? { projectId: draft.projectId, title: draft.title } : {}) })).digest("hex");
       const receipt = await client.query<{ fingerprint: string; outcome: DiscussionWorkOutcome }>(
@@ -742,7 +743,17 @@ export class PostgresDatabase implements
         work.kind === "note" ? work.id : null, work.kind === "task" ? work.id : null,
         JSON.stringify(link.selectedMessages.map(({ id }) => id)), memberId, draft.createdAt]);
       await this.#recordPortableProjection(client, "DiscussionWorkLink", link.id, link.schema, link);
-      const outcome = { status: "created" as const, work, projections: [workProjection, link] };
+      const activity: DiscussionWorkActivity = { schema: "stash.activity.v1", id: randomUUID(), workspaceId: discussion.workspaceId,
+        action: "discussion_work_created", object: { kind: work.kind === "note" ? "Note" : "Task", id: work.id },
+        actor: draft.createdBy, cause: { kind: "member" }, occurredAt: draft.createdAt,
+        before: { discussionId, selectedMessageIds: selectedMessages.map(({ id }) => id) }, after: work };
+      await client.query(`INSERT INTO stash_workspace_activity
+        (id, workspace_id, object_kind, object_id, action, actor_account_id, cause, occurred_at, before_state, after_state)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb)`, [activity.id, activity.workspaceId,
+        activity.object.kind, activity.object.id, activity.action, memberId, activity.cause.kind, activity.occurredAt,
+        JSON.stringify(activity.before), JSON.stringify(activity.after)]);
+      await this.#recordPortableProjection(client, "Activity", activity.id, activity.schema, activity);
+      const outcome = { status: "created" as const, work, activity, projections: [workProjection, link, activity] };
       await client.query("INSERT INTO stash_discussion_work_receipts (account_id,idempotency_key,fingerprint,outcome) VALUES ($1,$2,$3,$4::jsonb)",
         [memberId, draft.idempotencyKey, fingerprint, JSON.stringify(outcome)]);
       return outcome;

@@ -43,7 +43,8 @@ export function discussionRoutes(service: DiscussionService, memberAccess: Membe
         if (url.pathname.endsWith("/work")) {
           const result = await service.createWork(access.accountId, discussionId, await readJson(request));
           if (result.status === "created" || result.status === "duplicate") json(response, result.status === "created" ? 201 : 200, {
-            result: result.status, work: result.work, projections: result.projections.map(({ schema }) => ({ schema, status: "recorded" })),
+            result: result.status, work: result.work, activity: result.activity,
+            projections: result.projections.map(({ schema }) => ({ schema, status: "recorded" })),
           });
           else if (result.status === "forbidden") json(response, 403, { error: result.status, message: "Project Guests cannot create durable work from Discussions." });
           else if (result.status === "message_not_found") json(response, 422, { error: result.status, message: "Every selected message must belong to this Discussion." });

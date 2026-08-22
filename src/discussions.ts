@@ -58,7 +58,21 @@ export interface PortableDiscussionWorkLinkProjection {
   createdBy: PortableIdentity;
 }
 
-export type DiscussionWorkProjection = { schema: "stash.note.v1" | "stash.task.v1" } | PortableDiscussionWorkLinkProjection;
+export interface DiscussionWorkActivity {
+  schema: "stash.activity.v1";
+  id: string;
+  workspaceId: string;
+  action: "discussion_work_created";
+  object: { kind: "Note" | "Task"; id: string };
+  actor: PortableIdentity;
+  cause: { kind: "member" };
+  occurredAt: string;
+  before: { discussionId: string; selectedMessageIds: string[] };
+  after: DiscussionWork;
+}
+
+export type DiscussionWorkProjection = { schema: "stash.note.v1" | "stash.task.v1" }
+  | PortableDiscussionWorkLinkProjection | DiscussionWorkActivity;
 
 interface DiscussionWorkDraftBase {
   messageIds: string[];
@@ -72,9 +86,9 @@ export type CreateDiscussionWorkDraft = DiscussionWorkDraftBase & (
   | { kind: "note" }
   | { kind: "task"; projectId: string; title: string }
 );
-type CreatedDiscussionWork = { status: "created"; work: DiscussionWork; projections: DiscussionWorkProjection[] };
+type CreatedDiscussionWork = { status: "created"; work: DiscussionWork; activity: DiscussionWorkActivity; projections: DiscussionWorkProjection[] };
 export type DiscussionWorkOutcome = CreatedDiscussionWork
-  | { status: "duplicate"; work: DiscussionWork; projections: DiscussionWorkProjection[] }
+  | { status: "duplicate"; work: DiscussionWork; activity: DiscussionWorkActivity; projections: DiscussionWorkProjection[] }
   | { status: "not_found" | "forbidden" | "message_not_found" | "project_forbidden" | "idempotency_conflict" };
 
 export type CreateDiscussionOutcome =

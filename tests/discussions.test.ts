@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 
-import { DiscussionService, type CreateDiscussionWorkDraft, type DiscussionDraft, type DiscussionRecord, type DiscussionRepository, type DiscussionWorkOutcome, type DiscussionWorkProjection, type PortableDiscussionProjection, type PortableDiscussionWorkLinkProjection } from "../src/discussions.js";
+import { DiscussionService, type CreateDiscussionWorkDraft, type DiscussionDraft, type DiscussionRecord, type DiscussionRepository, type DiscussionWorkActivity, type DiscussionWorkOutcome, type DiscussionWorkProjection, type PortableDiscussionProjection, type PortableDiscussionWorkLinkProjection } from "../src/discussions.js";
 import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
 import type { MemberAccessResolver, PortableIdentity } from "../src/workspaces-projects.js";
 
@@ -18,6 +18,8 @@ class DiscussionFake implements DatabaseProbe, DiscussionRepository {
   readonly projections: PortableDiscussionProjection[] = [];
   readonly createdWork: Array<Extract<DiscussionWorkOutcome, { status: "created" }>> = [];
   readonly workRequests = new Map<string, { fingerprint: string; outcome: Extract<DiscussionWorkOutcome, { status: "created" }> }>();
+  readonly workActivities: DiscussionWorkActivity[] = [];
+  readonly workQueues = new Map<string, Promise<void>>();
   workProjectionFailure = false;
   blockPresent = true;
   duplicateBlock = false;
@@ -107,6 +109,7 @@ class DiscussionFake implements DatabaseProbe, DiscussionRepository {
     const found = await this.findDiscussion(memberId, discussionId);
     if (found.status === "not_found") return found;
     if (memberId !== "ada") return { status: "forbidden" };
+    return this.serializeWorkKey(draft.idempotencyKey, async () => {
     const fingerprint = JSON.stringify({ discussionId, kind: draft.kind, messageIds: draft.messageIds,
       ...(draft.kind === "task" ? { projectId: draft.projectId, title: draft.title } : {}) });
     const prior = this.workRequests.get(draft.idempotencyKey);
@@ -128,10 +131,27 @@ class DiscussionFake implements DatabaseProbe, DiscussionRepository {
       { schema: "stash.discussion-work-link.v1", id: draft.linkId, workspaceId: found.discussion.workspaceId,
         discussionId, work: { kind: work.kind, id: work.id }, selectedMessages: selected, createdAt: draft.createdAt, createdBy: draft.createdBy },
     ];
-    const outcome: Extract<DiscussionWorkOutcome, { status: "created" }> = { status: "created", work, projections };
+    const activity: DiscussionWorkActivity = { schema: "stash.activity.v1", id: `activity-${this.workActivities.length + 1}`,
+      workspaceId: found.discussion.workspaceId, action: "discussion_work_created",
+      object: { kind: work.kind === "note" ? "Note" : "Task", id: work.id }, actor: draft.createdBy,
+      cause: { kind: "member" }, occurredAt: draft.createdAt,
+      before: { discussionId, selectedMessageIds: selected.map(({ id }) => id) }, after: structuredClone(work) };
+    projections.push(activity);
+    const outcome: Extract<DiscussionWorkOutcome, { status: "created" }> = { status: "created", work, activity, projections };
     this.createdWork.push(structuredClone(outcome));
+    this.workActivities.push(structuredClone(activity));
     this.workRequests.set(draft.idempotencyKey, { fingerprint, outcome: structuredClone(outcome) });
     return structuredClone(outcome);
+    });
+  }
+  private async serializeWorkKey<T>(key: string, action: () => Promise<T>): Promise<T> {
+    const previous = this.workQueues.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    this.workQueues.set(key, current);
+    await previous;
+    try { return await action(); }
+    finally { release(); if (this.workQueues.get(key) === current) this.workQueues.delete(key); }
   }
   private canGuestReadDraft(draft: DiscussionDraft) {
     return draft.target.kind === "task" ? draft.target.taskId === taskId
@@ -300,9 +320,12 @@ describe("portable Discussions", () => {
     assert.equal(note.work.content, "Turn this into work");
     assert.doesNotMatch(note.work.content, /Keep as context/);
     assert.deepEqual(note.work.source, { discussionId: discussion.id, messageIds: [messages[1]!.id] });
-    assert.deepEqual(note.projections.map(({ schema }) => schema), ["stash.note.v1", "stash.discussion-work-link.v1"]);
+    assert.deepEqual(note.projections.map(({ schema }) => schema), ["stash.note.v1", "stash.discussion-work-link.v1", "stash.activity.v1"]);
     assert.deepEqual((database.createdWork[0]!.projections[1] as PortableDiscussionWorkLinkProjection).selectedMessages[0]!.author,
       { localAccountId: "ada", displayName: "Ada Lovelace" });
+    assert.deepEqual(database.workActivities[0]?.before,
+      { discussionId: discussion.id, selectedMessageIds: [messages[1]!.id] });
+    assert.equal(database.workActivities[0]?.object.kind, "Note");
 
     const taskResponse = await request(`/api/discussions/${discussion.id}/work`, "POST", {
       kind: "task", messageIds: [messages[0]!.id, messages[1]!.id], projectId: "88888888-8888-4888-8888-888888888888",
@@ -332,6 +355,7 @@ describe("portable Discussions", () => {
     const failed = await request(`/api/discussions/${discussion.id}/work`, "POST", input);
     assert.equal(failed.status, 503);
     assert.equal(database.createdWork.length, 0);
+    assert.equal(database.workActivities.length, 0);
     database.workProjectionFailure = false;
     const first = await request(`/api/discussions/${discussion.id}/work`, "POST", input);
     assert.equal(first.status, 201);
@@ -340,8 +364,30 @@ describe("portable Discussions", () => {
     assert.equal(retry.status, 200);
     assert.deepEqual((await retry.json() as { work: object }).work, (firstBody as { work: object }).work);
     assert.equal(database.createdWork.length, 1);
+    assert.equal(database.workActivities.length, 1, "an exact duplicate does not append Activity");
     const conflict = await request(`/api/discussions/${discussion.id}/work`, "POST", { kind: "task", messageIds: input.messageIds,
       projectId: "88888888-8888-4888-8888-888888888888", title: "Different", idempotencyKey: input.idempotencyKey });
     assert.equal(conflict.status, 409);
+    assert.equal(database.workActivities.length, 1, "a conflict does not append Activity");
+  });
+
+  it("serializes concurrent idempotency-key reuse across Discussions without duplicate work or outages", async () => {
+    const { database, request } = await run();
+    const [firstCreated, secondCreated] = await Promise.all([
+      request("/api/discussions", "POST", { target: { kind: "note", noteId }, message: "First Discussion" }),
+      request("/api/discussions", "POST", { target: { kind: "task", taskId }, message: "Second Discussion" }),
+    ]);
+    const first = (await firstCreated.json() as { discussion: DiscussionRecord }).discussion;
+    const second = (await secondCreated.json() as { discussion: DiscussionRecord }).discussion;
+    const idempotencyKey = "99999999-9999-4999-8999-999999999994";
+    const responses = await Promise.all([
+      request(`/api/discussions/${first.id}/work`, "POST", { kind: "note", messageIds: [first.messages[0]!.id], idempotencyKey }),
+      request(`/api/discussions/${second.id}/work`, "POST", { kind: "note", messageIds: [second.messages[0]!.id], idempotencyKey }),
+    ]);
+
+    assert.deepEqual(responses.map(({ status }) => status).sort((left, right) => left - right), [201, 409]);
+    assert.equal(responses.some(({ status }) => status === 503), false);
+    assert.equal(database.createdWork.length, 1);
+    assert.equal(database.workActivities.length, 1);
   });
 });

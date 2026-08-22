@@ -165,6 +165,13 @@ different Discussion, selection, work kind, destination Project, or Task title i
 conflict. A projection failure rolls back the work, link, Task-key allocation, and receipt together,
 so the Member can safely retry.
 
+That transaction also appends one `stash.activity.v1` entry with the Member actor, `member` cause,
+UTC occurrence time, selected Discussion and message identities, and the created Note or Task state.
+An exact idempotent retry returns the original Activity without appending another; conflicts and
+rolled-back attempts record none. Creation requests serialize on Member and idempotency key before
+checking the receipt, so concurrent reuse across Discussions deterministically produces one creation
+and one conflict instead of partial work or a persistence outage.
+
 ```json
 {
   "schema": "stash.discussion-work-link.v1",
