@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 
-import { AttachmentService, LocalAttachmentStorage, portableAttachmentHref, type AttachmentRecord, type AttachmentRepository, type PortableAttachmentProjection } from "../src/attachments.js";
+import { AttachmentService, encodePortableFilename, LocalAttachmentStorage, portableAttachmentHref, type AttachmentRecord, type AttachmentRepository, type PortableAttachmentProjection } from "../src/attachments.js";
 import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
 import type { MemberAccessResolver } from "../src/workspaces-projects.js";
 import { NoteService, type NoteEditBatch, type NoteRecord, type NoteRepository, type PortableNoteProjection } from "../src/notes.js";
@@ -49,7 +49,7 @@ describe("Workspace Attachments", () => {
       attachments: new AttachmentService(database, storage, { maxBytes: 12 }), notes: new NoteService(database) });
     return { database, directory, storage, baseUrl: instance.url };
   }
-  const upload = (baseUrl: string, token: string, body: string, filename = "design notes.txt", contentType = "text/plain") => fetch(`${baseUrl}/api/workspaces/${workspaceId}/attachments`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": contentType, "x-stash-filename": filename, "x-stash-source": "paste" }, body });
+  const upload = (baseUrl: string, token: string, body: string, filename = "design notes.txt", contentType = "text/plain") => fetch(`${baseUrl}/api/workspaces/${workspaceId}/attachments`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": contentType, "x-stash-filename": encodePortableFilename(filename), "x-stash-source": "paste" }, body });
 
   it("uploads pasted bytes, records a portable relative link, and serves them only to Workspace Members", async () => {
     const { baseUrl, database, directory, storage } = await run();
@@ -81,6 +81,13 @@ describe("Workspace Attachments", () => {
     assert.match(portable.relativePath, /report%2A\.txt$/);
     assert.equal(decodeURIComponent(new URL(portable.portableHref, "file:///export/note.md").pathname).slice("/export/".length), portable.relativePath.slice(2));
     assert.equal(await (await fetch(`${baseUrl}${portable.contentUrl}`, { headers: { authorization: "Bearer member-ada" } })).text(), "portable");
+
+    const unicodeUpload = await upload(baseUrl, "member-ada", "utf8", "界.txt");
+    assert.equal(unicodeUpload.status, 201);
+    const unicodeResponse = await unicodeUpload.json() as { filename: string; relativePath: string; portableHref: string };
+    assert.equal(unicodeResponse.filename, "界.txt");
+    assert.match(unicodeResponse.relativePath, /%E7%95%8C\.txt$/);
+    assert.equal(decodeURIComponent(new URL(unicodeResponse.portableHref, "file:///export/note.md").pathname).slice("/export/".length), unicodeResponse.relativePath.slice(2));
 
     const unicode = await new AttachmentService(database, storage, { maxBytes: 12 }).create("ada", workspaceId, { filename: "界.txt", contentType: "text/plain", source: "upload", content: Buffer.from("utf8") });
     assert.equal(unicode.status, "created");

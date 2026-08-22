@@ -22,6 +22,8 @@ Instance URL, so moving a Workspace does not break its links. Portable exports c
 that relative path and contain no Instance secrets.
 Markdown links URI-encode the literal portable path separately; a percent sign in an encoded disk
 component is itself encoded as `%25`, so resolving the href names the exact exported file.
+The upload protocol carries the original filename in `X-Stash-Filename` as canonical percent-encoded
+UTF-8, allowing Unicode names through HTTP headers without lossy ByteString conversion.
 
 ## `stash.workspace.v1`
 

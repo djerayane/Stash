@@ -16,6 +16,18 @@ async function readBodyWithLimit(request: IncomingMessage, maximum: number): Pro
   return Buffer.concat(chunks);
 }
 
+function decodeFilenameHeader(value: string | string[] | undefined): string {
+  if (typeof value !== "string") throw new InvalidAttachment("filename");
+  try {
+    const filename = decodeURIComponent(value);
+    if (encodePortableFilename(filename) !== value) throw new InvalidAttachment("filename");
+    return filename;
+  } catch (error) {
+    if (error instanceof InvalidAttachment) throw error;
+    throw new InvalidAttachment("filename");
+  }
+}
+
 async function download(service: AttachmentService, memberId: string, response: ServerResponse, url: URL) {
   const result = await service.get(memberId, decodeURIComponent(url.pathname.split("/")[3]!));
   if (!result) { json(response, 404, { error: "attachment_not_found", message: "This Attachment is unavailable." }); return; }
@@ -30,9 +42,9 @@ async function download(service: AttachmentService, memberId: string, response: 
 }
 
 async function upload(service: AttachmentService, memberId: string, request: IncomingMessage, response: ServerResponse, url: URL) {
-  const filename = request.headers["x-stash-filename"];
+  const filename = decodeFilenameHeader(request.headers["x-stash-filename"]);
   const source = request.headers["x-stash-source"] ?? "upload";
-  if (typeof filename !== "string" || (source !== "upload" && source !== "paste")) throw new InvalidAttachment("filename");
+  if (source !== "upload" && source !== "paste") throw new InvalidAttachment("filename");
   const result = await service.create(memberId, decodeURIComponent(url.pathname.split("/")[3]!), {
     filename,
     contentType: request.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase() ?? "application/octet-stream",
