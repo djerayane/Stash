@@ -20,6 +20,7 @@ import { RepositoryConnectionService } from "./repository-connections.js";
 import { TaskService } from "./tasks.js";
 import { AttachmentService, LocalAttachmentStorage } from "./attachments.js";
 import { MobileCaptureService } from "./mobile-captures.js";
+import { DiscussionService } from "./discussions.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -71,6 +72,7 @@ async function main(): Promise<void> {
     tasks: new TaskService(database, database),
     attachments: new AttachmentService(database, new LocalAttachmentStorage(process.env.ATTACHMENT_STORAGE_PATH?.trim() || "/var/lib/stash/attachments")),
     mobileCaptures: new MobileCaptureService(database),
+    discussions: new DiscussionService(database),
     memberLocalization: new MemberLocalizationService(database),
     oidcAuth: new OidcAuthService(database),
     oidcManagement: new OidcManagementService(database),

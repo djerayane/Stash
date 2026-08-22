@@ -73,6 +73,50 @@ The outbox envelope stores `object_kind`, `object_id`, `revision`, `projection_s
 `payload`, creation time, and processing `state`. Consumers select the format using
 `projection_schema`; they must not infer a payload version from the database table layout.
 
+## `stash.discussion.v1`
+
+A Discussion is durable Workspace data distinct from a Note. Its projection contains its stable
+identity, Workspace, Note/Task/Block target, ordered messages, portable author identities, creation
+time, and optional resolution time. Each new message and the first resolution records a complete
+new projection revision atomically with the operational change. Resolved Discussions remain
+readable and cannot receive more messages.
+
+Organization and personal Workspace Members may create and update Discussions. A Project Guest may
+read Discussions only when their selected Project contains the target Task or the target Note (and
+therefore any target Block); workspace-wide Notes and other Projects remain unavailable. Guest
+access is read-only and is rechecked on direct reads as well as target listings.
+
+Block targets contain the stable `noteId` and sparsely assigned `blockId`, never the editor's
+operational `blockKey`. If that exact Block later disappears, Stash continues to return the
+Discussion through its containing Note and reports `block_missing`; duplicate imported identities
+are reported as `ambiguous`. The portable payload retains the original stable target without a
+transient relationship state, allowing an importer to reconstruct the conversation even when the
+Block cannot be recovered.
+
+```json
+{
+  "schema": "stash.discussion.v1",
+  "id": "7d98727b-dd2d-4513-8a3d-763debbc84bd",
+  "workspaceId": "89fa5772-0439-4cc1-b67a-bdeb12ae0ed5",
+  "target": {
+    "kind": "block",
+    "noteId": "d7289ce8-b0bb-4f44-971d-9b373fc34962",
+    "blockId": "44444444-4444-4444-8444-444444444444"
+  },
+  "messages": [{
+    "id": "a519b5b9-023b-41a8-85aa-dc22ba538e9d",
+    "content": "Should this include the rollback path?",
+    "author": {
+      "localAccountId": "dd24a52e-f591-42a8-90af-a981e1449877",
+      "displayName": "Ada Lovelace"
+    },
+    "createdAt": "2026-08-22T18:42:03.193Z"
+  }],
+  "createdAt": "2026-08-22T18:42:03.193Z",
+  "resolvedAt": "2026-08-23T09:12:00.000Z"
+}
+```
+
 ## `stash.note.v1`
 
 A captured Note records a Markdown-compatible content string and its durable metadata. Content is
