@@ -3,7 +3,7 @@ import { Pool, type PoolClient } from "pg";
 import type { DatabaseProbe } from "./instance.js";
 import type { BootstrapRecord, OwnerBootstrapRepository } from "./owner-bootstrap.js";
 import type { AccountAuthenticationRecord, PasswordAuthRepository, SessionRecord } from "./password-auth.js";
-import type { BuiltInRole, OidcAuthRepository, OidcIdentityKey, OidcIdentityRecord, OidcOrganizationConfiguration } from "./oidc-auth.js";
+import type { OidcAuthRepository, OidcIdentityKey, OidcIdentityRecord, OidcOrganizationConfiguration } from "./oidc-auth.js";
 import type { AccountRecoveryRepository, ClaimedEmailRecoveryDelivery, EmailRecoveryDeliveryClaim, EmailRecoveryDeliveryJob, EmailRecoveryRecord, PasskeyRecord, RecoveryCodeRecord } from "./account-recovery.js";
 import type { BuiltInOrganizationRole, OrganizationRoleRepository } from "./organization-roles.js";
 import {
@@ -264,8 +264,8 @@ export class PostgresDatabase implements
     } : undefined;
   }
 
-  async organizationRole(organizationId: string, accountId: string): Promise<BuiltInRole | undefined> {
-    const result = await this.#pool.query<{ role: BuiltInRole }>(
+  async organizationRole(organizationId: string, accountId: string): Promise<BuiltInOrganizationRole | undefined> {
+    const result = await this.#pool.query<{ role: BuiltInOrganizationRole }>(
       "SELECT role FROM stash_organization_memberships WHERE organization_id = $1 AND account_id = $2",
       [organizationId, accountId],
     );

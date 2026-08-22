@@ -101,5 +101,5 @@ function isUuid(value: string): boolean {
 }
 
 function validMemberId(value: string): boolean {
-  return value.length > 0 && value.length <= 200;
+  return isUuid(value);
 }

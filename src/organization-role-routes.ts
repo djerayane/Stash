@@ -16,6 +16,18 @@ export function organizationRoleRoutes(
   return {
     matches: (_request, url) => rolesPath.test(url.pathname) || memberPath.test(url.pathname),
     async handle(request, response, url) {
+      const rolesMatch = url.pathname.match(rolesPath);
+      const memberMatch = url.pathname.match(memberPath);
+      let organizationId: string;
+      let memberId: string | undefined;
+      try {
+        organizationId = decodeUuid((rolesMatch ?? memberMatch)![1]!);
+        memberId = memberMatch ? decodeUuid(memberMatch[2]!) : undefined;
+      } catch {
+        invalidInput(response);
+        return true;
+      }
+
       const access = await memberAccess.authenticateBearer(request.headers.authorization);
       if (!access) {
         json(response, 401, { error: "unauthorized", message: "A valid Member session is required." });
@@ -23,10 +35,6 @@ export function organizationRoleRoutes(
       }
 
       try {
-        const rolesMatch = url.pathname.match(rolesPath);
-        const memberMatch = url.pathname.match(memberPath);
-        const organizationId = decodeURIComponent((rolesMatch ?? memberMatch)![1]!);
-
         if (rolesMatch) {
           if (!await service.authorizeOwner(organizationId, access.accountId)) {
             forbidden(response);
@@ -45,21 +53,20 @@ export function organizationRoleRoutes(
           return true;
         }
 
-        const memberId = decodeURIComponent(memberMatch![2]!);
         let result;
         if (request.method === "PUT" && url.pathname.endsWith("/role")) {
           const input = await readJson(request);
-          result = await service.assign(organizationId, access.accountId, memberId, input);
+          result = await service.assign(organizationId, access.accountId, memberId!, input);
           if (result === "updated") {
             json(response, 200, {
               organizationId,
-              memberId,
+              memberId: memberId!,
               role: (input as { role: BuiltInOrganizationRole }).role,
             });
             return true;
           }
         } else if (request.method === "DELETE" && !url.pathname.endsWith("/role")) {
-          result = await service.remove(organizationId, access.accountId, memberId);
+          result = await service.remove(organizationId, access.accountId, memberId!);
           if (result === "removed") {
             response.writeHead(204, { "cache-control": "no-store" });
             response.end();
@@ -82,7 +89,7 @@ export function organizationRoleRoutes(
         }
       } catch (error) {
         if (error instanceof InvalidOrganizationRoleInput) {
-          json(response, 422, { error: "invalid_input", message: "Organization, Member, and built-in Role values must be valid." });
+          invalidInput(response);
         } else if (error instanceof SyntaxError) {
           json(response, 400, { error: "invalid_json", message: "Request body must be valid JSON." });
         } else {
@@ -99,4 +106,19 @@ function forbidden(response: Parameters<typeof json>[0]): void {
     error: "organization_forbidden",
     message: "Only an Organization Owner can manage built-in Roles.",
   });
+}
+
+function invalidInput(response: Parameters<typeof json>[0]): void {
+  json(response, 422, {
+    error: "invalid_input",
+    message: "Organization, Member, and built-in Role values must be valid.",
+  });
+}
+
+function decodeUuid(value: string): string {
+  const decoded = decodeURIComponent(value);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(decoded)) {
+    throw new InvalidOrganizationRoleInput();
+  }
+  return decoded;
 }
