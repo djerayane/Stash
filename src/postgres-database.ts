@@ -306,17 +306,20 @@ export class PostgresDatabase implements
   async createMobileCapture(
     memberId: string,
     clientCaptureId: string,
+    payloadDigest: string,
     note: NoteRecord,
     projection: PortableNoteProjection,
-  ): Promise<{ status: "created" | "duplicate"; noteId: string } | { status: "workspace_forbidden" | "project_forbidden" }> {
+  ): Promise<{ status: "created" | "duplicate"; noteId: string } | { status: "workspace_forbidden" | "project_forbidden" | "conflict" }> {
     return this.#withTransaction(async (client) => {
       await this.#ensureNoteSchema(client);
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [memberId, clientCaptureId]);
-      const receipt = await client.query<{ note_id: string }>(
-        "SELECT note_id FROM stash_mobile_capture_receipts WHERE account_id = $1 AND client_capture_id = $2",
+      const receipt = await client.query<{ note_id: string; payload_digest: string | null }>(
+        "SELECT note_id, payload_digest FROM stash_mobile_capture_receipts WHERE account_id = $1 AND client_capture_id = $2",
         [memberId, clientCaptureId],
       );
-      if (receipt.rows[0]) return { status: "duplicate", noteId: receipt.rows[0].note_id };
+      if (receipt.rows[0]) return receipt.rows[0].payload_digest === payloadDigest
+        ? { status: "duplicate", noteId: receipt.rows[0].note_id }
+        : { status: "conflict" };
       const access = await client.query<{ allowed: boolean }>(
         `SELECT ((owner_type = 'personal' AND personal_owner_id = $2) OR
           (owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
@@ -336,8 +339,8 @@ export class PostgresDatabase implements
       );
       await this.#recordPortableProjection(client, "Note", note.id, "stash.note.v1", projection);
       await client.query(
-        "INSERT INTO stash_mobile_capture_receipts (account_id, client_capture_id, note_id) VALUES ($1, $2, $3)",
-        [memberId, clientCaptureId, note.id],
+        "INSERT INTO stash_mobile_capture_receipts (account_id, client_capture_id, note_id, payload_digest) VALUES ($1, $2, $3, $4)",
+        [memberId, clientCaptureId, note.id, payloadDigest],
       );
       return { status: "created", noteId: note.id };
     });
@@ -1569,8 +1572,10 @@ export class PostgresDatabase implements
         account_id UUID NOT NULL REFERENCES stash_accounts(id),
         client_capture_id UUID NOT NULL,
         note_id UUID NOT NULL REFERENCES stash_notes(id),
+        payload_digest TEXT,
         PRIMARY KEY (account_id, client_capture_id)
       );
+      ALTER TABLE stash_mobile_capture_receipts ADD COLUMN IF NOT EXISTS payload_digest TEXT;
       ALTER TABLE stash_notes ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
       CREATE TABLE IF NOT EXISTS stash_note_links (
         id UUID PRIMARY KEY, workspace_id UUID NOT NULL REFERENCES stash_workspaces(id),

@@ -37,7 +37,7 @@ class MemoryEncryptedStore implements EncryptedMobileCaptureStore {
 
 class MobileProtocolDatabase implements DatabaseProbe, MobileCaptureRepository {
   readonly notes = new Map<string, NoteRecord>();
-  readonly receipts = new Map<string, string>();
+  readonly receipts = new Map<string, { noteId: string; payloadDigest: string }>();
   failure: Error | undefined;
 
   async verifyConnection() {}
@@ -50,14 +50,16 @@ class MobileProtocolDatabase implements DatabaseProbe, MobileCaptureRepository {
       ? { status: "found" as const, projects: [{ id: projectId, name: "Launch" }], tags: ["mobile"] }
       : { status: "workspace_forbidden" as const };
   }
-  async createMobileCapture(memberId: string, clientCaptureId: string, note: NoteRecord, projection: PortableNoteProjection) {
+  async createMobileCapture(memberId: string, clientCaptureId: string, payloadDigest: string, note: NoteRecord, projection: PortableNoteProjection) {
     if (this.failure) throw this.failure;
     const existing = this.receipts.get(clientCaptureId);
-    if (existing) return { status: "duplicate" as const, noteId: existing };
+    if (existing) return existing.payloadDigest === payloadDigest
+      ? { status: "duplicate" as const, noteId: existing.noteId }
+      : { status: "conflict" as const };
     if (memberId !== "ada" || note.workspaceId !== workspaceId) return { status: "workspace_forbidden" as const };
     if (note.projectId && note.projectId !== projectId) return { status: "project_forbidden" as const };
     this.notes.set(note.id, note);
-    this.receipts.set(clientCaptureId, note.id);
+    this.receipts.set(clientCaptureId, { noteId: note.id, payloadDigest });
     return { status: "created" as const, noteId: note.id };
   }
 }
@@ -130,6 +132,42 @@ describe("offline mobile capture synchronization", () => {
     assert.equal((await client.sync()).status, "synced");
     assert.equal(database.notes.size, 1);
     assert.equal((await client.outbox()).length, 0);
+  });
+
+  it("accepts a semantic duplicate despite a different creation timestamp", async () => {
+    const { database, baseUrl } = await run();
+    const id = "44444444-4444-4444-8444-444444444444";
+    const body = { protocol: "stash.mobile-capture.v1", id, kind: "text", content: "  Same thought  ",
+      tags: [" mobile ", "mobile"], createdAt: "2026-08-22T08:00:00+02:00" };
+    const first = await fetch(`${baseUrl}/api/mobile/v1/workspaces/${workspaceId}/captures`, {
+      method: "POST", headers: { authorization: "Bearer member-ada", "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    assert.equal(first.status, 201);
+
+    const duplicate = await fetch(`${baseUrl}/api/mobile/v1/workspaces/${workspaceId}/captures`, {
+      method: "POST", headers: { authorization: "Bearer member-ada", "content-type": "application/json" },
+      body: JSON.stringify({ ...body, content: "Same thought", tags: ["mobile"], createdAt: "2026-08-23T18:30:00-04:00" }),
+    });
+    assert.equal(duplicate.status, 200);
+    assert.equal((await duplicate.json() as { status: string }).status, "duplicate");
+    assert.equal(database.notes.size, 1);
+  });
+
+  it("returns a visible conflict and retains a reused capture ID with different content", async () => {
+    const { baseUrl } = await run();
+    const store = new MemoryEncryptedStore();
+    const client = new MobileCaptureClient(store, fetch, { allowInsecureInstanceForTest: true });
+    await client.pair({ instanceUrl: baseUrl, memberToken: "member-ada", workspaceId });
+    const original = await client.captureText("Original thought");
+    assert.equal((await client.sync()).status, "synced");
+
+    await store.saveCapture({ ...original, content: "Different thought", attempts: 0 });
+    const conflict = await client.sync();
+    assert.deepEqual(conflict, { status: "attention_required", count: 0, error: "capture_conflict" });
+    const [retained] = await client.outbox();
+    assert.equal(retained?.id, original.id);
+    assert.equal(retained?.attempts, 1);
+    assert.match(retained?.lastError ?? "", /different payload/i);
   });
 
   it("captures checklists with cached structure and retains visible terminal failures", async () => {
