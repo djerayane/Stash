@@ -1,6 +1,7 @@
 # Portable projection creation records
 
-Stash records a versioned JSON projection event whenever it creates a Workspace or Project. The
+Stash records a versioned JSON projection event whenever it creates portable domain state, including
+Workspaces, Projects, Notes, and Repository Connections. The
 event is inserted into `stash_portable_projection_outbox` in the same PostgreSQL transaction as
 the durable object. Creation succeeds only when both records commit; an outbox failure rolls back
 the object and the API reports a recoverable failure.
@@ -120,3 +121,44 @@ Importers map `guest.localAccountId` only through an explicit stable-reference m
 local account is mapped, they create an Identity Stub that preserves `displayName`; names alone
 never select or impersonate a local account. Projection failure rolls back both token acceptance
 and every Project grant, leaving the invitation retryable.
+
+## `stash.repository-connection.v1`
+
+Repository Connections project only durable, non-secret meaning. The stable connection identity,
+provider, readable repository URL, Organization identity, creator attribution, and same-Organization
+Project relationships are portable:
+
+```json
+{
+  "schema": "stash.repository-connection.v1",
+  "id": "622910d0-cb95-42ad-9445-688b11ef9342",
+  "provider": "github",
+  "repositoryUrl": "https://github.com/acme/platform",
+  "organization": {
+    "localOrganizationId": "c4c75c6b-68f7-44e0-b6d3-89920d216dc9",
+    "displayName": "Acme"
+  },
+  "createdBy": {
+    "localAccountId": "dd24a52e-f591-42a8-90af-a981e1449877",
+    "displayName": "Ada Lovelace",
+    "attribution": "recorded"
+  },
+  "projectIds": ["2a940fff-b3d9-4ef5-b55f-cc150b16b83e"]
+}
+```
+
+GitHub installation IDs, repository provider IDs, installation tokens, and the Instance App private
+key are operational Instance state and never appear in this schema. On import, unavailable local
+Organization and creator identities retain their display names; unavailable creators degrade to
+Identity Stubs and are never matched by name automatically. Project IDs preserve stable relationships
+and are reconciled through the same explicit stable-identity mapping used by Project imports.
+Connections upgraded from the pre-projection schema select a current Owner or Admin as a migration
+identity and set `createdBy.attribution` to `inferred-during-upgrade`; consumers must not present that
+identity as a historically recorded creator. Newly created connections use `recorded`.
+The upgrade inserts revision 1 for every legacy connection, including its existing Project links,
+before removing any formerly persisted installation token. Projection backfill and credential removal
+commit together; failure leaves the old state retryable, and repeated startup cannot duplicate revision 1.
+
+Creation and each Project attachment insert a new outbox revision in the same PostgreSQL transaction
+as the operational mutation. If projection recording fails, the Repository Connection or attachment
+rolls back. This keeps exported relationships synchronized without exposing provider credentials.

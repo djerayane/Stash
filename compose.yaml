@@ -35,6 +35,8 @@ services:
       WEBAUTHN_RP_NAME: ${WEBAUTHN_RP_NAME:-Stash}
       SMTP_URL: ${SMTP_URL:-}
       EMAIL_RECOVERY_FROM: ${EMAIL_RECOVERY_FROM:-}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
       HOST: 0.0.0.0
       PORT: 3000
     depends_on:

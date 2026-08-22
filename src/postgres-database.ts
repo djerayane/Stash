@@ -23,10 +23,17 @@ import type {
   WorkspaceRecord,
 } from "./workspaces-projects.js";
 import type { MemberLocalizationPreferences, MemberLocalizationRepository } from "./member-localization.js";
+import type { PortableRepositoryConnectionProjection, RepositoryConnectionRecord, RepositoryConnectionRepository } from "./repository-connections.js";
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
 const authenticationKeyCheckLockId = 795_541_992;
+const portableProjectionObjectKinds = ["Workspace", "Project", "Note", "GuestProjectAccess", "RepositoryConnection"] as const;
+const portableProjectionObjectKindSql = portableProjectionObjectKinds.map((kind) => `'${kind}'`).join(", ");
+const repositoryConnectionSelect = `SELECT connection.id, connection.organization_id, connection.provider, connection.installation_id,
+  connection.repository_id, connection.repository_url, connection.created_by_account_id, connection.created_by_attribution,
+  ARRAY(SELECT project_id FROM stash_repository_connection_projects link WHERE link.connection_id = connection.id ORDER BY project_id) AS project_ids
+  FROM stash_repository_connections connection`;
 
 export class PostgresDatabase implements
   DatabaseProbe,
@@ -38,7 +45,8 @@ export class PostgresDatabase implements
   AccountRecoveryRepository,
   OrganizationRoleRepository,
   MemberLocalizationRepository,
-  InvitationRepository
+  InvitationRepository,
+  RepositoryConnectionRepository
 {
   readonly #pool: Pool;
   readonly #authenticationSecrets: AuthenticationSecretCodec;
@@ -359,6 +367,70 @@ export class PostgresDatabase implements
     return result.rows[0]?.role;
   }
 
+  async findRepositoryConnectionById(organizationId: string, connectionId: string): Promise<RepositoryConnectionRecord | undefined> {
+    await this.#ensureRepositoryConnectionSchema();
+    const result = await this.#pool.query<RepositoryConnectionRow>(
+      `${repositoryConnectionSelect} WHERE organization_id = $1 AND connection.id = $2`,
+      [organizationId, connectionId],
+    );
+    return result.rows[0] ? repositoryConnectionRecord(result.rows[0]) : undefined;
+  }
+
+  async createRepositoryConnection(actorId: string, record: RepositoryConnectionRecord) {
+    await this.#ensureRepositoryConnectionSchema();
+    return this.#withTransaction(async (client) => {
+      const memberships = await this.#lockedOrganizationMemberships(client, record.organizationId);
+      if (!this.#canManageRepositoryConnections(memberships, actorId)) return { status: "forbidden" as const };
+      const existing = await client.query<RepositoryConnectionRow>(`${repositoryConnectionSelect} WHERE organization_id = $1 AND repository_id = $2 FOR UPDATE`, [record.organizationId, record.repositoryId]);
+      if (existing.rows[0]) return { status: "existing" as const, record: repositoryConnectionRecord(existing.rows[0]) };
+      await client.query(`INSERT INTO stash_repository_connections (id, organization_id, provider, installation_id, repository_id, repository_url, created_by_account_id, created_by_attribution) VALUES ($1,$2,$3,$4,$5,$6,$7,'recorded')`, [record.id, record.organizationId, record.provider, record.installationId, record.repositoryId, record.repositoryUrl, actorId]);
+      await this.#recordRepositoryConnectionProjection(client, record, 1);
+      return { status: "created" as const, record };
+    });
+  }
+
+  async listRepositoryConnections(organizationId: string): Promise<RepositoryConnectionRecord[]> {
+    await this.#ensureRepositoryConnectionSchema();
+    const result = await this.#pool.query<RepositoryConnectionRow>(
+      `${repositoryConnectionSelect} WHERE organization_id = $1 ORDER BY repository_url, id`,
+      [organizationId],
+    );
+    return result.rows.map(repositoryConnectionRecord);
+  }
+
+  async attachRepositoryConnectionToProject(actorId: string, organizationId: string, connectionId: string, projectId: string) {
+    await this.#ensureRepositoryConnectionSchema();
+    return this.#withTransaction(async (client) => {
+      const memberships = await this.#lockedOrganizationMemberships(client, organizationId);
+      if (!this.#canManageRepositoryConnections(memberships, actorId)) return "forbidden" as const;
+      const result = await client.query(
+      `INSERT INTO stash_repository_connection_projects (connection_id, project_id)
+       SELECT connection.id, project.id
+       FROM stash_repository_connections connection
+       JOIN stash_projects project ON project.id = $3
+       JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
+       WHERE connection.id = $2 AND connection.organization_id = $1
+         AND workspace.owner_type = 'organization' AND workspace.organization_owner_id = $1
+       ON CONFLICT DO NOTHING`,
+      [organizationId, connectionId, projectId],
+    );
+      if (!result.rowCount) {
+        const existing = await client.query(
+      `SELECT 1 FROM stash_repository_connection_projects link
+       JOIN stash_repository_connections connection ON connection.id = link.connection_id
+       WHERE connection.organization_id = $1 AND link.connection_id = $2 AND link.project_id = $3`,
+      [organizationId, connectionId, projectId],
+    );
+        if (!existing.rowCount) return "not_found" as const;
+      }
+      const refreshed = await client.query<RepositoryConnectionRow>(`${repositoryConnectionSelect} WHERE connection.organization_id = $1 AND connection.id = $2`, [organizationId, connectionId]);
+      const record = repositoryConnectionRecord(refreshed.rows[0]!);
+      const revision = await client.query<{ revision: number }>(`SELECT COALESCE(MAX(revision), 0) + 1 AS revision FROM stash_portable_projection_outbox WHERE object_kind = 'RepositoryConnection' AND object_id = $1`, [connectionId]);
+      await this.#recordRepositoryConnectionProjection(client, record, Number(revision.rows[0]!.revision));
+      return "attached" as const;
+    });
+  }
+
   async assignBuiltInRole(
     organizationId: string,
     actorId: string,
@@ -545,6 +617,14 @@ export class PostgresDatabase implements
     return memberships.some(
       (membership) => membership.account_id === accountId && membership.role === "Owner",
     );
+  }
+
+  #canManageRepositoryConnections(
+    memberships: ReadonlyArray<{ account_id: string; role: BuiltInOrganizationRole }>,
+    accountId: string,
+  ): boolean {
+    return memberships.some((membership) => membership.account_id === accountId
+      && (membership.role === "Owner" || membership.role === "Admin"));
   }
 
   async saveOidcConfiguration(configuration: OidcOrganizationConfiguration): Promise<void> {
@@ -882,6 +962,93 @@ export class PostgresDatabase implements
     `);
   }
 
+  async #ensureRepositoryConnectionSchema(): Promise<void> {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureWorkspaceProjectSchema(client);
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS stash_repository_connections (
+          id UUID PRIMARY KEY,
+          organization_id UUID NOT NULL REFERENCES stash_organizations(id),
+          provider TEXT NOT NULL CHECK (provider = 'github'),
+          installation_id BIGINT NOT NULL CHECK (installation_id > 0),
+          repository_id TEXT NOT NULL CHECK (length(repository_id) > 0),
+          repository_url TEXT NOT NULL CHECK (length(repository_url) > 0),
+          created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id),
+          created_by_attribution TEXT NOT NULL CONSTRAINT stash_repository_connections_creator_attribution_check CHECK (created_by_attribution IN ('recorded', 'inferred-during-upgrade')),
+          UNIQUE (organization_id, repository_id)
+        );
+        CREATE TABLE IF NOT EXISTS stash_repository_connection_projects (
+          connection_id UUID NOT NULL REFERENCES stash_repository_connections(id),
+          project_id UUID NOT NULL REFERENCES stash_projects(id),
+          PRIMARY KEY (connection_id, project_id)
+        )
+      `);
+      await client.query("SELECT pg_advisory_lock(1094218495)");
+      await client.query("BEGIN");
+      try {
+        await client.query(`
+          ALTER TABLE stash_repository_connections ADD COLUMN IF NOT EXISTS created_by_account_id UUID REFERENCES stash_accounts(id);
+          ALTER TABLE stash_repository_connections ADD COLUMN IF NOT EXISTS created_by_attribution TEXT NOT NULL DEFAULT 'inferred-during-upgrade';
+          UPDATE stash_repository_connections connection
+          SET created_by_account_id = (
+            SELECT candidate.account_id
+            FROM stash_organization_memberships candidate
+            WHERE candidate.organization_id = connection.organization_id AND candidate.role IN ('Owner', 'Admin')
+            ORDER BY CASE candidate.role WHEN 'Owner' THEN 0 ELSE 1 END, candidate.account_id
+            LIMIT 1
+          )
+          WHERE connection.created_by_account_id IS NULL;
+          DO $creator$
+          BEGIN
+            IF EXISTS (SELECT 1 FROM stash_repository_connections WHERE created_by_account_id IS NULL) THEN
+              RAISE EXCEPTION 'Cannot attribute an upgraded Repository Connection without an Organization Owner or Admin';
+            END IF;
+          END
+          $creator$;
+          ALTER TABLE stash_repository_connections ALTER COLUMN created_by_account_id SET NOT NULL;
+          DO $attribution$
+          BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'stash_repository_connections_creator_attribution_check') THEN
+              ALTER TABLE stash_repository_connections ADD CONSTRAINT stash_repository_connections_creator_attribution_check
+                CHECK (created_by_attribution IN ('recorded', 'inferred-during-upgrade'));
+            END IF;
+          END
+          $attribution$;
+        `);
+        await client.query(`
+          INSERT INTO stash_portable_projection_outbox
+            (object_kind, object_id, revision, projection_schema, payload)
+          SELECT 'RepositoryConnection', connection.id, 1, 'stash.repository-connection.v1',
+            jsonb_build_object(
+              'schema', 'stash.repository-connection.v1',
+              'id', connection.id,
+              'provider', 'github',
+              'repositoryUrl', connection.repository_url,
+              'organization', jsonb_build_object('localOrganizationId', organization.id, 'displayName', organization.name),
+              'createdBy', jsonb_build_object('localAccountId', creator.id, 'displayName', creator.name, 'attribution', connection.created_by_attribution),
+              'projectIds', to_jsonb(ARRAY(
+                SELECT link.project_id FROM stash_repository_connection_projects link
+                WHERE link.connection_id = connection.id ORDER BY link.project_id
+              ))
+            )
+          FROM stash_repository_connections connection
+          JOIN stash_organizations organization ON organization.id = connection.organization_id
+          JOIN stash_accounts creator ON creator.id = connection.created_by_account_id
+          ON CONFLICT (object_kind, object_id, revision) DO NOTHING
+        `);
+        await client.query("ALTER TABLE stash_repository_connections DROP COLUMN IF EXISTS protected_credential");
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        throw error;
+      }
+    } finally {
+      await client.query("SELECT pg_advisory_unlock(1094218495)").catch(() => undefined);
+      client.release();
+    }
+  }
+
   async #ensureWorkspaceProjectSchema(client: PoolClient): Promise<void> {
     await this.#ensureBootstrapSchema(client);
     await client.query(`
@@ -906,17 +1073,8 @@ export class PostgresDatabase implements
         created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id),
         UNIQUE (workspace_id, project_key)
       );
-      CREATE TABLE IF NOT EXISTS stash_portable_projection_outbox (
-        object_kind TEXT NOT NULL CHECK (object_kind IN ('Workspace', 'Project', 'Note')),
-        object_id UUID NOT NULL,
-        revision INTEGER NOT NULL CHECK (revision > 0),
-        projection_schema TEXT NOT NULL,
-        payload JSONB NOT NULL,
-        state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'projected')),
-        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (object_kind, object_id, revision)
-      );
     `);
+    await this.#ensurePortableProjectionSchema(client);
   }
 
   async #ensureNoteSchema(client: PoolClient): Promise<void> {
@@ -932,25 +1090,6 @@ export class PostgresDatabase implements
         created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id),
         created_at TIMESTAMPTZ NOT NULL
       )
-    `);
-    await client.query("SELECT pg_advisory_xact_lock(1094218495)");
-    await client.query(`
-      DO $migration$
-      BEGIN
-        IF EXISTS (
-          SELECT 1 FROM pg_constraint
-          WHERE conrelid = 'stash_portable_projection_outbox'::regclass
-            AND conname = 'stash_portable_projection_outbox_object_kind_check'
-            AND pg_get_constraintdef(oid) NOT LIKE '%Note%'
-        ) THEN
-          ALTER TABLE stash_portable_projection_outbox
-            DROP CONSTRAINT stash_portable_projection_outbox_object_kind_check;
-          ALTER TABLE stash_portable_projection_outbox
-            ADD CONSTRAINT stash_portable_projection_outbox_object_kind_check
-            CHECK (object_kind IN ('Workspace', 'Project', 'Note'));
-        END IF;
-      END
-      $migration$
     `);
   }
 
@@ -1011,18 +1150,43 @@ export class PostgresDatabase implements
           DELETE FROM stash_invitations WHERE token_lookup IS NULL OR token_secret IS NULL;
           ALTER TABLE stash_invitations DROP COLUMN token_hash;
         END IF;
-        IF EXISTS (
-          SELECT 1 FROM pg_constraint WHERE conrelid = 'stash_portable_projection_outbox'::regclass
-          AND conname = 'stash_portable_projection_outbox_object_kind_check'
-          AND pg_get_constraintdef(oid) NOT LIKE '%GuestProjectAccess%'
-        ) THEN
-          ALTER TABLE stash_portable_projection_outbox DROP CONSTRAINT stash_portable_projection_outbox_object_kind_check;
-          ALTER TABLE stash_portable_projection_outbox ADD CONSTRAINT stash_portable_projection_outbox_object_kind_check
-            CHECK (object_kind IN ('Workspace', 'Project', 'Note', 'GuestProjectAccess'));
-        END IF;
       END
       $migration$;
     `);
+  }
+
+  async #ensurePortableProjectionSchema(client: PoolClient): Promise<void> {
+    await client.query("SELECT pg_advisory_lock(1094218495)");
+    try {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS stash_portable_projection_outbox (
+          object_kind TEXT NOT NULL CONSTRAINT stash_portable_projection_outbox_object_kind_check CHECK (object_kind IN (${portableProjectionObjectKindSql})),
+          object_id UUID NOT NULL,
+          revision INTEGER NOT NULL CHECK (revision > 0),
+          projection_schema TEXT NOT NULL,
+          payload JSONB NOT NULL,
+          state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'projected')),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (object_kind, object_id, revision)
+        );
+        DO $portable_projection$
+        BEGIN
+          IF EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conrelid = 'stash_portable_projection_outbox'::regclass
+              AND conname = 'stash_portable_projection_outbox_object_kind_check'
+              AND (${portableProjectionObjectKinds.map((kind) => `pg_get_constraintdef(oid) NOT LIKE '%${kind}%'`).join(" OR ")})
+          ) THEN
+            ALTER TABLE stash_portable_projection_outbox DROP CONSTRAINT stash_portable_projection_outbox_object_kind_check;
+            ALTER TABLE stash_portable_projection_outbox ADD CONSTRAINT stash_portable_projection_outbox_object_kind_check
+              CHECK (object_kind IN (${portableProjectionObjectKindSql}));
+          END IF;
+        END
+        $portable_projection$;
+      `);
+    } finally {
+      await client.query("SELECT pg_advisory_unlock(1094218495)").catch(() => undefined);
+    }
   }
 
   async #recordPortableProjection(
@@ -1037,6 +1201,31 @@ export class PostgresDatabase implements
         (object_kind, object_id, revision, projection_schema, payload)
        VALUES ($1, $2, 1, $3, $4::jsonb)`,
       [objectKind, objectId, projectionSchema, JSON.stringify(payload)],
+    );
+  }
+
+  async #recordRepositoryConnectionProjection(client: PoolClient, record: RepositoryConnectionRecord, revision: number): Promise<void> {
+    const identities = await client.query<{ organization_name: string; account_name: string }>(
+      `SELECT organization.name AS organization_name, account.name AS account_name
+       FROM stash_organizations organization CROSS JOIN stash_accounts account
+       WHERE organization.id = $1 AND account.id = $2`,
+      [record.organizationId, record.createdByMemberId],
+    );
+    const identity = identities.rows[0];
+    if (!identity) throw new Error("Repository Connection projection identity is unavailable");
+    const projection: PortableRepositoryConnectionProjection = {
+      schema: "stash.repository-connection.v1",
+      id: record.id,
+      provider: "github",
+      repositoryUrl: record.repositoryUrl,
+      organization: { localOrganizationId: record.organizationId, displayName: identity.organization_name },
+      createdBy: { localAccountId: record.createdByMemberId, displayName: identity.account_name, attribution: record.createdByAttribution },
+      projectIds: record.projectIds,
+    };
+    await client.query(
+      `INSERT INTO stash_portable_projection_outbox (object_kind, object_id, revision, projection_schema, payload)
+       VALUES ('RepositoryConnection', $1, $2, 'stash.repository-connection.v1', $3::jsonb)`,
+      [record.id, revision, JSON.stringify(projection)],
     );
   }
 
@@ -1066,4 +1255,8 @@ interface MemberLocalizationRow {
   date_format: MemberLocalizationPreferences["dateFormat"];
   week_starts_on: MemberLocalizationPreferences["weekStartsOn"];
   updated_at: Date | string;
+}
+interface RepositoryConnectionRow { id: string; organization_id: string; provider: "github"; installation_id: string | number; repository_id: string; repository_url: string; created_by_account_id: string; created_by_attribution: "recorded" | "inferred-during-upgrade"; project_ids: string[] }
+function repositoryConnectionRecord(row: RepositoryConnectionRow): RepositoryConnectionRecord {
+  return { id: row.id, organizationId: row.organization_id, provider: row.provider, installationId: Number(row.installation_id), repositoryId: row.repository_id, repositoryUrl: row.repository_url, createdByMemberId: row.created_by_account_id, createdByAttribution: row.created_by_attribution, projectIds: row.project_ids };
 }
