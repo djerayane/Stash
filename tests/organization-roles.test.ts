@@ -180,6 +180,17 @@ describe("managing built-in Organization Roles", () => {
       error: "built_in_role_immutable",
       message: "Owner, Admin, and Member Roles cannot be edited or deleted.",
     });
+
+    for (const roleName of ["SuperAdmin", "%E0%A4%A"]) {
+      const unknownRole = await request(
+        baseUrl,
+        `/api/organizations/${organizationId}/roles/${roleName}`,
+        `member-${adaId}`,
+        { method: "DELETE" },
+      );
+      assert.equal(unknownRole.status, 422, roleName);
+      assert.equal((await unknownRole.json() as { error: string }).error, "invalid_input", roleName);
+    }
   });
 
   it("makes missing sessions, members, and recoverable persistence failures visible", async () => {

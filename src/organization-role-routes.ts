@@ -1,5 +1,6 @@
 import { json, readJson, type HttpRoute } from "./http-routing.js";
 import {
+  builtInOrganizationRoles,
   InvalidOrganizationRoleInput,
   type BuiltInOrganizationRole,
   type OrganizationRoleService,
@@ -20,9 +21,11 @@ export function organizationRoleRoutes(
       const memberMatch = url.pathname.match(memberPath);
       let organizationId: string;
       let memberId: string | undefined;
+      let roleName: BuiltInOrganizationRole | undefined;
       try {
         organizationId = decodeUuid((rolesMatch ?? memberMatch)![1]!);
         memberId = memberMatch ? decodeUuid(memberMatch[2]!) : undefined;
+        roleName = rolesMatch?.[2] ? decodeBuiltInRole(rolesMatch[2]) : undefined;
       } catch {
         invalidInput(response);
         return true;
@@ -42,7 +45,7 @@ export function organizationRoleRoutes(
           }
           if (request.method === "GET" && !rolesMatch[2]) {
             json(response, 200, { roles: service.listBuiltInRoles() });
-          } else if ((request.method === "PUT" || request.method === "DELETE") && rolesMatch[2]) {
+          } else if ((request.method === "PUT" || request.method === "DELETE") && roleName) {
             json(response, 409, {
               error: "built_in_role_immutable",
               message: "Owner, Admin, and Member Roles cannot be edited or deleted.",
@@ -121,4 +124,12 @@ function decodeUuid(value: string): string {
     throw new InvalidOrganizationRoleInput();
   }
   return decoded;
+}
+
+function decodeBuiltInRole(value: string): BuiltInOrganizationRole {
+  const decoded = decodeURIComponent(value);
+  if (!builtInOrganizationRoles.includes(decoded as BuiltInOrganizationRole)) {
+    throw new InvalidOrganizationRoleInput();
+  }
+  return decoded as BuiltInOrganizationRole;
 }
