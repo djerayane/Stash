@@ -11,6 +11,7 @@ import { createRecoveryEmailSender } from "./recovery-email.js";
 import { EmailRecoveryWorker } from "./email-recovery-worker.js";
 import { startRedisAcceleration, type RunningRedisAcceleration } from "./redis-acceleration.js";
 import { WorkspaceProjectService } from "./workspaces-projects.js";
+import { OrganizationRoleService } from "./organization-roles.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -51,6 +52,7 @@ async function main(): Promise<void> {
     ownerBootstrap: new OwnerBootstrapService(database),
     passwordAuth,
     workspaceProjects: new WorkspaceProjectService(database),
+    organizationRoles: new OrganizationRoleService(database),
     oidcAuth: new OidcAuthService(database),
     oidcManagement: new OidcManagementService(database),
     oidcCallbackOrigin: publicOrigin,
