@@ -37,6 +37,14 @@ export interface PortableTaskProjection {
   key: string; status: { id: string; name: string; category: "unstarted" | "started" | "completed" };
   sourceNoteIds: string[]; createdAt: string; createdBy: PortableIdentity;
   sourceBlocks?: TaskSourceBlockReference[];
+  assigneeIds?: string[];
+  priority?: "none" | "low" | "medium" | "high" | "urgent";
+  labelNames?: string[];
+  dueDate?: string;
+  estimate?: number;
+  linkedNoteIds?: string[];
+  dependencies?: Array<{ taskId: string; type: "depends_on" | "required_by" }>;
+  developmentLinks?: Array<{ provider: string; url: string; kind: "branch" | "commit" | "pull_request" }>;
 }
 
 export type TaskCreation = Omit<PortableTaskProjection, "schema" | "key" | "status">;
