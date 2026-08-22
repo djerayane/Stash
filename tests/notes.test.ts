@@ -39,7 +39,7 @@ class ProtocolCompatibleNoteDatabase implements DatabaseProbe, NoteRepository {
   }
 
   async listInboxNotes() { return { status: "found" as const, notes: [] }; }
-  async triageNote() { return "note_not_found" as const; }
+  async triageNote() { return { status: "note_not_found" as const }; }
 }
 
 const access: MemberAccessResolver = {

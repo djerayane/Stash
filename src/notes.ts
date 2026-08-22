@@ -30,14 +30,20 @@ export interface PortableNoteLinkProjection {
 
 export interface PortableTaskProjection {
   schema: "stash.task.v1"; id: string; workspaceId: string; projectId: string; title: string;
+  key: string; status: { id: string; name: string; category: "unstarted" | "started" | "completed" };
   sourceNoteIds: string[]; createdAt: string; createdBy: PortableIdentity;
 }
+
+export type TaskCreation = Omit<PortableTaskProjection, "schema" | "key" | "status">;
 
 export type NoteTriageResult =
   | { kind: "organized"; note: NoteRecord; projections: [PortableNoteStateProjection] }
   | { kind: "archived"; note: NoteRecord; projections: [PortableNoteStateProjection] }
   | { kind: "linked"; link: PortableNoteLinkProjection; projections: [PortableNoteLinkProjection] }
   | { kind: "task_created"; task: PortableTaskProjection; projections: [PortableTaskProjection] };
+
+export type NoteTriageChange = Exclude<NoteTriageResult, { kind: "task_created" }>
+  | { kind: "task_created"; task: TaskCreation; projections: [] };
 
 export interface PortableNoteProjection {
   schema: "stash.note.v1";
@@ -61,8 +67,9 @@ export interface NoteRepository {
   listInboxNotes(memberId: string, workspaceId: string): Promise<
     { status: "found"; notes: NoteRecord[] } | { status: "workspace_forbidden" }
   >;
-  triageNote(memberId: string, workspaceId: string, noteId: string, change: NoteTriageResult): Promise<
-    "updated" | "workspace_forbidden" | "project_forbidden" | "note_not_found" | "target_note_not_found"
+  triageNote(memberId: string, workspaceId: string, noteId: string, change: NoteTriageChange): Promise<
+    { status: "updated"; result: NoteTriageResult }
+    | { status: "workspace_forbidden" | "project_forbidden" | "note_not_found" | "target_note_not_found" }
   >;
 }
 
@@ -159,36 +166,48 @@ export class NoteService {
     const createdBy = await this.#repository.findPortableMemberIdentity(memberId);
     if (!createdBy) throw new Error("member_identity_unavailable");
     const now = new Date().toISOString();
-    let result: NoteTriageResult;
+    let change: NoteTriageChange;
     if (value.action === "organize") {
       if (typeof value.projectId !== "string" || !isUuid(value.projectId)
         || value.tags !== undefined && (!Array.isArray(value.tags) || value.tags.length > 50
           || value.tags.some((tag) => typeof tag !== "string" || !tag.trim() || tag.trim().length > 100))) {
         throw new InvalidNoteTriageInput();
       }
-      const existing = await this.#repository.listInboxNotes(memberId, workspaceId);
-      const note = existing.status === "found" ? existing.notes.find(({ id }) => id === noteId) : undefined;
-      if (!note) return { status: existing.status === "workspace_forbidden" ? existing.status : "note_not_found" };
+      const found = await this.#findInboxNote(memberId, workspaceId, noteId);
+      if (found.status !== "found") return { status: found.status };
+      const note = found.note;
       const organized = { ...note, projectId: value.projectId, tags: [...new Set((value.tags as string[] | undefined ?? note.tags).map((tag) => tag.trim()))] };
-      result = { kind: "organized", note: organized, projections: [{ schema: "stash.note.v2", note: publicNote(organized), createdBy }] };
+      const noteCreator = await this.#repository.findPortableMemberIdentity(note.createdByMemberId);
+      if (!noteCreator) throw new Error("member_identity_unavailable");
+      change = { kind: "organized", note: organized, projections: [{ schema: "stash.note.v2", note: publicNote(organized), createdBy: noteCreator }] };
     } else if (value.action === "archive" && Object.keys(value).length === 1) {
-      const existing = await this.#repository.listInboxNotes(memberId, workspaceId);
-      const note = existing.status === "found" ? existing.notes.find(({ id }) => id === noteId) : undefined;
-      if (!note) return { status: existing.status === "workspace_forbidden" ? existing.status : "note_not_found" };
+      const found = await this.#findInboxNote(memberId, workspaceId, noteId);
+      if (found.status !== "found") return { status: found.status };
+      const note = found.note;
       const archived = { ...note, archivedAt: now };
-      result = { kind: "archived", note: archived, projections: [{ schema: "stash.note.v2", note: publicNote(archived), createdBy }] };
+      const noteCreator = await this.#repository.findPortableMemberIdentity(note.createdByMemberId);
+      if (!noteCreator) throw new Error("member_identity_unavailable");
+      change = { kind: "archived", note: archived, projections: [{ schema: "stash.note.v2", note: publicNote(archived), createdBy: noteCreator }] };
     } else if (value.action === "link" && typeof value.targetNoteId === "string" && isUuid(value.targetNoteId)
       && value.targetNoteId !== noteId && Object.keys(value).length === 2) {
       const link = { schema: "stash.note-link.v1" as const, id: randomUUID(), workspaceId, sourceNoteId: noteId, targetNoteId: value.targetNoteId };
-      result = { kind: "linked", link, projections: [link] };
+      change = { kind: "linked", link, projections: [link] };
     } else if (value.action === "create_task" && typeof value.projectId === "string" && isUuid(value.projectId)
       && typeof value.title === "string" && value.title.trim().length > 0 && value.title.trim().length <= 500 && Object.keys(value).every((key) => ["action", "projectId", "title"].includes(key))) {
-      const task = { schema: "stash.task.v1" as const, id: randomUUID(), workspaceId, projectId: value.projectId,
+      const task = { id: randomUUID(), workspaceId, projectId: value.projectId,
         title: value.title.trim(), sourceNoteIds: [noteId], createdAt: now, createdBy };
-      result = { kind: "task_created", task, projections: [task] };
+      change = { kind: "task_created", task, projections: [] };
     } else throw new InvalidNoteTriageInput();
-    const status = await this.#repository.triageNote(memberId, workspaceId, noteId, result);
-    return status === "updated" ? { status, result } : { status };
+    return this.#repository.triageNote(memberId, workspaceId, noteId, change);
+  }
+
+  async #findInboxNote(memberId: string, workspaceId: string, noteId: string): Promise<
+    { status: "found"; note: NoteRecord } | { status: "workspace_forbidden" | "note_not_found" }
+  > {
+    const inbox = await this.#repository.listInboxNotes(memberId, workspaceId);
+    if (inbox.status === "workspace_forbidden") return inbox;
+    const note = inbox.notes.find(({ id }) => id === noteId);
+    return note ? { status: "found", note } : { status: "note_not_found" };
   }
 }
 

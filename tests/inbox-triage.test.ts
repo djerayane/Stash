@@ -6,6 +6,7 @@ import {
   NoteService,
   type NoteRecord,
   type NoteRepository,
+  type NoteTriageChange,
   type NoteTriageResult,
   type PortableNoteProjection,
 } from "../src/notes.js";
@@ -19,30 +20,40 @@ const targetNoteId = "44444444-4444-4444-8444-444444444444";
 class ProtocolCompatibleInboxDatabase implements DatabaseProbe, NoteRepository {
   readonly note: NoteRecord = {
     id: noteId, workspaceId, content: "Turn the release idea into work.", tags: [],
-    createdByMemberId: "ada", createdAt: "2026-08-22T10:00:00.000Z",
+    createdByMemberId: "grace", createdAt: "2026-08-22T10:00:00.000Z",
   };
   readonly projections: object[] = [];
   archived = false;
+  nextTaskNumber = 1;
   failure: Error | undefined;
 
   async verifyConnection() {}
   async close() {}
-  async findPortableMemberIdentity() { return { localAccountId: "ada", displayName: "Ada Lovelace" }; }
+  async findPortableMemberIdentity(memberId: string) {
+    return memberId === "grace"
+      ? { localAccountId: "grace", displayName: "Grace Hopper" }
+      : { localAccountId: "ada", displayName: "Ada Lovelace" };
+  }
   async createNote(_memberId: string, _note: NoteRecord, _projection: PortableNoteProjection) { return "created" as const; }
   async listInboxNotes(memberId: string, requestedWorkspaceId: string) {
     if (memberId !== "ada" || requestedWorkspaceId !== workspaceId) return { status: "workspace_forbidden" as const };
     return { status: "found" as const, notes: this.archived || this.note.projectId ? [] : [this.note] };
   }
-  async triageNote(memberId: string, requestedWorkspaceId: string, requestedNoteId: string, change: NoteTriageResult) {
+  async triageNote(memberId: string, requestedWorkspaceId: string, requestedNoteId: string, change: NoteTriageChange) {
     if (this.failure) throw this.failure;
-    if (memberId !== "ada" || requestedWorkspaceId !== workspaceId) return "workspace_forbidden" as const;
-    if (requestedNoteId !== noteId) return "note_not_found" as const;
+    if (memberId !== "ada" || requestedWorkspaceId !== workspaceId) return { status: "workspace_forbidden" as const };
+    if (requestedNoteId !== noteId) return { status: "note_not_found" as const };
     if (change.kind === "organized") {
-      if (change.note.projectId !== projectId) return "project_forbidden" as const;
+      if (change.note.projectId !== projectId) return { status: "project_forbidden" as const };
       Object.assign(this.note, change.note);
     } else if (change.kind === "archived") this.archived = true;
-    this.projections.push(...change.projections);
-    return "updated" as const;
+    const result: NoteTriageResult = change.kind === "task_created" ? (() => {
+      const task = { ...change.task, schema: "stash.task.v1" as const, key: `REL-${this.nextTaskNumber++}`,
+        status: { id: "55555555-5555-4555-8555-555555555555", name: "Backlog", category: "unstarted" as const } };
+      return { kind: "task_created" as const, task, projections: [task] };
+    })() : change;
+    this.projections.push(...result.projections);
+    return { status: "updated" as const, result };
   }
 }
 
@@ -93,6 +104,9 @@ describe("Inbox triage", () => {
     assert.deepEqual(body.note.tags, ["release"]);
     assert.equal(database.projections.length, 1);
     assert.equal((database.projections[0] as any).schema, "stash.note.v2");
+    assert.deepEqual((database.projections[0] as any).createdBy, {
+      localAccountId: "grace", displayName: "Grace Hopper",
+    });
   });
 
   it("archives, links, and creates actionable work while preserving the source Note", async () => {
@@ -108,8 +122,29 @@ describe("Inbox triage", () => {
       assert.equal(body.result, expectedKind);
       assert.equal(database.note.content, "Turn the release idea into work.");
       assert.ok(database.projections.length >= 1);
+      if (expectedKind === "task_created") {
+        assert.equal(body.task.key, "REL-1");
+        assert.deepEqual(body.task.status, {
+          id: "55555555-5555-4555-8555-555555555555", name: "Backlog", category: "unstarted",
+        });
+        assert.deepEqual(body.task.createdBy, { localAccountId: "ada", displayName: "Ada Lovelace" });
+      }
       await instance?.close(); instance = undefined;
     }
+  });
+
+  it("allocates durable Project-scoped Task Keys and one canonical default Workflow status", async () => {
+    const { baseUrl } = await run();
+    const first = await triage(baseUrl, { action: "create_task", projectId, title: "Ship release" });
+    const second = await triage(baseUrl, { action: "create_task", projectId, title: "Publish notes" });
+    assert.equal(first.status, 200);
+    assert.equal(second.status, 200);
+    assert.equal(((await first.json()) as any).task.key, "REL-1");
+    const secondTask = (await second.json() as any).task;
+    assert.equal(secondTask.key, "REL-2");
+    assert.deepEqual(secondTask.status, {
+      id: "55555555-5555-4555-8555-555555555555", name: "Backlog", category: "unstarted",
+    });
   });
 
   it("exposes authorization, invalid input, missing objects, and recoverable failures without partial changes", async () => {
