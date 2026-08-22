@@ -1097,6 +1097,7 @@ export class PostgresDatabase implements
       if (batch.changes.dependencies !== undefined) await client.query("SELECT pg_advisory_xact_lock(hashtext('stash-task-dependencies'),hashtext($1))", [writable.rows[0]!.workspace_id]);
       const current = await client.query<any>(`${taskPlanningSelect} FOR UPDATE OF task`, [projectId, taskKey, memberId]);
       const row = current.rows[0]; if (!row) return { status: "not_found" as const };
+      if (batch.baseRevision > Number(row.revision)) return { status: "invalid_revision" as const };
       const digest = taskEditDigest(batch);
       const prior = await client.query<{ digest: string; outcome: any }>(
         "SELECT digest, outcome FROM stash_task_edit_operations WHERE task_id = $1 AND operation_id = $2", [row.id, batch.operationId]);
@@ -1201,7 +1202,7 @@ export class PostgresDatabase implements
   }
 
   async #applyStructuredTaskChanges(client: PoolClient, memberId: string, row: any, update: TaskPlanningUpdate): Promise<boolean> {
-    if (update.statusId) { const status = await client.query("SELECT 1 FROM stash_workflow_statuses WHERE id=$1 AND project_id=$2", [update.statusId, row.project_id]); if (!status.rowCount) return false; }
+    if (update.statusId) { const status = await client.query("SELECT 1 FROM stash_workflow_statuses WHERE id=$1 AND project_id=$2 AND archived=FALSE", [update.statusId, row.project_id]); if (!status.rowCount) return false; }
     if (update.assigneeIds) { const result = await client.query(`SELECT account.id FROM stash_accounts account JOIN stash_workspaces workspace ON workspace.id=$2
       WHERE account.id=ANY($1::uuid[]) AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=account.id) OR
       (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=account.id)))`, [update.assigneeIds,row.workspace_id]); if (result.rowCount !== new Set(update.assigneeIds).size) return false; }

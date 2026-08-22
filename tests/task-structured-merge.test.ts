@@ -19,6 +19,7 @@ class StructuredTaskFake implements DatabaseProbe, StructuredTaskEditRepository 
   async applyStructuredTaskEdit(memberId: string, requestedProjectId: string, key: string, batch: TaskEditBatch) {
     if (this.fail) throw new Error("postgres://secret");
     if (memberId !== "ada" || requestedProjectId !== projectId || key !== "STASH-12") return { status: "not_found" as const };
+    if (batch.baseRevision > this.revision) return { status: "invalid_revision" as const };
     const digest = taskEditDigest(batch); const receipt = this.receipts.get(batch.operationId);
     if (receipt) return receipt.digest === digest ? receipt.outcome : { status: "operation_identity_conflict" as const };
     const fields = Object.keys(batch.changes); const incompatible = fields.filter((field) => (this.fieldRevisions.get(field) ?? 0) > batch.baseRevision);
@@ -92,6 +93,7 @@ describe("field-level Task collaboration", () => {
     const { database, edit } = await run(); await edit({ operationId: operationA, baseRevision: 1, changes: { priority: "low" } });
     assert.equal((await edit({ operationId: operationA, baseRevision: 1, changes: { priority: "high" } })).status, 409);
     assert.equal((await edit({ operationId: operationB, baseRevision: 0, changes: { priority: "high" } })).status, 422);
+    assert.equal((await edit({ operationId: operationB, baseRevision: Number.MAX_SAFE_INTEGER, changes: { priority: "high" } })).status, 409);
     assert.equal((await edit({ operationId: operationB, baseRevision: 1, changes: { unknown: true } })).status, 422);
     assert.equal((await edit({ operationId: operationB, baseRevision: 1, changes: { priority: "high" } }, "unknown")).status, 401);
     database.fail = true; const failed = await edit({ operationId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", baseRevision: 1, changes: { title: "Retry me" } });

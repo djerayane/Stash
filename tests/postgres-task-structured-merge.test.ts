@@ -8,6 +8,7 @@ import { startInstance, type RunningInstance } from "../src/instance.js";
 import { NoteService } from "../src/notes.js";
 import { OwnerBootstrapService } from "../src/owner-bootstrap.js";
 import { PostgresDatabase } from "../src/postgres-database.js";
+import { ProjectWorkflowService } from "../src/project-workflows.js";
 import { TaskService } from "../src/tasks.js";
 import { WorkspaceProjectService } from "../src/workspaces-projects.js";
 
@@ -43,6 +44,12 @@ describe("PostgreSQL structured Task collaboration", { skip: !databaseUrl }, () 
       assert.equal(task.status, "created"); if (task.status !== "created") throw new Error("task creation failed"); return task.task; };
     const differentTask = await createTask("Concurrent different fields"); const sameTask = await createTask("Concurrent same field");
     const retryTask = await createTask("Concurrent retry");
+    const workflowService = new ProjectWorkflowService(database); const workflowResult = await workflowService.find(owner.ownerId, project.project.id);
+    assert.equal(workflowResult.status, "found"); if (workflowResult.status !== "found") return;
+    const archivedStatus = workflowResult.workflow.statuses.find(({ name }) => name === "Ready")!;
+    const archived = await workflowService.replace(owner.ownerId, project.project.id, { expectedRevision: workflowResult.workflow.revision,
+      statuses: workflowResult.workflow.statuses.map(({ id, name, category, archived }) => ({ id, name, category,
+        archived: id === archivedStatus.id ? true : archived })) }); assert.equal(archived.status, "updated");
     const setup = new Pool({ connectionString: databaseUrl! });
     await setup.query(`CREATE OR REPLACE FUNCTION stash_test_delay_task_receipt() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN PERFORM pg_sleep(0.08); RETURN NEW; END $$;
@@ -54,6 +61,10 @@ describe("PostgreSQL structured Task collaboration", { skip: !databaseUrl }, () 
     const taskBase = (key: string, selectedProjectId = project.project.id) => `${instance.url}/api/projects/${selectedProjectId}/tasks/${key}`;
     const concurrentEdit = (key: string, operationId: string, changes: unknown, revision = 1) => fetch(`${taskBase(key)}/edits`, { method: "POST",
       headers: { authorization: "Bearer test", "content-type": "application/json" }, body: JSON.stringify({ operationId, baseRevision: revision, changes }) });
+    const future = await concurrentEdit(created.task.key, randomUUID(), { title: "Must not overwrite" }, Number.MAX_SAFE_INTEGER);
+    assert.equal(future.status, 409); assert.equal((await future.json() as any).error, "invalid_revision");
+    const archivedEdit = await concurrentEdit(created.task.key, randomUUID(), { statusId: archivedStatus.id });
+    assert.equal(archivedEdit.status, 422); assert.equal((await archivedEdit.json() as any).error, "invalid_reference");
     const different = await Promise.all([concurrentEdit(differentTask.key, randomUUID(), { title: "Changed concurrently" }),
       concurrentEdit(differentTask.key, randomUUID(), { priority: "high" })]); assert.deepEqual(different.map(({ status }) => status).sort(), [200, 200]);
     const differentRead = await (await fetch(taskBase(differentTask.key), { headers: { authorization: "Bearer test" } })).json() as any;

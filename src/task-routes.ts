@@ -43,6 +43,7 @@ export function taskRoutes(service: TaskService, memberAccess: MemberAccessResol
             if (result.status === "applied") json(response, 200, { task: result.task, revision: result.revision, appliedFields: result.appliedFields });
             else if (result.status === "conflict_preserved") json(response, 409, { error: "task_edit_conflict", message: "This Task field changed concurrently. Every contribution was preserved for focused resolution.", conflict: result.conflict });
             else if (result.status === "operation_identity_conflict") json(response, 409, { error: result.status, message: "That operation identity was already used for a different Task edit." });
+            else if (result.status === "invalid_revision") json(response, 409, { error: result.status, message: "The supplied Task revision does not exist. Refresh the Task before retrying." });
             else if (result.status === "invalid_reference") json(response, 422, { error: result.status, message: "One or more Task properties refer to unavailable Project data." });
             else json(response, 404, { error: "task_not_found", message: "This Task is unavailable in that Project." });
             return true;

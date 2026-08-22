@@ -90,7 +90,7 @@ export interface TaskEditConflict {
 export type StructuredTaskEditOutcome =
   | { status: "applied"; task: TaskPlanningReadModel; revision: number; appliedFields: string[] }
   | { status: "conflict_preserved"; conflict: TaskEditConflict }
-  | { status: "not_found" | "invalid_reference" | "operation_identity_conflict" };
+  | { status: "not_found" | "invalid_reference" | "invalid_revision" | "operation_identity_conflict" };
 export interface StructuredTaskEditRepository {
   applyStructuredTaskEdit(memberId: string, projectId: string, taskKey: string, batch: TaskEditBatch): Promise<StructuredTaskEditOutcome>;
   listStructuredTaskConflicts(memberId: string, projectId: string, taskKey: string): Promise<
