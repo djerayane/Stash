@@ -142,12 +142,34 @@ describe("offline mobile capture synchronization", () => {
       "33333333-3333-4333-8333-333333333333"];
     const batch = new IncomingShareDeliveryBatch(() => ids.shift()!);
     const payloads = [{ shareType: "text", value: "saved" }, { shareType: "file", value: "file://retry" }];
-    const first = batch.receive(payloads);
+    const first = batch.receiveInvocation(payloads);
     assert.equal(batch.acknowledge(first[0]!.id), false);
-    assert.deepEqual(batch.receive(payloads), [first[1]]);
+    assert.deepEqual(batch.pending(), [first[1]]);
     assert.equal(batch.acknowledge(first[1]!.id), true);
-    batch.reset();
-    assert.notEqual(batch.receive(payloads)[0]!.id, first[0]!.id, "a later identical user action gets a fresh delivery ID");
+    assert.notEqual(batch.receiveInvocation(payloads)[0]!.id, first[0]!.id, "a later identical user action gets a fresh delivery ID");
+  });
+
+  it("captures interleaved OS invocations exactly once while an older item awaits retry", async () => {
+    let sequence = 0;
+    const batch = new IncomingShareDeliveryBatch(() => `00000000-0000-4000-8000-${String(++sequence).padStart(12, "0")}`);
+    const store = new MemoryEncryptedStore();
+    store.pairing = { instanceUrl: "https://stash.example", memberToken: "token", workspaceId, memberId: "ada" };
+    const client = new MobileCaptureClient(store, async () => new Response());
+    const [savedA, failedA] = batch.receiveInvocation([
+      { shareType: "text", value: "A saved" }, { shareType: "file", value: "file://A-retry" },
+    ]);
+    await client.captureSharedContent(savedA!.payload.value, "share_sheet", {}, savedA!.id);
+    batch.acknowledge(savedA!.id);
+    const pending = batch.receiveInvocation([{ shareType: "text", value: "A saved" }]);
+    const invocationB = pending.at(-1)!;
+    assert.notEqual(invocationB.id, savedA!.id, "identical content from invocation B has its own delivery identity");
+    await client.captureSharedContent(invocationB.payload.value, "share_sheet", {}, invocationB.id);
+    batch.acknowledge(invocationB.id);
+    assert.deepEqual(batch.pending(), [failedA]);
+    await client.captureMedia({ kind: "file", filename: "A-retry.txt", contentType: "text/plain", base64: "cmVjb3ZlcmVk" }, "", {}, failedA!.id);
+    assert.equal(batch.acknowledge(failedA!.id), true);
+    assert.deepEqual(batch.pending(), []);
+    assert.deepEqual(store.captures.map(({ id }) => id), [savedA!.id, invocationB.id, failedA!.id]);
   });
   let instance: RunningInstance | undefined;
   afterEach(async () => { await instance?.close(); instance = undefined; });
