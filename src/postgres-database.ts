@@ -9,6 +9,10 @@ import {
   type AuthenticationSecretCodec,
 } from "./authentication-secrets.js";
 
+// First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
+// PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
+const authenticationKeyCheckLockId = 795_541_992;
+
 export class PostgresDatabase implements DatabaseProbe, OwnerBootstrapRepository, PasswordAuthRepository {
   readonly #pool: Pool;
   readonly #authenticationSecrets: AuthenticationSecretCodec;
@@ -159,7 +163,7 @@ export class PostgresDatabase implements DatabaseProbe, OwnerBootstrapRepository
         )
       `);
       await client.query("BEGIN");
-      await client.query("SELECT pg_advisory_xact_lock(1236629358)");
+      await client.query("SELECT pg_advisory_xact_lock($1)", [authenticationKeyCheckLockId]);
       const result = await client.query<{ encrypted_check: string }>(
         "SELECT encrypted_check FROM stash_authentication_key_check WHERE singleton = TRUE",
       );
