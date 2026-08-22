@@ -2,7 +2,8 @@ import { randomUUID, timingSafeEqual } from "node:crypto";
 import { Pool, type PoolClient } from "pg";
 
 import type { DatabaseProbe } from "./instance.js";
-import type { NoteRecord, NoteRepository, NoteTriageChange, NoteTriageResult, PortableNoteProjection, PortableTaskProjection, TaskCreation } from "./notes.js";
+import { noteOperationDigest, type NoteEditBatch, type NoteRecord, type NoteRepository, type NoteTriageChange, type NoteTriageResult, type PortableNoteProjection, type PortableTaskProjection, type TaskCreation } from "./notes.js";
+import { richTextToMarkdown } from "./rich-text.js";
 import type { BootstrapRecord, OwnerBootstrapRepository } from "./owner-bootstrap.js";
 import type { AccountAuthenticationRecord, PasswordAuthRepository, SessionRecord } from "./password-auth.js";
 import type { OidcAuthRepository, OidcIdentityKey, OidcIdentityRecord, OidcOrganizationConfiguration } from "./oidc-auth.js";
@@ -276,13 +277,15 @@ export class PostgresDatabase implements
       }
       await client.query(
         `INSERT INTO stash_notes
-          (id, workspace_id, project_id, content, tags, reminder_at, created_by_account_id, created_at)
-         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)`,
+          (id, workspace_id, project_id, content, document, revision, tags, reminder_at, created_by_account_id, created_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::jsonb, $8, $9, $10)`,
         [
           note.id,
           note.workspaceId,
           note.projectId ?? null,
           note.content,
+          JSON.stringify(note.document),
+          note.revision,
           JSON.stringify(note.tags),
           note.reminder?.at ?? null,
           note.createdByMemberId,
@@ -303,11 +306,11 @@ export class PostgresDatabase implements
         (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
           WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)))`, [workspaceId, memberId]);
       if (!access.rowCount) return { status: "workspace_forbidden" as const };
-      const result = await client.query<any>(`SELECT id, workspace_id, project_id, content, tags, reminder_at,
+      const result = await client.query<any>(`SELECT id, workspace_id, project_id, content, document, revision, tags, reminder_at,
         created_by_account_id, created_at, archived_at FROM stash_notes
         WHERE workspace_id = $1 AND project_id IS NULL AND archived_at IS NULL ORDER BY created_at, id`, [workspaceId]);
       return { status: "found" as const, notes: result.rows.map((row: any) => ({ id: row.id, workspaceId: row.workspace_id,
-        content: row.content, tags: row.tags, createdByMemberId: row.created_by_account_id,
+        content: row.content, document: row.document, revision: row.revision, tags: row.tags, createdByMemberId: row.created_by_account_id,
         createdAt: new Date(row.created_at).toISOString(), ...(row.project_id ? { projectId: row.project_id } : {}),
         ...(row.reminder_at ? { reminder: { at: new Date(row.reminder_at).toISOString() } } : {}),
         ...(row.archived_at ? { archivedAt: new Date(row.archived_at).toISOString() } : {}) })) };
@@ -404,6 +407,96 @@ export class PostgresDatabase implements
       ON CONFLICT DO NOTHING`, statuses.flat());
   }
 
+  async findNoteForMember(memberId: string, noteId: string): Promise<NoteRecord | undefined> {
+    await this.#ensureNoteSchemaForPool();
+    const result = await this.#pool.query<{
+      id: string; workspace_id: string; project_id: string | null; content: string; document: NoteRecord["document"];
+      revision: number; tags: string[]; reminder_at: Date | null; created_by_account_id: string; created_at: Date;
+    }>(`SELECT note.* FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id = note.workspace_id
+       WHERE note.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2)
+       OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+       WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)))`, [noteId, memberId]);
+    const row = result.rows[0];
+    return row ? {
+      id: row.id, workspaceId: row.workspace_id, content: row.content, document: row.document, revision: row.revision,
+      tags: row.tags, createdByMemberId: row.created_by_account_id, createdAt: row.created_at.toISOString(),
+      ...(row.project_id ? { projectId: row.project_id } : {}),
+      ...(row.reminder_at ? { reminder: { at: row.reminder_at.toISOString() } } : {}),
+    } : undefined;
+  }
+
+  async applyNoteOperations(memberId: string, noteId: string, batch: NoteEditBatch) {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureNoteSchema(client);
+      const access = await client.query<any>(`SELECT note.*, creator.name AS creator_name FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id = note.workspace_id
+        JOIN stash_accounts creator ON creator.id = note.created_by_account_id
+        WHERE note.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2)
+        OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+        WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2))) FOR UPDATE OF note`, [noteId, memberId]);
+      const row = access.rows[0];
+      if (!row) return { status: "not_found" as const };
+      const createdBy = { localAccountId: row.created_by_account_id, displayName: row.creator_name };
+      const existing = await client.query<{ operation_id: string; operation_digest: string | null }>("SELECT operation_id, operation_digest FROM stash_note_operations WHERE note_id = $1 AND operation_id = ANY($2::uuid[])", [noteId, batch.operations.map(({ id }) => id)]);
+      const knownDigests = new Map(existing.rows.map(({ operation_id, operation_digest }) => [operation_id, operation_digest]));
+      const reused = batch.operations.find((operation) => knownDigests.has(operation.id) && knownDigests.get(operation.id) !== noteOperationDigest(operation));
+      if (reused) {
+        await client.query("INSERT INTO stash_note_edit_conflicts (id,note_id,base_revision,document,markdown,operations,created_by_account_id) VALUES ($1,$2,$3,$4::jsonb,$5,$6::jsonb,$7)", [randomUUID(),noteId,batch.baseRevision,JSON.stringify(row.document),row.content,JSON.stringify([reused]),memberId]);
+        return { status: "invalid_reference" as const };
+      }
+      const applied = new Set(existing.rows.map(({ operation_id }) => operation_id));
+      const conflicted = await client.query<{ operation_id: string; operation_digest: string | null }>("SELECT operation_id, operation_digest FROM stash_note_conflict_operations WHERE note_id = $1 AND operation_id = ANY($2::uuid[])", [noteId, batch.operations.map(({ id }) => id)]);
+      const conflictDigests = new Map(conflicted.rows.map(({ operation_id, operation_digest }) => [operation_id, operation_digest]));
+      const reusedConflict = batch.operations.find((operation) => conflictDigests.has(operation.id) && conflictDigests.get(operation.id) !== noteOperationDigest(operation));
+      if (reusedConflict) {
+        await client.query("INSERT INTO stash_note_edit_conflicts (id,note_id,base_revision,document,markdown,operations,created_by_account_id) VALUES ($1,$2,$3,$4::jsonb,$5,$6::jsonb,$7)", [randomUUID(),noteId,batch.baseRevision,JSON.stringify(row.document),row.content,JSON.stringify([reusedConflict]),memberId]);
+        return { status: "invalid_reference" as const };
+      }
+      const conflictIds = new Set(conflicted.rows.map(({ operation_id }) => operation_id));
+      const pending = batch.operations.filter(({ id }) => !applied.has(id) && !conflictIds.has(id));
+      const current: NoteRecord = { id: row.id, workspaceId: row.workspace_id, content: row.content, document: row.document,
+        revision: row.revision, tags: row.tags, createdByMemberId: row.created_by_account_id, createdAt: new Date(row.created_at).toISOString(),
+        ...(row.project_id ? { projectId: row.project_id } : {}), ...(row.reminder_at ? { reminder: { at: new Date(row.reminder_at).toISOString() } } : {}),
+        ...(row.archived_at ? { archivedAt: new Date(row.archived_at).toISOString() } : {}) };
+      const projectionFor = (note: NoteRecord): PortableNoteProjection => ({ schema: "stash.note.v1", id: note.id,
+        workspaceId: note.workspaceId, content: note.content, tags: note.tags, createdAt: note.createdAt, createdBy,
+        ...(note.projectId ? { projectId: note.projectId } : {}), ...(note.reminder ? { reminder: note.reminder } : {}) });
+      if (!pending.length) return conflictIds.size ? { status: "conflict_preserved" as const }
+        : { status: "duplicate" as const, note: current, projection: projectionFor(current) };
+      const changed = await client.query<{ block_key: string }>("SELECT block_key FROM stash_note_operations WHERE note_id = $1 AND applied_revision > $2", [noteId, batch.baseRevision]);
+      const changedKeys = new Set(changed.rows.map(({ block_key }) => block_key));
+      if (pending.some(({ blockKey }) => changedKeys.has(blockKey))) {
+        const conflictId = randomUUID();
+        await client.query("INSERT INTO stash_note_edit_conflicts (id, note_id, base_revision, document, markdown, operations, created_by_account_id) VALUES ($1,$2,$3,$4::jsonb,$5,$6::jsonb,$7)",
+          [conflictId, noteId, batch.baseRevision, JSON.stringify(current.document), current.content, JSON.stringify(pending), memberId]);
+        for (const operation of pending) await client.query("INSERT INTO stash_note_conflict_operations (note_id,operation_id,conflict_id,operation_digest) VALUES ($1,$2,$3,$4)", [noteId, operation.id, conflictId, noteOperationDigest(operation)]);
+        return { status: "conflict_preserved" as const };
+      }
+      const blocks = [...current.document.blocks];
+      for (const operation of pending) {
+        const index = blocks.findIndex(({ blockKey }) => blockKey === operation.blockKey);
+        if (operation.type === "insert_block") {
+          if (index >= 0 || operation.block.id) return { status: "invalid_reference" as const };
+          const after = operation.afterBlockKey === null ? -1 : blocks.findIndex(({ blockKey }) => blockKey === operation.afterBlockKey);
+          if (operation.afterBlockKey !== null && after < 0) return { status: "invalid_reference" as const };
+          blocks.splice(after + 1, 0, operation.block);
+        } else if (operation.type === "delete_block") {
+          if (index < 0 || blocks[index]!.id) return { status: "invalid_reference" as const };
+          blocks.splice(index, 1);
+        } else {
+          if (index < 0 || blocks[index]!.id !== operation.block.id) return { status: "invalid_reference" as const };
+          blocks[index] = operation.block;
+        }
+      }
+      if (!blocks.length) return { status: "invalid_reference" as const };
+      const document = { type: "doc" as const, blocks };
+      const note = { ...current, document, content: richTextToMarkdown(document), revision: current.revision + 1 };
+      const projection = projectionFor(note);
+      await client.query("UPDATE stash_notes SET content=$2, document=$3::jsonb, revision=$4 WHERE id=$1", [noteId, note.content, JSON.stringify(document), note.revision]);
+      for (const operation of pending) await client.query("INSERT INTO stash_note_operations (note_id,operation_id,base_revision,applied_revision,block_key,operation_digest) VALUES ($1,$2,$3,$4,$5,$6)", [noteId, operation.id, batch.baseRevision, note.revision, operation.blockKey, noteOperationDigest(operation)]);
+      await this.#recordPortableProjection(client, "Note", note.id, "stash.note.v1", projection);
+      return { status: "updated" as const, note, projection };
+    });
+  }
   async close(): Promise<void> {
     await this.#pool.end();
   }
@@ -1197,6 +1290,8 @@ export class PostgresDatabase implements
         workspace_id UUID NOT NULL REFERENCES stash_workspaces(id),
         project_id UUID REFERENCES stash_projects(id),
         content TEXT NOT NULL CHECK (length(content) > 0),
+        document JSONB NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
         tags JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(tags) = 'array'),
         reminder_at TIMESTAMPTZ,
         created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id),
@@ -1224,6 +1319,49 @@ export class PostgresDatabase implements
         task_id UUID NOT NULL REFERENCES stash_tasks(id), note_id UUID NOT NULL REFERENCES stash_notes(id), PRIMARY KEY (task_id, note_id)
       )
     `);
+    await client.query("ALTER TABLE stash_notes ADD COLUMN IF NOT EXISTS document JSONB");
+    await client.query("ALTER TABLE stash_notes ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0)");
+    await client.query("UPDATE stash_notes SET document = jsonb_build_object('type', 'doc', 'blocks', jsonb_build_array(jsonb_build_object('type', 'paragraph', 'content', jsonb_build_array(jsonb_build_object('text', content))))) WHERE document IS NULL");
+    await client.query("ALTER TABLE stash_notes ALTER COLUMN document SET NOT NULL");
+    await client.query(`UPDATE stash_notes SET document = jsonb_set(document, '{blocks}', (
+      SELECT jsonb_agg(CASE WHEN block ? 'blockKey' THEN block ELSE block || jsonb_build_object('blockKey', gen_random_uuid()) END)
+      FROM jsonb_array_elements(document->'blocks') block))
+      WHERE EXISTS (SELECT 1 FROM jsonb_array_elements(document->'blocks') block WHERE NOT block ? 'blockKey')`);
+    await client.query(`CREATE TABLE IF NOT EXISTS stash_note_operations (
+      note_id UUID NOT NULL REFERENCES stash_notes(id) ON DELETE CASCADE,
+      operation_id UUID NOT NULL,
+      base_revision INTEGER NOT NULL CHECK (base_revision > 0),
+      applied_revision INTEGER NOT NULL CHECK (applied_revision > 0),
+      block_key UUID NOT NULL,
+      operation_digest TEXT,
+      PRIMARY KEY (note_id, operation_id)
+    )`);
+    await client.query("ALTER TABLE stash_note_operations ADD COLUMN IF NOT EXISTS operation_digest TEXT");
+    await client.query(`CREATE TABLE IF NOT EXISTS stash_note_edit_conflicts (
+      id UUID PRIMARY KEY,
+      note_id UUID NOT NULL REFERENCES stash_notes(id) ON DELETE CASCADE,
+      base_revision INTEGER NOT NULL CHECK (base_revision > 0),
+      document JSONB NOT NULL,
+      markdown TEXT NOT NULL,
+      operations JSONB,
+      created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      resolved_at TIMESTAMPTZ
+    )`);
+    await client.query("ALTER TABLE stash_note_edit_conflicts ADD COLUMN IF NOT EXISTS operations JSONB");
+    await client.query(`CREATE TABLE IF NOT EXISTS stash_note_conflict_operations (
+      note_id UUID NOT NULL REFERENCES stash_notes(id) ON DELETE CASCADE,
+      operation_id UUID NOT NULL,
+      conflict_id UUID NOT NULL REFERENCES stash_note_edit_conflicts(id) ON DELETE CASCADE,
+      operation_digest TEXT,
+      PRIMARY KEY (note_id, operation_id)
+    )`);
+    await client.query("ALTER TABLE stash_note_conflict_operations ADD COLUMN IF NOT EXISTS operation_digest TEXT");
+  }
+
+  async #ensureNoteSchemaForPool(): Promise<void> {
+    const client = await this.#pool.connect();
+    try { await this.#ensureNoteSchema(client); } finally { client.release(); }
   }
 
   async #ensureMemberLocalizationSchema(): Promise<void> {

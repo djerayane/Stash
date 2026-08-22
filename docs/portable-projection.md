@@ -111,6 +111,41 @@ inside the same transaction so keys are never duplicated or reused. The source N
 All referenced Notes and Projects must exist in the same authorized Workspace; a failed validation
 or outbox write rolls back the whole triage operation.
 
+The operational Note body is a versioned rich-text document rendered by Stash's WYSIWYG editor.
+Every successful edit atomically increments the Note revision and records another `stash.note.v1`
+outbox revision whose `content` is the complete Markdown rendering. Ordinary Blocks have no
+identifier. Once another durable object references a Block, its UUID is preserved in the rich-text
+document and projected immediately after that Block as an HTML comment:
+
+```markdown
+Decide how release candidates are signed.
+<!-- stash-block:44444444-4444-4444-8444-444444444444 -->
+```
+
+The comment is stable, readable by ordinary Markdown tools, and does not include live Task status.
+Importers preserve valid identifiers exactly and report malformed or ambiguous references instead
+of guessing. Rich formatting uses ordinary Markdown headings, emphasis, links, quotes, lists,
+checklists, and fenced code so the WYSIWYG and portable surfaces round-trip intelligibly.
+
+Editor updates are idempotent operation batches. Every operation has a UUID and addresses a stable
+operational `blockKey`; retries do not create another revision. Concurrent operations based on an
+older revision merge automatically when they address different Blocks. Same-Block changes are
+preserved in `stash_note_edit_conflicts` for focused resolution rather than choosing a contribution.
+An operation may preserve an existing portable Block `id`, but cannot move it to another Block,
+mint a linked identity, or delete a linked Block. Missing or ambiguous references are rejected
+visibly; linking capabilities own the sparse portable-identity lifecycle.
+Operation UUIDs are bound to a canonical SHA-256 digest of their type, target, placement, and full
+payload. Reusing an ID with altered intent is rejected visibly and the attempted contribution is
+retained for investigation; property ordering does not affect the digest. Edit projections always
+retain the immutable original Note creator resolved from the locked Note row. The editing Member
+is authorization and activity context, never a replacement for `createdBy`.
+
+The rich-text foundation round-trips paragraphs, headings (levels one through three), bold,
+italic, inline code, links, quotes, bullet items, checklists, and fenced code through documented
+Markdown. Tables, callouts, images, and Attachments are delivered by the downstream expressive
+content and Attachment slices; encountering those constructs in this foundation produces an
+explicit unsupported-construct result instead of silently flattening or discarding them.
+
 ## `stash.guest-project-access.v1`
 
 Accepting a Guest invitation records the selected Project relationships and their containing

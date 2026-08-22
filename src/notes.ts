@@ -1,6 +1,7 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { normalizeExplicitOffsetTimestamp } from "./explicit-offset-timestamp.js";
 import type { PortableIdentity } from "./workspaces-projects.js";
+import { isRichTextDocument, paragraphDocument, type RichTextBlock, type RichTextDocument } from "./rich-text.js";
 
 export interface NoteReminder {
   at: string;
@@ -10,6 +11,8 @@ export interface NoteRecord {
   id: string;
   workspaceId: string;
   content: string;
+  document: RichTextDocument;
+  revision: number;
   tags: string[];
   createdByMemberId: string;
   createdAt: string;
@@ -57,6 +60,26 @@ export interface PortableNoteProjection {
   reminder?: NoteReminder;
 }
 
+export type NoteEditOperation =
+  | { id: string; type: "replace_block"; blockKey: string; block: RichTextBlock }
+  | { id: string; type: "insert_block"; blockKey: string; afterBlockKey: string | null; block: RichTextBlock }
+  | { id: string; type: "delete_block"; blockKey: string };
+export interface NoteEditBatch { baseRevision: number; operations: NoteEditOperation[] }
+function canonicalJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (value !== null && typeof value === "object") return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => left.localeCompare(right)).map(([key, nested]) => [key, canonicalJson(nested)]));
+  return value;
+}
+export function noteOperationDigest(operation: NoteEditOperation): string {
+  const canonical = operation.type === "delete_block" ? { type: operation.type, blockKey: operation.blockKey }
+    : operation.type === "insert_block" ? { type: operation.type, blockKey: operation.blockKey, afterBlockKey: operation.afterBlockKey, block: operation.block }
+      : { type: operation.type, blockKey: operation.blockKey, block: operation.block };
+  return createHash("sha256").update(JSON.stringify(canonicalJson(canonical))).digest("hex");
+}
+export type NoteEditOutcome = { status: "updated" | "duplicate"; note: NoteRecord; projection: PortableNoteProjection }
+  | { status: "not_found" | "conflict_preserved" | "invalid_reference" };
+
 export interface NoteRepository {
   findPortableMemberIdentity(memberId: string): Promise<PortableIdentity | undefined>;
   createNote(
@@ -71,9 +94,12 @@ export interface NoteRepository {
     { status: "updated"; result: NoteTriageResult }
     | { status: "workspace_forbidden" | "project_forbidden" | "note_not_found" | "target_note_not_found" }
   >;
+  findNoteForMember(memberId: string, noteId: string): Promise<NoteRecord | undefined>;
+  applyNoteOperations(memberId: string, noteId: string, batch: NoteEditBatch): Promise<NoteEditOutcome>;
 }
 
 export class InvalidNoteInput extends Error {}
+export class InvalidNoteEdit extends Error {}
 export class InvalidNoteTriageInput extends Error {}
 
 interface NoteInput {
@@ -119,6 +145,11 @@ export class NoteService {
     this.#repository = repository;
   }
 
+  async get(memberId: string, noteId: string): Promise<NoteRecord | undefined> {
+    if (!isUuid(noteId)) throw new InvalidNoteEdit();
+    return this.#repository.findNoteForMember(memberId, noteId);
+  }
+
   async capture(memberId: string, workspaceId: string, value: unknown): Promise<
     | { status: "created"; note: NoteRecord; projection: PortableNoteProjection }
     | { status: "workspace_forbidden" | "project_forbidden" }
@@ -131,6 +162,8 @@ export class NoteService {
       id: randomUUID(),
       workspaceId,
       content: value.content,
+      document: paragraphDocument(value.content, randomUUID()),
+      revision: 1,
       tags,
       createdByMemberId: memberId,
       createdAt: new Date().toISOString(),
@@ -171,6 +204,30 @@ export class NoteService {
     if ("status" in prepared) return prepared;
     const change = prepared.change;
     return this.#repository.triageNote(memberId, workspaceId, noteId, change);
+  }
+
+  async edit(memberId: string, noteId: string, value: unknown): Promise<NoteEditOutcome> {
+    if (!isUuid(noteId) || !isPlainObject(value) || !Number.isSafeInteger(value.baseRevision)
+      || (value.baseRevision as number) < 1 || !Array.isArray(value.operations) || value.operations.length < 1
+      || !Object.keys(value).every((key) => ["baseRevision", "operations"].includes(key))) throw new InvalidNoteEdit();
+    const operations: NoteEditOperation[] = [];
+    for (const operation of value.operations) {
+      if (!isPlainObject(operation) || typeof operation.id !== "string" || !isUuid(operation.id)
+        || typeof operation.blockKey !== "string" || !isUuid(operation.blockKey)) throw new InvalidNoteEdit();
+      if (operation.type === "delete_block") {
+        if (!Object.keys(operation).every((key) => ["id", "type", "blockKey"].includes(key))) throw new InvalidNoteEdit();
+      } else if ((operation.type === "replace_block" || operation.type === "insert_block")
+        && isRichTextDocument({ type: "doc", blocks: [operation.block] })
+        && (operation.block as RichTextBlock).blockKey === operation.blockKey) {
+        if (operation.type === "insert_block" && (operation.afterBlockKey !== null
+          && (typeof operation.afterBlockKey !== "string" || !isUuid(operation.afterBlockKey)))) throw new InvalidNoteEdit();
+        const allowed = operation.type === "insert_block" ? ["id", "type", "blockKey", "afterBlockKey", "block"] : ["id", "type", "blockKey", "block"];
+        if (!Object.keys(operation).every((key) => allowed.includes(key))) throw new InvalidNoteEdit();
+      } else throw new InvalidNoteEdit();
+      operations.push(operation as unknown as NoteEditOperation);
+    }
+    if (new Set(operations.map(({ id }) => id)).size !== operations.length) throw new InvalidNoteEdit();
+    return this.#repository.applyNoteOperations(memberId, noteId, { baseRevision: value.baseRevision as number, operations });
   }
 }
 

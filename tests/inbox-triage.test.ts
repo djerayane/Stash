@@ -20,6 +20,8 @@ const targetNoteId = "44444444-4444-4444-8444-444444444444";
 class ProtocolCompatibleInboxDatabase implements DatabaseProbe, NoteRepository {
   readonly note: NoteRecord = {
     id: noteId, workspaceId, content: "Turn the release idea into work.", tags: [],
+    document: { type: "doc", blocks: [{ type: "paragraph", content: [{ text: "Turn the release idea into work." }] }] },
+    revision: 1,
     createdByMemberId: "grace", createdAt: "2026-08-22T10:00:00.000Z",
   };
   readonly projections: object[] = [];
@@ -42,6 +44,8 @@ class ProtocolCompatibleInboxDatabase implements DatabaseProbe, NoteRepository {
       : { localAccountId: "ada", displayName: "Ada Lovelace" };
   }
   async createNote(_memberId: string, _note: NoteRecord, _projection: PortableNoteProjection) { return "created" as const; }
+  async findNoteForMember() { return undefined; }
+  async applyNoteOperations() { return { status: "not_found" as const }; }
   async listInboxNotes(memberId: string, requestedWorkspaceId: string) {
     if (memberId !== "ada" || requestedWorkspaceId !== workspaceId) return { status: "workspace_forbidden" as const };
     return { status: "found" as const, notes: this.archived || this.note.projectId ? [] : [this.note] };
@@ -96,6 +100,8 @@ describe("Inbox triage", () => {
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { notes: [{
       id: noteId, workspaceId, content: "Turn the release idea into work.", tags: [],
+      document: { type: "doc", blocks: [{ type: "paragraph", content: [{ text: "Turn the release idea into work." }] }] },
+      revision: 1,
       createdAt: "2026-08-22T10:00:00.000Z",
     }] });
   });
