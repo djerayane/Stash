@@ -1,6 +1,6 @@
 import { router } from "expo-router";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ScrollView, Text, TextInput, useColorScheme } from "react-native";
+import { ScrollView, Share, Text, TextInput, useColorScheme } from "react-native";
 
 import { MobileCaptureClient } from "../../src/mobile-capture-client";
 import { SecureMobileCaptureStore } from "../src/secure-mobile-store";
@@ -17,13 +17,20 @@ export default function PairingScreen() {
   const [memberToken, setMemberToken] = useState("");
   const [workspaceId, setWorkspaceId] = useState("");
   const [error, setError] = useState("");
+  const [legacyRecovery, setLegacyRecovery] = useState(false);
   const pair = async () => {
     try {
       await client.pair({ instanceUrl: instanceUrl.trim(), memberToken: memberToken.trim(), workspaceId: workspaceId.trim() }, controller.signal);
       if (!mounted.current) return;
       router.back();
-    } catch (cause) { if (mounted.current && !controller.signal.aborted) setError(cause instanceof Error ? cause.message : "Pairing failed."); }
+    } catch (cause) { if (mounted.current && !controller.signal.aborted) {
+      const recovery = await client.legacyRecoveryStatus();
+      setLegacyRecovery(recovery.available);
+      setError(recovery.available ? `${cause instanceof Error ? cause.message : "Pairing failed."} Export the legacy captures before replacing this pairing.`
+        : cause instanceof Error ? cause.message : "Pairing failed.");
+    } }
   };
+  const exportLegacy = async () => { await Share.share({ message: await client.exportLegacyCaptures(), title: "Stash legacy capture recovery" }); };
   useEffect(() => () => { mounted.current = false; controller.abort(); client.cancelRequests(); }, [client, controller]);
   return <ScrollView contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled"
     contentContainerStyle={{ padding: 20, gap: 18 }}>
@@ -38,6 +45,7 @@ export default function PairingScreen() {
     <TextInput accessibilityLabel="Workspace ID" autoCapitalize="none" autoCorrect={false}
       placeholder="Workspace UUID" value={workspaceId} onChangeText={setWorkspaceId} style={fieldStyle} />
     {error ? <StatusFeedback message={error} /> : null}
+    {legacyRecovery ? <NativeActionButton label="Export legacy captures" onPress={exportLegacy} /> : null}
     <NativeActionButton label="Pair Instance" onPress={pair} />
   </ScrollView>;
 }

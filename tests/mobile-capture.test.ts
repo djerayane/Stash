@@ -194,7 +194,7 @@ describe("offline mobile capture synchronization", () => {
       workspaceId: otherWorkspaceId, memberId: "member-b" });
     const retained = await client.sync();
 
-    assert.deepEqual(retained, { status: "attention_required", count: 0, error: "capture_pairing_mismatch" });
+    assert.deepEqual(retained, { status: "synced", count: 0 });
     assert.deepEqual(requestedUrls, []);
     assert.equal(database.notes.size, 0);
     assert.deepEqual(await client.outbox(), []);
@@ -229,9 +229,11 @@ describe("offline mobile capture synchronization", () => {
     await store.savePairing({ ...gracePairing!, memberToken: "revoked-grace" });
     await assert.rejects(() => client.refreshOptions(), /valid Member session/i);
     assert.deepEqual(await client.options(), graceOptions);
-    assert.deepEqual(await client.sync(), { status: "attention_required", count: 0, error: "capture_pairing_mismatch" });
+    assert.deepEqual(await client.sync(), { status: "synced", count: 0 });
     assert.deepEqual(await client.outbox(), []);
     assert.equal(database.notes.size, 0);
+    assert.deepEqual(await client.legacyRecoveryStatus(), { available: false, count: 0 });
+    await assert.rejects(() => client.exportLegacyCaptures(), /legacy pairing/i);
 
     await client.pair({ instanceUrl: baseUrl, memberToken: "member-ada-rotated", workspaceId });
     assert.deepEqual(await client.options(), { projects: [{ id: projectId, name: "Launch" }], tags: ["mobile"],
@@ -258,6 +260,22 @@ describe("offline mobile capture synchronization", () => {
     assert.equal(adopted?.origin?.memberId, "ada");
     assert.deepEqual(await client.sync(), { status: "synced", count: 1 });
     assert.equal(database.notes.size, 1);
+  });
+
+  it("offers an explicit local export when a rotated credential cannot authenticate a legacy outbox", async () => {
+    const { baseUrl } = await run();
+    const store = new MemoryEncryptedStore();
+    await store.savePairing({ instanceUrl: baseUrl, memberToken: "expired-ada", workspaceId });
+    await store.saveCapture({ id: "66666666-6666-4666-8666-666666666666", kind: "text",
+      content: "Recover this legacy thought", createdAt: "2026-08-22T10:00:00.000Z", attempts: 0,
+      origin: { instanceUrl: baseUrl, workspaceId } });
+    const client = new MobileCaptureClient(store, fetch, { allowInsecureInstanceForTest: true });
+
+    await assert.rejects(() => client.pair({ instanceUrl: baseUrl, memberToken: "member-ada-unknown-rotation", workspaceId }),
+      /valid Member session/i);
+    assert.deepEqual(await client.legacyRecoveryStatus(), { available: true, count: 1 });
+    const exported = JSON.parse(await client.exportLegacyCaptures()) as { captures: MobileCapture[] };
+    assert.equal(exported.captures[0]?.content, "Recover this legacy thought");
   });
 
   it("returns a visible conflict and retains a reused capture ID with different content", async () => {

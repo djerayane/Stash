@@ -100,6 +100,20 @@ export class MobileCaptureClient {
     return (await this.#store.listCaptures()).filter((capture) => capture.origin?.instanceUrl === pairing.instanceUrl
       && capture.origin.workspaceId === pairing.workspaceId && capture.origin.memberId === pairing.memberId);
   }
+  async legacyRecoveryStatus(): Promise<{ available: boolean; count: number }> {
+    const pairing = await this.#store.loadPairing();
+    if (!pairing || pairing.memberId) return { available: false, count: 0 };
+    const captures = await this.#legacyCaptures(pairing);
+    return { available: captures.length > 0, count: captures.length };
+  }
+  async exportLegacyCaptures(): Promise<string> {
+    const pairing = await this.#store.loadPairing();
+    if (!pairing || pairing.memberId) throw new Error("Legacy capture export is available only from an unverified legacy pairing.");
+    const captures = await this.#legacyCaptures(pairing);
+    if (!captures.length) throw new Error("No legacy captures are available for this destination.");
+    return JSON.stringify({ protocol: "stash.mobile-capture-recovery.v1",
+      instanceUrl: pairing.instanceUrl, workspaceId: pairing.workspaceId, captures }, null, 2);
+  }
   async options() {
     const pairing = await this.#store.loadPairing();
     return pairing?.memberId ? this.#store.loadOptions(pairingScope(pairing)) : emptyOptions();
@@ -212,16 +226,10 @@ export class MobileCaptureClient {
     let retryPending = false;
     const activeMemberId = pairing.memberId;
     for (const capture of await this.#store.listCaptures()) {
+      if (capture.origin?.memberId && (capture.origin.instanceUrl !== pairing.instanceUrl
+        || capture.origin.workspaceId !== pairing.workspaceId || capture.origin.memberId !== activeMemberId)) continue;
       if (!capture.origin?.memberId) {
         attentionError ??= "capture_origin_unknown";
-        continue;
-      }
-      if (capture.origin.instanceUrl !== pairing.instanceUrl || capture.origin.workspaceId !== pairing.workspaceId) {
-        attentionError ??= "capture_pairing_mismatch";
-        continue;
-      }
-      if (capture.origin.memberId !== activeMemberId) {
-        attentionError ??= "capture_pairing_mismatch";
         continue;
       }
       if (capture.nextRetryAt && Date.parse(capture.nextRetryAt) > this.#now()) { retryPending = true; continue; }
@@ -260,6 +268,12 @@ export class MobileCaptureClient {
     if (externalSignal?.aborted) controller.abort(externalSignal.reason);
     else externalSignal?.addEventListener("abort", () => controller.abort(externalSignal.reason), { once: true });
     return controller;
+  }
+
+  async #legacyCaptures(pairing: MobileCapturePairing): Promise<MobileCapture[]> {
+    return (await this.#store.listCaptures()).filter((capture) => capture.origin
+      && !capture.origin.memberId && capture.origin.instanceUrl === pairing.instanceUrl
+      && capture.origin.workspaceId === pairing.workspaceId);
   }
 }
 
