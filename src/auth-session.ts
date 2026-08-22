@@ -17,6 +17,12 @@ export async function issueSession(
   member: SessionMember,
   userAgent?: string,
 ) {
+  const prepared = prepareSession(member, userAgent);
+  await repository.createSession(prepared.record);
+  return prepared.result;
+}
+
+export function prepareSession(member: SessionMember, userAgent?: string) {
   const token = randomBytes(32).toString("base64url");
   const now = new Date().toISOString();
   const session: SessionRecord = {
@@ -27,11 +33,9 @@ export async function issueSession(
     lastSeenAt: now,
     ...(userAgent ? { userAgent: userAgent.slice(0, 500) } : {}),
   };
-  await repository.createSession(session);
   return {
-    token,
-    member,
-    session: presentSession(session, session.id),
+    record: session,
+    result: { token, member, session: presentSession(session, session.id) },
   };
 }
 

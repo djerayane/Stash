@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { issueSession, presentSession } from "./auth-session.js";
+import { issueSession, prepareSession, presentSession } from "./auth-session.js";
 import { passwordHashCodec, type PasswordHashCodec } from "./password-hash.js";
 
 export interface AccountAuthenticationRecord {
@@ -31,6 +31,14 @@ export interface PasswordAuthRepository {
 export interface AuthenticatedMember {
   accountId: string;
   sessionId: string;
+}
+export interface PreparedSession {
+  record: SessionRecord;
+  result: {
+    token: string;
+    member: { id: string; name: string; email: string };
+    session: { id: string; createdAt: string; lastSeenAt: string; userAgent?: string; current: boolean };
+  };
 }
 
 export class InvalidAuthenticationInput extends Error {}
@@ -70,6 +78,16 @@ export class PasswordAuthService {
       throw new InvalidCredentials();
     }
     return issueSession(this.#repository, { id: account.id, name: account.name, email: account.email }, userAgent);
+  }
+
+  async createSession(account: AccountAuthenticationRecord, userAgent?: string) {
+    const prepared = this.prepareSession(account, userAgent);
+    await this.#repository.createSession(prepared.record);
+    return prepared.result;
+  }
+
+  prepareSession(account: AccountAuthenticationRecord, userAgent?: string): PreparedSession {
+    return prepareSession({ id: account.id, name: account.name, email: account.email }, userAgent);
   }
 
   async authenticateBearer(authorization: string | undefined): Promise<AuthenticatedMember | undefined> {

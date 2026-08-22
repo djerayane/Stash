@@ -5,6 +5,10 @@ import { PasswordAuthService } from "./password-auth.js";
 import { OidcAuthService } from "./oidc-auth.js";
 import { OidcManagementService } from "./oidc-management.js";
 import { createAuthenticationSecretCodec } from "./authentication-secrets.js";
+import { AccountRecoveryService } from "./account-recovery.js";
+import { resolveWebAuthnConfiguration, WebAuthnPasskeyVerifier } from "./passkey-verifier.js";
+import { createRecoveryEmailSender } from "./recovery-email.js";
+import { EmailRecoveryWorker } from "./email-recovery-worker.js";
 import { startRedisAcceleration, type RunningRedisAcceleration } from "./redis-acceleration.js";
 import { WorkspaceProjectService } from "./workspaces-projects.js";
 
@@ -31,6 +35,14 @@ async function main(): Promise<void> {
   }
 
   const passwordAuth = new PasswordAuthService(database);
+  const publicOrigin = requiredEnvironment("PUBLIC_ORIGIN");
+  const smtpUrl = process.env.SMTP_URL?.trim();
+  const emailRecoveryFrom = process.env.EMAIL_RECOVERY_FROM?.trim();
+  const recoveryEmail = createRecoveryEmailSender({
+    ...(smtpUrl ? { smtpUrl } : {}),
+    ...(emailRecoveryFrom ? { from: emailRecoveryFrom } : {}),
+    publicOrigin,
+  });
   const instance = await startInstance({
     database,
     host: process.env.HOST ?? "0.0.0.0",
@@ -41,13 +53,32 @@ async function main(): Promise<void> {
     workspaceProjects: new WorkspaceProjectService(database),
     oidcAuth: new OidcAuthService(database),
     oidcManagement: new OidcManagementService(database),
-    oidcCallbackOrigin: requiredEnvironment("PUBLIC_ORIGIN"),
+    oidcCallbackOrigin: publicOrigin,
+    accountRecovery: new AccountRecoveryService(database, passwordAuth, {
+      passkeys: new WebAuthnPasskeyVerifier(resolveWebAuthnConfiguration(publicOrigin, {
+        ...(process.env.WEBAUTHN_RP_ID ? { rpId: process.env.WEBAUTHN_RP_ID } : {}),
+        ...(process.env.WEBAUTHN_RP_NAME ? { rpName: process.env.WEBAUTHN_RP_NAME } : {}),
+      })),
+      secrets: authenticationSecrets,
+      ...(recoveryEmail ? { email: recoveryEmail } : {}),
+    }),
     ...(redis ? { acceleration: redis.acceleration } : {}),
   });
+  const emailRecoveryWorker = recoveryEmail ? new EmailRecoveryWorker(database, authenticationSecrets, recoveryEmail) : undefined;
+  const emailRecoveryTimer = emailRecoveryWorker ? setInterval(() => {
+    void emailRecoveryWorker.processNext()
+      .then((status) => { if (status === "retry_scheduled") console.warn("Email recovery delivery failed; a retry was scheduled."); })
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : "unknown worker failure";
+        console.warn(`Email recovery delivery worker unavailable: ${message}`);
+      });
+  }, 1_000) : undefined;
+  emailRecoveryTimer?.unref();
   console.log(`Stash Instance listening on ${instance.url}`);
 
   const shutdown = async () => {
     console.log("Stopping Stash Instance");
+    if (emailRecoveryTimer) clearInterval(emailRecoveryTimer);
     await instance.close();
     await redis?.close();
     process.exit(0);
