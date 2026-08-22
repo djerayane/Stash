@@ -1,9 +1,9 @@
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { Pool, type PoolClient } from "pg";
 
 import type { DatabaseProbe } from "./instance.js";
 import { noteOperationDigest, type NoteConflictResolution, type NoteEditBatch, type NoteEditConflict, type NoteRecord, type NoteRepository, type NoteTriageChange, type NoteTriageResult, type PortableNoteProjection, type PortableTaskProjection, type TaskCreation } from "./notes.js";
-import { richTextToMarkdown } from "./rich-text.js";
+import { paragraphDocument, richTextToMarkdown } from "./rich-text.js";
 import type { BootstrapRecord, OwnerBootstrapRepository } from "./owner-bootstrap.js";
 import type { AccountAuthenticationRecord, PasswordAuthRepository, SessionRecord } from "./password-auth.js";
 import type { OidcAuthRepository, OidcIdentityKey, OidcIdentityRecord, OidcOrganizationConfiguration } from "./oidc-auth.js";
@@ -28,12 +28,12 @@ import type { PortableRepositoryConnectionProjection, RepositoryConnectionRecord
 import type { CreateTaskFromBlockDraft, LinkedTaskReadModel, TaskFromBlockRepository, TaskMoveActivity, TaskMoveRepository, TaskPlanningReadModel, TaskPlanningRepository, TaskPlanningUpdate, TaskSourceBlockReference } from "./tasks.js";
 import type { AttachmentRecord, AttachmentRepository, PortableAttachmentProjection } from "./attachments.js";
 import type { MobileCaptureRepository } from "./mobile-captures.js";
-import type { DiscussionDraft, DiscussionMessage, DiscussionRecord, DiscussionRepository, DiscussionTarget, PortableDiscussionProjection, PortableDiscussionTarget } from "./discussions.js";
+import type { CreateDiscussionWorkDraft, DiscussionDraft, DiscussionMessage, DiscussionRecord, DiscussionRepository, DiscussionTarget, DiscussionWorkOutcome, PortableDiscussionProjection, PortableDiscussionTarget, PortableDiscussionWorkLinkProjection } from "./discussions.js";
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
 const authenticationKeyCheckLockId = 795_541_992;
-const portableProjectionObjectKinds = ["Workspace", "Project", "Note", "NoteLink", "Task", "GuestProjectAccess", "RepositoryConnection", "Attachment", "Discussion", "Activity"] as const;
+const portableProjectionObjectKinds = ["Workspace", "Project", "Note", "NoteLink", "Task", "GuestProjectAccess", "RepositoryConnection", "Attachment", "Discussion", "DiscussionWorkLink", "Activity"] as const;
 const portableProjectionObjectKindSql = portableProjectionObjectKinds.map((kind) => `'${kind}'`).join(", ");
 const repositoryConnectionSelect = `SELECT connection.id, connection.organization_id, connection.provider, connection.installation_id,
   connection.repository_id, connection.repository_url, connection.created_by_account_id, connection.created_by_attribution,
@@ -685,6 +685,67 @@ export class PostgresDatabase implements
       const projection = this.#portableDiscussion(discussion);
       await this.#recordPortableProjection(client, "Discussion", discussionId, projection.schema, projection);
       return { status: "resolved" as const, discussion, projection };
+    });
+  }
+
+  async createWorkFromMessages(memberId: string, discussionId: string, draft: CreateDiscussionWorkDraft): Promise<DiscussionWorkOutcome> {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureDiscussionSchema(client);
+      const discussion = await this.#readDiscussion(client, memberId, discussionId, true);
+      if (!discussion) return { status: "not_found" as const };
+      if (!await this.#canWriteDiscussion(client, memberId, discussion.workspaceId)) return { status: "forbidden" as const };
+      const fingerprint = createHash("sha256").update(JSON.stringify({ discussionId, kind: draft.kind,
+        messageIds: draft.messageIds, ...(draft.kind === "task" ? { projectId: draft.projectId, title: draft.title } : {}) })).digest("hex");
+      const receipt = await client.query<{ fingerprint: string; outcome: DiscussionWorkOutcome }>(
+        "SELECT fingerprint, outcome FROM stash_discussion_work_receipts WHERE account_id = $1 AND idempotency_key = $2 FOR UPDATE",
+        [memberId, draft.idempotencyKey],
+      );
+      if (receipt.rows[0]) return receipt.rows[0].fingerprint === fingerprint
+        ? { ...(receipt.rows[0].outcome as Extract<DiscussionWorkOutcome, { status: "created" }>), status: "duplicate" as const }
+        : { status: "idempotency_conflict" as const };
+      const selectedIds = new Set(draft.messageIds);
+      const selectedMessages = discussion.messages.filter(({ id }) => selectedIds.has(id));
+      if (selectedMessages.length !== draft.messageIds.length) return { status: "message_not_found" as const };
+
+      let work: Extract<DiscussionWorkOutcome, { status: "created" }>["work"];
+      let workProjection: { schema: "stash.note.v1" | "stash.task.v1" };
+      if (draft.kind === "note") {
+        const content = selectedMessages.map(({ content }) => content).join("\n\n");
+        await client.query(`INSERT INTO stash_notes
+          (id, workspace_id, project_id, content, document, revision, tags, reminder_at, created_by_account_id, created_at)
+          VALUES ($1,$2,NULL,$3,$4::jsonb,1,'[]'::jsonb,NULL,$5,$6)`,
+        [draft.workId, discussion.workspaceId, content, JSON.stringify(paragraphDocument(content, randomUUID())), memberId, draft.createdAt]);
+        const projection = { schema: "stash.note.v1" as const, id: draft.workId, workspaceId: discussion.workspaceId,
+          content, tags: [], createdAt: draft.createdAt, createdBy: draft.createdBy };
+        await this.#recordPortableProjection(client, "Note", draft.workId, projection.schema, projection);
+        work = { kind: "note", id: draft.workId, workspaceId: discussion.workspaceId, content,
+          source: { discussionId, messageIds: selectedMessages.map(({ id }) => id) } };
+        workProjection = { schema: projection.schema };
+      } else {
+        const project = await client.query("SELECT 1 FROM stash_projects WHERE id = $1 AND workspace_id = $2", [draft.projectId, discussion.workspaceId]);
+        if (!project.rowCount) return { status: "project_forbidden" as const };
+        const projection = await this.#createTask(client, { id: draft.workId, workspaceId: discussion.workspaceId,
+          projectId: draft.projectId, title: draft.title, sourceNoteIds: [], createdAt: draft.createdAt, createdBy: draft.createdBy });
+        await client.query("INSERT INTO stash_tasks (id, workspace_id, project_id, task_key, workflow_status_id, title, created_by_account_id, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+          [projection.id, projection.workspaceId, projection.projectId, projection.key, projection.status.id, projection.title, memberId, projection.createdAt]);
+        await this.#recordPortableProjection(client, "Task", projection.id, projection.schema, projection);
+        work = { kind: "task", id: projection.id, workspaceId: projection.workspaceId, projectId: projection.projectId,
+          title: projection.title, key: projection.key, source: { discussionId, messageIds: selectedMessages.map(({ id }) => id) } };
+        workProjection = { schema: projection.schema };
+      }
+      const link: PortableDiscussionWorkLinkProjection = { schema: "stash.discussion-work-link.v1", id: draft.linkId,
+        workspaceId: discussion.workspaceId, discussionId, work: { kind: work.kind, id: work.id },
+        selectedMessages, createdAt: draft.createdAt, createdBy: draft.createdBy };
+      await client.query(`INSERT INTO stash_discussion_work_links
+        (id, discussion_id, work_kind, note_id, task_id, selected_message_ids, created_by_account_id, created_at)
+        VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8)`, [draft.linkId, discussionId, work.kind,
+        work.kind === "note" ? work.id : null, work.kind === "task" ? work.id : null,
+        JSON.stringify(link.selectedMessages.map(({ id }) => id)), memberId, draft.createdAt]);
+      await this.#recordPortableProjection(client, "DiscussionWorkLink", link.id, link.schema, link);
+      const outcome = { status: "created" as const, work, projections: [workProjection, link] };
+      await client.query("INSERT INTO stash_discussion_work_receipts (account_id,idempotency_key,fingerprint,outcome) VALUES ($1,$2,$3,$4::jsonb)",
+        [memberId, draft.idempotencyKey, fingerprint, JSON.stringify(outcome)]);
+      return outcome;
     });
   }
 
@@ -2206,6 +2267,18 @@ export class PostgresDatabase implements
       content TEXT NOT NULL CHECK (char_length(content) BETWEEN 1 AND 20000),
       author_account_id UUID NOT NULL REFERENCES stash_accounts(id), created_at TIMESTAMPTZ NOT NULL
     )`);
+    await client.query(`CREATE TABLE IF NOT EXISTS stash_discussion_work_links (
+      id UUID PRIMARY KEY, discussion_id UUID NOT NULL REFERENCES stash_discussions(id) ON DELETE RESTRICT,
+      work_kind TEXT NOT NULL CHECK (work_kind IN ('note','task')),
+      note_id UUID REFERENCES stash_notes(id) ON DELETE RESTRICT, task_id UUID REFERENCES stash_tasks(id) ON DELETE RESTRICT,
+      selected_message_ids JSONB NOT NULL, created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id), created_at TIMESTAMPTZ NOT NULL,
+      CHECK ((work_kind = 'note' AND note_id IS NOT NULL AND task_id IS NULL)
+        OR (work_kind = 'task' AND note_id IS NULL AND task_id IS NOT NULL))
+    )`);
+    await client.query(`CREATE TABLE IF NOT EXISTS stash_discussion_work_receipts (
+      account_id UUID NOT NULL REFERENCES stash_accounts(id), idempotency_key UUID NOT NULL,
+      fingerprint TEXT NOT NULL, outcome JSONB NOT NULL, PRIMARY KEY (account_id, idempotency_key)
+    )`);
   }
 
   async #readDiscussion(client: PoolClient, memberId: string, discussionId: string, lock: boolean): Promise<DiscussionRecord | undefined> {
@@ -2358,9 +2431,9 @@ export class PostgresDatabase implements
 
   async #recordPortableProjection(
     client: PoolClient,
-    objectKind: "Workspace" | "Project" | "Note" | "NoteLink" | "Task" | "GuestProjectAccess" | "RepositoryConnection" | "Attachment" | "Discussion" | "Activity",
+    objectKind: "Workspace" | "Project" | "Note" | "NoteLink" | "Task" | "GuestProjectAccess" | "RepositoryConnection" | "Attachment" | "Discussion" | "DiscussionWorkLink" | "Activity",
     objectId: string,
-    projectionSchema: "stash.workspace.v1" | "stash.project.v1" | "stash.note.v1" | "stash.note.v2" | "stash.note-link.v1" | "stash.task.v1" | "stash.guest-project-access.v1" | "stash.repository-connection.v1" | "stash.attachment.v1" | "stash.discussion.v1" | "stash.activity.v1",
+    projectionSchema: "stash.workspace.v1" | "stash.project.v1" | "stash.note.v1" | "stash.note.v2" | "stash.note-link.v1" | "stash.task.v1" | "stash.guest-project-access.v1" | "stash.repository-connection.v1" | "stash.attachment.v1" | "stash.discussion.v1" | "stash.discussion-work-link.v1" | "stash.activity.v1",
     payload: object,
   ): Promise<void> {
     await client.query(

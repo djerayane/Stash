@@ -8,6 +8,7 @@ export function discussionRoutes(service: DiscussionService, memberAccess: Membe
       || (request.method === "GET" && /^\/api\/(notes|tasks)\/[^/]+\/discussions$/.test(url.pathname))
       || (["GET"].includes(request.method ?? "") && /^\/api\/discussions\/[^/]+$/.test(url.pathname))
       || (request.method === "POST" && /^\/api\/discussions\/[^/]+\/messages$/.test(url.pathname))
+      || (request.method === "POST" && /^\/api\/discussions\/[^/]+\/work$/.test(url.pathname))
       || (request.method === "PUT" && /^\/api\/discussions\/[^/]+\/resolution$/.test(url.pathname)),
     async handle(request, response, url) {
       const access = await memberAccess.authenticateBearer(request.headers.authorization);
@@ -39,6 +40,18 @@ export function discussionRoutes(service: DiscussionService, memberAccess: Membe
           else json(response, 404, { error: "discussion_not_found", message: "This Discussion is unavailable." });
           return true;
         }
+        if (url.pathname.endsWith("/work")) {
+          const result = await service.createWork(access.accountId, discussionId, await readJson(request));
+          if (result.status === "created" || result.status === "duplicate") json(response, result.status === "created" ? 201 : 200, {
+            result: result.status, work: result.work, projections: result.projections.map(({ schema }) => ({ schema, status: "recorded" })),
+          });
+          else if (result.status === "forbidden") json(response, 403, { error: result.status, message: "Project Guests cannot create durable work from Discussions." });
+          else if (result.status === "message_not_found") json(response, 422, { error: result.status, message: "Every selected message must belong to this Discussion." });
+          else if (result.status === "project_forbidden") json(response, 404, { error: result.status, message: "The destination Project is unavailable." });
+          else if (result.status === "idempotency_conflict") json(response, 409, { error: result.status, message: "That idempotency key was already used for different work." });
+          else json(response, 404, { error: "discussion_not_found", message: "This Discussion is unavailable." });
+          return true;
+        }
         if (url.pathname.endsWith("/messages")) {
           const result = await service.reply(access.accountId, discussionId, await readJson(request));
           if (result.status === "updated") json(response, 201, { discussion: result.discussion, projection: { status: "recorded", schema: result.projection.schema } });
@@ -53,7 +66,7 @@ export function discussionRoutes(service: DiscussionService, memberAccess: Membe
         else if (result.status === "forbidden") json(response, 403, { error: result.status, message: "Project Guests cannot resolve Discussions." });
         else json(response, 404, { error: "discussion_not_found", message: "This Discussion is unavailable." });
       } catch (error) {
-        if (error instanceof InvalidDiscussionInput) json(response, 422, { error: "invalid_input", message: "A Discussion requires one valid target and non-empty content." });
+        if (error instanceof InvalidDiscussionInput) json(response, 422, { error: "invalid_input", message: "The Discussion request contains invalid input." });
         else if (error instanceof SyntaxError || error instanceof Error && error.message === "body_too_large")
           json(response, error instanceof SyntaxError ? 400 : 413, { error: error instanceof SyntaxError ? "invalid_json" : "body_too_large", message: "The request could not be read." });
         else json(response, 503, { error: "discussion_unavailable", message: "The Discussion change could not be saved. Try again." });

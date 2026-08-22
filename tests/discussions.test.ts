@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 
-import { DiscussionService, type DiscussionDraft, type DiscussionRecord, type DiscussionRepository, type PortableDiscussionProjection } from "../src/discussions.js";
+import { DiscussionService, type CreateDiscussionWorkDraft, type DiscussionDraft, type DiscussionRecord, type DiscussionRepository, type DiscussionWorkOutcome, type DiscussionWorkProjection, type PortableDiscussionProjection, type PortableDiscussionWorkLinkProjection } from "../src/discussions.js";
 import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
 import type { MemberAccessResolver, PortableIdentity } from "../src/workspaces-projects.js";
 
@@ -16,6 +16,9 @@ const secretTaskId = "77777777-7777-4777-8777-777777777777";
 class DiscussionFake implements DatabaseProbe, DiscussionRepository {
   readonly discussions: DiscussionRecord[] = [];
   readonly projections: PortableDiscussionProjection[] = [];
+  readonly createdWork: Array<Extract<DiscussionWorkOutcome, { status: "created" }>> = [];
+  readonly workRequests = new Map<string, { fingerprint: string; outcome: Extract<DiscussionWorkOutcome, { status: "created" }> }>();
+  workProjectionFailure = false;
   blockPresent = true;
   duplicateBlock = false;
   fail = false;
@@ -99,6 +102,36 @@ class DiscussionFake implements DatabaseProbe, DiscussionRepository {
       target: structuredClone(discussion.target), messages: structuredClone(discussion.messages), createdAt: discussion.createdAt, resolvedAt };
     this.projections.push(structuredClone(projection));
     return { status: "resolved" as const, discussion: structuredClone(discussion), projection };
+  }
+  async createWorkFromMessages(memberId: string, discussionId: string, draft: CreateDiscussionWorkDraft): Promise<DiscussionWorkOutcome> {
+    const found = await this.findDiscussion(memberId, discussionId);
+    if (found.status === "not_found") return found;
+    if (memberId !== "ada") return { status: "forbidden" };
+    const fingerprint = JSON.stringify({ discussionId, kind: draft.kind, messageIds: draft.messageIds,
+      ...(draft.kind === "task" ? { projectId: draft.projectId, title: draft.title } : {}) });
+    const prior = this.workRequests.get(draft.idempotencyKey);
+    if (prior) return prior.fingerprint === fingerprint
+      ? { ...structuredClone(prior.outcome), status: "duplicate" }
+      : { status: "idempotency_conflict" };
+    const selected = found.discussion.messages.filter((message) => draft.messageIds.includes(message.id));
+    if (selected.length !== draft.messageIds.length) return { status: "message_not_found" };
+    if (draft.kind === "task" && draft.projectId !== "88888888-8888-4888-8888-888888888888") return { status: "project_forbidden" };
+    if (this.workProjectionFailure) throw new Error("portable outbox unavailable");
+    const source = { discussionId, messageIds: selected.map(({ id }) => id) };
+    const work = draft.kind === "note"
+      ? { kind: "note" as const, id: draft.workId, workspaceId: found.discussion.workspaceId,
+        content: selected.map(({ content }) => content).join("\n\n"), source }
+      : { kind: "task" as const, id: draft.workId, workspaceId: found.discussion.workspaceId,
+        projectId: draft.projectId, title: draft.title, key: "LAUNCH-1", source };
+    const projections: DiscussionWorkProjection[] = [
+      { schema: draft.kind === "note" ? "stash.note.v1" : "stash.task.v1" },
+      { schema: "stash.discussion-work-link.v1", id: draft.linkId, workspaceId: found.discussion.workspaceId,
+        discussionId, work: { kind: work.kind, id: work.id }, selectedMessages: selected, createdAt: draft.createdAt, createdBy: draft.createdBy },
+    ];
+    const outcome: Extract<DiscussionWorkOutcome, { status: "created" }> = { status: "created", work, projections };
+    this.createdWork.push(structuredClone(outcome));
+    this.workRequests.set(draft.idempotencyKey, { fingerprint, outcome: structuredClone(outcome) });
+    return structuredClone(outcome);
   }
   private canGuestReadDraft(draft: DiscussionDraft) {
     return draft.target.kind === "task" ? draft.target.taskId === taskId
@@ -249,5 +282,66 @@ describe("portable Discussions", () => {
     assert.equal((await request(`/api/discussions/${discussion.id}/resolution`, "PUT", {}, "guest-grace")).status, 403);
     assert.equal((await request("/api/discussions", "POST", { target: { kind: "task", taskId: secretTaskId }, message: "Probe" }, "guest-grace")).status, 404);
     assert.deepEqual(database.discussions, before);
+  });
+
+  it("creates linked durable Notes and Tasks from only the selected Discussion messages", async () => {
+    const { database, request } = await run();
+    const created = await request("/api/discussions", "POST", { target: { kind: "note", noteId }, message: "Keep as context" });
+    const discussion = (await created.json() as { discussion: DiscussionRecord }).discussion;
+    const second = await request(`/api/discussions/${discussion.id}/messages`, "POST", { content: "Turn this into work" });
+    const messages = (await second.json() as { discussion: DiscussionRecord }).discussion.messages;
+
+    const noteResponse = await request(`/api/discussions/${discussion.id}/work`, "POST", {
+      kind: "note", messageIds: [messages[1]!.id], idempotencyKey: "99999999-9999-4999-8999-999999999991",
+    });
+    assert.equal(noteResponse.status, 201);
+    const note = await noteResponse.json() as { result: string; work: { kind: string; content: string; source: { discussionId: string; messageIds: string[] } }; projections: Array<{ schema: string }> };
+    assert.equal(note.work.kind, "note");
+    assert.equal(note.work.content, "Turn this into work");
+    assert.doesNotMatch(note.work.content, /Keep as context/);
+    assert.deepEqual(note.work.source, { discussionId: discussion.id, messageIds: [messages[1]!.id] });
+    assert.deepEqual(note.projections.map(({ schema }) => schema), ["stash.note.v1", "stash.discussion-work-link.v1"]);
+    assert.deepEqual((database.createdWork[0]!.projections[1] as PortableDiscussionWorkLinkProjection).selectedMessages[0]!.author,
+      { localAccountId: "ada", displayName: "Ada Lovelace" });
+
+    const taskResponse = await request(`/api/discussions/${discussion.id}/work`, "POST", {
+      kind: "task", messageIds: [messages[0]!.id, messages[1]!.id], projectId: "88888888-8888-4888-8888-888888888888",
+      title: "Document the rollback path", idempotencyKey: "99999999-9999-4999-8999-999999999992",
+    });
+    assert.equal(taskResponse.status, 201);
+    const task = await taskResponse.json() as { work: { kind: string; projectId: string; title: string; key: string; source: { discussionId: string; messageIds: string[] } } };
+    assert.equal(task.work.kind, "task");
+    assert.equal(task.work.projectId, "88888888-8888-4888-8888-888888888888");
+    assert.equal(task.work.title, "Document the rollback path");
+    assert.equal(task.work.key, "LAUNCH-1");
+    assert.deepEqual(task.work.source, { discussionId: discussion.id, messageIds: messages.map(({ id }) => id) });
+  });
+
+  it("makes selection, authorization, idempotency, and recoverable projection failures visible", async () => {
+    const { database, request } = await run();
+    const created = await request("/api/discussions", "POST", { target: { kind: "task", taskId }, message: "Selected" });
+    const discussion = (await created.json() as { discussion: DiscussionRecord }).discussion;
+    const input = { kind: "note", messageIds: [discussion.messages[0]!.id], idempotencyKey: "99999999-9999-4999-8999-999999999993" };
+
+    assert.equal((await request(`/api/discussions/${discussion.id}/work`, "POST", input, "guest-grace")).status, 403);
+    for (const invalid of [{ ...input, messageIds: [] }, { ...input, messageIds: [taskId] },
+      { ...input, messageIds: [discussion.messages[0]!.id, discussion.messages[0]!.id] }, { ...input, extra: true }])
+      assert.equal((await request(`/api/discussions/${discussion.id}/work`, "POST", invalid)).status, 422);
+
+    database.workProjectionFailure = true;
+    const failed = await request(`/api/discussions/${discussion.id}/work`, "POST", input);
+    assert.equal(failed.status, 503);
+    assert.equal(database.createdWork.length, 0);
+    database.workProjectionFailure = false;
+    const first = await request(`/api/discussions/${discussion.id}/work`, "POST", input);
+    assert.equal(first.status, 201);
+    const firstBody = await first.json();
+    const retry = await request(`/api/discussions/${discussion.id}/work`, "POST", input);
+    assert.equal(retry.status, 200);
+    assert.deepEqual((await retry.json() as { work: object }).work, (firstBody as { work: object }).work);
+    assert.equal(database.createdWork.length, 1);
+    const conflict = await request(`/api/discussions/${discussion.id}/work`, "POST", { kind: "task", messageIds: input.messageIds,
+      projectId: "88888888-8888-4888-8888-888888888888", title: "Different", idempotencyKey: input.idempotencyKey });
+    assert.equal(conflict.status, 409);
   });
 });

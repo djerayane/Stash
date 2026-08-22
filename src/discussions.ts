@@ -38,6 +38,45 @@ export interface PortableDiscussionProjection {
   resolvedAt?: string;
 }
 
+export interface DiscussionWorkSource {
+  discussionId: string;
+  messageIds: string[];
+}
+
+export type DiscussionWork =
+  | { kind: "note"; id: string; workspaceId: string; content: string; source: DiscussionWorkSource }
+  | { kind: "task"; id: string; workspaceId: string; projectId: string; title: string; key: string; source: DiscussionWorkSource };
+
+export interface PortableDiscussionWorkLinkProjection {
+  schema: "stash.discussion-work-link.v1";
+  id: string;
+  workspaceId: string;
+  discussionId: string;
+  work: { kind: DiscussionWork["kind"]; id: string };
+  selectedMessages: DiscussionMessage[];
+  createdAt: string;
+  createdBy: PortableIdentity;
+}
+
+export type DiscussionWorkProjection = { schema: "stash.note.v1" | "stash.task.v1" } | PortableDiscussionWorkLinkProjection;
+
+interface DiscussionWorkDraftBase {
+  messageIds: string[];
+  idempotencyKey: string;
+  workId: string;
+  linkId: string;
+  createdAt: string;
+  createdBy: PortableIdentity;
+}
+export type CreateDiscussionWorkDraft = DiscussionWorkDraftBase & (
+  | { kind: "note" }
+  | { kind: "task"; projectId: string; title: string }
+);
+type CreatedDiscussionWork = { status: "created"; work: DiscussionWork; projections: DiscussionWorkProjection[] };
+export type DiscussionWorkOutcome = CreatedDiscussionWork
+  | { status: "duplicate"; work: DiscussionWork; projections: DiscussionWorkProjection[] }
+  | { status: "not_found" | "forbidden" | "message_not_found" | "project_forbidden" | "idempotency_conflict" };
+
 export type CreateDiscussionOutcome =
   | { status: "created"; discussion: DiscussionRecord; projection: PortableDiscussionProjection }
   | { status: "target_not_found" | "ambiguous_block" | "forbidden" };
@@ -58,6 +97,7 @@ export interface DiscussionRepository {
   listTaskDiscussions(memberId: string, taskId: string): Promise<{ status: "found"; discussions: DiscussionRecord[] } | { status: "not_found" }>;
   addMessage(memberId: string, discussionId: string, message: DiscussionMessage): Promise<AddDiscussionMessageOutcome>;
   resolveDiscussion(memberId: string, discussionId: string, resolvedAt: string): Promise<ResolveDiscussionOutcome>;
+  createWorkFromMessages(memberId: string, discussionId: string, draft: CreateDiscussionWorkDraft): Promise<DiscussionWorkOutcome>;
 }
 
 export class InvalidDiscussionInput extends Error {}
@@ -127,5 +167,29 @@ export class DiscussionService {
   async resolve(memberId: string, discussionId: string, value: unknown): Promise<ResolveDiscussionOutcome> {
     if (!uuid.test(discussionId) || !plainObject(value) || Object.keys(value).length !== 0) throw new InvalidDiscussionInput();
     return this.repository.resolveDiscussion(memberId, discussionId, new Date().toISOString());
+  }
+
+  async createWork(memberId: string, discussionId: string, value: unknown): Promise<DiscussionWorkOutcome> {
+    if (!uuid.test(discussionId) || !plainObject(value)) throw new InvalidDiscussionInput();
+    const keys = Object.keys(value);
+    const commonValid = Array.isArray(value.messageIds) && value.messageIds.length > 0 && value.messageIds.length <= 100
+      && value.messageIds.every((id) => typeof id === "string" && uuid.test(id))
+      && new Set(value.messageIds).size === value.messageIds.length
+      && typeof value.idempotencyKey === "string" && uuid.test(value.idempotencyKey);
+    const noteValid = value.kind === "note" && keys.length === 3
+      && keys.every((key) => ["kind", "messageIds", "idempotencyKey"].includes(key));
+    const taskValid = value.kind === "task" && keys.length === 5
+      && keys.every((key) => ["kind", "messageIds", "idempotencyKey", "projectId", "title"].includes(key))
+      && typeof value.projectId === "string" && uuid.test(value.projectId)
+      && typeof value.title === "string" && value.title.trim().length > 0 && value.title.trim().length <= 500;
+    if (!commonValid || !noteValid && !taskValid) throw new InvalidDiscussionInput();
+    const createdBy = await this.repository.findPortableMemberIdentity(memberId);
+    if (!createdBy) throw new Error("member_identity_unavailable");
+    const messageIds = value.messageIds as string[];
+    const base: DiscussionWorkDraftBase = { messageIds: [...messageIds], idempotencyKey: value.idempotencyKey as string,
+      workId: randomUUID(), linkId: randomUUID(), createdAt: new Date().toISOString(), createdBy };
+    const draft: CreateDiscussionWorkDraft = value.kind === "note" ? { ...base, kind: "note" }
+      : { ...base, kind: "task", projectId: value.projectId as string, title: (value.title as string).trim() };
+    return this.repository.createWorkFromMessages(memberId, discussionId, draft);
   }
 }
