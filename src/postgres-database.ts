@@ -8,12 +8,22 @@ import {
   verifyAuthenticationKeyCheck,
   type AuthenticationSecretCodec,
 } from "./authentication-secrets.js";
+import type {
+  WorkspaceProjectRecord,
+  WorkspaceProjectRepository,
+  WorkspaceRecord,
+} from "./workspaces-projects.js";
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
 const authenticationKeyCheckLockId = 795_541_992;
 
-export class PostgresDatabase implements DatabaseProbe, OwnerBootstrapRepository, PasswordAuthRepository {
+export class PostgresDatabase implements
+  DatabaseProbe,
+  OwnerBootstrapRepository,
+  PasswordAuthRepository,
+  WorkspaceProjectRepository
+{
   readonly #pool: Pool;
   readonly #authenticationSecrets: AuthenticationSecretCodec;
 
@@ -57,6 +67,78 @@ export class PostgresDatabase implements DatabaseProbe, OwnerBootstrapRepository
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async createWorkspace(record: WorkspaceRecord): Promise<"created" | "organization_forbidden"> {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureWorkspaceProjectSchema(client);
+      if (record.owner.type === "organization") {
+        const membership = await client.query(
+          `SELECT 1 FROM stash_organization_memberships
+           WHERE organization_id = $1 AND account_id = $2`,
+          [record.owner.id, record.createdByMemberId],
+        );
+        if (!membership.rowCount) return "organization_forbidden";
+      }
+      await client.query(
+        `INSERT INTO stash_workspaces
+          (id, name, owner_type, personal_owner_id, organization_owner_id, created_by_account_id)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [
+          record.id,
+          record.name,
+          record.owner.type,
+          record.owner.type === "personal" ? record.owner.id : null,
+          record.owner.type === "organization" ? record.owner.id : null,
+          record.createdByMemberId,
+        ],
+      );
+      return "created";
+    } finally {
+      client.release();
+    }
+  }
+
+  async createProject(
+    memberId: string,
+    record: WorkspaceProjectRecord,
+  ): Promise<"created" | "workspace_forbidden" | "workspace_not_found" | "key_conflict"> {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureWorkspaceProjectSchema(client);
+      const access = await client.query<{ allowed: boolean }>(
+        `SELECT (
+           (owner_type = 'personal' AND personal_owner_id = $2)
+           OR (owner_type = 'organization' AND EXISTS (
+             SELECT 1 FROM stash_organization_memberships membership
+             WHERE membership.organization_id = stash_workspaces.organization_owner_id
+               AND membership.account_id = $2
+           ))
+         ) AS allowed
+         FROM stash_workspaces WHERE id = $1`,
+        [record.workspaceId, memberId],
+      );
+      if (!access.rowCount) return "workspace_not_found";
+      if (!access.rows[0]!.allowed) return "workspace_forbidden";
+      try {
+        await client.query(
+          `INSERT INTO stash_projects (id, workspace_id, name, project_key, created_by_account_id)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [record.id, record.workspaceId, record.name, record.key, record.createdByMemberId],
+        );
+      } catch (error) {
+        if (
+          error instanceof Error
+          && "code" in error
+          && (error as Error & { code?: string }).code === "23505"
+        ) return "key_conflict";
+        throw error;
+      }
+      return "created";
     } finally {
       client.release();
     }
@@ -225,6 +307,33 @@ export class PostgresDatabase implements DatabaseProbe, OwnerBootstrapRepository
       );
       CREATE TABLE IF NOT EXISTS stash_instance_bootstrap (
         singleton BOOLEAN PRIMARY KEY CHECK (singleton)
+      );
+    `);
+  }
+
+  async #ensureWorkspaceProjectSchema(client: PoolClient): Promise<void> {
+    await this.#ensureBootstrapSchema(client);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS stash_workspaces (
+        id UUID PRIMARY KEY,
+        name TEXT NOT NULL,
+        owner_type TEXT NOT NULL CHECK (owner_type IN ('personal', 'organization')),
+        personal_owner_id UUID REFERENCES stash_accounts(id),
+        organization_owner_id UUID REFERENCES stash_organizations(id),
+        created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id),
+        CHECK (
+          (owner_type = 'personal' AND personal_owner_id IS NOT NULL AND organization_owner_id IS NULL)
+          OR
+          (owner_type = 'organization' AND personal_owner_id IS NULL AND organization_owner_id IS NOT NULL)
+        )
+      );
+      CREATE TABLE IF NOT EXISTS stash_projects (
+        id UUID PRIMARY KEY,
+        workspace_id UUID NOT NULL REFERENCES stash_workspaces(id),
+        name TEXT NOT NULL,
+        project_key TEXT NOT NULL,
+        created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id),
+        UNIQUE (workspace_id, project_key)
       );
     `);
   }

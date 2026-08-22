@@ -4,6 +4,7 @@ import { PostgresDatabase } from "./postgres-database.js";
 import { PasswordAuthService } from "./password-auth.js";
 import { createAuthenticationSecretCodec } from "./authentication-secrets.js";
 import { startRedisAcceleration, type RunningRedisAcceleration } from "./redis-acceleration.js";
+import { WorkspaceProjectService } from "./workspaces-projects.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -27,13 +28,15 @@ async function main(): Promise<void> {
     throw new Error("PORT must be an integer between 1 and 65535");
   }
 
+  const passwordAuth = new PasswordAuthService(database);
   const instance = await startInstance({
     database,
     host: process.env.HOST ?? "0.0.0.0",
     port,
     instanceAdminToken: requiredEnvironment("INSTANCE_ADMIN_TOKEN"),
     ownerBootstrap: new OwnerBootstrapService(database),
-    passwordAuth: new PasswordAuthService(database),
+    passwordAuth,
+    workspaceProjects: new WorkspaceProjectService(database),
     ...(redis ? { acceleration: redis.acceleration } : {}),
   });
   console.log(`Stash Instance listening on ${instance.url}`);
