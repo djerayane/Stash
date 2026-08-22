@@ -274,20 +274,17 @@ export class PostgresDatabase implements
 
   async assignBuiltInRole(
     organizationId: string,
+    actorId: string,
     accountId: string,
     role: BuiltInOrganizationRole,
-  ): Promise<"updated" | "member_not_found" | "final_owner"> {
+  ): Promise<"updated" | "member_not_found" | "final_owner" | "forbidden"> {
     return this.#withTransaction(async (client) => {
-      await this.#ensureBootstrapSchema(client);
-      const memberships = await client.query<{ account_id: string; role: BuiltInOrganizationRole }>(
-        `SELECT account_id, role FROM stash_organization_memberships
-         WHERE organization_id = $1 FOR UPDATE`,
-        [organizationId],
-      );
-      const target = memberships.rows.find((membership) => membership.account_id === accountId);
+      const memberships = await this.#lockedOrganizationMemberships(client, organizationId);
+      if (!this.#canManageRoles(memberships, actorId)) return "forbidden";
+      const target = memberships.find((membership) => membership.account_id === accountId);
       if (!target) return "member_not_found";
       if (target.role === "Owner" && role !== "Owner"
-        && memberships.rows.filter((membership) => membership.role === "Owner").length === 1) {
+        && this.#isOnlyOwner(memberships, accountId)) {
         return "final_owner";
       }
       await client.query(
@@ -301,19 +298,15 @@ export class PostgresDatabase implements
 
   async removeOrganizationMember(
     organizationId: string,
+    actorId: string,
     accountId: string,
-  ): Promise<"removed" | "member_not_found" | "final_owner"> {
+  ): Promise<"removed" | "member_not_found" | "final_owner" | "forbidden"> {
     return this.#withTransaction(async (client) => {
-      await this.#ensureBootstrapSchema(client);
-      const memberships = await client.query<{ account_id: string; role: BuiltInOrganizationRole }>(
-        `SELECT account_id, role FROM stash_organization_memberships
-         WHERE organization_id = $1 FOR UPDATE`,
-        [organizationId],
-      );
-      const target = memberships.rows.find((membership) => membership.account_id === accountId);
+      const memberships = await this.#lockedOrganizationMemberships(client, organizationId);
+      if (!this.#canManageRoles(memberships, actorId)) return "forbidden";
+      const target = memberships.find((membership) => membership.account_id === accountId);
       if (!target) return "member_not_found";
-      if (target.role === "Owner"
-        && memberships.rows.filter((membership) => membership.role === "Owner").length === 1) {
+      if (target.role === "Owner" && this.#isOnlyOwner(memberships, accountId)) {
         return "final_owner";
       }
       await client.query(
@@ -322,6 +315,35 @@ export class PostgresDatabase implements
       );
       return "removed";
     });
+  }
+
+  async #lockedOrganizationMemberships(client: PoolClient, organizationId: string) {
+    await this.#ensureBootstrapSchema(client);
+    const memberships = await client.query<{ account_id: string; role: BuiltInOrganizationRole }>(
+      `SELECT account_id, role FROM stash_organization_memberships
+       WHERE organization_id = $1 FOR UPDATE`,
+      [organizationId],
+    );
+    return memberships.rows;
+  }
+
+  #isOnlyOwner(
+    memberships: ReadonlyArray<{ account_id: string; role: BuiltInOrganizationRole }>,
+    accountId: string,
+  ): boolean {
+    return memberships.filter((membership) => membership.role === "Owner").length === 1
+      && memberships.some(
+        (membership) => membership.account_id === accountId && membership.role === "Owner",
+      );
+  }
+
+  #canManageRoles(
+    memberships: ReadonlyArray<{ account_id: string; role: BuiltInOrganizationRole }>,
+    accountId: string,
+  ): boolean {
+    return memberships.some(
+      (membership) => membership.account_id === accountId && membership.role === "Owner",
+    );
   }
 
   async saveOidcConfiguration(configuration: OidcOrganizationConfiguration): Promise<void> {

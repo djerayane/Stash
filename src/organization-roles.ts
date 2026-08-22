@@ -1,5 +1,37 @@
 export const builtInOrganizationRoles = ["Owner", "Admin", "Member"] as const;
 export type BuiltInOrganizationRole = (typeof builtInOrganizationRoles)[number];
+export type OrganizationPermission =
+  | "organization.roles.manage"
+  | "organization.members.manage"
+  | "workspace.create"
+  | "project.create";
+
+const builtInRoleDefinitions: ReadonlyArray<{
+  name: BuiltInOrganizationRole;
+  immutable: true;
+  permissions: readonly OrganizationPermission[];
+}> = [
+  {
+    name: "Owner",
+    immutable: true,
+    permissions: [
+      "organization.roles.manage",
+      "organization.members.manage",
+      "workspace.create",
+      "project.create",
+    ],
+  },
+  {
+    name: "Admin",
+    immutable: true,
+    permissions: ["organization.members.manage", "workspace.create", "project.create"],
+  },
+  {
+    name: "Member",
+    immutable: true,
+    permissions: ["workspace.create", "project.create"],
+  },
+];
 
 type MembershipMutationResult = "updated" | "removed" | "member_not_found" | "final_owner";
 
@@ -10,13 +42,15 @@ export interface OrganizationRoleRepository {
   ): Promise<BuiltInOrganizationRole | undefined>;
   assignBuiltInRole(
     organizationId: string,
+    actorId: string,
     accountId: string,
     role: BuiltInOrganizationRole,
-  ): Promise<Extract<MembershipMutationResult, "updated" | "member_not_found" | "final_owner">>;
+  ): Promise<Extract<MembershipMutationResult, "updated" | "member_not_found" | "final_owner"> | "forbidden">;
   removeOrganizationMember(
     organizationId: string,
+    actorId: string,
     accountId: string,
-  ): Promise<Extract<MembershipMutationResult, "removed" | "member_not_found" | "final_owner">>;
+  ): Promise<Extract<MembershipMutationResult, "removed" | "member_not_found" | "final_owner"> | "forbidden">;
 }
 
 export class InvalidOrganizationRoleInput extends Error {}
@@ -34,21 +68,22 @@ export class OrganizationRoleService {
   }
 
   listBuiltInRoles() {
-    return builtInOrganizationRoles.map((name) => ({ name, immutable: true as const }));
+    return builtInRoleDefinitions;
   }
 
   async assign(
     organizationId: string,
+    actorId: string,
     memberId: string,
     value: unknown,
   ) {
     if (!isRoleInput(value) || !validMemberId(memberId)) throw new InvalidOrganizationRoleInput();
-    return this.#repository.assignBuiltInRole(organizationId, memberId, value.role);
+    return this.#repository.assignBuiltInRole(organizationId, actorId, memberId, value.role);
   }
 
-  async remove(organizationId: string, memberId: string) {
+  async remove(organizationId: string, actorId: string, memberId: string) {
     if (!validMemberId(memberId)) throw new InvalidOrganizationRoleInput();
-    return this.#repository.removeOrganizationMember(organizationId, memberId);
+    return this.#repository.removeOrganizationMember(organizationId, actorId, memberId);
   }
 }
 

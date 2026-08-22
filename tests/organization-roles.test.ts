@@ -26,9 +26,15 @@ class ProtocolCompatibleDatabase implements DatabaseProbe, OrganizationRoleRepos
     return this.memberships.get(orgId)?.get(accountId);
   }
 
-  async assignBuiltInRole(orgId: string, accountId: string, role: BuiltInOrganizationRole) {
+  async assignBuiltInRole(
+    orgId: string,
+    actorId: string,
+    accountId: string,
+    role: BuiltInOrganizationRole,
+  ) {
     if (this.failure) throw this.failure;
     const members = this.memberships.get(orgId);
+    if (members?.get(actorId) !== "Owner") return "forbidden" as const;
     if (!members?.has(accountId)) return "member_not_found" as const;
     if (members.get(accountId) === "Owner" && role !== "Owner"
       && [...members.values()].filter((candidate) => candidate === "Owner").length === 1) {
@@ -38,9 +44,10 @@ class ProtocolCompatibleDatabase implements DatabaseProbe, OrganizationRoleRepos
     return "updated" as const;
   }
 
-  async removeOrganizationMember(orgId: string, accountId: string) {
+  async removeOrganizationMember(orgId: string, actorId: string, accountId: string) {
     if (this.failure) throw this.failure;
     const members = this.memberships.get(orgId);
+    if (members?.get(actorId) !== "Owner") return "forbidden" as const;
     if (!members?.has(accountId)) return "member_not_found" as const;
     if (members.get(accountId) === "Owner"
       && [...members.values()].filter((candidate) => candidate === "Owner").length === 1) {
@@ -92,9 +99,22 @@ describe("managing built-in Organization Roles", () => {
     assert.equal(roles.status, 200);
     assert.deepEqual(await roles.json(), {
       roles: [
-        { name: "Owner", immutable: true },
-        { name: "Admin", immutable: true },
-        { name: "Member", immutable: true },
+        {
+          name: "Owner",
+          immutable: true,
+          permissions: [
+            "organization.roles.manage",
+            "organization.members.manage",
+            "workspace.create",
+            "project.create",
+          ],
+        },
+        {
+          name: "Admin",
+          immutable: true,
+          permissions: ["organization.members.manage", "workspace.create", "project.create"],
+        },
+        { name: "Member", immutable: true, permissions: ["workspace.create", "project.create"] },
       ],
     });
 

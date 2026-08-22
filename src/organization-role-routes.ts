@@ -26,15 +26,12 @@ export function organizationRoleRoutes(
         const rolesMatch = url.pathname.match(rolesPath);
         const memberMatch = url.pathname.match(memberPath);
         const organizationId = decodeURIComponent((rolesMatch ?? memberMatch)![1]!);
-        if (!await service.authorizeOwner(organizationId, access.accountId)) {
-          json(response, 403, {
-            error: "organization_forbidden",
-            message: "Only an Organization Owner can manage built-in Roles.",
-          });
-          return true;
-        }
 
         if (rolesMatch) {
+          if (!await service.authorizeOwner(organizationId, access.accountId)) {
+            forbidden(response);
+            return true;
+          }
           if (request.method === "GET" && !rolesMatch[2]) {
             json(response, 200, { roles: service.listBuiltInRoles() });
           } else if ((request.method === "PUT" || request.method === "DELETE") && rolesMatch[2]) {
@@ -52,7 +49,7 @@ export function organizationRoleRoutes(
         let result;
         if (request.method === "PUT" && url.pathname.endsWith("/role")) {
           const input = await readJson(request);
-          result = await service.assign(organizationId, memberId, input);
+          result = await service.assign(organizationId, access.accountId, memberId, input);
           if (result === "updated") {
             json(response, 200, {
               organizationId,
@@ -62,7 +59,7 @@ export function organizationRoleRoutes(
             return true;
           }
         } else if (request.method === "DELETE" && !url.pathname.endsWith("/role")) {
-          result = await service.remove(organizationId, memberId);
+          result = await service.remove(organizationId, access.accountId, memberId);
           if (result === "removed") {
             response.writeHead(204, { "cache-control": "no-store" });
             response.end();
@@ -73,7 +70,9 @@ export function organizationRoleRoutes(
           return true;
         }
 
-        if (result === "member_not_found") {
+        if (result === "forbidden") {
+          forbidden(response);
+        } else if (result === "member_not_found") {
           json(response, 404, { error: result, message: "That Member does not belong to this Organization." });
         } else if (result === "final_owner") {
           json(response, 409, {
@@ -93,4 +92,11 @@ export function organizationRoleRoutes(
       return true;
     },
   };
+}
+
+function forbidden(response: Parameters<typeof json>[0]): void {
+  json(response, 403, {
+    error: "organization_forbidden",
+    message: "Only an Organization Owner can manage built-in Roles.",
+  });
 }
