@@ -8,6 +8,7 @@ import { createAuthenticationSecretCodec } from "./authentication-secrets.js";
 import { AccountRecoveryService } from "./account-recovery.js";
 import { WebAuthnPasskeyVerifier } from "./passkey-verifier.js";
 import { createRecoveryEmailSender } from "./recovery-email.js";
+import { EmailRecoveryWorker } from "./email-recovery-worker.js";
 import { startRedisAcceleration, type RunningRedisAcceleration } from "./redis-acceleration.js";
 import { WorkspaceProjectService } from "./workspaces-projects.js";
 
@@ -65,10 +66,21 @@ async function main(): Promise<void> {
     }),
     ...(redis ? { acceleration: redis.acceleration } : {}),
   });
+  const emailRecoveryWorker = recoveryEmail ? new EmailRecoveryWorker(database, authenticationSecrets, recoveryEmail) : undefined;
+  const emailRecoveryTimer = emailRecoveryWorker ? setInterval(() => {
+    void emailRecoveryWorker.processNext()
+      .then((status) => { if (status === "retry_scheduled") console.warn("Email recovery delivery failed; a retry was scheduled."); })
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : "unknown worker failure";
+        console.warn(`Email recovery delivery worker unavailable: ${message}`);
+      });
+  }, 1_000) : undefined;
+  emailRecoveryTimer?.unref();
   console.log(`Stash Instance listening on ${instance.url}`);
 
   const shutdown = async () => {
     console.log("Stopping Stash Instance");
+    if (emailRecoveryTimer) clearInterval(emailRecoveryTimer);
     await instance.close();
     await redis?.close();
     process.exit(0);

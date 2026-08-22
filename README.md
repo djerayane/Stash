@@ -55,7 +55,7 @@ OIDC issuer, discovery, token, and JWKS endpoints must use HTTPS and resolve onl
 
 OIDC callback URLs always use `PUBLIC_ORIGIN`; request `Host` and forwarding headers never influence them. Deployments behind a proxy must preserve the configured public URL when forwarding the callback. Production callback origins require HTTPS. The insecure-origin exception is injectable only by acceptance tests and is not available from environment configuration.
 
-Production passkeys require an HTTPS `PUBLIC_ORIGIN` whose hostname matches the configured relying-party ID. Email recovery stays visibly disabled when SMTP is absent. Partial SMTP configuration fails startup rather than presenting a recovery option that cannot deliver mail.
+Production passkeys require an HTTPS `PUBLIC_ORIGIN` whose hostname matches the configured relying-party ID. Email recovery stays visibly disabled when SMTP is absent. Partial SMTP configuration fails startup rather than presenting a recovery option that cannot deliver mail. Recovery requests queue encrypted local delivery jobs and return without waiting for SMTP; transient delivery failures remain queued for retry and are reported in Instance logs.
 
 `INSTANCE_MASTER_KEY` is part of the Instance's restore contract even though it is stored outside
 PostgreSQL. Instance backup procedures must preserve this exact key separately and operators must

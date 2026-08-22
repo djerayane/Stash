@@ -13,9 +13,7 @@ export function createRecoveryEmailSender(
   if (origin.protocol !== "https:" && origin.hostname !== "localhost") throw new Error("PUBLIC_ORIGIN must use HTTPS for email recovery");
   const transport = transportFactory(configuration.smtpUrl);
   return {
-    async enqueueRecovery(delivery) {
-      if (!delivery) return;
-      const { address, token } = delivery;
+    async deliver(address, token) {
       const recoveryUrl = new URL("/recover-account", origin);
       recoveryUrl.searchParams.set("token", token);
       await transport.sendMail({

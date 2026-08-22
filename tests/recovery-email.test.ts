@@ -13,7 +13,7 @@ describe("operator-configured email recovery delivery", () => {
       { smtpUrl: "smtp://mail.test", from: "Stash <recovery@stash.test>", publicOrigin: "https://stash.test" },
       () => ({ async sendMail(message) { messages.push(message); } }),
     );
-    await sender!.enqueueRecovery({ address: "ada@example.com", token: "secret-token" });
+    await sender!.deliver("ada@example.com", "secret-token");
     assert.equal(messages[0]?.to, "ada@example.com");
     assert.match(messages[0]?.text ?? "", /https:\/\/stash\.test\/recover-account\?token=secret-token/);
   });

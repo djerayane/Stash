@@ -1,10 +1,11 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { AuthenticationSecretCodec } from "./authentication-secrets.js";
 import type { AccountAuthenticationRecord, AuthenticatedMember, PasswordAuthService, SessionRecord } from "./password-auth.js";
 
 export interface PasskeyRecord { credentialId: string; accountId: string; publicKey: string; counter: number; transports?: string[]; createdAt: string }
 export interface RecoveryCodeRecord { accountId: string; lookup: string; protectedSecret: string }
 export interface EmailRecoveryRecord { accountId: string; tokenLookup: string; protectedSecret: string; expiresAt: string }
+export interface EmailRecoveryDeliveryJob { id: string; protectedDelivery: string; createdAt: string }
 export interface AccountRecoveryRepository {
   findAccountByEmail(email: string): Promise<AccountAuthenticationRecord | undefined>;
   findAccountById(id: string): Promise<AccountAuthenticationRecord | undefined>;
@@ -13,7 +14,10 @@ export interface AccountRecoveryRepository {
   updatePasskeyCounterAndCreateSession(credentialId: string, previousCounter: number, newCounter: number, session: SessionRecord): Promise<boolean>;
   replaceRecoveryCodes(accountId: string, records: RecoveryCodeRecord[]): Promise<void>;
   consumeRecoveryCodeAndCreateSession(accountId: string, lookup: string, session?: SessionRecord): Promise<boolean>;
-  prepareEmailRecovery(record?: EmailRecoveryRecord): Promise<void>;
+  enqueueEmailRecovery(record: EmailRecoveryRecord | undefined, job: EmailRecoveryDeliveryJob): Promise<void>;
+  nextEmailRecoveryDelivery(): Promise<EmailRecoveryDeliveryJob | undefined>;
+  completeEmailRecoveryDelivery(id: string): Promise<void>;
+  retryEmailRecoveryDelivery(id: string, reason: string): Promise<void>;
   findEmailRecoveryAccount(lookup: string, now: string): Promise<string | undefined>;
   consumeEmailRecoveryAndCreateSession(lookup: string, now: string, session: SessionRecord): Promise<boolean>;
 }
@@ -23,7 +27,7 @@ export interface PasskeyVerifier {
   register(challenge: string, input: Record<string, unknown>): Promise<Omit<PasskeyRecord, "accountId" | "createdAt">>;
   authenticate(challenge: string, input: Record<string, unknown>, passkey: PasskeyRecord): Promise<{ newCounter: number }>;
 }
-export interface RecoveryEmailSender { enqueueRecovery(delivery?: { address: string; token: string }): Promise<void> }
+export interface RecoveryEmailSender { deliver(address: string, token: string): Promise<void> }
 export class InvalidRecoveryInput extends Error {}
 export class RecoveryCredentialsRejected extends Error {}
 export class EmailRecoveryUnavailable extends Error {}
@@ -97,16 +101,11 @@ export class AccountRecoveryService {
     const input = this.#object(value);
     if (typeof input.email !== "string" || !emailPattern.test(input.email)) throw new InvalidRecoveryInput();
     const account = await this.#repository.findAccountByEmail(input.email.trim().toLowerCase());
-    if (account) {
-      const token = randomBytes(32).toString("base64url");
-      await this.#repository.prepareEmailRecovery({ accountId: account.id, tokenLookup: derivePurposeSeparatedLookup("email-recovery", token), protectedSecret: this.#adapters.secrets.encrypt(token), expiresAt: new Date(Date.now() + 15 * 60_000).toISOString() });
-      await this.#adapters.email.enqueueRecovery({ address: account.email, token });
-    } else {
-      const token = randomBytes(32).toString("base64url");
-      this.#adapters.secrets.encrypt(token);
-      await this.#repository.prepareEmailRecovery();
-      await this.#adapters.email.enqueueRecovery();
-    }
+    const token = randomBytes(32).toString("base64url");
+    const now = new Date();
+    const recovery = account ? { accountId: account.id, tokenLookup: derivePurposeSeparatedLookup("email-recovery", token), protectedSecret: this.#adapters.secrets.encrypt(token), expiresAt: new Date(now.getTime() + 15 * 60_000).toISOString() } : undefined;
+    const protectedDelivery = this.#adapters.secrets.encrypt(JSON.stringify(account ? { address: account.email, token } : { dummy: true }));
+    await this.#repository.enqueueEmailRecovery(recovery, { id: randomUUID(), protectedDelivery, createdAt: now.toISOString() });
   }
   async signInWithEmailRecovery(value: unknown, userAgent?: string) {
     const input = this.#object(value);

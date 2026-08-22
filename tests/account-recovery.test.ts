@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 
-import { AccountRecoveryService, type AccountRecoveryRepository, type RecoveryCodeRecord, type PasskeyRecord, type EmailRecoveryRecord } from "../src/account-recovery.js";
+import { AccountRecoveryService, type AccountRecoveryRepository, type RecoveryCodeRecord, type PasskeyRecord, type EmailRecoveryRecord, type EmailRecoveryDeliveryJob } from "../src/account-recovery.js";
 import { PasswordAuthService, hashPassword, type AccountAuthenticationRecord, type PasswordAuthRepository, type SessionRecord } from "../src/password-auth.js";
 import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
 import { createAuthenticationSecretCodec } from "../src/authentication-secrets.js";
+import { EmailRecoveryWorker } from "../src/email-recovery-worker.js";
 
 class AuthDatabase implements DatabaseProbe, PasswordAuthRepository, AccountRecoveryRepository {
   account: AccountAuthenticationRecord | undefined;
@@ -12,6 +13,8 @@ class AuthDatabase implements DatabaseProbe, PasswordAuthRepository, AccountReco
   passkeys = new Map<string, PasskeyRecord>();
   codes: RecoveryCodeRecord[] = [];
   emailRecoveries = new Map<string, EmailRecoveryRecord>();
+  emailJobs = new Map<string, EmailRecoveryDeliveryJob>();
+  deliveryFailures = new Map<string, string>();
   recoveryRequestWork = 0;
   recoverySignInWork = 0;
   sessionFailures = 0;
@@ -29,7 +32,10 @@ class AuthDatabase implements DatabaseProbe, PasswordAuthRepository, AccountReco
   async updatePasskeyCounterAndCreateSession(id: string, previous: number, next: number, session: SessionRecord) { const passkey = this.passkeys.get(id); if (!passkey || passkey.counter !== previous) return false; return this.commitSession(session, () => { passkey.counter = next; }); }
   async replaceRecoveryCodes(accountId: string, records: RecoveryCodeRecord[]) { this.codes = records.filter((r) => r.accountId === accountId); }
   async consumeRecoveryCodeAndCreateSession(accountId: string, lookup: string, session?: SessionRecord) { this.recoverySignInWork += 1; const index = this.codes.findIndex((r) => r.accountId === accountId && r.lookup === lookup); if (index < 0 || !session) return false; return this.commitSession(session, () => { this.codes.splice(index, 1); }); }
-  async prepareEmailRecovery(record?: EmailRecoveryRecord) { this.recoveryRequestWork += 1; if (record) this.emailRecoveries.set(record.tokenLookup, record); }
+  async enqueueEmailRecovery(record: EmailRecoveryRecord | undefined, job: EmailRecoveryDeliveryJob) { this.recoveryRequestWork += 1; if (record) this.emailRecoveries.set(record.tokenLookup, record); this.emailJobs.set(job.id, job); }
+  async nextEmailRecoveryDelivery() { return this.emailJobs.values().next().value as EmailRecoveryDeliveryJob | undefined; }
+  async completeEmailRecoveryDelivery(id: string) { this.emailJobs.delete(id); this.deliveryFailures.delete(id); }
+  async retryEmailRecoveryDelivery(id: string, reason: string) { this.deliveryFailures.set(id, reason); }
   async findEmailRecoveryAccount(lookup: string, now: string) { const record = this.emailRecoveries.get(lookup); return record && record.expiresAt > now ? record.accountId : undefined; }
   async consumeEmailRecoveryAndCreateSession(lookup: string, now: string, session: SessionRecord) { const record = this.emailRecoveries.get(lookup); if (!record || record.accountId !== session.accountId || record.expiresAt <= now) return false; return this.commitSession(session, () => { this.emailRecoveries.delete(lookup); }); }
   private async commitSession(session: SessionRecord, mutation: () => void) { if (this.sessionFailures > 0) { this.sessionFailures -= 1; throw new Error("session write failed"); } mutation(); this.sessions.set(session.id, session); return true; }
@@ -39,12 +45,13 @@ describe("Member account recovery on a running Stash Instance", () => {
   let instance: RunningInstance | undefined;
   afterEach(async () => { await instance?.close(); instance = undefined; });
 
-  async function run(emailConfigured = true) {
+  async function run(emailConfigured = true, deliver?: (address: string, token: string) => Promise<void>) {
     const database = new AuthDatabase();
     database.account = { id: "account-1", name: "Ada", email: "ada@example.com", passwordHash: await hashPassword("correct horse battery staple") };
     const delivered: string[] = [];
     const passwords = new PasswordAuthService(database);
     const secrets = createAuthenticationSecretCodec(Buffer.alloc(32, 9).toString("base64"));
+    const email = emailConfigured ? { async deliver(address: string, token: string) { if (deliver) await deliver(address, token); else delivered.push(token); } } : undefined;
     const recovery = new AccountRecoveryService(database, passwords, {
       passkeys: {
         registrationOptions(challenge, account) { return { challenge, rp: { id: "stash.test", name: "Stash" }, user: { id: account.id, name: account.email } }; },
@@ -53,12 +60,12 @@ describe("Member account recovery on a running Stash Instance", () => {
         async authenticate(challenge, input, passkey) { const data = clientData(input); if (data.challenge !== challenge || data.origin !== "https://stash.test" || data.type !== "webauthn.get" || input.proof !== "valid" || passkey.publicKey !== "verified-cose-key") throw new Error(); return { newCounter: passkey.counter + 1 }; },
       },
       secrets,
-      ...(emailConfigured ? { email: { async enqueueRecovery(delivery?: { address: string; token: string }) { if (delivery) delivered.push(delivery.token); } } } : {}),
+      ...(email ? { email } : {}),
     });
     instance = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin", passwordAuth: passwords, accountRecovery: recovery });
     const signedIn = await fetch(`${instance.url}/api/auth/sessions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "ada@example.com", password: "correct horse battery staple" }) });
     const session = await signedIn.json() as { token: string };
-    return { database, delivered, baseUrl: instance.url, token: session.token };
+    return { database, delivered, baseUrl: instance.url, token: session.token, ...(email ? { worker: new EmailRecoveryWorker(database, secrets, email) } : {}) };
   }
 
   it("registers a passkey and signs in after verifying its challenge", async () => {
@@ -126,25 +133,50 @@ describe("Member account recovery on a running Stash Instance", () => {
   });
 
   it("uses configured email recovery without revealing account existence", async () => {
-    const { baseUrl, delivered, database } = await run();
+    const { baseUrl, delivered, database, worker } = await run();
     for (const email of ["ada@example.com", "missing@example.com"]) {
       const response = await fetch(`${baseUrl}/api/auth/email-recovery`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email }) });
       assert.equal(response.status, 202);
     }
-    assert.equal(delivered.length, 1);
+    assert.equal(delivered.length, 0);
     assert.equal(database.recoveryRequestWork, 2);
+    assert.equal(await worker!.processNext(), "delivered");
+    assert.equal(await worker!.processNext(), "dummy_completed");
+    assert.equal(delivered.length, 1);
     assert.ok([...database.emailRecoveries.values()].every((record) => record.protectedSecret !== delivered[0] && !record.tokenLookup.includes(delivered[0]!)));
     const recovered = await fetch(`${baseUrl}/api/auth/email-recovery-sessions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token: delivered[0] }) });
     assert.equal(recovered.status, 201);
   });
 
   it("keeps an email token usable when atomic session creation fails", async () => {
-    const { baseUrl, delivered, database } = await run();
+    const { baseUrl, delivered, database, worker } = await run();
     await fetch(`${baseUrl}/api/auth/email-recovery`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "ada@example.com" }) });
+    await worker!.processNext();
     database.sessionFailures = 1;
     const recover = () => fetch(`${baseUrl}/api/auth/email-recovery-sessions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token: delivered[0] }) });
     assert.equal((await recover()).status, 503);
     assert.equal((await recover()).status, 201);
+  });
+
+  it("returns after local email queueing without waiting for SMTP and leaves failures retryable", async () => {
+    let releaseDelivery!: () => void;
+    const blocked = new Promise<void>((resolve) => { releaseDelivery = resolve; });
+    const { baseUrl, database, worker } = await run(true, async () => blocked);
+    const response = await fetch(`${baseUrl}/api/auth/email-recovery`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "ada@example.com" }) });
+    assert.equal(response.status, 202);
+    const processing = worker!.processNext();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(database.emailJobs.size, 1);
+    releaseDelivery();
+    assert.equal(await processing, "delivered");
+
+    await instance?.close();
+    instance = undefined;
+    const failing = await run(true, async () => { throw new Error("smtp temporarily unavailable"); });
+    await fetch(`${failing.baseUrl}/api/auth/email-recovery`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "ada@example.com" }) });
+    assert.equal(await failing.worker!.processNext(), "retry_scheduled");
+    assert.equal(failing.database.emailJobs.size, 1);
+    assert.match([...failing.database.deliveryFailures.values()][0] ?? "", /temporarily unavailable/);
   });
 
   it("makes disabled email recovery and invalid recovery attempts visible", async () => {
