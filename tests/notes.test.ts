@@ -140,6 +140,23 @@ describe("capturing Notes", () => {
     });
   });
 
+  it("accepts real leap days and legal offset edges without changing their local calendar value", async () => {
+    const { baseUrl } = await run();
+
+    for (const [at, expectedUtc] of [
+      ["2028-02-29T23:59:59+14:00", "2028-02-29T09:59:59.000Z"],
+      ["2028-02-29T00:00:00-14:00", "2028-02-29T14:00:00.000Z"],
+    ]) {
+      const response = await capture(baseUrl, "member-ada", {
+        content: "Valid reminder",
+        reminder: { at },
+      });
+      assert.equal(response.status, 201);
+      const note = await response.json() as { reminder: { at: string } };
+      assert.equal(note.reminder.at, expectedUtc);
+    }
+  });
+
   it("makes permission, input, and recoverable persistence failures visible without saving data", async () => {
     const { baseUrl, database } = await run();
 
@@ -152,6 +169,12 @@ describe("capturing Notes", () => {
       { content: "Idea", tags: [""] },
       { content: "Idea", reminder: { at: "sometime" } },
       { content: "Idea", reminder: { at: "2026-09-02T10:30:00" } },
+      { content: "Idea", reminder: { at: "2026-02-29T10:00:00Z" } },
+      { content: "Idea", reminder: { at: "2026-02-30T10:00:00Z" } },
+      { content: "Idea", reminder: { at: "2026-04-31T10:00:00+02:00" } },
+      { content: "Idea", reminder: { at: "2026-09-02T10:30:00+14:01" } },
+      { content: "Idea", reminder: { at: "2026-09-02T10:30:00+15:00" } },
+      { content: "Idea", reminder: { at: "2026-09-02T10:30:00+02:60" } },
       { content: "Idea", projectId: "not-a-uuid" },
     ]) {
       const invalid = await capture(baseUrl, "member-ada", invalidBody);
