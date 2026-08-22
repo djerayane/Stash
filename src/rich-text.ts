@@ -64,8 +64,12 @@ export function isRichTextDocument(value: unknown): value is RichTextDocument {
   });
 }
 
+export function escapeMarkdownText(text: string): string {
+  return text.replace(/([\\`*_{}\[\]<>])/g, "\\$1");
+}
+
 function renderSpan(span: RichTextSpan): string {
-  let text = span.text.replace(/([\\`*_{}\[\]<>])/g, "\\$1");
+  let text = escapeMarkdownText(span.text);
   const marks = new Set(span.marks ?? []);
   if (marks.has("code")) {
     const longestRun = Math.max(0, ...(span.text.match(/`+/g) ?? []).map((run) => run.length));

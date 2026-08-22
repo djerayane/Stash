@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { json, type HttpRoute } from "./http-routing.js";
 import { InvalidAttachment, type AttachmentService, type AttachmentSource } from "./attachments.js";
 import type { MemberAccessResolver } from "./workspaces-projects.js";
+import { escapeMarkdownText } from "./rich-text.js";
 
 async function readBodyWithLimit(request: IncomingMessage, maximum: number): Promise<Buffer> {
   const chunks: Buffer[] = [];
@@ -40,7 +41,7 @@ async function upload(service: AttachmentService, memberId: string, request: Inc
   });
   if (result.status === "workspace_forbidden") { json(response, 403, { error: "workspace_forbidden", message: "This Member cannot add Attachments to that Workspace." }); return; }
   const { createdByMemberId: _, storageKey: __, ...attachment } = result.record;
-  json(response, 201, { ...attachment, contentUrl: `/api/attachments/${attachment.id}/content`, portableLink: `[${attachment.filename}](<${attachment.relativePath}>)`, portableProjection: { format: result.projection.schema, state: "recorded" } });
+  json(response, 201, { ...attachment, contentUrl: `/api/attachments/${attachment.id}/content`, portableLink: `[${escapeMarkdownText(attachment.filename)}](<${attachment.relativePath}>)`, portableProjection: { format: result.projection.schema, state: "recorded" } });
 }
 
 export function attachmentRoutes(service: AttachmentService, access: MemberAccessResolver): HttpRoute {

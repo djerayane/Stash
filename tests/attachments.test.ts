@@ -67,6 +67,11 @@ describe("Workspace Attachments", () => {
     assert.equal(uploaded.status, 201);
     assert.equal((await uploaded.json() as { source: string }).source, "upload");
 
+    const hostile = await upload(baseUrl, "member-ada", "safe bytes", "x](javascript:alert(1)).txt");
+    assert.equal(hostile.status, 201);
+    const hostileAttachment = await hostile.json() as { portableLink: string; relativePath: string };
+    assert.equal(hostileAttachment.portableLink, `[x\\](javascript:alert(1)).txt](<${hostileAttachment.relativePath}>)`);
+
     const captured = await fetch(`${baseUrl}/api/workspaces/${workspaceId}/notes`, { method: "POST", headers: { authorization: "Bearer member-ada", "content-type": "application/json" }, body: JSON.stringify({ content: "Design file" }) });
     const note = await captured.json() as NoteRecord; const block = database.notes.get(note.id)!.document.blocks[0]!;
     const linked = await fetch(`${baseUrl}/api/notes/${note.id}`, { method: "PUT", headers: { authorization: "Bearer member-ada", "content-type": "application/json" }, body: JSON.stringify({ baseRevision: 1, operations: [{ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", type: "replace_block", blockKey: block.blockKey, block: { ...block, content: [{ text: attachment.filename, href: attachment.relativePath }] } }] }) });
