@@ -36,6 +36,8 @@ The application fails at startup with a clear error when required configuration 
 | `WEBAUTHN_RP_NAME` | no | Name displayed by authenticators; defaults to `Stash` |
 | `SMTP_URL` | no | SMTP connection URL; enables email recovery only when paired with `EMAIL_RECOVERY_FROM` |
 | `EMAIL_RECOVERY_FROM` | no | Sender address for recovery messages; must be configured with `SMTP_URL` |
+| `GITHUB_APP_ID` | no | Numeric ID of the Instance-owned GitHub App; must be configured with `GITHUB_APP_PRIVATE_KEY` |
+| `GITHUB_APP_PRIVATE_KEY` | no | PEM private key for the Instance-owned GitHub App; keep it outside PostgreSQL and configure it with `GITHUB_APP_ID` |
 
 Never commit production secrets or include them in a Portable Workspace Export.
 
@@ -54,6 +56,8 @@ Provider identities are explicitly linked to an existing Organization Member wit
 OIDC issuer, discovery, token, and JWKS endpoints must use HTTPS and resolve only to public addresses. Stash pins each validated DNS result to the outbound connection, revalidates controlled discovery/JWKS redirects, rejects token-endpoint redirects, and bounds response time and size. The plain-HTTP/private-address exception exists only as an explicitly injected test adapter and is not available through Instance configuration.
 
 OIDC callback URLs always use `PUBLIC_ORIGIN`; request `Host` and forwarding headers never influence them. Deployments behind a proxy must preserve the configured public URL when forwarding the callback. Production callback origins require HTTPS. The insecure-origin exception is injectable only by acceptance tests and is not available from environment configuration.
+
+When the Instance GitHub App is configured, an authenticated Organization Owner or Admin creates a Repository Connection with `POST /api/organizations/<organizationId>/repository-connections` and a JSON body containing the numeric `installationId`, repository `owner`, and repository `name`. `GET` on the same path lists only that Organization's connections. A connection is reused for the same GitHub repository inside one Organization and is never shared across Organizations. The installation and repository IDs remain operational Instance data. Stash never persists short-lived GitHub installation tokens: the Instance-owned App mints a fresh token for each provider operation, and the App private key remains in Instance configuration. Tokens, private keys, and provider operational IDs are never returned in portable metadata.
 
 Production passkeys require an HTTPS `PUBLIC_ORIGIN` whose hostname matches the configured relying-party ID. Email recovery stays visibly disabled when SMTP is absent. Partial SMTP configuration fails startup rather than presenting a recovery option that cannot deliver mail. Recovery requests queue encrypted local delivery jobs and return without waiting for SMTP; transient delivery failures remain queued for retry and are reported in Instance logs.
 

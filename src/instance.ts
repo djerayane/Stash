@@ -27,6 +27,8 @@ import { memberLocalizationRoutes } from "./member-localization-routes.js";
 import type { MemberLocalizationService } from "./member-localization.js";
 import { invitationRoutes } from "./invitation-routes.js";
 import type { InvitationService } from "./invitations.js";
+import { repositoryConnectionRoutes } from "./repository-connection-routes.js";
+import type { RepositoryConnectionService } from "./repository-connections.js";
 
 export interface DatabaseProbe {
   verifyConnection(): Promise<void>;
@@ -38,7 +40,7 @@ export interface RunningInstance {
   close(): Promise<void>;
 }
 
-interface InstanceOptions {
+export interface InstanceOptions {
   database: DatabaseProbe;
   host: string;
   port: number;
@@ -58,6 +60,7 @@ interface InstanceOptions {
   invitations?: InvitationService;
   diagnostics?: Diagnostics;
   acceleration?: OptionalRedisAcceleration;
+  repositoryConnections?: RepositoryConnectionService;
 }
 
 const browserSurface = `<!doctype html>
@@ -135,6 +138,9 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
       : []),
     ...(options.notes && (options.memberAccess ?? options.passwordAuth)
       ? [noteRoutes(options.notes, (options.memberAccess ?? options.passwordAuth)!)]
+      : []),
+    ...(options.repositoryConnections && (options.memberAccess ?? options.passwordAuth)
+      ? [repositoryConnectionRoutes(options.repositoryConnections, (options.memberAccess ?? options.passwordAuth)!)]
       : []),
   ];
 

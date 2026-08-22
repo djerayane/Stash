@@ -15,6 +15,8 @@ import { WorkspaceProjectService } from "./workspaces-projects.js";
 import { OrganizationRoleService } from "./organization-roles.js";
 import { MemberLocalizationService } from "./member-localization.js";
 import { InvitationService } from "./invitations.js";
+import { GitHubAppClient } from "./github-app.js";
+import { RepositoryConnectionService } from "./repository-connections.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -39,6 +41,10 @@ async function main(): Promise<void> {
   }
 
   const passwordAuth = new PasswordAuthService(database);
+  const githubAppId = process.env.GITHUB_APP_ID?.trim();
+  const githubAppPrivateKey = process.env.GITHUB_APP_PRIVATE_KEY?.replace(/\\n/g, "\n").trim();
+  if (Boolean(githubAppId) !== Boolean(githubAppPrivateKey)) throw new Error("GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY must be configured together");
+  const githubApp = githubAppId && githubAppPrivateKey ? new GitHubAppClient(githubAppId, githubAppPrivateKey) : undefined;
   const publicOrigin = requiredEnvironment("PUBLIC_ORIGIN");
   const smtpUrl = process.env.SMTP_URL?.trim();
   const emailRecoveryFrom = process.env.EMAIL_RECOVERY_FROM?.trim();
@@ -57,6 +63,7 @@ async function main(): Promise<void> {
     workspaceProjects: new WorkspaceProjectService(database),
     organizationRoles: new OrganizationRoleService(database),
     invitations: new InvitationService(database),
+    ...(githubApp ? { repositoryConnections: new RepositoryConnectionService(database, githubApp) } : {}),
     notes: new NoteService(database),
     memberLocalization: new MemberLocalizationService(database),
     oidcAuth: new OidcAuthService(database),
