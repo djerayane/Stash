@@ -295,11 +295,37 @@ describe("offline mobile capture synchronization", () => {
     assert.match(await client.exportLegacyCaptures(), /Export before rotating/);
     assert.equal((await store.loadPairing())?.memberId, undefined);
 
+    client.acknowledgeLegacyRecoveryExport(false);
+    await assert.rejects(() => client.pair(rotated, undefined, { replaceLegacy: true }), LegacyRecoveryRequired);
+    assert.deepEqual(await client.legacyRecoveryStatus(), { available: true, count: 1 });
+    client.acknowledgeLegacyRecoveryExport(true);
     await client.pair(rotated, undefined, { replaceLegacy: true });
     assert.deepEqual(await client.legacyRecoveryStatus(), { available: false, count: 0 });
     assert.deepEqual(await client.outbox(), []);
     assert.equal((await store.listCaptures())[0]?.id, legacy.id);
     assert.equal((await store.listCaptures())[0]?.origin?.memberId, undefined);
+  });
+
+  it("requires export before replacing a legacy pairing with a different authenticated destination", async () => {
+    const { baseUrl } = await run();
+    const store = new MemoryEncryptedStore();
+    await store.savePairing({ instanceUrl: baseUrl, memberToken: "expired-ada", workspaceId });
+    await store.saveCapture({ id: "88888888-8888-4888-8888-888888888888", kind: "text",
+      content: "Instance A recovery", createdAt: "2026-08-22T10:00:00.000Z", attempts: 0,
+      origin: { instanceUrl: baseUrl, workspaceId } });
+    const client = new MobileCaptureClient(store, async (input, init) => String(input).startsWith("https://instance-b.example/")
+      ? new Response(JSON.stringify({ memberId: "member-b", projects: [], tags: [], reminders: [] }), { status: 200 })
+      : fetch(input, init), { allowInsecureInstanceForTest: true });
+    const destinationB = { instanceUrl: "https://instance-b.example", memberToken: "member-b-token",
+      workspaceId: "99999999-9999-4999-8999-999999999999" };
+
+    await assert.rejects(() => client.pair(destinationB), LegacyRecoveryRequired);
+    assert.deepEqual(await client.legacyRecoveryStatus(), { available: true, count: 1 });
+    assert.match(await client.exportLegacyCaptures(), /Instance A recovery/);
+    client.acknowledgeLegacyRecoveryExport(true);
+    await client.pair(destinationB, undefined, { replaceLegacy: true });
+    assert.equal((await store.loadPairing())?.instanceUrl, destinationB.instanceUrl);
+    assert.equal((await store.listCaptures()).length, 1);
   });
 
   it("returns a visible conflict and retains a reused capture ID with different content", async () => {

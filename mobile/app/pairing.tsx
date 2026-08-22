@@ -33,8 +33,10 @@ export default function PairingScreen() {
     } }
   };
   const exportLegacy = async () => {
-    await Share.share({ message: await client.exportLegacyCaptures(), title: "Stash legacy capture recovery" });
-    if (mounted.current) setLegacyExported(true);
+    const result = await Share.share({ message: await client.exportLegacyCaptures(), title: "Stash legacy capture recovery" });
+    const shared = result.action === Share.sharedAction;
+    client.acknowledgeLegacyRecoveryExport(shared);
+    if (mounted.current) setLegacyExported(shared);
   };
   const continuePairing = async () => {
     await client.pair(pairing(), controller.signal, { replaceLegacy: true });

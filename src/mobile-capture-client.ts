@@ -56,6 +56,7 @@ export class MobileCaptureClient {
   #syncController: AbortController | undefined;
   #refreshControllers = new Set<AbortController>();
   #inFlightSync: Promise<MobileSyncResult> | undefined;
+  #legacyExportAcknowledged = false;
 
   constructor(store: EncryptedMobileCaptureStore, fetchImplementation: Fetch, options: { allowInsecureInstanceForTest?: boolean; now?: () => number } = {}) {
     this.#store = store;
@@ -84,10 +85,11 @@ export class MobileCaptureClient {
       if (!response.ok || !body.memberId) throw new Error(body.message ?? "The Member pairing could not be authenticated.");
       const previous = await this.#store.loadPairing();
       const authenticated = { ...pairing, instanceUrl: url.origin, memberId: body.memberId };
-      const replacingLegacy = previous && !previous.memberId && previous.instanceUrl === authenticated.instanceUrl
-        && previous.workspaceId === authenticated.workspaceId && previous.memberToken !== authenticated.memberToken
+      const preservesLegacyIdentity = previous?.instanceUrl === authenticated.instanceUrl
+        && previous.workspaceId === authenticated.workspaceId && previous.memberToken === authenticated.memberToken;
+      const replacingLegacy = previous && !previous.memberId && !preservesLegacyIdentity
         && (await this.#legacyCaptures(previous)).length > 0;
-      if (replacingLegacy && !options.replaceLegacy) throw new LegacyRecoveryRequired();
+      if (replacingLegacy && (!options.replaceLegacy || !this.#legacyExportAcknowledged)) throw new LegacyRecoveryRequired();
       if (previous?.instanceUrl === authenticated.instanceUrl && previous.workspaceId === authenticated.workspaceId
         && previous.memberToken === authenticated.memberToken) {
         for (const capture of await this.#store.listCaptures()) {
@@ -99,6 +101,7 @@ export class MobileCaptureClient {
       }
       await this.#store.savePairing(authenticated);
       await this.#store.saveOptions(pairingScope(authenticated), { projects: body.projects, tags: body.tags, reminders: body.reminders });
+      this.#legacyExportAcknowledged = false;
     } finally { this.#refreshControllers.delete(controller); }
   }
 
@@ -122,6 +125,7 @@ export class MobileCaptureClient {
     return JSON.stringify({ protocol: "stash.mobile-capture-recovery.v1",
       instanceUrl: pairing.instanceUrl, workspaceId: pairing.workspaceId, captures }, null, 2);
   }
+  acknowledgeLegacyRecoveryExport(shared: boolean): void { this.#legacyExportAcknowledged = shared; }
   async options() {
     const pairing = await this.#store.loadPairing();
     return pairing?.memberId ? this.#store.loadOptions(pairingScope(pairing)) : emptyOptions();
