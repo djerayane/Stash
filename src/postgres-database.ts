@@ -25,7 +25,7 @@ import type {
 } from "./workspaces-projects.js";
 import type { MemberLocalizationPreferences, MemberLocalizationRepository } from "./member-localization.js";
 import type { PortableRepositoryConnectionProjection, RepositoryConnectionRecord, RepositoryConnectionRepository } from "./repository-connections.js";
-import type { CreateTaskFromBlockDraft, LinkedTaskReadModel, TaskFromBlockRepository, TaskMoveRepository, TaskPlanningReadModel, TaskPlanningRepository, TaskPlanningUpdate, TaskSourceBlockReference } from "./tasks.js";
+import type { CreateTaskFromBlockDraft, LinkedTaskReadModel, TaskFromBlockRepository, TaskMoveActivity, TaskMoveRepository, TaskPlanningReadModel, TaskPlanningRepository, TaskPlanningUpdate, TaskSourceBlockReference } from "./tasks.js";
 import type { AttachmentRecord, AttachmentRepository, PortableAttachmentProjection } from "./attachments.js";
 import type { MobileCaptureRepository } from "./mobile-captures.js";
 import type { DiscussionDraft, DiscussionMessage, DiscussionRecord, DiscussionRepository, DiscussionTarget, PortableDiscussionProjection, PortableDiscussionTarget } from "./discussions.js";
@@ -33,7 +33,7 @@ import type { DiscussionDraft, DiscussionMessage, DiscussionRecord, DiscussionRe
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
 const authenticationKeyCheckLockId = 795_541_992;
-const portableProjectionObjectKinds = ["Workspace", "Project", "Note", "NoteLink", "Task", "GuestProjectAccess", "RepositoryConnection", "Attachment", "Discussion"] as const;
+const portableProjectionObjectKinds = ["Workspace", "Project", "Note", "NoteLink", "Task", "GuestProjectAccess", "RepositoryConnection", "Attachment", "Discussion", "Activity"] as const;
 const portableProjectionObjectKindSql = portableProjectionObjectKinds.map((kind) => `'${kind}'`).join(", ");
 const repositoryConnectionSelect = `SELECT connection.id, connection.organization_id, connection.provider, connection.installation_id,
   connection.repository_id, connection.repository_url, connection.created_by_account_id, connection.created_by_attribution,
@@ -903,6 +903,8 @@ export class PostgresDatabase implements
       const backlog = await client.query<{ id: string }>(
         "SELECT id FROM stash_workflow_statuses WHERE project_id = $1 AND name = 'Backlog' ORDER BY position LIMIT 1", [destinationProjectId]);
       const nextKey = `${destination.rows[0]!.project_key}-${destination.rows[0]!.task_number}`;
+      const before = { projectId: row.project_id, key: row.task_key,
+        status: { id: row.workflow_status_id, name: row.status_name, category: row.status_category } };
       await client.query(`INSERT INTO stash_task_key_aliases (project_id, task_key, task_id, created_at)
         VALUES ($1,$2,$3,now())`, [row.project_id, row.task_key, row.id]);
       await client.query("UPDATE stash_tasks SET project_id = $2, task_key = $3, workflow_status_id = $4 WHERE id = $1",
@@ -910,7 +912,19 @@ export class PostgresDatabase implements
       const saved = await client.query<any>(taskPlanningSelect, [destinationProjectId, nextKey, memberId]);
       const task = taskPlanningReadModelFromRow(saved.rows[0]);
       await this.#recordPortableProjection(client, "Task", task.id, task.schema, taskProjectionFromRow(saved.rows[0]));
-      return { status: "moved" as const, task };
+      const actor = await client.query<{ name: string }>("SELECT name FROM stash_accounts WHERE id = $1", [memberId]);
+      if (!actor.rows[0]) throw new Error("Task move actor identity is unavailable");
+      const activity: TaskMoveActivity = { schema: "stash.activity.v1", id: randomUUID(), workspaceId: task.workspaceId,
+        action: "task_moved", object: { kind: "Task", id: task.id },
+        actor: { localAccountId: memberId, displayName: actor.rows[0].name }, cause: { kind: "member" },
+        occurredAt: new Date().toISOString(), before,
+        after: { projectId: task.projectId, key: task.key, status: task.status } };
+      await client.query(`INSERT INTO stash_workspace_activity
+        (id, workspace_id, object_kind, object_id, action, actor_account_id, cause, occurred_at, before_state, after_state)
+        VALUES ($1,$2,'Task',$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb)`, [activity.id, activity.workspaceId, task.id,
+        activity.action, memberId, activity.cause.kind, activity.occurredAt, JSON.stringify(activity.before), JSON.stringify(activity.after)]);
+      await this.#recordPortableProjection(client, "Activity", activity.id, activity.schema, activity);
+      return { status: "moved" as const, task, activity };
     });
   }
 
@@ -2017,6 +2031,18 @@ export class PostgresDatabase implements
         PRIMARY KEY (project_id, task_key),
         UNIQUE (task_id, project_id, task_key)
       );
+      CREATE TABLE IF NOT EXISTS stash_workspace_activity (
+        id UUID PRIMARY KEY,
+        workspace_id UUID NOT NULL REFERENCES stash_workspaces(id) ON DELETE CASCADE,
+        object_kind TEXT NOT NULL,
+        object_id UUID NOT NULL,
+        action TEXT NOT NULL,
+        actor_account_id UUID NOT NULL REFERENCES stash_accounts(id),
+        cause TEXT NOT NULL,
+        occurred_at TIMESTAMPTZ NOT NULL,
+        before_state JSONB NOT NULL,
+        after_state JSONB NOT NULL
+      );
       ALTER TABLE stash_tasks ADD COLUMN IF NOT EXISTS assignee_ids JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(assignee_ids) = 'array');
       ALTER TABLE stash_tasks ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'none' CHECK (priority IN ('none','low','medium','high','urgent'));
       ALTER TABLE stash_tasks ADD COLUMN IF NOT EXISTS label_names JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(label_names) = 'array');
@@ -2332,9 +2358,9 @@ export class PostgresDatabase implements
 
   async #recordPortableProjection(
     client: PoolClient,
-    objectKind: "Workspace" | "Project" | "Note" | "NoteLink" | "Task" | "GuestProjectAccess" | "RepositoryConnection" | "Attachment" | "Discussion",
+    objectKind: "Workspace" | "Project" | "Note" | "NoteLink" | "Task" | "GuestProjectAccess" | "RepositoryConnection" | "Attachment" | "Discussion" | "Activity",
     objectId: string,
-    projectionSchema: "stash.workspace.v1" | "stash.project.v1" | "stash.note.v1" | "stash.note.v2" | "stash.note-link.v1" | "stash.task.v1" | "stash.guest-project-access.v1" | "stash.repository-connection.v1" | "stash.attachment.v1" | "stash.discussion.v1",
+    projectionSchema: "stash.workspace.v1" | "stash.project.v1" | "stash.note.v1" | "stash.note.v2" | "stash.note-link.v1" | "stash.task.v1" | "stash.guest-project-access.v1" | "stash.repository-connection.v1" | "stash.attachment.v1" | "stash.discussion.v1" | "stash.activity.v1",
     payload: object,
   ): Promise<void> {
     await client.query(

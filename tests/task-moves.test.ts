@@ -3,7 +3,7 @@ import { afterEach, describe, it } from "node:test";
 
 import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
 import type { PortableTaskProjection } from "../src/notes.js";
-import { TaskService, type TaskMoveRepository, type TaskPlanningReadModel } from "../src/tasks.js";
+import { TaskService, type TaskMoveActivity, type TaskMoveRepository, type TaskPlanningReadModel } from "../src/tasks.js";
 import type { MemberAccessResolver } from "../src/workspaces-projects.js";
 
 const sourceProjectId = "22222222-2222-4222-8222-222222222222";
@@ -19,7 +19,9 @@ class TaskMoveFake implements DatabaseProbe, TaskMoveRepository {
     sourceNoteIds: [], assigneeIds: [], priority: "none", labelNames: [], linkedNoteIds: [], dependencies: [], developmentLinks: [],
     createdAt: "2026-08-22T08:00:00.000Z", createdBy: { localAccountId: "ada", displayName: "Ada Lovelace" }, dependencyWarnings: [],
   };
-  nextDestinationNumber = 9;
+  readonly nextNumbers = new Map([[sourceProjectId, 5], [destinationProjectId, 9]]);
+  readonly projectKeys = new Map([[sourceProjectId, "SOURCE"], [destinationProjectId, "DEST"]]);
+  activities: TaskMoveActivity[] = [];
   fail = false;
   private moveQueue: Promise<void> = Promise.resolve();
   async verifyConnection() {}
@@ -41,11 +43,19 @@ class TaskMoveFake implements DatabaseProbe, TaskMoveRepository {
       if (found.status === "not_found") return found;
       if (nextProjectId === forbiddenProjectId || memberId !== "ada") return { status: "destination_forbidden" as const };
       if (nextProjectId === this.task.projectId) return { status: "same_project" as const };
-      const former = { projectId: this.task.projectId, key: this.task.key };
-      this.task = { ...this.task, projectId: nextProjectId, key: `DEST-${this.nextDestinationNumber++}`,
-        keyAliases: [...(this.task.keyAliases ?? []), former],
+      const before = { projectId: this.task.projectId, key: this.task.key, status: structuredClone(this.task.status) };
+      const number = this.nextNumbers.get(nextProjectId)!;
+      this.nextNumbers.set(nextProjectId, number + 1);
+      this.task = { ...this.task, projectId: nextProjectId, key: `${this.projectKeys.get(nextProjectId)}-${number}`,
+        keyAliases: [...(this.task.keyAliases ?? []), { projectId: before.projectId, key: before.key }],
         status: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", name: "Backlog", category: "unstarted" } };
-      return { status: "moved" as const, task: structuredClone(this.task) };
+      const activity: TaskMoveActivity = { schema: "stash.activity.v1", id: `activity-${this.activities.length + 1}`,
+        workspaceId: this.task.workspaceId, action: "task_moved", object: { kind: "Task", id: this.task.id },
+        actor: { localAccountId: memberId, displayName: "Ada Lovelace" }, cause: { kind: "member" },
+        occurredAt: "2026-08-23T00:00:00.000Z", before,
+        after: { projectId: this.task.projectId, key: this.task.key, status: structuredClone(this.task.status) } };
+      this.activities.push(activity);
+      return { status: "moved" as const, task: structuredClone(this.task), activity: structuredClone(activity) };
     } finally { release(); }
   }
 }
@@ -71,25 +81,32 @@ describe("moving Tasks while preserving Task Key aliases", () => {
   }
 
   it("assigns a destination key and keeps every former Project key resolving permanently", async () => {
-    const { move, get } = await run();
+    const { database, move, get } = await run();
     const first = await move();
     assert.equal(first.status, 200);
-    const firstTask = (await first.json() as { task: PortableTaskProjection }).task;
+    const firstBody = await first.json() as { task: PortableTaskProjection; activity: TaskMoveActivity };
+    const firstTask = firstBody.task;
     assert.equal(firstTask.id, "33333333-3333-4333-8333-333333333333");
     assert.equal(firstTask.projectId, destinationProjectId);
     assert.equal(firstTask.key, "DEST-9");
     assert.deepEqual(firstTask.keyAliases, [{ projectId: sourceProjectId, key: "SOURCE-4" }]);
+    assert.deepEqual(firstBody.activity.before, { projectId: sourceProjectId, key: "SOURCE-4",
+      status: { id: "44444444-4444-4444-8444-444444444444", name: "In Progress", category: "started" } });
+    assert.deepEqual(firstBody.activity.after, { projectId: destinationProjectId, key: "DEST-9",
+      status: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", name: "Backlog", category: "unstarted" } });
+    assert.deepEqual(firstBody.activity.actor, { localAccountId: "ada", displayName: "Ada Lovelace" });
     assert.equal((await get(sourceProjectId, "SOURCE-4")).status, 200);
 
     const second = await move(destinationProjectId, "DEST-9", sourceProjectId);
     assert.equal(second.status, 200);
     const secondTask = (await second.json() as { task: PortableTaskProjection }).task;
-    assert.equal(secondTask.key, "DEST-10");
+    assert.equal(secondTask.key, "SOURCE-5");
     assert.deepEqual(secondTask.keyAliases, [
       { projectId: sourceProjectId, key: "SOURCE-4" }, { projectId: destinationProjectId, key: "DEST-9" },
     ]);
     assert.equal((await get(sourceProjectId, "SOURCE-4")).status, 200);
     assert.equal((await get(destinationProjectId, "DEST-9")).status, 200);
+    assert.equal(database.activities.length, 2);
   });
 
   it("does not mutate when the destination is forbidden or the move is invalid", async () => {
@@ -97,6 +114,7 @@ describe("moving Tasks while preserving Task Key aliases", () => {
     const before = structuredClone(database.task);
     assert.equal((await move(sourceProjectId, "SOURCE-4", forbiddenProjectId)).status, 403);
     assert.deepEqual(database.task, before);
+    assert.equal(database.activities.length, 0);
     assert.equal((await move(sourceProjectId, "SOURCE-4", sourceProjectId)).status, 409);
     assert.deepEqual(database.task, before);
     assert.equal((await move(sourceProjectId, "SOURCE-4", "not-a-uuid")).status, 422);
@@ -111,6 +129,7 @@ describe("moving Tasks while preserving Task Key aliases", () => {
     const failed = await move();
     assert.equal(failed.status, 503);
     assert.doesNotMatch(await failed.text(), /postgres|secret/i);
+    assert.equal(database.activities.length, 0);
   });
 
   it("serializes concurrent moves so one source key cannot move the Task twice", async () => {
@@ -119,5 +138,6 @@ describe("moving Tasks while preserving Task Key aliases", () => {
     assert.deepEqual(responses.map(({ status }) => status).sort(), [200, 409]);
     assert.equal(database.task.key, "DEST-9");
     assert.deepEqual(database.task.keyAliases, [{ projectId: sourceProjectId, key: "SOURCE-4" }]);
+    assert.equal(database.activities.length, 1);
   });
 });

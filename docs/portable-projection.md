@@ -225,7 +225,10 @@ assigns the destination Project's next Task Key and Backlog status, and appends 
 permanently reserved and resolve through the same permission-aware Task read boundary. The source
 Task, destination Project, key allocation, alias reservation, status change, and portable projection
 commit atomically; unauthorized, cross-Workspace, invalid, or failed moves leave the Task unchanged
-and are safe to retry.
+and are safe to retry. The same transaction records a portable `stash.activity.v1` entry with the
+Member actor, `member` cause, UTC occurrence time, stable Task identity, and the Project, Task Key,
+and Workflow status before and after the move. The successful API response returns this Activity so
+clients can present the meaningful change without reconstructing it from the current Task.
 
 The operational Note body is a versioned rich-text document rendered by Stash's WYSIWYG editor.
 Every successful edit atomically increments the Note revision and records another `stash.note.v1`

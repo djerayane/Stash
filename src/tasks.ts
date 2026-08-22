@@ -28,9 +28,22 @@ export interface TaskDependencyWarning {
 
 export type TaskPlanningReadModel = PortableTaskProjection & { dependencyWarnings: TaskDependencyWarning[] };
 
+export interface TaskMoveActivity {
+  schema: "stash.activity.v1";
+  id: string;
+  workspaceId: string;
+  action: "task_moved";
+  object: { kind: "Task"; id: string };
+  actor: PortableIdentity;
+  cause: { kind: "member" };
+  occurredAt: string;
+  before: { projectId: string; key: string; status: PortableTaskProjection["status"] };
+  after: { projectId: string; key: string; status: PortableTaskProjection["status"] };
+}
+
 export interface TaskMoveRepository {
   moveTask(memberId: string, projectId: string, taskKey: string, destinationProjectId: string): Promise<
-    | { status: "moved"; task: TaskPlanningReadModel }
+    | { status: "moved"; task: TaskPlanningReadModel; activity: TaskMoveActivity }
     | { status: "not_found" | "destination_forbidden" | "same_project" }
   >;
 }
