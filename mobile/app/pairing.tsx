@@ -2,7 +2,7 @@ import { router } from "expo-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ScrollView, Share, Text, TextInput, useColorScheme } from "react-native";
 
-import { MobileCaptureClient } from "../../src/mobile-capture-client";
+import { LegacyRecoveryRequired, MobileCaptureClient } from "../../src/mobile-capture-client";
 import { SecureMobileCaptureStore } from "../src/secure-mobile-store";
 import { NativeActionButton } from "@/components/native-controls";
 import { StatusFeedback } from "@/components/status-feedback";
@@ -18,19 +18,28 @@ export default function PairingScreen() {
   const [workspaceId, setWorkspaceId] = useState("");
   const [error, setError] = useState("");
   const [legacyRecovery, setLegacyRecovery] = useState(false);
+  const [legacyExported, setLegacyExported] = useState(false);
+  const pairing = () => ({ instanceUrl: instanceUrl.trim(), memberToken: memberToken.trim(), workspaceId: workspaceId.trim() });
   const pair = async () => {
     try {
-      await client.pair({ instanceUrl: instanceUrl.trim(), memberToken: memberToken.trim(), workspaceId: workspaceId.trim() }, controller.signal);
+      await client.pair(pairing(), controller.signal);
       if (!mounted.current) return;
       router.back();
     } catch (cause) { if (mounted.current && !controller.signal.aborted) {
       const recovery = await client.legacyRecoveryStatus();
       setLegacyRecovery(recovery.available);
-      setError(recovery.available ? `${cause instanceof Error ? cause.message : "Pairing failed."} Export the legacy captures before replacing this pairing.`
+      setError(cause instanceof LegacyRecoveryRequired ? cause.message : recovery.available ? `${cause instanceof Error ? cause.message : "Pairing failed."} Export the legacy captures before replacing this pairing.`
         : cause instanceof Error ? cause.message : "Pairing failed.");
     } }
   };
-  const exportLegacy = async () => { await Share.share({ message: await client.exportLegacyCaptures(), title: "Stash legacy capture recovery" }); };
+  const exportLegacy = async () => {
+    await Share.share({ message: await client.exportLegacyCaptures(), title: "Stash legacy capture recovery" });
+    if (mounted.current) setLegacyExported(true);
+  };
+  const continuePairing = async () => {
+    await client.pair(pairing(), controller.signal, { replaceLegacy: true });
+    if (mounted.current) router.back();
+  };
   useEffect(() => () => { mounted.current = false; controller.abort(); client.cancelRequests(); }, [client, controller]);
   return <ScrollView contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled"
     contentContainerStyle={{ padding: 20, gap: 18 }}>
@@ -46,6 +55,7 @@ export default function PairingScreen() {
       placeholder="Workspace UUID" value={workspaceId} onChangeText={setWorkspaceId} style={fieldStyle} />
     {error ? <StatusFeedback message={error} /> : null}
     {legacyRecovery ? <NativeActionButton label="Export legacy captures" onPress={exportLegacy} /> : null}
+    {legacyRecovery && legacyExported ? <NativeActionButton label="Continue with new pairing" onPress={continuePairing} /> : null}
     <NativeActionButton label="Pair Instance" onPress={pair} />
   </ScrollView>;
 }

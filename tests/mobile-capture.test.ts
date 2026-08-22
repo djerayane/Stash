@@ -4,6 +4,7 @@ import { afterEach, describe, it } from "node:test";
 import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
 import {
   MobileCaptureClient,
+  LegacyRecoveryRequired,
   type EncryptedMobileCaptureStore,
   type MobileCapture,
   type MobileCapturePairing,
@@ -276,6 +277,29 @@ describe("offline mobile capture synchronization", () => {
     assert.deepEqual(await client.legacyRecoveryStatus(), { available: true, count: 1 });
     const exported = JSON.parse(await client.exportLegacyCaptures()) as { captures: MobileCapture[] };
     assert.equal(exported.captures[0]?.content, "Recover this legacy thought");
+  });
+
+  it("requires legacy recovery before a valid rotated credential replaces the unverified pairing", async () => {
+    const { baseUrl } = await run();
+    const store = new MemoryEncryptedStore();
+    await store.savePairing({ instanceUrl: baseUrl, memberToken: "expired-ada", workspaceId });
+    const legacy: MobileCapture = { id: "77777777-7777-4777-8777-777777777777", kind: "text",
+      content: "Export before rotating", createdAt: "2026-08-22T10:00:00.000Z", attempts: 0,
+      origin: { instanceUrl: baseUrl, workspaceId } };
+    await store.saveCapture(legacy);
+    const client = new MobileCaptureClient(store, fetch, { allowInsecureInstanceForTest: true });
+    const rotated = { instanceUrl: baseUrl, memberToken: "member-ada-rotated", workspaceId };
+
+    await assert.rejects(() => client.pair(rotated), LegacyRecoveryRequired);
+    assert.deepEqual(await client.legacyRecoveryStatus(), { available: true, count: 1 });
+    assert.match(await client.exportLegacyCaptures(), /Export before rotating/);
+    assert.equal((await store.loadPairing())?.memberId, undefined);
+
+    await client.pair(rotated, undefined, { replaceLegacy: true });
+    assert.deepEqual(await client.legacyRecoveryStatus(), { available: false, count: 0 });
+    assert.deepEqual(await client.outbox(), []);
+    assert.equal((await store.listCaptures())[0]?.id, legacy.id);
+    assert.equal((await store.listCaptures())[0]?.origin?.memberId, undefined);
   });
 
   it("returns a visible conflict and retains a reused capture ID with different content", async () => {

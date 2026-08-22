@@ -44,6 +44,10 @@ export type MobileSyncResult =
   | { status: "cancelled"; count: number }
   | { status: "attention_required"; count: number; error: string };
 
+export class LegacyRecoveryRequired extends Error {
+  constructor() { super("Export the legacy captures before replacing this pairing."); this.name = "LegacyRecoveryRequired"; }
+}
+
 export class MobileCaptureClient {
   readonly #store: EncryptedMobileCaptureStore;
   readonly #fetch: Fetch;
@@ -60,7 +64,7 @@ export class MobileCaptureClient {
     this.#now = options.now ?? Date.now;
   }
 
-  async pair(pairing: MobileCapturePairing, signal?: AbortSignal): Promise<void> {
+  async pair(pairing: MobileCapturePairing, signal?: AbortSignal, options: { replaceLegacy?: boolean } = {}): Promise<void> {
     let url: URL;
     try { url = new URL(pairing.instanceUrl); } catch { throw new Error("Instance URL must be a valid HTTPS origin."); }
     const testLoopback = this.#allowInsecureInstanceForTest && url.protocol === "http:"
@@ -80,6 +84,10 @@ export class MobileCaptureClient {
       if (!response.ok || !body.memberId) throw new Error(body.message ?? "The Member pairing could not be authenticated.");
       const previous = await this.#store.loadPairing();
       const authenticated = { ...pairing, instanceUrl: url.origin, memberId: body.memberId };
+      const replacingLegacy = previous && !previous.memberId && previous.instanceUrl === authenticated.instanceUrl
+        && previous.workspaceId === authenticated.workspaceId && previous.memberToken !== authenticated.memberToken
+        && (await this.#legacyCaptures(previous)).length > 0;
+      if (replacingLegacy && !options.replaceLegacy) throw new LegacyRecoveryRequired();
       if (previous?.instanceUrl === authenticated.instanceUrl && previous.workspaceId === authenticated.workspaceId
         && previous.memberToken === authenticated.memberToken) {
         for (const capture of await this.#store.listCaptures()) {
