@@ -30,6 +30,8 @@ import { invitationRoutes } from "./invitation-routes.js";
 import type { InvitationService } from "./invitations.js";
 import { repositoryConnectionRoutes } from "./repository-connection-routes.js";
 import type { RepositoryConnectionService } from "./repository-connections.js";
+import { taskRoutes } from "./task-routes.js";
+import type { TaskService } from "./tasks.js";
 
 export interface DatabaseProbe {
   verifyConnection(): Promise<void>;
@@ -62,6 +64,7 @@ export interface InstanceOptions {
   diagnostics?: Diagnostics;
   acceleration?: OptionalRedisAcceleration;
   repositoryConnections?: RepositoryConnectionService;
+  tasks?: TaskService;
 }
 
 const browserSurface = `<!doctype html>
@@ -141,6 +144,9 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
       : []),
     ...(options.notes && (options.memberAccess ?? options.passwordAuth)
       ? [noteRoutes(options.notes, (options.memberAccess ?? options.passwordAuth)!)]
+      : []),
+    ...(options.tasks && (options.memberAccess ?? options.passwordAuth)
+      ? [taskRoutes(options.tasks, (options.memberAccess ?? options.passwordAuth)!)]
       : []),
     ...(options.repositoryConnections && (options.memberAccess ?? options.passwordAuth)
       ? [repositoryConnectionRoutes(options.repositoryConnections, (options.memberAccess ?? options.passwordAuth)!)]

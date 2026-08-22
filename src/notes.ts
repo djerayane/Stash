@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { normalizeExplicitOffsetTimestamp } from "./explicit-offset-timestamp.js";
 import type { PortableIdentity } from "./workspaces-projects.js";
 import { isRichTextDocument, paragraphDocument, type RichTextBlock, type RichTextDocument } from "./rich-text.js";
+import type { TaskSourceBlockReference } from "./tasks.js";
 
 export interface NoteReminder {
   at: string;
@@ -35,6 +36,7 @@ export interface PortableTaskProjection {
   schema: "stash.task.v1"; id: string; workspaceId: string; projectId: string; title: string;
   key: string; status: { id: string; name: string; category: "unstarted" | "started" | "completed" };
   sourceNoteIds: string[]; createdAt: string; createdBy: PortableIdentity;
+  sourceBlocks?: TaskSourceBlockReference[];
 }
 
 export type TaskCreation = Omit<PortableTaskProjection, "schema" | "key" | "status">;
