@@ -23,6 +23,7 @@ import { MobileCaptureService } from "./mobile-captures.js";
 import { DiscussionService } from "./discussions.js";
 import { ProjectWorkflowService } from "./project-workflows.js";
 import { PortableWorkspaceExportService } from "./portable-workspace-export.js";
+import { BoardService } from "./boards.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -74,6 +75,7 @@ async function main(): Promise<void> {
     notes: new NoteService(database),
     tasks: new TaskService(database, database),
     projectWorkflows: new ProjectWorkflowService(database),
+    boards: new BoardService(database),
     attachments: new AttachmentService(database, attachmentStorage),
     portableWorkspaceExports: new PortableWorkspaceExportService(database, attachmentStorage),
     mobileCaptures: new MobileCaptureService(database),

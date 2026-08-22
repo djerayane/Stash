@@ -31,11 +31,12 @@ import type { MobileCaptureRepository } from "./mobile-captures.js";
 import type { CreateDiscussionWorkDraft, DiscussionDraft, DiscussionMessage, DiscussionRecord, DiscussionRepository, DiscussionTarget, DiscussionWorkActivity, DiscussionWorkOutcome, PortableDiscussionProjection, PortableDiscussionTarget, PortableDiscussionWorkLinkProjection } from "./discussions.js";
 import { initialWorkflowStatus, type ProjectWorkflow, type ProjectWorkflowRepository, type WorkflowStatus } from "./project-workflows.js";
 import type { PortableWorkspaceExportRepository, PortableWorkspaceExportSnapshot } from "./portable-workspace-export.js";
+import type { Board, BoardRepository, BoardTask } from "./boards.js";
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
 const authenticationKeyCheckLockId = 795_541_992;
-const portableProjectionObjectKinds = ["Workspace", "Project", "Workflow", "Note", "NoteLink", "Task", "GuestProjectAccess", "RepositoryConnection", "Attachment", "Discussion", "DiscussionWorkLink", "Activity"] as const;
+const portableProjectionObjectKinds = ["Workspace", "Project", "Workflow", "Board", "Note", "NoteLink", "Task", "GuestProjectAccess", "RepositoryConnection", "Attachment", "Discussion", "DiscussionWorkLink", "Activity"] as const;
 const portableProjectionObjectKindSql = portableProjectionObjectKinds.map((kind) => `'${kind}'`).join(", ");
 export const workflowTemporaryRenameSql = `UPDATE stash_workflow_statuses
   SET position = -position - 1, name = repeat('__stash_workflow_transition__', 4) || id::text
@@ -103,6 +104,10 @@ function taskConflictFromRow(row: any): TaskEditConflict {
     createdBy: { displayName: row.created_by_display_name, attribution: "recorded" },
     ...(row.resolved_at ? { resolvedAt: new Date(row.resolved_at).toISOString(), resolution: row.resolution } : {}) };
 }
+function boardFromRow(row: any): Board {
+  return { schema: "stash.board.v1", id: row.id, projectId: row.project_id, name: row.name,
+    groupBy: row.group_by, createdAt: new Date(row.created_at).toISOString() };
+}
 
 export class PostgresDatabase implements
   DatabaseProbe,
@@ -124,7 +129,8 @@ export class PostgresDatabase implements
   MobileCaptureRepository,
   DiscussionRepository,
   ProjectWorkflowRepository,
-  PortableWorkspaceExportRepository
+  PortableWorkspaceExportRepository,
+  BoardRepository
 {
   readonly #pool: Pool;
   readonly #authenticationSecrets: AuthenticationSecretCodec;
@@ -1010,6 +1016,64 @@ export class PostgresDatabase implements
     const statuses = await client.query<{ id: string; name: string; category: WorkflowStatus["category"]; position: number; archived: boolean }>(
       "SELECT id, name, category, position, archived FROM stash_workflow_statuses WHERE project_id = $1 ORDER BY position, id", [projectId]);
     return { schema: "stash.workflow.v1", projectId, revision: project.rows[0]!.workflow_revision, statuses: statuses.rows };
+  }
+
+  async listBoards(memberId: string, projectId: string) {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureBoardSchema(client); await this.#ensureInvitationSchema(client);
+      if (await this.#findProjectWorkflowAccess(client, memberId, projectId) === "not_found") return { status: "not_found" as const };
+      const result = await client.query<any>("SELECT id, project_id, name, group_by, created_at FROM stash_boards WHERE project_id = $1 ORDER BY created_at, id", [projectId]);
+      return { status: "found" as const, boards: result.rows.map(boardFromRow) };
+    } finally { client.release(); }
+  }
+
+  async createBoard(memberId: string, board: Board) {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureBoardSchema(client); await this.#ensureInvitationSchema(client);
+      const access = await this.#findProjectWorkflowAccess(client, memberId, board.projectId, true);
+      if (access !== "member") return { status: access };
+      await client.query("INSERT INTO stash_boards (id, project_id, name, group_by, created_at) VALUES ($1,$2,$3,$4,$5)", [board.id, board.projectId, board.name, board.groupBy, board.createdAt]);
+      await this.#recordPortableProjection(client, "Board", board.id, board.schema, board);
+      return { status: "created" as const, board };
+    });
+  }
+
+  async readBoard(memberId: string, projectId: string, boardId: string) {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureBoardSchema(client); await this.#ensureInvitationSchema(client);
+      if (await this.#findProjectWorkflowAccess(client, memberId, projectId) === "not_found") return { status: "not_found" as const };
+      const found = await client.query<any>("SELECT id, project_id, name, group_by, created_at FROM stash_boards WHERE id = $1 AND project_id = $2", [boardId, projectId]);
+      if (!found.rowCount) return { status: "not_found" as const };
+      const rows = await client.query<any>(`SELECT task.id, task.task_key, task.title, task.assignee_ids, task.priority, task.label_names,
+        status.id AS status_id, status.name AS status_name, status.category FROM stash_tasks task
+        JOIN stash_workflow_statuses status ON status.id = task.workflow_status_id WHERE task.project_id = $1 ORDER BY task.task_key, task.id`, [projectId]);
+      const tasks: BoardTask[] = rows.rows.map((row: any) => ({ id: row.id, key: row.task_key, title: row.title,
+        status: { id: row.status_id, name: row.status_name, category: row.category }, assigneeIds: row.assignee_ids, priority: row.priority, labelNames: row.label_names }));
+      return { status: "found" as const, board: boardFromRow(found.rows[0]), tasks, statuses: (await this.#loadWorkflow(client, projectId)).statuses };
+    } finally { client.release(); }
+  }
+
+  async moveTaskOnBoard(memberId: string, projectId: string, boardId: string, taskKey: string, statusId: string) {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureBoardSchema(client); await this.#ensureInvitationSchema(client);
+      const access = await this.#findProjectWorkflowAccess(client, memberId, projectId, true);
+      if (access !== "member") return { status: access };
+      const board = await client.query<{ group_by: string }>("SELECT group_by FROM stash_boards WHERE id = $1 AND project_id = $2", [boardId, projectId]);
+      if (!board.rowCount) return { status: "not_found" as const };
+      if (board.rows[0]!.group_by !== "status") return { status: "unsupported_group" as const };
+      const status = await client.query<any>("SELECT id, name, category FROM stash_workflow_statuses WHERE id = $1 AND project_id = $2 AND archived = FALSE", [statusId, projectId]);
+      if (!status.rowCount) return { status: "invalid_status" as const };
+      const changed = await client.query<any>(`UPDATE stash_tasks SET workflow_status_id = $3 WHERE project_id = $1 AND task_key = $2
+        RETURNING id, task_key, title, assignee_ids, priority, label_names`, [projectId, taskKey, statusId]);
+      if (!changed.rowCount) return { status: "not_found" as const };
+      const row = changed.rows[0]; const task: BoardTask = { id: row.id, key: row.task_key, title: row.title,
+        status: status.rows[0], assigneeIds: row.assignee_ids, priority: row.priority, labelNames: row.label_names };
+      const projection = await client.query<any>(taskPlanningSelectById, [task.id, memberId]);
+      if (projection.rows[0]) await this.#recordPortableProjection(client, "Task", task.id, "stash.task.v1", taskProjectionFromRow(projection.rows[0]));
+      return { status: "moved" as const, task };
+    });
   }
 
   async updateTaskByKey(memberId: string, projectId: string, taskKey: string, update: TaskPlanningUpdate) {
@@ -2571,6 +2635,14 @@ export class PostgresDatabase implements
     await client.query("ALTER TABLE stash_note_conflict_operations ADD COLUMN IF NOT EXISTS operation_digest TEXT");
   }
 
+  async #ensureBoardSchema(client: PoolClient): Promise<void> {
+    await this.#ensureNoteSchema(client);
+    await client.query(`CREATE TABLE IF NOT EXISTS stash_boards (
+      id UUID PRIMARY KEY, project_id UUID NOT NULL REFERENCES stash_projects(id) ON DELETE CASCADE,
+      name TEXT NOT NULL CHECK (char_length(name) BETWEEN 1 AND 100), group_by TEXT NOT NULL CHECK (group_by IN ('status','priority')),
+      created_at TIMESTAMPTZ NOT NULL, UNIQUE (project_id, name))`);
+  }
+
   async #ensureNoteSchemaForPool(): Promise<void> {
     const client = await this.#pool.connect();
     try { await this.#ensureNoteSchema(client); } finally { client.release(); }
@@ -2766,9 +2838,9 @@ export class PostgresDatabase implements
 
   async #recordPortableProjection(
     client: PoolClient,
-    objectKind: "Workspace" | "Project" | "Workflow" | "Note" | "NoteLink" | "Task" | "GuestProjectAccess" | "RepositoryConnection" | "Attachment" | "Discussion" | "DiscussionWorkLink" | "Activity",
+    objectKind: "Workspace" | "Project" | "Workflow" | "Board" | "Note" | "NoteLink" | "Task" | "GuestProjectAccess" | "RepositoryConnection" | "Attachment" | "Discussion" | "DiscussionWorkLink" | "Activity",
     objectId: string,
-    projectionSchema: "stash.workspace.v1" | "stash.project.v1" | "stash.workflow.v1" | "stash.note.v1" | "stash.note.v2" | "stash.note-link.v1" | "stash.task.v1" | "stash.guest-project-access.v1" | "stash.repository-connection.v1" | "stash.attachment.v1" | "stash.discussion.v1" | "stash.discussion-work-link.v1" | "stash.activity.v1",
+    projectionSchema: "stash.workspace.v1" | "stash.project.v1" | "stash.workflow.v1" | "stash.board.v1" | "stash.note.v1" | "stash.note.v2" | "stash.note-link.v1" | "stash.task.v1" | "stash.guest-project-access.v1" | "stash.repository-connection.v1" | "stash.attachment.v1" | "stash.discussion.v1" | "stash.discussion-work-link.v1" | "stash.activity.v1",
     payload: object,
   ): Promise<void> {
     await client.query(
