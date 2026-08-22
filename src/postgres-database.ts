@@ -3,7 +3,11 @@ import { Pool, type PoolClient } from "pg";
 import type { DatabaseProbe } from "./instance.js";
 import type { BootstrapRecord, OwnerBootstrapRepository } from "./owner-bootstrap.js";
 import type { AccountAuthenticationRecord, PasswordAuthRepository, SessionRecord } from "./password-auth.js";
-import type { AuthenticationSecretCodec } from "./authentication-secrets.js";
+import {
+  createAuthenticationKeyCheck,
+  verifyAuthenticationKeyCheck,
+  type AuthenticationSecretCodec,
+} from "./authentication-secrets.js";
 
 export class PostgresDatabase implements DatabaseProbe, OwnerBootstrapRepository, PasswordAuthRepository {
   readonly #pool: Pool;
@@ -16,6 +20,7 @@ export class PostgresDatabase implements DatabaseProbe, OwnerBootstrapRepository
 
   async verifyConnection(): Promise<void> {
     await this.#pool.query("SELECT 1");
+    await this.#verifyAuthenticationKey();
   }
 
   async createFirstOrganizationOwner(record: BootstrapRecord): Promise<boolean> {
@@ -142,6 +147,38 @@ export class PostgresDatabase implements DatabaseProbe, OwnerBootstrapRepository
         user_agent TEXT
       )
     `);
+  }
+
+  async #verifyAuthenticationKey(): Promise<void> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS stash_authentication_key_check (
+          singleton BOOLEAN PRIMARY KEY CHECK (singleton),
+          encrypted_check TEXT NOT NULL
+        )
+      `);
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(1236629358)");
+      const result = await client.query<{ encrypted_check: string }>(
+        "SELECT encrypted_check FROM stash_authentication_key_check WHERE singleton = TRUE",
+      );
+      const existing = result.rows[0];
+      if (existing) {
+        verifyAuthenticationKeyCheck(this.#authenticationSecrets, existing.encrypted_check);
+      } else {
+        await client.query(
+          "INSERT INTO stash_authentication_key_check (singleton, encrypted_check) VALUES (TRUE, $1)",
+          [createAuthenticationKeyCheck(this.#authenticationSecrets)],
+        );
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   #accountRecord(row: AccountRow): AccountAuthenticationRecord {

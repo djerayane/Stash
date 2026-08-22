@@ -6,6 +6,23 @@ export interface AuthenticationSecretCodec {
   blindIndex(value: string): string;
 }
 
+const authenticationKeyCheckValue = "stash-instance-authentication-key-v1";
+
+export function createAuthenticationKeyCheck(codec: AuthenticationSecretCodec): string {
+  return codec.encrypt(authenticationKeyCheckValue);
+}
+
+export function verifyAuthenticationKeyCheck(
+  codec: AuthenticationSecretCodec,
+  encryptedKeyCheck: string,
+): void {
+  try {
+    if (codec.decrypt(encryptedKeyCheck) !== authenticationKeyCheckValue) throw new Error();
+  } catch {
+    throw new Error("INSTANCE_MASTER_KEY does not match this Instance's authentication state");
+  }
+}
+
 export function createAuthenticationSecretCodec(encodedMasterKey: string): AuthenticationSecretCodec {
   let masterKey: Buffer;
   try {

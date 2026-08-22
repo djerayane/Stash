@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { createAuthenticationSecretCodec } from "../src/authentication-secrets.js";
+import {
+  createAuthenticationKeyCheck,
+  createAuthenticationSecretCodec,
+  verifyAuthenticationKeyCheck,
+} from "../src/authentication-secrets.js";
 
 describe("Instance authentication secret boundary", () => {
   it("encrypts authentication material and produces a keyed session lookup value", () => {
@@ -26,5 +30,17 @@ describe("Instance authentication secret boundary", () => {
     const first = createAuthenticationSecretCodec(Buffer.alloc(32, 1).toString("base64"));
     const second = createAuthenticationSecretCodec(Buffer.alloc(32, 2).toString("base64"));
     assert.throws(() => second.decrypt(first.encrypt("password-hash")));
+  });
+
+  it("validates a persisted key-check independently of whether accounts exist", () => {
+    const configured = createAuthenticationSecretCodec(Buffer.alloc(32, 3).toString("base64"));
+    const wrong = createAuthenticationSecretCodec(Buffer.alloc(32, 4).toString("base64"));
+    const persistedKeyCheck = createAuthenticationKeyCheck(configured);
+
+    assert.doesNotThrow(() => verifyAuthenticationKeyCheck(configured, persistedKeyCheck));
+    assert.throws(
+      () => verifyAuthenticationKeyCheck(wrong, persistedKeyCheck),
+      /INSTANCE_MASTER_KEY does not match this Instance's authentication state/,
+    );
   });
 });

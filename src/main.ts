@@ -14,6 +14,7 @@ function requiredEnvironment(name: string): string {
 async function main(): Promise<void> {
   const authenticationSecrets = createAuthenticationSecretCodec(requiredEnvironment("INSTANCE_MASTER_KEY"));
   const database = new PostgresDatabase(requiredEnvironment("DATABASE_URL"), authenticationSecrets);
+  await database.verifyConnection();
   const redisUrl = process.env.REDIS_URL?.trim();
   let redis: RunningRedisAcceleration | undefined;
   if (redisUrl) {
