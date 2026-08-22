@@ -3,9 +3,9 @@ import {
   InvalidOidcRequest,
   OidcAuthService,
   OidcIdentityNotAuthorized,
-  OidcManagementNotAuthorized,
   OidcProviderRejected,
 } from "./oidc-auth.js";
+import { OidcManagementNotAuthorized, type OidcManagementService } from "./oidc-management.js";
 import type { PasswordAuthService } from "./password-auth.js";
 
 function callbackUri(request: Parameters<HttpRoute["handle"]>[0], organizationId: string): string {
@@ -56,7 +56,7 @@ export function oidcAuthRoute(service: OidcAuthService): HttpRoute {
   };
 }
 
-export function oidcManagementRoute(service: OidcAuthService, sessions: PasswordAuthService): HttpRoute {
+export function oidcManagementRoute(service: OidcManagementService, sessions: PasswordAuthService): HttpRoute {
   return {
     matches: (_request, url) => /^\/api\/organizations\/[^/]+\/auth\/oidc(?:\/identities)?$/.test(url.pathname),
     async handle(request, response, url) {

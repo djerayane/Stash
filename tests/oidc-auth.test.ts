@@ -9,6 +9,7 @@ import {
   type OidcAuthRepository,
   type OidcIdentityRecord,
 } from "../src/oidc-auth.js";
+import { OidcManagementService } from "../src/oidc-management.js";
 import type { SessionRecord } from "../src/password-auth.js";
 import { PasswordAuthService, type AccountAuthenticationRecord, type PasswordAuthRepository } from "../src/password-auth.js";
 
@@ -127,7 +128,7 @@ describe("optional OpenID Connect authentication on a running Stash Instance", (
     });
     database.configurations.set("organization-1", { organizationId: "organization-1", issuer: provider.issuer, clientId: "stash-client", clientSecret: "provider-secret" });
     const oidc = new OidcAuthService(database);
-    instance = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin-token", oidcAuth: oidc, passwordAuth: new PasswordAuthService(database) });
+    instance = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin-token", oidcAuth: oidc, oidcManagement: new OidcManagementService(database), passwordAuth: new PasswordAuthService(database) });
     return { baseUrl: instance.url, database, provider, adminToken };
   }
 
