@@ -7,6 +7,7 @@ import type { AccountAuthenticationRecord, PasswordAuthRepository, SessionRecord
 import type { OidcAuthRepository, OidcIdentityKey, OidcIdentityRecord, OidcOrganizationConfiguration } from "./oidc-auth.js";
 import type { AccountRecoveryRepository, ClaimedEmailRecoveryDelivery, EmailRecoveryDeliveryClaim, EmailRecoveryDeliveryJob, EmailRecoveryRecord, PasskeyRecord, RecoveryCodeRecord } from "./account-recovery.js";
 import type { BuiltInOrganizationRole, OrganizationRoleRepository } from "./organization-roles.js";
+import type { InvitationRecord, InvitationRepository, ProjectAccessSummary } from "./invitations.js";
 import {
   createAuthenticationKeyCheck,
   verifyAuthenticationKeyCheck,
@@ -35,7 +36,8 @@ export class PostgresDatabase implements
   OidcAuthRepository,
   AccountRecoveryRepository,
   OrganizationRoleRepository,
-  MemberLocalizationRepository
+  MemberLocalizationRepository,
+  InvitationRepository
 {
   readonly #pool: Pool;
   readonly #authenticationSecrets: AuthenticationSecretCodec;
@@ -399,6 +401,96 @@ export class PostgresDatabase implements
       );
       return "removed";
     });
+  }
+
+  async createInvitation(record: InvitationRecord): Promise<"created" | "forbidden" | "project_forbidden"> {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureInvitationSchema(client);
+      const actor = await client.query<{ role: BuiltInOrganizationRole }>(
+        "SELECT role FROM stash_organization_memberships WHERE organization_id = $1 AND account_id = $2",
+        [record.organizationId, record.invitedByAccountId],
+      );
+      if (!actor.rows[0] || !["Owner", "Admin"].includes(actor.rows[0].role)) return "forbidden";
+      if (record.kind === "guest") {
+        const allowed = await client.query<{ id: string }>(
+          `SELECT project.id FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
+           WHERE project.id = ANY($1::uuid[]) AND workspace.organization_owner_id = $2`,
+          [record.projectIds, record.organizationId],
+        );
+        if (allowed.rowCount !== record.projectIds.length) return "project_forbidden";
+      }
+      await client.query(
+        `INSERT INTO stash_invitations (id, organization_id, token_hash, kind, member_role, invited_by_account_id, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [record.id, record.organizationId, record.tokenHash, record.kind, record.kind === "member" ? record.role : null, record.invitedByAccountId, record.expiresAt],
+      );
+      if (record.kind === "guest") for (const projectId of record.projectIds) {
+        await client.query("INSERT INTO stash_invitation_projects (invitation_id, project_id) VALUES ($1, $2)", [record.id, projectId]);
+      }
+      return "created";
+    });
+  }
+
+  async acceptInvitation(tokenHash: string, accountId: string, acceptedAt: string): Promise<
+    | { status: "accepted"; access: { kind: "member"; organizationId: string; role: BuiltInOrganizationRole } | { kind: "guest"; organizationId: string; projectIds: string[] } }
+    | "invalid_invitation"
+  > {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureInvitationSchema(client);
+      const result = await client.query<{ id: string; organization_id: string; kind: "member" | "guest"; member_role: BuiltInOrganizationRole | null }>(
+        `SELECT id, organization_id, kind, member_role FROM stash_invitations
+         WHERE token_hash = $1 AND accepted_at IS NULL AND expires_at > $2 FOR UPDATE`, [tokenHash, acceptedAt],
+      );
+      const invitation = result.rows[0];
+      if (!invitation) return "invalid_invitation";
+      await client.query("UPDATE stash_invitations SET accepted_at = $2, accepted_by_account_id = $3 WHERE id = $1", [invitation.id, acceptedAt, accountId]);
+      if (invitation.kind === "member") {
+        const role = invitation.member_role!;
+        await client.query(
+          `INSERT INTO stash_organization_memberships (organization_id, account_id, role) VALUES ($1, $2, $3)
+           ON CONFLICT (organization_id, account_id) DO UPDATE SET role = EXCLUDED.role`,
+          [invitation.organization_id, accountId, role],
+        );
+        return { status: "accepted", access: { kind: "member", organizationId: invitation.organization_id, role } };
+      }
+      const projects = await client.query<{ project_id: string }>("SELECT project_id FROM stash_invitation_projects WHERE invitation_id = $1 ORDER BY project_id", [invitation.id]);
+      for (const { project_id } of projects.rows) {
+        await client.query("INSERT INTO stash_project_guests (project_id, account_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [project_id, accountId]);
+      }
+      return { status: "accepted", access: { kind: "guest", organizationId: invitation.organization_id, projectIds: projects.rows.map(({ project_id }) => project_id) } };
+    });
+  }
+
+  async readProject(accountId: string, projectId: string): Promise<ProjectAccessSummary | undefined> {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureInvitationSchema(client);
+      const result = await client.query<{ id: string; organization_id: string; name: string; project_key: string; creator_id: string; creator_name: string }>(
+        `SELECT project.id, workspace.organization_owner_id AS organization_id, project.name, project.project_key,
+                creator.id AS creator_id, creator.name AS creator_name
+         FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
+         JOIN stash_accounts creator ON creator.id = project.created_by_account_id
+         WHERE project.id = $1 AND (
+           EXISTS (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)
+           OR EXISTS (SELECT 1 FROM stash_project_guests guest WHERE guest.project_id = project.id AND guest.account_id = $2)
+         )`, [projectId, accountId],
+      );
+      const row = result.rows[0];
+      return row ? { id: row.id, organizationId: row.organization_id, name: row.name, key: row.project_key, createdBy: { localAccountId: row.creator_id, displayName: row.creator_name } } : undefined;
+    } finally { client.release(); }
+  }
+
+  async canWriteProject(accountId: string, projectId: string): Promise<boolean> {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureInvitationSchema(client);
+      const result = await client.query(
+        `SELECT 1 FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
+         JOIN stash_organization_memberships membership ON membership.organization_id = workspace.organization_owner_id
+         WHERE project.id = $1 AND membership.account_id = $2`, [projectId, accountId],
+      );
+      return result.rowCount === 1;
+    } finally { client.release(); }
   }
 
   async #lockedOrganizationMemberships(client: PoolClient, organizationId: string) {
@@ -854,6 +946,34 @@ export class PostgresDatabase implements
     } finally {
       client.release();
     }
+  }
+
+  async #ensureInvitationSchema(client: PoolClient): Promise<void> {
+    await this.#ensureWorkspaceProjectSchema(client);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS stash_invitations (
+        id UUID PRIMARY KEY,
+        organization_id UUID NOT NULL REFERENCES stash_organizations(id),
+        token_hash TEXT NOT NULL UNIQUE,
+        kind TEXT NOT NULL CHECK (kind IN ('member', 'guest')),
+        member_role TEXT CHECK (member_role IN ('Owner', 'Admin', 'Member')),
+        invited_by_account_id UUID NOT NULL REFERENCES stash_accounts(id),
+        expires_at TIMESTAMPTZ NOT NULL,
+        accepted_at TIMESTAMPTZ,
+        accepted_by_account_id UUID REFERENCES stash_accounts(id),
+        CHECK ((kind = 'member' AND member_role IS NOT NULL) OR (kind = 'guest' AND member_role IS NULL))
+      );
+      CREATE TABLE IF NOT EXISTS stash_invitation_projects (
+        invitation_id UUID NOT NULL REFERENCES stash_invitations(id) ON DELETE CASCADE,
+        project_id UUID NOT NULL REFERENCES stash_projects(id),
+        PRIMARY KEY (invitation_id, project_id)
+      );
+      CREATE TABLE IF NOT EXISTS stash_project_guests (
+        project_id UUID NOT NULL REFERENCES stash_projects(id),
+        account_id UUID NOT NULL REFERENCES stash_accounts(id),
+        PRIMARY KEY (project_id, account_id)
+      );
+    `);
   }
 
   async #recordPortableProjection(

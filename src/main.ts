@@ -14,6 +14,7 @@ import { startRedisAcceleration, type RunningRedisAcceleration } from "./redis-a
 import { WorkspaceProjectService } from "./workspaces-projects.js";
 import { OrganizationRoleService } from "./organization-roles.js";
 import { MemberLocalizationService } from "./member-localization.js";
+import { InvitationService } from "./invitations.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -55,6 +56,7 @@ async function main(): Promise<void> {
     passwordAuth,
     workspaceProjects: new WorkspaceProjectService(database),
     organizationRoles: new OrganizationRoleService(database),
+    invitations: new InvitationService(database),
     notes: new NoteService(database),
     memberLocalization: new MemberLocalizationService(database),
     oidcAuth: new OidcAuthService(database),
