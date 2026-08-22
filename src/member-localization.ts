@@ -1,3 +1,13 @@
+import { normalizeExplicitOffsetTimestamp } from "./explicit-offset-timestamp.js";
+import {
+  MessageCatalogs,
+  type MessageCatalog,
+  type MessageKey,
+  type MessageParameters,
+} from "./localization-catalog.js";
+
+export type { MessageCatalog, MessageKey, MessageParameters } from "./localization-catalog.js";
+
 export type DateFormat = "short" | "medium" | "long";
 export type WeekStart = "sunday" | "monday" | "saturday";
 
@@ -100,13 +110,10 @@ export class MemberLocalizationService {
   }
 
   async render(memberId: string, message: string | null, timestamp: string | null) {
-    if (message !== "instance.running"
-      || !timestamp
-      || !/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/.test(timestamp)) {
-      throw new InvalidLocalizationRenderRequest();
-    }
-    const instant = new Date(timestamp);
-    if (Number.isNaN(instant.valueOf())) throw new InvalidLocalizationRenderRequest();
+    if (message !== "instance.running" || !timestamp) throw new InvalidLocalizationRenderRequest();
+    const normalizedTimestamp = normalizeExplicitOffsetTimestamp(timestamp);
+    if (!normalizedTimestamp) throw new InvalidLocalizationRenderRequest();
+    const instant = new Date(normalizedTimestamp);
     const preferences = await this.get(memberId);
     const localeForDates = preferences.locale.toLowerCase() === "en-xa" ? "en" : preferences.locale;
     return {
@@ -120,11 +127,3 @@ export class MemberLocalizationService {
     };
   }
 }
-import {
-  MessageCatalogs,
-  type MessageCatalog,
-  type MessageKey,
-  type MessageParameters,
-} from "./localization-catalog.js";
-
-export type { MessageCatalog, MessageKey, MessageParameters } from "./localization-catalog.js";

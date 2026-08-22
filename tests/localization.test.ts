@@ -193,4 +193,37 @@ describe("Member localization through a running Stash Instance", () => {
       message: "Localization preferences are temporarily unavailable.",
     });
   });
+
+  it("rejects impossible explicit-offset timestamps and preserves valid leap and offset edges", async () => {
+    const { baseUrl } = await run();
+    const headers = { authorization: "Bearer member-session" };
+
+    for (const timestamp of [
+      "2026-02-30T10:00:00Z",
+      "2026-02-29T10:00:00Z",
+      "2026-04-31T10:00:00+02:00",
+      "2026-09-02T10:30:00+14:01",
+      "2026-09-02T10:30:00+15:00",
+    ]) {
+      const response = await fetch(
+        `${baseUrl}/api/member/localization/render?message=instance.running&timestamp=${encodeURIComponent(timestamp)}`,
+        { headers },
+      );
+      assert.equal(response.status, 422, timestamp);
+      assert.equal((await response.json() as { message: string }).message,
+        "A supported message and an ISO 8601 timestamp with an offset are required.");
+    }
+
+    for (const [timestamp, expectedUtc] of [
+      ["2028-02-29T23:59:59+14:00", "2028-02-29T09:59:59.000Z"],
+      ["2028-02-29T00:00:00-14:00", "2028-02-29T14:00:00.000Z"],
+    ] as const) {
+      const response = await fetch(
+        `${baseUrl}/api/member/localization/render?message=instance.running&timestamp=${encodeURIComponent(timestamp)}`,
+        { headers },
+      );
+      assert.equal(response.status, 200, timestamp);
+      assert.equal((await response.json() as { timestamp: string }).timestamp, expectedUtc);
+    }
+  });
 });
