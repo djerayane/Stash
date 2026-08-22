@@ -1,6 +1,5 @@
 import { Link } from "expo-router";
 import NetInfo from "@react-native-community/netinfo";
-import { Picker } from "@react-native-picker/picker";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AppState, Pressable, ScrollView, Text, TextInput, View, useColorScheme } from "react-native";
 
@@ -8,6 +7,7 @@ import { MobileCaptureClient } from "../../src/mobile-capture-client";
 import { SecureMobileCaptureStore } from "../src/secure-mobile-store";
 import type { MobileCaptureOptions } from "../../src/mobile-capture-client";
 import { NativeActionButton, NativeToggle } from "@/components/native-controls";
+import { NativeChoice } from "@/components/native-choice";
 import { StatusFeedback } from "@/components/status-feedback";
 import { colors } from "@/theme/colors";
 import { presentMobileSyncResult } from "@/src/sync-status";
@@ -76,22 +76,13 @@ export default function CaptureScreen() {
         />
         <NativeToggle label={checklist ? "Checklist capture" : "Text capture"} value={checklist} onChange={setChecklist} />
       </View>
-      {options.projects.length ? <Choice label="Project" value={projectId} onChange={setProjectId}
+      {options.projects.length ? <NativeChoice label="Project" value={projectId} onChange={setProjectId}
         items={options.projects.map(({ id, name }) => ({ value: id, label: name }))} /> : null}
-      {options.tags.length ? <Choice label="Tag" value={tag} onChange={setTag}
+      {options.tags.length ? <NativeChoice label="Tag" value={tag} onChange={setTag}
         items={options.tags.map((value) => ({ value, label: value }))} /> : null}
-      {options.reminders.length ? <Choice label="Reminder" value={reminderOffset?.toString()} onChange={(value) => setReminderOffset(value ? Number(value) : undefined)}
+      {options.reminders.length ? <NativeChoice label="Reminder" value={reminderOffset?.toString()} onChange={(value) => setReminderOffset(value ? Number(value) : undefined)}
         items={options.reminders.map(({ offsetMinutes, label }) => ({ value: offsetMinutes.toString(), label }))} /> : null}
       <NativeActionButton label="Save capture" disabled={!content.trim()} onPress={save} />
     </ScrollView>
   );
-}
-
-function Choice({ label, value, items, onChange }: { label: string; value?: string; items: { value: string; label: string }[]; onChange: (value?: string) => void }) {
-  return <View accessibilityLabel={label} style={{ borderWidth: 1, borderColor: colors.separator, borderRadius: 14, borderCurve: "continuous" }}>
-    <Picker selectedValue={value ?? ""} onValueChange={(next) => onChange(next || undefined)}>
-      <Picker.Item label={`${label}: None`} value="" />
-      {items.map((item) => <Picker.Item key={item.value} label={`${label}: ${item.label}`} value={item.value} />)}
-    </Picker>
-  </View>;
 }

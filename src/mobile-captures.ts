@@ -39,6 +39,7 @@ export class MobileCaptureService {
     const content = richTextToMarkdown(document);
     const tags = [...new Set(((value.tags ?? []) as string[]).map((tag) => tag.trim()))].sort();
     const reminderAt = value.reminder ? normalizeExplicitOffsetTimestamp(value.reminder.at)! : undefined;
+    const createdAt = normalizeExplicitOffsetTimestamp(value.createdAt)!;
     const payloadDigest = createHash("sha256").update(JSON.stringify({
       kind: value.kind,
       content: normalizedContent,
@@ -46,13 +47,14 @@ export class MobileCaptureService {
       projectId: value.projectId ?? null,
       tags,
       reminder: reminderAt ? { at: reminderAt } : null,
+      createdAt,
     })).digest("hex");
     const createdBy = await this.repository.findPortableMemberIdentity(memberId);
     if (!createdBy) throw new Error("member_identity_unavailable");
     const note: NoteRecord = {
       id: randomUUID(), workspaceId, content, document, revision: 1,
       tags,
-      createdByMemberId: memberId, createdAt: normalizeExplicitOffsetTimestamp(value.createdAt)!,
+      createdByMemberId: memberId, createdAt,
       ...(value.projectId ? { projectId: value.projectId } : {}),
       ...(reminderAt ? { reminder: { at: reminderAt } } : {}),
     };

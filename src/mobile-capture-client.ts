@@ -20,6 +20,7 @@ export interface MobileCapture {
   reminder?: { at: string };
   createdAt: string;
   attempts: number;
+  nextRetryAt?: string;
   lastError?: string;
 }
 
@@ -38,18 +39,23 @@ type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Resp
 export type MobileSyncResult =
   | { status: "synced"; count: number }
   | { status: "offline" | "retry_pending"; count: number }
+  | { status: "cancelled"; count: number }
   | { status: "attention_required"; count: number; error: string };
 
 export class MobileCaptureClient {
   readonly #store: EncryptedMobileCaptureStore;
   readonly #fetch: Fetch;
   readonly #allowInsecureInstanceForTest: boolean;
-  #activeRequest: AbortController | undefined;
+  readonly #now: () => number;
+  #syncController: AbortController | undefined;
+  #refreshControllers = new Set<AbortController>();
+  #inFlightSync: Promise<MobileSyncResult> | undefined;
 
-  constructor(store: EncryptedMobileCaptureStore, fetchImplementation: Fetch, options: { allowInsecureInstanceForTest?: boolean } = {}) {
+  constructor(store: EncryptedMobileCaptureStore, fetchImplementation: Fetch, options: { allowInsecureInstanceForTest?: boolean; now?: () => number } = {}) {
     this.#store = store;
     this.#fetch = fetchImplementation;
     this.#allowInsecureInstanceForTest = options.allowInsecureInstanceForTest ?? false;
+    this.#now = options.now ?? Date.now;
   }
 
   async pair(pairing: MobileCapturePairing): Promise<void> {
@@ -84,6 +90,7 @@ export class MobileCaptureClient {
       if (!online) return;
       void this.sync().then((result) => {
         if (!online) return;
+        if (result.status === "cancelled") return;
         onResult(result);
         if (result.status === "retry_pending" && online) {
           const delay = Math.min(1_000 * 2 ** retryNumber, 60_000);
@@ -101,21 +108,26 @@ export class MobileCaptureClient {
     return () => { online = false; cancelRetry?.(); this.cancelRequests(); unsubscribe(); };
   }
 
-  cancelRequests(): void { this.#activeRequest?.abort(new DOMException("Request cancelled", "AbortError")); }
+  cancelRequests(): void {
+    const reason = new DOMException("Request cancelled", "AbortError");
+    this.#syncController?.abort(reason);
+    for (const controller of this.#refreshControllers) controller.abort(reason);
+  }
 
   async refreshOptions(signal?: AbortSignal): Promise<MobileCaptureOptions> {
-    const controller = this.#beginRequest(signal);
-    const pairing = await this.#store.loadPairing();
-    if (!pairing) throw new Error("Pair the app before refreshing capture options.");
-    const response = await this.#fetch(`${pairing.instanceUrl}/api/mobile/v1/workspaces/${pairing.workspaceId}/capture-options`, {
-      headers: { authorization: `Bearer ${pairing.memberToken}` },
-      signal: controller.signal,
-    });
-    const body = await response.json().catch(() => ({})) as MobileCaptureOptions & { message?: string };
-    if (!response.ok) throw new Error(body.message ?? "Capture options could not be refreshed.");
-    const options = { projects: body.projects, tags: body.tags, reminders: body.reminders };
-    await this.#store.saveOptions(options);
-    return options;
+    const controller = this.#controller(signal);
+    this.#refreshControllers.add(controller);
+    try {
+      const pairing = await this.#store.loadPairing();
+      if (!pairing) throw new Error("Pair the app before refreshing capture options.");
+      const response = await this.#fetch(`${pairing.instanceUrl}/api/mobile/v1/workspaces/${pairing.workspaceId}/capture-options`, {
+        headers: { authorization: `Bearer ${pairing.memberToken}` }, signal: controller.signal,
+      });
+      const body = await response.json().catch(() => ({})) as MobileCaptureOptions & { message?: string };
+      if (!response.ok) throw new Error(body.message ?? "Capture options could not be refreshed.");
+      const options = { projects: body.projects, tags: body.tags, reminders: body.reminders };
+      await this.#store.saveOptions(options); return options;
+    } finally { this.#refreshControllers.delete(controller); }
   }
 
   async captureText(content: string, structure: Pick<MobileCapture, "projectId" | "tags" | "reminder"> = {}): Promise<MobileCapture> {
@@ -138,23 +150,36 @@ export class MobileCaptureClient {
     return capture;
   }
 
-  async sync(signal?: AbortSignal): Promise<MobileSyncResult> {
-    const controller = this.#beginRequest(signal);
+  sync(signal?: AbortSignal): Promise<MobileSyncResult> {
+    if (this.#inFlightSync) return this.#inFlightSync;
+    const controller = this.#controller(signal);
+    this.#syncController = controller;
+    const running = this.#performSync(controller).finally(() => {
+      if (this.#inFlightSync === running) this.#inFlightSync = undefined;
+      if (this.#syncController === controller) this.#syncController = undefined;
+    });
+    this.#inFlightSync = running;
+    return running;
+  }
+
+  async #performSync(controller: AbortController): Promise<MobileSyncResult> {
     const pairing = await this.#store.loadPairing();
     if (!pairing) return { status: "attention_required", count: 0, error: "not_paired" };
     let count = 0;
     let attentionError: string | undefined;
+    let retryPending = false;
     for (const capture of await this.#store.listCaptures()) {
+      if (capture.nextRetryAt && Date.parse(capture.nextRetryAt) > this.#now()) { retryPending = true; continue; }
       let response: Response;
       try {
         response = await this.#fetch(`${pairing.instanceUrl}/api/mobile/v1/workspaces/${pairing.workspaceId}/captures`, {
           method: "POST",
           headers: { authorization: `Bearer ${pairing.memberToken}`, "content-type": "application/json" },
-          body: JSON.stringify({ protocol: "stash.mobile-capture.v1", ...capture, lastError: undefined, attempts: undefined }),
+          body: JSON.stringify({ protocol: "stash.mobile-capture.v1", ...capture, lastError: undefined, attempts: undefined, nextRetryAt: undefined }),
           signal: controller.signal,
         });
       } catch (error) {
-        if (controller.signal.aborted) return { status: "offline", count };
+        if (controller.signal.aborted) return { status: "cancelled", count };
         return { status: "offline", count };
       }
       const body = await response.json().catch(() => ({})) as { error?: string; message?: string };
@@ -163,22 +188,33 @@ export class MobileCaptureClient {
         count += 1;
         continue;
       }
-      const failed = { ...capture, attempts: capture.attempts + 1, lastError: body.message ?? "Synchronization failed." };
+      const attempts = capture.attempts + 1;
+      const retriable = response.status >= 500 || response.status === 429;
+      const failed = { ...capture, attempts, lastError: body.message ?? "Synchronization failed.",
+        ...(retriable ? { nextRetryAt: new Date(this.#now() + retryDelay(response.headers.get("retry-after"), attempts, this.#now())).toISOString() } : {}) };
       await this.#store.saveCapture(failed);
-      if (response.status >= 500 || response.status === 429) return { status: "retry_pending", count };
-      attentionError ??= body.error ?? "sync_rejected";
+      if (retriable) retryPending = true; else attentionError ??= body.error ?? "sync_rejected";
     }
-    return attentionError ? { status: "attention_required", count, error: attentionError } : { status: "synced", count };
+    return retryPending ? { status: "retry_pending", count }
+      : attentionError ? { status: "attention_required", count, error: attentionError } : { status: "synced", count };
   }
 
-  #beginRequest(externalSignal?: AbortSignal): AbortController {
-    this.cancelRequests();
+  #controller(externalSignal?: AbortSignal): AbortController {
     const controller = new AbortController();
-    this.#activeRequest = controller;
     if (externalSignal?.aborted) controller.abort(externalSignal.reason);
     else externalSignal?.addEventListener("abort", () => controller.abort(externalSignal.reason), { once: true });
     return controller;
   }
+}
+
+function retryDelay(retryAfter: string | null, attempts: number, now: number): number {
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.max(1_000, seconds * 1_000);
+    const date = Date.parse(retryAfter);
+    if (Number.isFinite(date)) return Math.max(1_000, date - now);
+  }
+  return Math.min(1_000 * 2 ** Math.max(0, attempts - 1), 60_000);
 }
 
 export function isUuid(value: string): boolean {

@@ -51,6 +51,7 @@ class MobileProtocolDatabase implements DatabaseProbe, MobileCaptureRepository {
   readonly notes = new Map<string, NoteRecord>();
   readonly receipts = new Map<string, { noteId: string; payloadDigest: string }>();
   failure: Error | undefined;
+  failingContent: string | undefined;
 
   async verifyConnection() {}
   async close() {}
@@ -64,6 +65,7 @@ class MobileProtocolDatabase implements DatabaseProbe, MobileCaptureRepository {
   }
   async createMobileCapture(memberId: string, clientCaptureId: string, payloadDigest: string, note: NoteRecord, projection: PortableNoteProjection) {
     if (this.failure) throw this.failure;
+    if (this.failingContent && note.content.includes(this.failingContent)) throw new Error("temporarily unavailable");
     const existing = this.receipts.get(clientCaptureId);
     if (existing) return existing.payloadDigest === payloadDigest
       ? { status: "duplicate" as const, noteId: existing.noteId }
@@ -100,10 +102,11 @@ describe("offline mobile capture synchronization", () => {
     const ciphertext = new RecordingCiphertextRepository();
     const store = new EncryptedStateMobileCaptureStore(ciphertext, testCipher);
     let online = false;
+    let now = Date.parse("2026-08-22T10:00:00Z");
     const client = new MobileCaptureClient(store, async (input, init) => {
       if (!online) throw new TypeError("Network request failed");
       return fetch(input, init);
-    }, { allowInsecureInstanceForTest: true });
+    }, { allowInsecureInstanceForTest: true, now: () => now });
     await client.pair({ instanceUrl: baseUrl, memberToken: "member-ada", workspaceId });
     online = true;
     assert.deepEqual(await client.refreshOptions(), {
@@ -138,6 +141,7 @@ describe("offline mobile capture synchronization", () => {
     await retryPending;
     assert.equal((await client.outbox()).length, 1);
     database.failure = undefined;
+    now += 1_000;
     scheduledRetry!();
     assert.equal((await synchronized).status, "synced");
     assert.equal((await client.outbox()).length, 0);
@@ -149,7 +153,7 @@ describe("offline mobile capture synchronization", () => {
     assert.equal((await client.outbox()).length, 0);
   });
 
-  it("accepts a semantic duplicate despite a different creation timestamp", async () => {
+  it("rejects a reused capture ID when its creation timestamp changes", async () => {
     const { database, baseUrl } = await run();
     const id = "44444444-4444-4444-8444-444444444444";
     const body = { protocol: "stash.mobile-capture.v1", id, kind: "text", content: "  Same thought  ",
@@ -163,8 +167,8 @@ describe("offline mobile capture synchronization", () => {
       method: "POST", headers: { authorization: "Bearer member-ada", "content-type": "application/json" },
       body: JSON.stringify({ ...body, content: "Same thought", tags: ["mobile"], createdAt: "2026-08-23T18:30:00-04:00" }),
     });
-    assert.equal(duplicate.status, 200);
-    assert.equal((await duplicate.json() as { status: string }).status, "duplicate");
+    assert.equal(duplicate.status, 409);
+    assert.equal((await duplicate.json() as { error: string }).error, "capture_conflict");
     assert.equal(database.notes.size, 1);
   });
 
@@ -238,6 +242,33 @@ describe("offline mobile capture synchronization", () => {
     assert.match(presentMobileSyncResult(result, await client.outbox()), /cannot capture/i);
   });
 
+  it("backs off a retriable first capture while synchronizing later eligible captures", async () => {
+    const { database, baseUrl } = await run();
+    const store = new MemoryEncryptedStore();
+    let now = Date.parse("2026-08-22T10:00:00Z");
+    const client = new MobileCaptureClient(store, fetch, { allowInsecureInstanceForTest: true, now: () => now });
+    await client.pair({ instanceUrl: baseUrl, memberToken: "member-ada", workspaceId });
+    const first = await client.captureText("Persistently failing");
+    await client.captureText("Later succeeds");
+    database.failingContent = "Persistently failing";
+
+    const partial = await client.sync();
+    assert.deepEqual(partial, { status: "retry_pending", count: 1 });
+    assert.equal(database.notes.size, 1);
+    const [retained] = await client.outbox();
+    assert.equal(retained?.id, first.id);
+    assert.equal(retained?.attempts, 1);
+    assert.equal(retained?.nextRetryAt, "2026-08-22T10:00:01.000Z");
+
+    database.failingContent = undefined;
+    assert.deepEqual(await client.sync(), { status: "retry_pending", count: 0 });
+    assert.equal(database.notes.size, 1);
+    now += 1_000;
+    assert.deepEqual(await client.sync(), { status: "synced", count: 1 });
+    assert.equal(database.notes.size, 2);
+    assert.equal((await client.outbox()).length, 0);
+  });
+
   it("aborts an in-flight synchronization and suppresses callbacks after cleanup", async () => {
     const store = new MemoryEncryptedStore();
     await store.savePairing({ instanceUrl: "https://stash.example", memberToken: "member-ada", workspaceId });
@@ -263,5 +294,37 @@ describe("offline mobile capture synchronization", () => {
     assert.equal(requestSignal?.aborted, true);
     assert.equal(callbacks, 0);
     assert.equal((await store.listCaptures()).length, 1);
+  });
+
+  it("joins concurrent sync triggers without cancelling an options refresh", async () => {
+    const store = new MemoryEncryptedStore();
+    await store.savePairing({ instanceUrl: "https://stash.example", memberToken: "member-ada", workspaceId });
+    await store.saveCapture({ id: "44444444-4444-4444-8444-444444444444", kind: "text", content: "Wait",
+      createdAt: "2026-08-22T10:00:00.000Z", attempts: 0 });
+    let refreshSignal: AbortSignal | undefined;
+    let syncRequests = 0;
+    let resolveRefresh!: (response: Response) => void;
+    let resolveSync!: (response: Response) => void;
+    const client = new MobileCaptureClient(store, async (input, init) => {
+      if (String(input).endsWith("capture-options")) {
+        refreshSignal = init?.signal ?? undefined;
+        return new Promise<Response>((resolve) => { resolveRefresh = resolve; });
+      }
+      syncRequests += 1;
+      return new Promise<Response>((resolve) => { resolveSync = resolve; });
+    });
+
+    const refresh = client.refreshOptions();
+    await new Promise((resolve) => setImmediate(resolve));
+    const first = client.sync();
+    const joined = client.sync();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(first, joined);
+    assert.equal(syncRequests, 1);
+    assert.equal(refreshSignal?.aborted, false);
+    resolveRefresh(new Response(JSON.stringify({ projects: [], tags: [], reminders: [] }), { status: 200 }));
+    resolveSync(new Response(JSON.stringify({ status: "created" }), { status: 201 }));
+    await refresh;
+    assert.deepEqual(await first, { status: "synced", count: 1 });
   });
 });
