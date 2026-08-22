@@ -59,9 +59,15 @@ Stopping or deleting Redis does not remove durable Stash data. Do not include Re
 - `GET /health/ready` probes PostgreSQL and returns `200` with `{"status":"ready"}` or `503` with a stable `database_unavailable` error. Database details are deliberately not exposed.
 - `GET /` is the browser surface.
 - `GET /api/instance` requires `Authorization: Bearer <INSTANCE_ADMIN_TOKEN>`. Missing or invalid authorization returns a visible `401` without echoing the secret.
+- `POST /api/workspaces` requires a Member session and creates either a personal Workspace owned by that Member or an Organization Workspace when the Member belongs to that Organization.
+- `POST /api/workspaces/:workspaceId/projects` requires a Member session and creates a Project only when the Member owns the personal Workspace or belongs to its Organization. Project keys are normalized to uppercase and unique within their Workspace.
 - Unknown routes, malformed JSON, oversized bodies, and unsupported writes return structured JSON errors rather than being silently accepted.
 
 The Compose health check uses readiness, so a container is not marked healthy while PostgreSQL is unavailable.
+
+Successful Workspace and Project creation atomically records a versioned portable-projection
+event. The API reports its schema and `recorded` state; creation fails visibly if that event cannot
+be committed. See [the portable projection format](docs/portable-projection.md).
 
 ## Development and acceptance tests
 
@@ -72,4 +78,4 @@ npm test
 npm run build
 ```
 
-Acceptance tests bind a real ephemeral HTTP port and exercise the public protocol. They substitute only the PostgreSQL probe with a documented protocol-compatible fake that implements `verifyConnection()` and `close()`, allowing deterministic healthy and recoverable-outage scenarios. `npm run smoke` targets a running, PostgreSQL-backed Instance and verifies both readiness and the browser surface.
+Acceptance tests bind a real ephemeral HTTP port and exercise the public protocol. Protocol-compatible database and Member-access fakes provide deterministic ownership, healthy, and recoverable-outage scenarios without bypassing the Instance HTTP boundary. `npm run smoke` targets a running, PostgreSQL-backed Instance and verifies both readiness and the browser surface.

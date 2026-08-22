@@ -8,12 +8,25 @@ import {
   verifyAuthenticationKeyCheck,
   type AuthenticationSecretCodec,
 } from "./authentication-secrets.js";
+import type {
+  PortableIdentity,
+  PortableProjectProjection,
+  PortableWorkspaceProjection,
+  WorkspaceProjectRecord,
+  WorkspaceProjectRepository,
+  WorkspaceRecord,
+} from "./workspaces-projects.js";
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
 const authenticationKeyCheckLockId = 795_541_992;
 
-export class PostgresDatabase implements DatabaseProbe, OwnerBootstrapRepository, PasswordAuthRepository {
+export class PostgresDatabase implements
+  DatabaseProbe,
+  OwnerBootstrapRepository,
+  PasswordAuthRepository,
+  WorkspaceProjectRepository
+{
   readonly #pool: Pool;
   readonly #authenticationSecrets: AuthenticationSecretCodec;
 
@@ -60,6 +73,124 @@ export class PostgresDatabase implements DatabaseProbe, OwnerBootstrapRepository
     } finally {
       client.release();
     }
+  }
+
+  async findPortableMemberIdentity(memberId: string): Promise<PortableIdentity | undefined> {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureBootstrapSchema(client);
+      const result = await client.query<{ id: string; name: string }>(
+        "SELECT id, name FROM stash_accounts WHERE id = $1",
+        [memberId],
+      );
+      const member = result.rows[0];
+      return member
+        ? { localAccountId: member.id, displayName: member.name }
+        : undefined;
+    } finally {
+      client.release();
+    }
+  }
+
+  async createWorkspace(
+    record: WorkspaceRecord,
+    createdBy: PortableIdentity,
+  ): Promise<
+    | { status: "created"; projection: PortableWorkspaceProjection }
+    | { status: "organization_forbidden" }
+  > {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureWorkspaceProjectSchema(client);
+      let owner: PortableWorkspaceProjection["owner"];
+      if (record.owner.type === "organization") {
+        const authorizedOrganization = await client.query<{ id: string; name: string }>(
+          `SELECT organization.id, organization.name
+           FROM stash_organization_memberships membership
+           JOIN stash_organizations organization ON organization.id = membership.organization_id
+           WHERE membership.organization_id = $1 AND membership.account_id = $2`,
+          [record.owner.id, record.createdByMemberId],
+        );
+        const organization = authorizedOrganization.rows[0];
+        if (!organization) return { status: "organization_forbidden" };
+        owner = {
+          type: "organization",
+          identity: {
+            localOrganizationId: organization.id,
+            displayName: organization.name,
+          },
+        };
+      } else {
+        owner = { type: "personal", identity: createdBy };
+      }
+      const projection: PortableWorkspaceProjection = {
+        schema: "stash.workspace.v1",
+        id: record.id,
+        name: record.name,
+        owner,
+        createdBy,
+      };
+      await client.query(
+        `INSERT INTO stash_workspaces
+          (id, name, owner_type, personal_owner_id, organization_owner_id, created_by_account_id)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [
+          record.id,
+          record.name,
+          record.owner.type,
+          record.owner.type === "personal" ? record.owner.id : null,
+          record.owner.type === "organization" ? record.owner.id : null,
+          record.createdByMemberId,
+        ],
+      );
+      await this.#recordPortableProjection(
+        client,
+        "Workspace",
+        record.id,
+        "stash.workspace.v1",
+        projection,
+      );
+      return { status: "created", projection };
+    });
+  }
+
+  async createProject(
+    memberId: string,
+    record: WorkspaceProjectRecord,
+    projection: PortableProjectProjection,
+  ): Promise<"created" | "workspace_forbidden" | "workspace_not_found" | "key_conflict"> {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureWorkspaceProjectSchema(client);
+      const access = await client.query<{ allowed: boolean }>(
+        `SELECT (
+           (owner_type = 'personal' AND personal_owner_id = $2)
+           OR (owner_type = 'organization' AND EXISTS (
+             SELECT 1 FROM stash_organization_memberships membership
+             WHERE membership.organization_id = stash_workspaces.organization_owner_id
+               AND membership.account_id = $2
+           ))
+         ) AS allowed
+         FROM stash_workspaces WHERE id = $1`,
+        [record.workspaceId, memberId],
+      );
+      if (!access.rowCount) return "workspace_not_found";
+      if (!access.rows[0]!.allowed) return "workspace_forbidden";
+      const inserted = await client.query(
+        `INSERT INTO stash_projects (id, workspace_id, name, project_key, created_by_account_id)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (workspace_id, project_key) DO NOTHING
+         RETURNING id`,
+        [record.id, record.workspaceId, record.name, record.key, record.createdByMemberId],
+      );
+      if (!inserted.rowCount) return "key_conflict";
+      await this.#recordPortableProjection(
+        client,
+        "Project",
+        record.id,
+        "stash.project.v1",
+        projection,
+      );
+      return "created";
+    });
   }
 
   async close(): Promise<void> {
@@ -227,6 +358,73 @@ export class PostgresDatabase implements DatabaseProbe, OwnerBootstrapRepository
         singleton BOOLEAN PRIMARY KEY CHECK (singleton)
       );
     `);
+  }
+
+  async #ensureWorkspaceProjectSchema(client: PoolClient): Promise<void> {
+    await this.#ensureBootstrapSchema(client);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS stash_workspaces (
+        id UUID PRIMARY KEY,
+        name TEXT NOT NULL,
+        owner_type TEXT NOT NULL CHECK (owner_type IN ('personal', 'organization')),
+        personal_owner_id UUID REFERENCES stash_accounts(id),
+        organization_owner_id UUID REFERENCES stash_organizations(id),
+        created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id),
+        CHECK (
+          (owner_type = 'personal' AND personal_owner_id IS NOT NULL AND organization_owner_id IS NULL)
+          OR
+          (owner_type = 'organization' AND personal_owner_id IS NULL AND organization_owner_id IS NOT NULL)
+        )
+      );
+      CREATE TABLE IF NOT EXISTS stash_projects (
+        id UUID PRIMARY KEY,
+        workspace_id UUID NOT NULL REFERENCES stash_workspaces(id),
+        name TEXT NOT NULL,
+        project_key TEXT NOT NULL,
+        created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id),
+        UNIQUE (workspace_id, project_key)
+      );
+      CREATE TABLE IF NOT EXISTS stash_portable_projection_outbox (
+        object_kind TEXT NOT NULL CHECK (object_kind IN ('Workspace', 'Project')),
+        object_id UUID NOT NULL,
+        revision INTEGER NOT NULL CHECK (revision > 0),
+        projection_schema TEXT NOT NULL,
+        payload JSONB NOT NULL,
+        state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'projected')),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (object_kind, object_id, revision)
+      );
+    `);
+  }
+
+  async #recordPortableProjection(
+    client: PoolClient,
+    objectKind: "Workspace" | "Project",
+    objectId: string,
+    projectionSchema: "stash.workspace.v1" | "stash.project.v1",
+    payload: PortableWorkspaceProjection | PortableProjectProjection,
+  ): Promise<void> {
+    await client.query(
+      `INSERT INTO stash_portable_projection_outbox
+        (object_kind, object_id, revision, projection_schema, payload)
+       VALUES ($1, $2, 1, $3, $4::jsonb)`,
+      [objectKind, objectId, projectionSchema, JSON.stringify(payload)],
+    );
+  }
+
+  async #withTransaction<Result>(operation: (client: PoolClient) => Promise<Result>): Promise<Result> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await operation(client);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 }
 

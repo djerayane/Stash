@@ -12,6 +12,8 @@ import { instanceAdminRoute } from "./instance-route.js";
 import type { OwnerBootstrapService } from "./owner-bootstrap.js";
 import { passwordAuthRoute } from "./password-auth-routes.js";
 import type { PasswordAuthService } from "./password-auth.js";
+import { workspaceProjectRoutes } from "./workspace-project-routes.js";
+import type { MemberAccessResolver, WorkspaceProjectService } from "./workspaces-projects.js";
 
 export interface DatabaseProbe {
   verifyConnection(): Promise<void>;
@@ -30,6 +32,8 @@ interface InstanceOptions {
   instanceAdminToken: string;
   ownerBootstrap?: OwnerBootstrapService;
   passwordAuth?: PasswordAuthService;
+  workspaceProjects?: WorkspaceProjectService;
+  memberAccess?: MemberAccessResolver;
   diagnostics?: Diagnostics;
   acceleration?: OptionalRedisAcceleration;
 }
@@ -73,6 +77,12 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
       options.instanceAdminToken,
       ownerBootstrapRoute(options.ownerBootstrap),
     ),
+    ...(options.workspaceProjects && (options.memberAccess ?? options.passwordAuth)
+      ? [workspaceProjectRoutes(
+        options.workspaceProjects,
+        (options.memberAccess ?? options.passwordAuth)!,
+      )]
+      : []),
   ];
 
   const server = createServer(async (request, response) => {
