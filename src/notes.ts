@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { normalizeExplicitOffsetTimestamp } from "./explicit-offset-timestamp.js";
 import type { PortableIdentity } from "./workspaces-projects.js";
-import { isRichTextDocument, paragraphDocument, richTextToMarkdown, type RichTextDocument } from "./rich-text.js";
+import { isRichTextDocument, paragraphDocument, type RichTextBlock, type RichTextDocument } from "./rich-text.js";
 
 export interface NoteReminder {
   at: string;
@@ -60,6 +60,14 @@ export interface PortableNoteProjection {
   reminder?: NoteReminder;
 }
 
+export type NoteEditOperation =
+  | { id: string; type: "replace_block"; blockKey: string; block: RichTextBlock }
+  | { id: string; type: "insert_block"; blockKey: string; afterBlockKey: string | null; block: RichTextBlock }
+  | { id: string; type: "delete_block"; blockKey: string };
+export interface NoteEditBatch { baseRevision: number; operations: NoteEditOperation[] }
+export type NoteEditOutcome = { status: "updated" | "duplicate"; note: NoteRecord; projection: PortableNoteProjection }
+  | { status: "not_found" | "conflict_preserved" | "invalid_reference" };
+
 export interface NoteRepository {
   findPortableMemberIdentity(memberId: string): Promise<PortableIdentity | undefined>;
   createNote(
@@ -74,8 +82,8 @@ export interface NoteRepository {
     { status: "updated"; result: NoteTriageResult }
     | { status: "workspace_forbidden" | "project_forbidden" | "note_not_found" | "target_note_not_found" }
   >;
-  findNoteForMember?(memberId: string, noteId: string): Promise<NoteRecord | undefined>;
-  updateNote?(memberId: string, note: NoteRecord, expectedRevision: number, projection: PortableNoteProjection): Promise<"updated" | "not_found" | "revision_conflict_preserved">;
+  findNoteForMember(memberId: string, noteId: string): Promise<NoteRecord | undefined>;
+  applyNoteOperations(memberId: string, noteId: string, batch: NoteEditBatch, createdBy: PortableIdentity): Promise<NoteEditOutcome>;
 }
 
 export class InvalidNoteInput extends Error {}
@@ -127,7 +135,6 @@ export class NoteService {
 
   async get(memberId: string, noteId: string): Promise<NoteRecord | undefined> {
     if (!isUuid(noteId)) throw new InvalidNoteEdit();
-    if (!this.#repository.findNoteForMember) throw new Error("rich_text_repository_unavailable");
     return this.#repository.findNoteForMember(memberId, noteId);
   }
 
@@ -143,7 +150,7 @@ export class NoteService {
       id: randomUUID(),
       workspaceId,
       content: value.content,
-      document: paragraphDocument(value.content),
+      document: paragraphDocument(value.content, randomUUID()),
       revision: 1,
       tags,
       createdByMemberId: memberId,
@@ -187,34 +194,30 @@ export class NoteService {
     return this.#repository.triageNote(memberId, workspaceId, noteId, change);
   }
 
-  async edit(memberId: string, noteId: string, value: unknown): Promise<{ status: "updated"; note: NoteRecord; projection: PortableNoteProjection } | { status: "not_found" | "revision_conflict_preserved" }> {
-    if (!isUuid(noteId) || !isPlainObject(value) || !Number.isSafeInteger(value.revision)
-      || (value.revision as number) < 1 || !isRichTextDocument(value.document)
-      || !Object.keys(value).every((key) => ["revision", "document"].includes(key))) throw new InvalidNoteEdit();
-    if (!this.#repository.findNoteForMember || !this.#repository.updateNote) throw new Error("rich_text_repository_unavailable");
-    const current = await this.#repository.findNoteForMember(memberId, noteId);
-    if (!current) return { status: "not_found" };
-    const content = richTextToMarkdown(value.document);
-    if (!content.trim()) throw new InvalidNoteEdit();
-    const note: NoteRecord = { ...current, content, document: value.document, revision: (value.revision as number) + 1 };
-    const createdBy = await this.#repository.findPortableMemberIdentity(current.createdByMemberId);
+  async edit(memberId: string, noteId: string, value: unknown): Promise<NoteEditOutcome> {
+    if (!isUuid(noteId) || !isPlainObject(value) || !Number.isSafeInteger(value.baseRevision)
+      || (value.baseRevision as number) < 1 || !Array.isArray(value.operations) || value.operations.length < 1
+      || !Object.keys(value).every((key) => ["baseRevision", "operations"].includes(key))) throw new InvalidNoteEdit();
+    const operations: NoteEditOperation[] = [];
+    for (const operation of value.operations) {
+      if (!isPlainObject(operation) || typeof operation.id !== "string" || !isUuid(operation.id)
+        || typeof operation.blockKey !== "string" || !isUuid(operation.blockKey)) throw new InvalidNoteEdit();
+      if (operation.type === "delete_block") {
+        if (!Object.keys(operation).every((key) => ["id", "type", "blockKey"].includes(key))) throw new InvalidNoteEdit();
+      } else if ((operation.type === "replace_block" || operation.type === "insert_block")
+        && isRichTextDocument({ type: "doc", blocks: [operation.block] })
+        && (operation.block as RichTextBlock).blockKey === operation.blockKey) {
+        if (operation.type === "insert_block" && (operation.afterBlockKey !== null
+          && (typeof operation.afterBlockKey !== "string" || !isUuid(operation.afterBlockKey)))) throw new InvalidNoteEdit();
+        const allowed = operation.type === "insert_block" ? ["id", "type", "blockKey", "afterBlockKey", "block"] : ["id", "type", "blockKey", "block"];
+        if (!Object.keys(operation).every((key) => allowed.includes(key))) throw new InvalidNoteEdit();
+      } else throw new InvalidNoteEdit();
+      operations.push(operation as unknown as NoteEditOperation);
+    }
+    if (new Set(operations.map(({ id }) => id)).size !== operations.length) throw new InvalidNoteEdit();
+    const createdBy = await this.#repository.findPortableMemberIdentity(memberId);
     if (!createdBy) throw new Error("member_identity_unavailable");
-    const projection: PortableNoteProjection = {
-      schema: "stash.note.v1", id: note.id, workspaceId: note.workspaceId, content, tags: note.tags,
-      createdAt: note.createdAt, createdBy,
-      ...(note.projectId ? { projectId: note.projectId } : {}), ...(note.reminder ? { reminder: note.reminder } : {}),
-    };
-    if (current.revision !== value.revision) {
-      const status = await this.#repository.updateNote(memberId, note, value.revision as number, projection);
-      return status === "updated" ? { status, note, projection } : { status };
-    }
-    const currentIds = current.document.blocks.flatMap((block) => block.id ? [block.id] : []).sort();
-    const editedIds = value.document.blocks.flatMap((block) => block.id ? [block.id] : []).sort();
-    if (currentIds.length !== editedIds.length || currentIds.some((id, index) => id !== editedIds[index])) {
-      throw new InvalidNoteEdit();
-    }
-    const status = await this.#repository.updateNote(memberId, note, value.revision as number, projection);
-    return status === "updated" ? { status, note, projection } : { status };
+    return this.#repository.applyNoteOperations(memberId, noteId, { baseRevision: value.baseRevision as number, operations }, createdBy);
   }
 }
 

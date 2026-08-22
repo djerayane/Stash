@@ -7,10 +7,10 @@ export interface RichTextSpan {
 }
 
 export type RichTextBlock =
-  | { type: "paragraph" | "quote" | "bullet"; id?: string; content: RichTextSpan[] }
-  | { type: "heading"; level: 1 | 2 | 3; id?: string; content: RichTextSpan[] }
-  | { type: "check"; checked: boolean; id?: string; content: RichTextSpan[] }
-  | { type: "code"; language?: string; id?: string; text: string };
+  | { type: "paragraph" | "quote" | "bullet"; blockKey?: string; id?: string; content: RichTextSpan[] }
+  | { type: "heading"; level: 1 | 2 | 3; blockKey?: string; id?: string; content: RichTextSpan[] }
+  | { type: "check"; checked: boolean; blockKey?: string; id?: string; content: RichTextSpan[] }
+  | { type: "code"; language?: string; blockKey?: string; id?: string; text: string };
 
 export interface RichTextDocument {
   type: "doc";
@@ -50,14 +50,16 @@ export function isRichTextDocument(value: unknown): value is RichTextDocument {
     if (block.type === "code") {
       return typeof block.text === "string" && block.text.length > 0
         && (block.language === undefined || (typeof block.language === "string" && safeCodeLanguage.test(block.language)))
-        && Object.keys(block).every((key) => ["type", "id", "text", "language"].includes(key));
+        && (block.blockKey === undefined || typeof block.blockKey === "string" && uuid.test(block.blockKey))
+        && Object.keys(block).every((key) => ["type", "blockKey", "id", "text", "language"].includes(key));
     }
     if (!["paragraph", "quote", "bullet", "heading", "check"].includes(block.type)
       || !validContent(block.content)) return false;
     if (block.type === "heading" && ![1, 2, 3].includes(Number(block.level))) return false;
     if (block.type === "check" && typeof block.checked !== "boolean") return false;
-    const allowed = block.type === "heading" ? ["type", "id", "level", "content"]
-      : block.type === "check" ? ["type", "id", "checked", "content"] : ["type", "id", "content"];
+    if (block.blockKey !== undefined && (typeof block.blockKey !== "string" || !uuid.test(block.blockKey))) return false;
+    const allowed = block.type === "heading" ? ["type", "blockKey", "id", "level", "content"]
+      : block.type === "check" ? ["type", "blockKey", "id", "checked", "content"] : ["type", "blockKey", "id", "content"];
     return Object.keys(block).every((key) => allowed.includes(key));
   });
 }
@@ -94,6 +96,41 @@ export function richTextToMarkdown(document: RichTextDocument): string {
   }).join("\n\n");
 }
 
-export function paragraphDocument(content: string): RichTextDocument {
-  return { type: "doc", blocks: [{ type: "paragraph", content: [{ text: content }] }] };
+export function paragraphDocument(content: string, blockKey?: string): RichTextDocument {
+  return { type: "doc", blocks: [{ type: "paragraph", ...(blockKey ? { blockKey } : {}), content: [{ text: content }] }] };
+}
+
+export class UnsupportedMarkdown extends Error {}
+
+function parseInline(text: string): RichTextSpan[] {
+  const link = text.match(/^\[([^\]]+)\]\(<([^>]+)>\)$/);
+  if (link) return [{ text: link[1]!, href: link[2]! }];
+  const wrappers: Array<[RegExp, RichTextMark]> = [[/^\*\*(.*)\*\*$/, "bold"], [/^_(.*)_$/, "italic"], [/^`([^`]*)`$/, "code"]];
+  for (const [pattern, mark] of wrappers) { const match = text.match(pattern); if (match) return [{ text: match[1]!, marks: [mark] }]; }
+  return [{ text: text.replace(/\\([\\`*_{}\[\]<>])/g, "$1") }];
+}
+
+export function markdownToRichText(markdown: string): RichTextDocument {
+  if (!markdown.trim() || /^\s*\|.*\|/m.test(markdown) || /!\[[^\]]*\]\(/.test(markdown)
+    || /^:::|^> \[!/m.test(markdown)) throw new UnsupportedMarkdown("Unsupported Markdown construct");
+  const chunks = markdown.trim().split(/\n\n+/);
+  const blocks: RichTextBlock[] = [];
+  for (let index = 0; index < chunks.length; index += 1) {
+    let chunk = chunks[index]!;
+    const identity = chunk.match(/\n<!-- stash-block:([0-9a-f-]+) -->$/i);
+    if (identity) chunk = chunk.slice(0, identity.index);
+    const id = identity?.[1];
+    const code = chunk.match(/^(`{3,})([a-z0-9_+.-]*)\n([\s\S]*)\n\1$/i);
+    if (code) { blocks.push({ type: "code", text: code[3]!, ...(code[2] ? { language: code[2] } : {}), ...(id ? { id } : {}) }); continue; }
+    let type: "paragraph" | "quote" | "bullet" | "heading" | "check" = "paragraph";
+    let level: 1 | 2 | 3 | undefined; let checked = false;
+    const heading = chunk.match(/^(#{1,3}) (.*)$/s);
+    if (heading) { type = "heading"; level = heading[1]!.length as 1 | 2 | 3; chunk = heading[2]!; }
+    else if (chunk.startsWith("> ")) { type = "quote"; chunk = chunk.slice(2); }
+    else { const check = chunk.match(/^- \[([ x])\] (.*)$/s); if (check) { type = "check"; checked = check[1] === "x"; chunk = check[2]!; }
+      else if (chunk.startsWith("- ")) { type = "bullet"; chunk = chunk.slice(2); } }
+    const base = { content: parseInline(chunk), ...(id ? { id } : {}) };
+    blocks.push(type === "heading" ? { type, level: level!, ...base } : type === "check" ? { type, checked, ...base } : { type, ...base });
+  }
+  return { type: "doc", blocks };
 }

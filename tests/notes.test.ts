@@ -4,10 +4,12 @@ import { afterEach, describe, it } from "node:test";
 import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
 import {
   NoteService,
+  type NoteEditBatch,
   type NoteRecord,
   type NoteRepository,
   type PortableNoteProjection,
 } from "../src/notes.js";
+import { richTextToMarkdown } from "../src/rich-text.js";
 import type { MemberAccessResolver } from "../src/workspaces-projects.js";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
@@ -17,7 +19,9 @@ const blockId = "44444444-4444-4444-8444-444444444444";
 class ProtocolCompatibleNoteDatabase implements DatabaseProbe, NoteRepository {
   readonly notes = new Map<string, NoteRecord>();
   readonly portableProjectionOutbox: PortableNoteProjection[] = [];
-  readonly conflicts: NoteRecord[] = [];
+  readonly conflicts: NoteEditBatch[] = [];
+  readonly applied = new Map<string, { revision: number; blockKey: string }>();
+  readonly conflictIds = new Set<string>();
   failure: Error | undefined;
   projectionFailure: Error | undefined;
   updateFailure: Error | undefined;
@@ -49,17 +53,29 @@ class ProtocolCompatibleNoteDatabase implements DatabaseProbe, NoteRepository {
     return this.notes.get(noteId);
   }
 
-  async updateNote(memberId: string, note: NoteRecord, expectedRevision: number, projection: PortableNoteProjection) {
+  async applyNoteOperations(memberId: string, noteId: string, batch: NoteEditBatch, createdBy: { localAccountId: string; displayName: string }) {
     if (this.updateFailure) throw this.updateFailure;
-    const current = this.notes.get(note.id);
-    if (memberId !== "ada" || !current) return "not_found" as const;
-    if (current.revision !== expectedRevision) {
-      this.conflicts.push(note);
-      return "revision_conflict_preserved" as const;
+    const current = this.notes.get(noteId);
+    if (memberId !== "ada" || !current) return { status: "not_found" as const };
+    const pending = batch.operations.filter(({ id }) => !this.applied.has(id) && !this.conflictIds.has(id));
+    const projection = (note: NoteRecord): PortableNoteProjection => ({ schema: "stash.note.v1", id: note.id, workspaceId: note.workspaceId,
+      content: note.content, tags: note.tags, createdAt: note.createdAt, createdBy });
+    if (!pending.length) return batch.operations.some(({ id }) => this.conflictIds.has(id)) ? { status: "conflict_preserved" as const }
+      : { status: "duplicate" as const, note: current, projection: projection(current) };
+    if (pending.some(({ blockKey }) => [...this.applied.values()].some((entry) => entry.revision > batch.baseRevision && entry.blockKey === blockKey))) {
+      this.conflicts.push(batch); for (const operation of pending) this.conflictIds.add(operation.id); return { status: "conflict_preserved" as const };
     }
-    this.notes.set(note.id, note);
-    this.portableProjectionOutbox.push(projection);
-    return "updated" as const;
+    const blocks = [...current.document.blocks];
+    for (const operation of pending) { const index = blocks.findIndex(({ blockKey }) => blockKey === operation.blockKey);
+      if (operation.type === "delete_block") { if (index < 0 || blocks[index]!.id) return { status: "invalid_reference" as const }; blocks.splice(index, 1); }
+      else if (operation.type === "insert_block") { if (index >= 0 || operation.block.id) return { status: "invalid_reference" as const };
+        const after = operation.afterBlockKey === null ? -1 : blocks.findIndex(({ blockKey }) => blockKey === operation.afterBlockKey);
+        if (operation.afterBlockKey !== null && after < 0) return { status: "invalid_reference" as const }; blocks.splice(after + 1, 0, operation.block); }
+      else { if (index < 0 || blocks[index]!.id !== operation.block.id) return { status: "invalid_reference" as const }; blocks[index] = operation.block; } }
+    const document = { type: "doc" as const, blocks }; const note = { ...current, document, content: richTextToMarkdown(document), revision: current.revision + 1 };
+    for (const operation of pending) this.applied.set(operation.id, { revision: note.revision, blockKey: operation.blockKey });
+    this.notes.set(note.id, note); this.portableProjectionOutbox.push(projection(note));
+    return { status: "updated" as const, note, projection: projection(note) };
   }
 }
 
@@ -253,9 +269,15 @@ describe("editing Notes", () => {
     return { database, baseUrl: instance.url, note: await capture.json() as NoteRecord };
   }
 
-  it("loads a WYSIWYG-primary editor and saves rich content with portable Markdown", async () => {
+  const operationId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const otherOperationId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const conflictOperationId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+
+  it("loads a WYSIWYG-primary editor and applies an idempotent Block operation", async () => {
     const { baseUrl, database, note } = await run();
-    database.notes.get(note.id)!.document.blocks[0]!.id = blockId;
+    const block = database.notes.get(note.id)!.document.blocks[0]!;
+    block.id = blockId;
+    const blockKey = block.blockKey!;
     const loaded = await fetch(`${baseUrl}/api/notes/${note.id}`, { headers: { authorization: "Bearer member-ada" } });
     assert.equal(loaded.status, 200);
     assert.equal((await loaded.json() as NoteRecord).document.blocks[0]?.type, "paragraph");
@@ -271,55 +293,65 @@ describe("editing Notes", () => {
     assert.match(html, />Checklist</);
     assert.match(html, />Code block</);
     assert.match(html, /dataset\.blockId/);
+    assert.match(html, /\/assets\/gsap\.min\.js/);
+    assert.match(html, /prefers-reduced-motion/);
+    assert.match(html, /Checklist state/);
+    const gsap = await fetch(`${baseUrl}/assets/gsap.min.js`);
+    assert.equal(gsap.status, 200);
+    assert.match(await gsap.text(), /GreenSock|gsap/i);
     assert.match(html, /Your changes remain in the editor/);
     assert.doesNotMatch(html, /Markdown source/i);
 
+    const body = { baseRevision: 1, operations: [{ id: operationId, type: "replace_block", blockKey,
+      block: { type: "heading", level: 2, blockKey, id: blockId, content: [{ text: "Release notes", marks: ["bold"] }] } }] };
     const response = await fetch(`${baseUrl}/api/notes/${note.id}`, {
       method: "PUT",
       headers: { authorization: "Bearer member-ada", "content-type": "application/json" },
-      body: JSON.stringify({
-        revision: 1,
-        document: {
-          type: "doc",
-          blocks: [
-            { type: "heading", level: 2, content: [{ text: "Release notes" }] },
-            { type: "paragraph", id: blockId, content: [{ text: "Ship safely", marks: ["bold"] }] },
-            { type: "paragraph", content: [{ text: "use `safe`", marks: ["bold", "code"] }] },
-            { type: "code", language: "typescript", text: "const fence = '```';" },
-          ],
-        },
-      }),
+      body: JSON.stringify(body),
     });
     assert.equal(response.status, 200);
     const edited = await response.json() as NoteRecord;
     assert.equal(edited.revision, 2);
-    assert.equal(edited.content, `## Release notes\n\n**Ship safely**\n<!-- stash-block:${blockId} -->\n\n**\`\` use \`safe\` \`\`**\n\n\`\`\`\`typescript\nconst fence = '\`\`\`';\n\`\`\`\``);
+    assert.equal(edited.content, `## **Release notes**\n<!-- stash-block:${blockId} -->`);
     assert.deepEqual(database.notes.get(note.id)?.document, edited.document);
     assert.equal(database.portableProjectionOutbox.at(-1)?.content, edited.content);
+    const retry = await fetch(`${baseUrl}/api/notes/${note.id}`, { method: "PUT",
+      headers: { authorization: "Bearer member-ada", "content-type": "application/json" }, body: JSON.stringify(body) });
+    assert.equal(retry.status, 200);
+    assert.equal((await retry.json() as NoteRecord).revision, 2);
   });
 
-  it("surfaces invalid edits, stale revisions, permission failures, and recoverable failures", async () => {
+  it("merges concurrent operations on different Blocks and preserves same-Block conflicts", async () => {
     const { baseUrl, database, note } = await run();
+    const first = database.notes.get(note.id)!.document.blocks[0]!;
+    const secondKey = "55555555-5555-4555-8555-555555555555";
+    database.notes.get(note.id)!.document.blocks.push({ type: "check", checked: false, blockKey: secondKey, content: [{ text: "Verify" }] });
     const update = (body: unknown, token = "member-ada") => fetch(`${baseUrl}/api/notes/${note.id}`, {
       method: "PUT",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
       body: JSON.stringify(body),
     });
-    assert.equal((await update({ revision: 1, document: { type: "doc", blocks: [] } })).status, 422);
-    assert.equal((await update({ revision: 1, document: { type: "doc", blocks: [{ type: "paragraph", id: "not-uuid", content: [{ text: "x" }] }] } })).status, 422);
-    assert.equal((await update({ revision: 1, document: { type: "doc", blocks: [{ type: "paragraph", content: [{ text: "link", href: "https://example.test/x)\n# injected" }] }] } })).status, 422);
-    assert.equal((await update({ revision: 1, document: { type: "doc", blocks: [{ type: "code", language: "ts\n# injected", text: "code" }] } })).status, 422);
-    assert.equal((await update({ revision: 1, document: { type: "doc", blocks: [
-      { type: "paragraph", id: blockId, content: [{ text: "first" }] },
-      { type: "paragraph", id: blockId, content: [{ text: "duplicate" }] },
-    ] } })).status, 422);
-    assert.equal((await update({ revision: 2, document: { type: "doc", blocks: [{ type: "paragraph", id: blockId, content: [{ text: "stale contribution" }] }] } })).status, 409);
-    assert.equal((await update({ revision: 1, document: { type: "doc", blocks: [{ type: "paragraph", content: [{ text: "private" }] }] } }, "unknown")).status, 401);
+    const replace = (id: string, blockKey: string, text: string, checked?: boolean) => ({ baseRevision: 1, operations: [{ id, type: "replace_block", blockKey,
+      block: checked === undefined ? { ...first, blockKey, content: [{ text }] } : { type: "check", blockKey, checked, content: [{ text }] } }] });
+    assert.equal((await update(replace(operationId, first.blockKey!, "First changed"))).status, 200);
+    const merged = await update(replace(otherOperationId, secondKey, "Verified", true));
+    assert.equal(merged.status, 200); assert.equal((await merged.json() as NoteRecord).revision, 3);
+    const conflict = replace(conflictOperationId, first.blockKey!, "Conflicting");
+    assert.equal((await update(conflict)).status, 409);
+    assert.equal((await update(conflict)).status, 409);
+    assert.equal(database.conflicts.length, 1);
+    assert.equal(database.conflicts[0]!.operations[0]!.type, "replace_block");
+    const swapId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    database.notes.get(note.id)!.document.blocks[0]!.id = blockId;
+    database.notes.get(note.id)!.document.blocks[1]!.id = "66666666-6666-4666-8666-666666666666";
+    const invalid = { baseRevision: 3, operations: [{ id: swapId, type: "replace_block", blockKey: first.blockKey,
+      block: { ...first, blockKey: first.blockKey, id: "66666666-6666-4666-8666-666666666666", content: [{ text: "guessed" }] } }] };
+    assert.equal((await update(invalid)).status, 422);
+    assert.equal((await update(replace(operationId, first.blockKey!, "Private"), "unknown")).status, 401);
     database.updateFailure = new Error("database secret");
-    const unavailable = await update({ revision: 1, document: { type: "doc", blocks: [{ type: "paragraph", content: [{ text: "retry" }] }] } });
+    const unavailable = await update(replace("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", secondKey, "Retry", true));
     assert.equal(unavailable.status, 503);
     assert.doesNotMatch(await unavailable.text(), /secret/i);
-    assert.equal(database.notes.get(note.id)?.content, "Release notes");
-    assert.equal(database.conflicts.length, 1);
+    assert.match(database.notes.get(note.id)!.content, /First changed/);
   });
 });

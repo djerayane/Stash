@@ -127,11 +127,19 @@ Importers preserve valid identifiers exactly and report malformed or ambiguous r
 of guessing. Rich formatting uses ordinary Markdown headings, emphasis, links, quotes, lists,
 checklists, and fenced code so the WYSIWYG and portable surfaces round-trip intelligibly.
 
-Editor updates may preserve the exact set of already-linked Block identifiers but cannot mint or
-discard identifiers; linking capabilities own that sparse identity lifecycle. Updates carry the
-revision the Member began from. When that revision is stale, Stash retains the submitted rich-text
-document and Markdown in `stash_note_edit_conflicts` for focused resolution and returns a visible
-conflict response instead of overwriting either contribution or exposing raw conflict markers.
+Editor updates are idempotent operation batches. Every operation has a UUID and addresses a stable
+operational `blockKey`; retries do not create another revision. Concurrent operations based on an
+older revision merge automatically when they address different Blocks. Same-Block changes are
+preserved in `stash_note_edit_conflicts` for focused resolution rather than choosing a contribution.
+An operation may preserve an existing portable Block `id`, but cannot move it to another Block,
+mint a linked identity, or delete a linked Block. Missing or ambiguous references are rejected
+visibly; linking capabilities own the sparse portable-identity lifecycle.
+
+The rich-text foundation round-trips paragraphs, headings (levels one through three), bold,
+italic, inline code, links, quotes, bullet items, checklists, and fenced code through documented
+Markdown. Tables, callouts, images, and Attachments are delivered by the downstream expressive
+content and Attachment slices; encountering those constructs in this foundation produces an
+explicit unsupported-construct result instead of silently flattening or discarding them.
 
 ## `stash.guest-project-access.v1`
 

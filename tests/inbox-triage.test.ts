@@ -44,6 +44,8 @@ class ProtocolCompatibleInboxDatabase implements DatabaseProbe, NoteRepository {
       : { localAccountId: "ada", displayName: "Ada Lovelace" };
   }
   async createNote(_memberId: string, _note: NoteRecord, _projection: PortableNoteProjection) { return "created" as const; }
+  async findNoteForMember() { return undefined; }
+  async applyNoteOperations() { return { status: "not_found" as const }; }
   async listInboxNotes(memberId: string, requestedWorkspaceId: string) {
     if (memberId !== "ada" || requestedWorkspaceId !== workspaceId) return { status: "workspace_forbidden" as const };
     return { status: "found" as const, notes: this.archived || this.note.projectId ? [] : [this.note] };
