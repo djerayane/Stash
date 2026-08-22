@@ -15,14 +15,21 @@ export function parseIncomingCapture(url: string): IncomingCaptureParseResult {
 }
 
 export class IncomingCaptureDeliveryGate {
-  #candidate: { url: string; delivery: "initial" | "event"; at: number } | undefined;
-  constructor(readonly duplicateWindowMs = 2_000) {}
+  #candidates = new Map<string, { delivery: "initial" | "event"; at: number }>();
+  constructor(readonly duplicateWindowMs = 2_000, readonly maxCandidates = 32) {}
   accept(url: string, delivery: "initial" | "event", now = Date.now()): boolean {
-    if (this.#candidate?.url === url && this.#candidate.delivery !== delivery && now - this.#candidate.at <= this.duplicateWindowMs) {
-      this.#candidate = undefined;
+    for (const [candidateUrl, candidate] of this.#candidates) {
+      if (now - candidate.at > this.duplicateWindowMs) this.#candidates.delete(candidateUrl);
+    }
+    const candidate = this.#candidates.get(url);
+    if (candidate && candidate.delivery !== delivery) {
+      this.#candidates.delete(url);
       return false;
     }
-    this.#candidate = { url, delivery, at: now };
+    this.#candidates.delete(url);
+    this.#candidates.set(url, { delivery, at: now });
+    while (this.#candidates.size > this.maxCandidates) this.#candidates.delete(this.#candidates.keys().next().value!);
     return true;
   }
+  pendingCount(): number { return this.#candidates.size; }
 }

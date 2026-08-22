@@ -477,6 +477,28 @@ describe("offline mobile capture synchronization", () => {
     assert.equal(reverse.accept(url, "event", 20_200), true, "later intentional event remains allowed");
   });
 
+  it("preserves per-URL launch dedupe candidates across interleaved links", () => {
+    const a = "stash://capture?source=widget&content=A";
+    const b = "stash://capture?source=widget&content=B";
+    const initialFirst = new IncomingCaptureDeliveryGate();
+    assert.equal(initialFirst.accept(a, "initial", 1_000), true);
+    assert.equal(initialFirst.accept(b, "event", 1_010), true);
+    assert.equal(initialFirst.accept(a, "event", 1_020), false);
+    const eventFirst = new IncomingCaptureDeliveryGate();
+    assert.equal(eventFirst.accept(a, "event", 2_000), true);
+    assert.equal(eventFirst.accept(b, "initial", 2_010), true);
+    assert.equal(eventFirst.accept(a, "initial", 2_020), false);
+    assert.equal(eventFirst.accept(a, "event", 5_000), true, "the same intentional action is allowed after the window");
+  });
+
+  it("bounds and expires unmatched deep-link candidates", () => {
+    const gate = new IncomingCaptureDeliveryGate(100, 3);
+    for (let index = 0; index < 20; index += 1) gate.accept(`stash://capture?source=widget&content=${index}`, "initial", index);
+    assert.equal(gate.pendingCount(), 3);
+    gate.accept("stash://capture?source=widget&content=fresh", "event", 1_000);
+    assert.equal(gate.pendingCount(), 1, "expired candidates are pruned before accepting a new URL");
+  });
+
   it("rejects a reused capture ID when its creation timestamp changes", async () => {
     const { database, baseUrl } = await run();
     const id = "44444444-4444-4444-8444-444444444444";
