@@ -178,4 +178,22 @@ describe("inviting Members and Project Guests", () => {
     assert.equal(unavailable.status, 503);
     assert.doesNotMatch(await unavailable.text(), /postgres|secret-token/i);
   });
+
+  it("rejects malformed invitation and Guest Project path encoding before access or persistence", async () => {
+    const { baseUrl, database } = await run();
+    const invitationCount = database.invitations.size;
+    const guestGrantCount = database.guestProjects.size;
+
+    const malformedInvitation = await fetch(`${baseUrl}/api/organizations/%ZZ/invitations`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ kind: "member", role: "Member" }),
+    });
+    assert.equal(malformedInvitation.status, 422);
+    assert.deepEqual(await malformedInvitation.json(), { error: "invalid_input", message: "Invitation and Project values must be valid." });
+
+    const malformedProject = await fetch(`${baseUrl}/api/projects/%ZZ`);
+    assert.equal(malformedProject.status, 422);
+    assert.deepEqual(await malformedProject.json(), { error: "invalid_input", message: "Invitation and Project values must be valid." });
+    assert.equal(database.invitations.size, invitationCount);
+    assert.equal(database.guestProjects.size, guestGrantCount);
+  });
 });
