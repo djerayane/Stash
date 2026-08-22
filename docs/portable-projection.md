@@ -10,6 +10,21 @@ The outbox is the reliable boundary for a future projector or Portable Workspace
 `pending` record means its versioned payload is durably available for projection. It does not mean
 that a complete export has already been generated.
 
+## `stash.attachment.v1`
+
+An Attachment records its Workspace ownership, original safe filename, declared media type, byte
+size, capture source, creator attribution, creation time, and a portable path such as
+`./attachments/<stable-id>/design-notes.pdf`.
+The operational storage key is deliberately absent. Attachment metadata and its projection event
+commit in one database transaction; local bytes are written atomically before metadata becomes
+visible and are removed when that transaction fails. Notes and exports use `relativePath`, never an
+Instance URL, so moving a Workspace does not break its links. Portable exports copy the bytes to
+that relative path and contain no Instance secrets.
+Markdown links URI-encode the literal portable path separately; a percent sign in an encoded disk
+component is itself encoded as `%25`, so resolving the href names the exact exported file.
+The upload protocol carries the original filename in `X-Stash-Filename` as canonical percent-encoded
+UTF-8, allowing Unicode names through HTTP headers without lossy ByteString conversion.
+
 ## `stash.workspace.v1`
 
 ```json

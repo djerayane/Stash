@@ -37,6 +37,7 @@ services:
       EMAIL_RECOVERY_FROM: ${EMAIL_RECOVERY_FROM:-}
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
       GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
+      ATTACHMENT_STORAGE_PATH: /var/lib/stash/attachments
       HOST: 0.0.0.0
       PORT: 3000
     depends_on:
@@ -55,7 +56,10 @@ services:
       retries: 10
     ports:
       - "${STASH_PORT:-3000}:3000"
+    volumes:
+      - stash-attachments:/var/lib/stash/attachments
     restart: unless-stopped
 
 volumes:
   stash-postgres:
+  stash-attachments:

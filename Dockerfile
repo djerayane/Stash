@@ -11,6 +11,8 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
+USER root
+RUN mkdir -p /var/lib/stash/attachments && chown -R node:node /var/lib/stash
 USER node
 EXPOSE 3000
 CMD ["node", "dist/main.js"]
