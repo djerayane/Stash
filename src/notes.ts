@@ -35,6 +35,7 @@ export interface PortableNoteLinkProjection {
 export interface PortableTaskProjection {
   schema: "stash.task.v1"; id: string; workspaceId: string; projectId: string; title: string;
   key: string; status: { id: string; name: string; category: "unstarted" | "started" | "completed" };
+  keyAliases?: Array<{ projectId: string; key: string }>;
   sourceNoteIds: string[]; createdAt: string; createdBy: PortableIdentity;
   sourceBlocks?: TaskSourceBlockReference[];
   assigneeIds?: string[];

@@ -28,6 +28,26 @@ export interface TaskDependencyWarning {
 
 export type TaskPlanningReadModel = PortableTaskProjection & { dependencyWarnings: TaskDependencyWarning[] };
 
+export interface TaskMoveActivity {
+  schema: "stash.activity.v1";
+  id: string;
+  workspaceId: string;
+  action: "task_moved";
+  object: { kind: "Task"; id: string };
+  actor: PortableIdentity;
+  cause: { kind: "member" };
+  occurredAt: string;
+  before: { projectId: string; key: string; status: PortableTaskProjection["status"] };
+  after: { projectId: string; key: string; status: PortableTaskProjection["status"] };
+}
+
+export interface TaskMoveRepository {
+  moveTask(memberId: string, projectId: string, taskKey: string, destinationProjectId: string): Promise<
+    | { status: "moved"; task: TaskPlanningReadModel; activity: TaskMoveActivity }
+    | { status: "not_found" | "destination_forbidden" | "same_project" }
+  >;
+}
+
 export type CreateTaskFromBlockOutcome =
   | { status: "created"; task: PortableTaskProjection; sourceBlock: TaskSourceBlockReference }
   | { status: "note_not_found" | "block_not_found" | "project_forbidden" | "ambiguous_block" };
@@ -66,7 +86,7 @@ export class InvalidTaskFromBlockInput extends Error {}
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export class TaskService {
-  constructor(private readonly tasks: Partial<TaskFromBlockRepository & TaskPlanningRepository>, private readonly actors: TaskActorRepository) {}
+  constructor(private readonly tasks: Partial<TaskFromBlockRepository & TaskPlanningRepository & TaskMoveRepository>, private readonly actors: TaskActorRepository) {}
 
   async createFromBlock(memberId: string, noteId: string, blockKey: string, value: unknown): Promise<CreateTaskFromBlockOutcome> {
     if (!uuid.test(noteId) || !uuid.test(blockKey) || value === null || typeof value !== "object" || Array.isArray(value))
@@ -121,6 +141,13 @@ export class TaskService {
     if (update.labelNames) update.labelNames = [...new Set(update.labelNames.map((label) => label.trim()))];
     if (update.linkedNoteIds) update.linkedNoteIds = [...new Set(update.linkedNoteIds)];
     return this.tasks.updateTaskByKey(memberId, projectId, taskKey.toUpperCase(), update);
+  }
+
+  async move(memberId: string, projectId: string, taskKey: string, value: unknown) {
+    if (!uuid.test(projectId) || !isTaskKey(taskKey) || !this.tasks.moveTask || !isPlainObject(value)
+      || typeof value.destinationProjectId !== "string" || !uuid.test(value.destinationProjectId)
+      || Object.keys(value).some((key) => key !== "destinationProjectId")) throw new InvalidTaskFromBlockInput();
+    return this.tasks.moveTask(memberId, projectId, taskKey.toUpperCase(), value.destinationProjectId);
   }
 }
 

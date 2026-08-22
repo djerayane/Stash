@@ -218,6 +218,18 @@ warning disappears when that prerequisite enters a completed Status Category. Wa
 portable Task state: creating or removing a Dependency and changing either Task's status are
 independent operations, and neither a warning nor a Dependency prevents an ordinary Task update.
 
+Moving a Task uses `POST /api/projects/{projectId}/tasks/{taskKey}/move` with a
+`destinationProjectId`. A successful move keeps the stable Task identity and relationships,
+assigns the destination Project's next Task Key and Backlog status, and appends every former
+`{projectId, key}` pair to `keyAliases` in the complete `stash.task.v1` projection. Alias pairs are
+permanently reserved and resolve through the same permission-aware Task read boundary. The source
+Task, destination Project, key allocation, alias reservation, status change, and portable projection
+commit atomically; unauthorized, cross-Workspace, invalid, or failed moves leave the Task unchanged
+and are safe to retry. The same transaction records a portable `stash.activity.v1` entry with the
+Member actor, `member` cause, UTC occurrence time, stable Task identity, and the Project, Task Key,
+and Workflow status before and after the move. The successful API response returns this Activity so
+clients can present the meaningful change without reconstructing it from the current Task.
+
 The operational Note body is a versioned rich-text document rendered by Stash's WYSIWYG editor.
 Every successful edit atomically increments the Note revision and records another `stash.note.v1`
 outbox revision whose `content` is the complete Markdown rendering. Ordinary Blocks have no
