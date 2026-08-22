@@ -11,7 +11,12 @@ import { NativeChoice } from "@/components/native-choice";
 import { StatusFeedback } from "@/components/status-feedback";
 import { colors } from "@/theme/colors";
 import { presentMobileSyncResult } from "@/src/sync-status";
-import { loadCachedOptionsOnFocus, reconcileCaptureSelections } from "@/src/capture-options-focus";
+import {
+  captureOptionsLoadingMessage,
+  ensureCaptureOptionsReady,
+  loadCachedOptionsOnFocus,
+  reconcileCaptureSelections,
+} from "@/src/capture-options-focus";
 
 export default function CaptureScreen() {
   useColorScheme();
@@ -24,6 +29,8 @@ export default function CaptureScreen() {
   const [projectId, setProjectId] = useState<string>();
   const [tag, setTag] = useState<string>();
   const [reminderOffset, setReminderOffset] = useState<number>();
+  const optionsReady = useRef(false);
+  const [optionsLoading, setOptionsLoading] = useState(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useFocusEffect(useCallback(() => loadCachedOptionsOnFocus(client, (value) => {
     if (!mounted.current) return;
@@ -32,6 +39,14 @@ export default function CaptureScreen() {
     setTag((current) => reconcileCaptureSelections(value, { ...(current ? { tag: current } : {}) }).tag);
     setReminderOffset((current) => reconcileCaptureSelections(value,
       { ...(current !== undefined ? { reminderOffset: current } : {}) }).reminderOffset);
+    optionsReady.current = true;
+    setOptionsLoading(false);
+  }, () => {
+    optionsReady.current = false;
+    if (mounted.current) {
+      setOptionsLoading(true);
+      setStatus(captureOptionsLoadingMessage);
+    }
   }), [client]));
   useEffect(() => client.watchConnectivity(
     (listener) => NetInfo.addEventListener((state) => listener(Boolean(state.isConnected && state.isInternetReachable !== false))),
@@ -50,6 +65,7 @@ export default function CaptureScreen() {
 
   const save = async () => {
     try {
+      ensureCaptureOptionsReady(optionsReady.current);
       if (checklist) {
         const [title = "Checklist", ...items] = content.split("\n").filter((line) => line.trim());
         await client.captureChecklist(title, items, structure());
@@ -91,7 +107,8 @@ export default function CaptureScreen() {
         items={options.tags.map((value) => ({ value, label: value }))} /> : null}
       {options.reminders.length ? <NativeChoice label="Reminder" value={reminderOffset?.toString()} onChange={(value) => setReminderOffset(value ? Number(value) : undefined)}
         items={options.reminders.map(({ offsetMinutes, label }) => ({ value: offsetMinutes.toString(), label }))} /> : null}
-      <NativeActionButton label="Save capture" disabled={!content.trim()} onPress={save} />
+      <NativeActionButton label={optionsLoading ? "Loading capture options" : "Save capture"}
+        disabled={optionsLoading || !content.trim()} onPress={save} />
     </ScrollView>
   );
 }

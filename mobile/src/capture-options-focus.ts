@@ -1,7 +1,18 @@
 import type { MobileCaptureClient, MobileCaptureOptions } from "../../src/mobile-capture-client";
 
-export function loadCachedOptionsOnFocus(client: MobileCaptureClient, onOptions: (options: MobileCaptureOptions) => void): () => void {
+export const captureOptionsLoadingMessage = "Loading options for this pairing before capture.";
+
+export function ensureCaptureOptionsReady(ready: boolean): void {
+  if (!ready) throw new Error(captureOptionsLoadingMessage);
+}
+
+export function loadCachedOptionsOnFocus(
+  client: MobileCaptureClient,
+  onOptions: (options: MobileCaptureOptions) => void,
+  onLoading: () => void = () => undefined,
+): () => void {
   let active = true;
+  onLoading();
   void client.options().then((options) => { if (active) onOptions(options); });
   return () => { active = false; };
 }

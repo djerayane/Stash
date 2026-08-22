@@ -18,7 +18,11 @@ import type { NoteRecord, PortableNoteProjection } from "../src/notes.js";
 import type { MemberAccessResolver } from "../src/workspaces-projects.js";
 import { EncryptedStateMobileCaptureStore, type CiphertextStateRepository, type MobileCipher } from "../mobile/src/encrypted-mobile-store.js";
 import { presentMobileSyncResult } from "../mobile/src/sync-status.js";
-import { loadCachedOptionsOnFocus, reconcileCaptureSelections } from "../mobile/src/capture-options-focus.js";
+import {
+  ensureCaptureOptionsReady,
+  loadCachedOptionsOnFocus,
+  reconcileCaptureSelections,
+} from "../mobile/src/capture-options-focus.js";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const projectId = "22222222-2222-4222-8222-222222222222";
@@ -336,6 +340,7 @@ describe("offline mobile capture synchronization", () => {
     const store = new MemoryEncryptedStore();
     const client = new MobileCaptureClient(store, fetch, { allowInsecureInstanceForTest: true });
     await client.pair({ instanceUrl: baseUrl, memberToken: "member-ada", workspaceId });
+    await client.pair({ instanceUrl: baseUrl, memberToken: "member-grace", workspaceId });
     const original = await client.captureText("Original thought");
     assert.equal((await client.sync()).status, "synced");
 
@@ -507,6 +512,32 @@ describe("offline mobile capture synchronization", () => {
     assert.equal(queued?.projectId, undefined);
     assert.equal(queued?.tags, undefined);
     assert.equal(queued?.reminder, undefined);
+  });
+
+  it("gates capture synchronously while a new pairing's focused options are unresolved", async () => {
+    const { baseUrl } = await run();
+    const store = new MemoryEncryptedStore();
+    const client = new MobileCaptureClient(store, fetch, { allowInsecureInstanceForTest: true });
+    await client.pair({ instanceUrl: baseUrl, memberToken: "member-ada", workspaceId });
+    let releaseOptions: (() => void) | undefined;
+    const delayedClient = {
+      options: () => new Promise<MobileCaptureOptions>((resolve) => {
+        releaseOptions = () => { void client.options().then(resolve); };
+      }),
+    } as unknown as MobileCaptureClient;
+    let ready = true;
+    const focused = new Promise<MobileCaptureOptions>((resolve) => {
+      loadCachedOptionsOnFocus(delayedClient, (value) => { ready = true; resolve(value); }, () => { ready = false; });
+    });
+
+    await assert.rejects(async () => {
+      ensureCaptureOptionsReady(ready);
+      await client.captureText("Must not inherit Ada metadata", { projectId, tags: ["mobile"] });
+    }, /Loading options for this pairing/);
+    assert.deepEqual(await client.outbox(), []);
+    releaseOptions?.();
+    await focused;
+    assert.doesNotThrow(() => ensureCaptureOptionsReady(ready));
   });
 
   it("keeps permanent attention visible when a later capture is retriable", async () => {
