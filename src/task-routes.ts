@@ -7,6 +7,9 @@ export function taskRoutes(service: TaskService, memberAccess: MemberAccessResol
     matches: (request, url) => (request.method === "POST" && /^\/api\/notes\/[^/]+\/blocks\/[^/]+\/tasks$/.test(url.pathname))
       || (request.method === "GET" && /^\/api\/notes\/[^/]+\/linked-tasks$/.test(url.pathname))
       || (["GET", "POST"].includes(request.method ?? "") && /^\/api\/tasks\/[^/]+\/source-blocks$/.test(url.pathname))
+      || (request.method === "POST" && /^\/api\/projects\/[^/]+\/tasks\/[^/]+\/edits$/.test(url.pathname))
+      || (request.method === "GET" && /^\/api\/projects\/[^/]+\/tasks\/[^/]+\/conflicts$/.test(url.pathname))
+      || (request.method === "PUT" && /^\/api\/projects\/[^/]+\/tasks\/[^/]+\/conflicts\/[^/]+$/.test(url.pathname))
       || (request.method === "POST" && /^\/api\/projects\/[^/]+\/tasks\/[^/]+\/move$/.test(url.pathname))
       || ((request.method === "GET" || request.method === "PATCH") && /^\/api\/projects\/[^/]+\/tasks\/[^/]+$/.test(url.pathname)),
     async handle(request, response, url) {
@@ -35,6 +38,32 @@ export function taskRoutes(service: TaskService, memberAccess: MemberAccessResol
           let projectId: string; let taskKey: string;
           try { const segments = url.pathname.split("/"); projectId = decodeURIComponent(segments[3]!); taskKey = decodeURIComponent(segments[5]!); }
           catch { throw new InvalidTaskFromBlockInput(); }
+          if (url.pathname.endsWith("/edits")) {
+            const result = await service.applyStructuredEdit(access.accountId, projectId!, taskKey!, await readJson(request));
+            if (result.status === "applied") json(response, 200, { task: result.task, revision: result.revision, appliedFields: result.appliedFields });
+            else if (result.status === "conflict_preserved") json(response, 409, { error: "task_edit_conflict", message: "This Task field changed concurrently. Every contribution was preserved for focused resolution.", conflict: result.conflict });
+            else if (result.status === "operation_identity_conflict") json(response, 409, { error: result.status, message: "That operation identity was already used for a different Task edit." });
+            else if (result.status === "invalid_revision") json(response, 409, { error: result.status, message: "The supplied Task revision does not exist. Refresh the Task before retrying." });
+            else if (result.status === "invalid_reference") json(response, 422, { error: result.status, message: "One or more Task properties refer to unavailable Project data." });
+            else json(response, 404, { error: "task_not_found", message: "This Task is unavailable in that Project." });
+            return true;
+          }
+          if (url.pathname.endsWith("/conflicts")) {
+            const result = await service.listStructuredConflicts(access.accountId, projectId!, taskKey!);
+            if (result.status === "found") json(response, 200, { revision: result.revision, conflicts: result.conflicts });
+            else json(response, 404, { error: "task_not_found", message: "This Task is unavailable in that Project." });
+            return true;
+          }
+          if (url.pathname.includes("/conflicts/")) {
+            let conflictId: string; try { conflictId = decodeURIComponent(url.pathname.split("/")[7]!); } catch { throw new InvalidTaskFromBlockInput(); }
+            const result = await service.resolveStructuredConflict(access.accountId, projectId!, taskKey!, conflictId!, await readJson(request));
+            if (result.status === "resolved") json(response, 200, { task: result.task, revision: result.revision, activity: result.activity });
+            else if (result.status === "conflict_changed") json(response, 409, { error: result.status, message: "The Task changed again. Review the refreshed conflict before resolving it.", conflict: result.conflict });
+            else if (result.status === "already_resolved") json(response, 409, { error: "conflict_already_resolved", message: "This conflict has already been resolved." });
+            else if (result.status === "invalid_reference") json(response, 422, { error: result.status, message: "The preserved contribution now refers to unavailable Project data." });
+            else json(response, 404, { error: result.status, message: "The requested Task conflict could not be found." });
+            return true;
+          }
           const result = url.pathname.endsWith("/move") ? await service.move(access.accountId, projectId!, taskKey!, await readJson(request))
             : request.method === "GET" ? await service.findByKey(access.accountId, projectId!, taskKey!)
             : await service.updateByKey(access.accountId, projectId!, taskKey!, await readJson(request));

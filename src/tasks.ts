@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { PortableTaskProjection } from "./notes.js";
 import type { PortableIdentity } from "./workspaces-projects.js";
 
@@ -26,7 +26,7 @@ export interface TaskDependencyWarning {
   taskId: string;
 }
 
-export type TaskPlanningReadModel = PortableTaskProjection & { dependencyWarnings: TaskDependencyWarning[] };
+export type TaskPlanningReadModel = PortableTaskProjection & { revision: number; dependencyWarnings: TaskDependencyWarning[] };
 
 export interface TaskMoveActivity {
   schema: "stash.activity.v1";
@@ -81,12 +81,37 @@ export interface TaskPlanningRepository {
   >;
 }
 
+export interface TaskEditBatch { operationId: string; baseRevision: number; changes: TaskPlanningUpdate; createdAt: string; createdBy: PortableIdentity; }
+export interface TaskEditConflict {
+  id: string; taskId: string; baseRevision: number; currentRevision: number; fields: string[]; contribution: TaskPlanningUpdate;
+  createdAt: string; createdBy: { displayName: string; attribution: "recorded" };
+  resolvedAt?: string; resolution?: "keep_current" | "apply_contribution";
+}
+export type StructuredTaskEditOutcome =
+  | { status: "applied"; task: TaskPlanningReadModel; revision: number; appliedFields: string[] }
+  | { status: "conflict_preserved"; conflict: TaskEditConflict }
+  | { status: "not_found" | "invalid_reference" | "invalid_revision" | "operation_identity_conflict" };
+export interface StructuredTaskEditRepository {
+  applyStructuredTaskEdit(memberId: string, projectId: string, taskKey: string, batch: TaskEditBatch): Promise<StructuredTaskEditOutcome>;
+  listStructuredTaskConflicts(memberId: string, projectId: string, taskKey: string): Promise<
+    { status: "found"; revision: number; conflicts: TaskEditConflict[] } | { status: "not_found" }>;
+  resolveStructuredTaskConflict(memberId: string, projectId: string, taskKey: string, conflictId: string,
+    resolution: "keep_current" | "apply_contribution", expectedRevision: number): Promise<
+      | { status: "resolved"; task: TaskPlanningReadModel; revision: number; activity: unknown }
+      | { status: "conflict_changed"; conflict: TaskEditConflict }
+      | { status: "not_found" | "conflict_not_found" | "already_resolved" | "invalid_reference" }>;
+}
+export function taskEditDigest(batch: TaskEditBatch): string {
+  return createHash("sha256").update(JSON.stringify({ operationId: batch.operationId, baseRevision: batch.baseRevision,
+    changes: Object.fromEntries(Object.entries(batch.changes).sort(([left], [right]) => left.localeCompare(right))) })).digest("hex");
+}
+
 export class InvalidTaskFromBlockInput extends Error {}
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export class TaskService {
-  constructor(private readonly tasks: Partial<TaskFromBlockRepository & TaskPlanningRepository & TaskMoveRepository>, private readonly actors: TaskActorRepository) {}
+  constructor(private readonly tasks: Partial<TaskFromBlockRepository & TaskPlanningRepository & TaskMoveRepository & StructuredTaskEditRepository>, private readonly actors: TaskActorRepository) {}
 
   async createFromBlock(memberId: string, noteId: string, blockKey: string, value: unknown): Promise<CreateTaskFromBlockOutcome> {
     if (!uuid.test(noteId) || !uuid.test(blockKey) || value === null || typeof value !== "object" || Array.isArray(value))
@@ -135,11 +160,7 @@ export class TaskService {
   async updateByKey(memberId: string, projectId: string, taskKey: string, value: unknown) {
     if (!uuid.test(projectId) || !isTaskKey(taskKey) || !this.tasks.updateTaskByKey || !isPlanningUpdate(value))
       throw new InvalidTaskFromBlockInput();
-    const update = { ...value } as TaskPlanningUpdate;
-    if (typeof update.title === "string") update.title = update.title.trim();
-    if (update.assigneeIds) update.assigneeIds = [...new Set(update.assigneeIds)];
-    if (update.labelNames) update.labelNames = [...new Set(update.labelNames.map((label) => label.trim()))];
-    if (update.linkedNoteIds) update.linkedNoteIds = [...new Set(update.linkedNoteIds)];
+    const update = normalizePlanningUpdate(value as TaskPlanningUpdate);
     return this.tasks.updateTaskByKey(memberId, projectId, taskKey.toUpperCase(), update);
   }
 
@@ -149,6 +170,41 @@ export class TaskService {
       || Object.keys(value).some((key) => key !== "destinationProjectId")) throw new InvalidTaskFromBlockInput();
     return this.tasks.moveTask(memberId, projectId, taskKey.toUpperCase(), value.destinationProjectId);
   }
+
+  async applyStructuredEdit(memberId: string, projectId: string, taskKey: string, value: unknown) {
+    if (!uuid.test(projectId) || !isTaskKey(taskKey) || !this.tasks.applyStructuredTaskEdit || !isPlainObject(value)
+      || typeof value.operationId !== "string" || !uuid.test(value.operationId)
+      || !Number.isSafeInteger(value.baseRevision) || (value.baseRevision as number) < 1 || !isPlanningUpdate(value.changes)
+      || Object.keys(value).some((key) => !["operationId", "baseRevision", "changes"].includes(key))) throw new InvalidTaskFromBlockInput();
+    const actor = await this.actors.findPortableMemberIdentity(memberId);
+    if (!actor) throw new Error("member_identity_unavailable");
+    return this.tasks.applyStructuredTaskEdit(memberId, projectId, taskKey.toUpperCase(), { operationId: value.operationId,
+      baseRevision: value.baseRevision as number, changes: normalizePlanningUpdate(value.changes as TaskPlanningUpdate),
+      createdAt: new Date().toISOString(), createdBy: actor });
+  }
+
+  async listStructuredConflicts(memberId: string, projectId: string, taskKey: string) {
+    if (!uuid.test(projectId) || !isTaskKey(taskKey) || !this.tasks.listStructuredTaskConflicts) throw new InvalidTaskFromBlockInput();
+    return this.tasks.listStructuredTaskConflicts(memberId, projectId, taskKey.toUpperCase());
+  }
+
+  async resolveStructuredConflict(memberId: string, projectId: string, taskKey: string, conflictId: string, value: unknown) {
+    if (!uuid.test(projectId) || !isTaskKey(taskKey) || !uuid.test(conflictId) || !this.tasks.resolveStructuredTaskConflict
+      || !isPlainObject(value) || !["keep_current", "apply_contribution"].includes(value.resolution as string)
+      || !Number.isSafeInteger(value.expectedRevision) || (value.expectedRevision as number) < 0
+      || Object.keys(value).some((key) => !["resolution", "expectedRevision"].includes(key))) throw new InvalidTaskFromBlockInput();
+    return this.tasks.resolveStructuredTaskConflict(memberId, projectId, taskKey.toUpperCase(), conflictId,
+      value.resolution as "keep_current" | "apply_contribution", value.expectedRevision as number);
+  }
+}
+
+function normalizePlanningUpdate(value: TaskPlanningUpdate): TaskPlanningUpdate {
+  const update = { ...value };
+  if (typeof update.title === "string") update.title = update.title.trim();
+  if (update.assigneeIds) update.assigneeIds = [...new Set(update.assigneeIds)];
+  if (update.labelNames) update.labelNames = [...new Set(update.labelNames.map((label) => label.trim()))];
+  if (update.linkedNoteIds) update.linkedNoteIds = [...new Set(update.linkedNoteIds)];
+  return update;
 }
 
 function isTaskKey(value: string): boolean { return /^[A-Za-z][A-Za-z0-9-]{1,19}-[1-9][0-9]*$/.test(value); }

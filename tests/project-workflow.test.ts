@@ -59,7 +59,7 @@ class WorkflowFake implements DatabaseProbe, ProjectWorkflowRepository {
     const status = initialWorkflowStatus(this.workflow);
     const task = { ...this.#task(sourceTaskId, "FLOW-2", "Move me", {
       projectId, createdAt: "2026-08-23T10:00:00.000Z", createdBy: { localAccountId: "member", displayName: "Ada Lovelace" },
-    }, status), dependencyWarnings: [] };
+    }, status), revision: 1, dependencyWarnings: [] };
     return { status: "moved" as const, task, activity: {
       schema: "stash.activity.v1" as const, id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", workspaceId: task.workspaceId,
       action: "task_moved" as const, object: { kind: "Task" as const, id: task.id },
