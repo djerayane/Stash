@@ -32,6 +32,8 @@ import { repositoryConnectionRoutes } from "./repository-connection-routes.js";
 import type { RepositoryConnectionService } from "./repository-connections.js";
 import { taskRoutes } from "./task-routes.js";
 import type { TaskService } from "./tasks.js";
+import { attachmentRoutes } from "./attachment-routes.js";
+import type { AttachmentService } from "./attachments.js";
 
 export interface DatabaseProbe {
   verifyConnection(): Promise<void>;
@@ -65,6 +67,7 @@ export interface InstanceOptions {
   acceleration?: OptionalRedisAcceleration;
   repositoryConnections?: RepositoryConnectionService;
   tasks?: TaskService;
+  attachments?: AttachmentService;
 }
 
 const browserSurface = `<!doctype html>
@@ -148,6 +151,8 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
     ...(options.tasks && (options.memberAccess ?? options.passwordAuth)
       ? [taskRoutes(options.tasks, (options.memberAccess ?? options.passwordAuth)!)]
       : []),
+    ...(options.attachments && (options.memberAccess ?? options.passwordAuth)
+      ? [attachmentRoutes(options.attachments, (options.memberAccess ?? options.passwordAuth)!)] : []),
     ...(options.repositoryConnections && (options.memberAccess ?? options.passwordAuth)
       ? [repositoryConnectionRoutes(options.repositoryConnections, (options.memberAccess ?? options.passwordAuth)!)]
       : []),
