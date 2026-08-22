@@ -16,8 +16,12 @@ export interface OidcIdentityRecord {
 }
 
 export interface OidcAuthRepository {
+  findOidcConfiguration(organizationId: string): Promise<OidcOrganizationConfiguration | undefined>;
   findOidcIdentity(organizationId: string, issuer: string, subject: string): Promise<OidcIdentityRecord | undefined>;
   createSession(session: SessionRecord): Promise<void>;
+  organizationRole(organizationId: string, accountId: string): Promise<string | undefined>;
+  saveOidcConfiguration(configuration: OidcOrganizationConfiguration): Promise<void>;
+  linkOidcIdentity(organizationId: string, accountId: string, issuer: string, subject: string): Promise<boolean>;
 }
 
 export interface OidcOrganizationConfiguration {
@@ -44,6 +48,7 @@ interface PendingAuthorization {
 
 export class InvalidOidcRequest extends Error {}
 export class OidcIdentityNotAuthorized extends Error {}
+export class OidcManagementNotAuthorized extends Error {}
 export class OidcProviderRejected extends Error {}
 
 function encodeSha256(value: string): string {
@@ -68,27 +73,41 @@ function requiredString(value: unknown): string {
 
 export class OidcAuthService {
   readonly #repository: OidcAuthRepository;
-  readonly #configurations: Map<string, OidcOrganizationConfiguration>;
   readonly #pending = new Map<string, PendingAuthorization>();
   readonly #fetch: typeof fetch;
 
   constructor(
     repository: OidcAuthRepository,
-    configurations: OidcOrganizationConfiguration[],
     fetcher: typeof fetch = fetch,
   ) {
     this.#repository = repository;
     this.#fetch = fetcher;
-    this.#configurations = new Map(configurations.map((configuration) => {
-      if (!configuration.organizationId || !configuration.clientId || !configuration.clientSecret) {
-        throw new Error("OIDC organizationId, clientId, and clientSecret must not be empty");
-      }
-      return [configuration.organizationId, { ...configuration, issuer: configuredIssuer(configuration.issuer) }];
-    }));
+  }
+
+  async configure(accountId: string, organizationId: string, value: unknown): Promise<void> {
+    await this.#requireAdministrator(accountId, organizationId);
+    const input = object(value);
+    if (typeof input.issuer !== "string" || typeof input.clientId !== "string" || !input.clientId
+      || typeof input.clientSecret !== "string" || !input.clientSecret) throw new InvalidOidcRequest();
+    let issuer: string;
+    try { issuer = configuredIssuer(input.issuer); } catch { throw new InvalidOidcRequest(); }
+    await this.#repository.saveOidcConfiguration({ organizationId, issuer, clientId: input.clientId, clientSecret: input.clientSecret });
+  }
+
+  async linkIdentity(accountId: string, organizationId: string, value: unknown): Promise<void> {
+    await this.#requireAdministrator(accountId, organizationId);
+    const input = object(value);
+    if (typeof input.accountId !== "string" || !input.accountId || typeof input.subject !== "string" || !input.subject) {
+      throw new InvalidOidcRequest();
+    }
+    const configuration = await this.#configuration(organizationId);
+    if (!(await this.#repository.linkOidcIdentity(organizationId, input.accountId, configuration.issuer, input.subject))) {
+      throw new OidcIdentityNotAuthorized();
+    }
   }
 
   async begin(organizationId: string, redirectUri: string): Promise<{ authorizationUrl: string }> {
-    const configuration = this.#configuration(organizationId);
+    const configuration = await this.#configuration(organizationId);
     const metadata = await this.#metadata(configuration);
     const state = randomBytes(32).toString("base64url");
     const nonce = randomBytes(32).toString("base64url");
@@ -123,7 +142,7 @@ export class OidcAuthService {
       throw new InvalidOidcRequest();
     }
 
-    const configuration = this.#configuration(organizationId);
+    const configuration = await this.#configuration(organizationId);
     const metadata = await this.#metadata(configuration);
     const response = await this.#fetch(metadata.token_endpoint, {
       method: "POST",
@@ -146,10 +165,15 @@ export class OidcAuthService {
     return issueSession(this.#repository, { id: identity.accountId, name: identity.name, email: identity.email }, userAgent);
   }
 
-  #configuration(organizationId: string): OidcOrganizationConfiguration {
-    const configuration = this.#configurations.get(organizationId);
+  async #configuration(organizationId: string): Promise<OidcOrganizationConfiguration> {
+    const configuration = await this.#repository.findOidcConfiguration(organizationId);
     if (!configuration) throw new InvalidOidcRequest();
     return configuration;
+  }
+
+  async #requireAdministrator(accountId: string, organizationId: string): Promise<void> {
+    const role = await this.#repository.organizationRole(organizationId, accountId);
+    if (role !== "Owner" && role !== "Admin") throw new OidcManagementNotAuthorized();
   }
 
   async #metadata(configuration: OidcOrganizationConfiguration): Promise<ProviderMetadata> {

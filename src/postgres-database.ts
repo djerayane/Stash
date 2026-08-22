@@ -3,7 +3,7 @@ import { Pool, type PoolClient } from "pg";
 import type { DatabaseProbe } from "./instance.js";
 import type { BootstrapRecord, OwnerBootstrapRepository } from "./owner-bootstrap.js";
 import type { AccountAuthenticationRecord, PasswordAuthRepository, SessionRecord } from "./password-auth.js";
-import type { OidcAuthRepository, OidcIdentityRecord } from "./oidc-auth.js";
+import type { OidcAuthRepository, OidcIdentityRecord, OidcOrganizationConfiguration } from "./oidc-auth.js";
 import {
   createAuthenticationKeyCheck,
   verifyAuthenticationKeyCheck,
@@ -244,6 +244,49 @@ export class PostgresDatabase implements
     return row ? { accountId: row.id, name: row.name, email: row.email } : undefined;
   }
 
+  async findOidcConfiguration(organizationId: string): Promise<OidcOrganizationConfiguration | undefined> {
+    await this.#ensureOidcSchema();
+    const result = await this.#pool.query<OidcConfigurationRow>(
+      "SELECT organization_id, issuer, client_id, client_secret FROM stash_oidc_configurations WHERE organization_id = $1",
+      [organizationId],
+    );
+    const row = result.rows[0];
+    return row ? {
+      organizationId: row.organization_id,
+      issuer: row.issuer,
+      clientId: row.client_id,
+      clientSecret: this.#authenticationSecrets.decrypt(row.client_secret),
+    } : undefined;
+  }
+
+  async organizationRole(organizationId: string, accountId: string): Promise<string | undefined> {
+    const result = await this.#pool.query<{ role: string }>(
+      "SELECT role FROM stash_organization_memberships WHERE organization_id = $1 AND account_id = $2",
+      [organizationId, accountId],
+    );
+    return result.rows[0]?.role;
+  }
+
+  async saveOidcConfiguration(configuration: OidcOrganizationConfiguration): Promise<void> {
+    await this.#ensureOidcSchema();
+    await this.#pool.query(`
+      INSERT INTO stash_oidc_configurations (organization_id, issuer, client_id, client_secret)
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT (organization_id) DO UPDATE SET issuer = EXCLUDED.issuer, client_id = EXCLUDED.client_id, client_secret = EXCLUDED.client_secret
+    `, [configuration.organizationId, configuration.issuer, configuration.clientId, this.#authenticationSecrets.encrypt(configuration.clientSecret)]);
+  }
+
+  async linkOidcIdentity(organizationId: string, accountId: string, issuer: string, subject: string): Promise<boolean> {
+    await this.#ensureOidcSchema();
+    const result = await this.#pool.query(`
+      INSERT INTO stash_oidc_identities (organization_id, issuer, subject, account_id)
+      SELECT $1, $3, $4, account_id FROM stash_organization_memberships
+      WHERE organization_id = $1 AND account_id = $2
+      ON CONFLICT (organization_id, issuer, account_id) DO UPDATE SET subject = EXCLUDED.subject
+    `, [organizationId, accountId, issuer, subject]);
+    return result.rowCount === 1;
+  }
+
   async findSessionByTokenHash(hash: string): Promise<SessionRecord | undefined> {
     await this.#ensureAuthSchema();
     const result = await this.#pool.query<SessionRow>(
@@ -301,6 +344,12 @@ export class PostgresDatabase implements
 
   async #ensureOidcSchema(): Promise<void> {
     await this.#pool.query(`
+      CREATE TABLE IF NOT EXISTS stash_oidc_configurations (
+        organization_id UUID PRIMARY KEY REFERENCES stash_organizations(id) ON DELETE CASCADE,
+        issuer TEXT NOT NULL,
+        client_id TEXT NOT NULL,
+        client_secret TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS stash_oidc_identities (
         organization_id UUID NOT NULL REFERENCES stash_organizations(id) ON DELETE CASCADE,
         issuer TEXT NOT NULL,
@@ -459,3 +508,4 @@ export class PostgresDatabase implements
 interface AccountRow { id: string; name: string; email: string; password_hash: string }
 interface SessionRow { id: string; account_id: string; token_hash: string; created_at: Date | string; last_seen_at: Date | string; user_agent: string | null }
 interface OidcIdentityRow { id: string; name: string; email: string }
+interface OidcConfigurationRow { organization_id: string; issuer: string; client_id: string; client_secret: string }

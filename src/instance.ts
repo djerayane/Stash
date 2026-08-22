@@ -10,7 +10,7 @@ import { createDiagnostics, type Diagnostics } from "./diagnostics.js";
 import { json, requireInstanceAdministrator } from "./http-routing.js";
 import { instanceAdminRoute } from "./instance-route.js";
 import type { OwnerBootstrapService } from "./owner-bootstrap.js";
-import { oidcAuthRoute } from "./oidc-auth-routes.js";
+import { oidcAuthRoute, oidcManagementRoute } from "./oidc-auth-routes.js";
 import type { OidcAuthService } from "./oidc-auth.js";
 import { passwordAuthRoute } from "./password-auth-routes.js";
 import type { PasswordAuthService } from "./password-auth.js";
@@ -72,6 +72,7 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
   diagnostics.record({ kind: "instance_started", occurredAt: new Date().toISOString() });
   const acceleration = options.acceleration ?? createOptionalRedisAcceleration();
   const routes = [
+    ...(options.oidcAuth && options.passwordAuth ? [oidcManagementRoute(options.oidcAuth, options.passwordAuth)] : []),
     ...(options.oidcAuth ? [oidcAuthRoute(options.oidcAuth)] : []),
     ...(options.passwordAuth ? [passwordAuthRoute(options.passwordAuth)] : []),
     diagnosticsSchemaRoute(diagnostics),

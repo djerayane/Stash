@@ -29,7 +29,6 @@ services:
       DATABASE_URL: postgres://stash:${POSTGRES_PASSWORD:-stash-development-only}@postgres:5432/stash
       INSTANCE_ADMIN_TOKEN: ${INSTANCE_ADMIN_TOKEN:?Set INSTANCE_ADMIN_TOKEN to a strong secret}
       INSTANCE_MASTER_KEY: ${INSTANCE_MASTER_KEY:?Set INSTANCE_MASTER_KEY to a base64-encoded 32-byte key}
-      OIDC_CONFIG: ${OIDC_CONFIG:-}
       REDIS_URL: ${REDIS_URL:-}
       HOST: 0.0.0.0
       PORT: 3000

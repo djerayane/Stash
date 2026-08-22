@@ -14,6 +14,7 @@ import { PasswordAuthService, type AccountAuthenticationRecord, type PasswordAut
 
 class ProtocolCompatibleOidcDatabase implements DatabaseProbe, OidcAuthRepository, PasswordAuthRepository {
   readonly identities = new Map<string, OidcIdentityRecord>();
+  readonly configurations = new Map<string, import("../src/oidc-auth.js").OidcOrganizationConfiguration>();
   readonly sessions = new Map<string, SessionRecord>();
   failure: Error | undefined;
 
@@ -23,13 +24,21 @@ class ProtocolCompatibleOidcDatabase implements DatabaseProbe, OidcAuthRepositor
     if (this.failure) throw this.failure;
     return this.identities.get(`${organizationId}:${issuer}:${subject}`);
   }
+  async findOidcConfiguration(organizationId: string) { return this.configurations.get(organizationId); }
+  async organizationRole(_organizationId: string, accountId: string) { return accountId === "account-1" ? "Owner" : undefined; }
+  async saveOidcConfiguration(configuration: import("../src/oidc-auth.js").OidcOrganizationConfiguration) { this.configurations.set(configuration.organizationId, configuration); }
+  async linkOidcIdentity(organizationId: string, accountId: string, issuer: string, subject: string) {
+    if (accountId !== "account-1") return false;
+    this.identities.set(`${organizationId}:${issuer}:${subject}`, { accountId, name: "Ada Lovelace", email: "ada@example.com" });
+    return true;
+  }
   async findAccountByEmail(_email: string): Promise<AccountAuthenticationRecord | undefined> { return undefined; }
   async findAccountById(_id: string): Promise<AccountAuthenticationRecord | undefined> { return undefined; }
   async createSession(session: SessionRecord) {
     if (this.failure) throw this.failure;
     this.sessions.set(session.id, session);
   }
-  async findSessionByTokenHash(_tokenHash: string) { return undefined; }
+  async findSessionByTokenHash(tokenHash: string) { return [...this.sessions.values()].find((session) => session.tokenHash === tokenHash); }
   async listSessions(_accountId: string) { return []; }
   async deleteSession(_accountId: string, _sessionId: string) { return false; }
   async changePasswordAndDeleteOtherSessions(_accountId: string, _currentSessionId: string, _passwordHash: string) {}
@@ -111,13 +120,40 @@ describe("optional OpenID Connect authentication on a running Stash Instance", (
   async function run() {
     provider = await ProtocolCompatibleOidcProvider.start();
     const database = new ProtocolCompatibleOidcDatabase();
+    const adminToken = "organization-owner-session";
+    database.sessions.set("admin-session", { id: "admin-session", accountId: "account-1", tokenHash: createHash("sha256").update(adminToken).digest("base64"), createdAt: new Date().toISOString(), lastSeenAt: new Date().toISOString() });
     database.identities.set(`organization-1:${provider.issuer}:provider-member-1`, {
       accountId: "account-1", name: "Ada Lovelace", email: "ada@example.com",
     });
-    const oidc = new OidcAuthService(database, [{ organizationId: "organization-1", issuer: provider.issuer, clientId: "stash-client", clientSecret: "provider-secret" }]);
+    database.configurations.set("organization-1", { organizationId: "organization-1", issuer: provider.issuer, clientId: "stash-client", clientSecret: "provider-secret" });
+    const oidc = new OidcAuthService(database);
     instance = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin-token", oidcAuth: oidc, passwordAuth: new PasswordAuthService(database) });
-    return { baseUrl: instance.url, database, provider };
+    return { baseUrl: instance.url, database, provider, adminToken };
   }
+
+  it("lets an Organization Owner enable OIDC and link an existing Member through supported boundaries", async () => {
+    const { baseUrl, database, provider, adminToken } = await run();
+    database.configurations.clear();
+    database.identities.clear();
+    const unauthorized = await fetch(`${baseUrl}/api/organizations/organization-1/auth/oidc`, {
+      method: "PUT", headers: { "content-type": "application/json" }, body: "{}",
+    });
+    assert.equal(unauthorized.status, 401);
+
+    const configured = await fetch(`${baseUrl}/api/organizations/organization-1/auth/oidc`, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${adminToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ issuer: provider.issuer, clientId: "stash-client", clientSecret: "provider-secret" }),
+    });
+    assert.equal(configured.status, 204);
+    const linked = await fetch(`${baseUrl}/api/organizations/organization-1/auth/oidc/identities`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${adminToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ accountId: "account-1", subject: "provider-member-1" }),
+    });
+    assert.equal(linked.status, 204);
+    assert.ok(database.identities.has(`organization-1:${provider.issuer}:provider-member-1`));
+  });
 
   it("signs a mapped Organization Member in through OIDC while built-in auth remains independently available", async () => {
     const { baseUrl, database, provider } = await run();
@@ -134,7 +170,7 @@ describe("optional OpenID Connect authentication on a running Stash Instance", (
     const result = await callback.json() as { token: string; member: { email: string } };
     assert.equal(result.member.email, "ada@example.com");
     assert.ok(result.token.length >= 32);
-    assert.equal(database.sessions.size, 1);
+    assert.equal(database.sessions.size, 2);
     assert.equal(provider.tokenRequest?.get("client_secret"), "provider-secret");
     assert.equal(provider.tokenRequest?.get("code_verifier")?.length, 64);
 
