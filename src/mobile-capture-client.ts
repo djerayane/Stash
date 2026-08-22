@@ -66,6 +66,8 @@ export class MobileCaptureClient {
   }
 
   async pair(pairing: MobileCapturePairing, signal?: AbortSignal, options: { replaceLegacy?: boolean } = {}): Promise<void> {
+    const acknowledgedLegacyExport = options.replaceLegacy && this.#legacyExportAcknowledged;
+    if (options.replaceLegacy) this.#legacyExportAcknowledged = false;
     let url: URL;
     try { url = new URL(pairing.instanceUrl); } catch { throw new Error("Instance URL must be a valid HTTPS origin."); }
     const testLoopback = this.#allowInsecureInstanceForTest && url.protocol === "http:"
@@ -89,7 +91,7 @@ export class MobileCaptureClient {
         && previous.workspaceId === authenticated.workspaceId && previous.memberToken === authenticated.memberToken;
       const replacingLegacy = previous && !previous.memberId && !preservesLegacyIdentity
         && (await this.#legacyCaptures(previous)).length > 0;
-      if (replacingLegacy && (!options.replaceLegacy || !this.#legacyExportAcknowledged)) throw new LegacyRecoveryRequired();
+      if (replacingLegacy && (!options.replaceLegacy || !acknowledgedLegacyExport)) throw new LegacyRecoveryRequired();
       if (previous?.instanceUrl === authenticated.instanceUrl && previous.workspaceId === authenticated.workspaceId
         && previous.memberToken === authenticated.memberToken) {
         for (const capture of await this.#store.listCaptures()) {
@@ -102,7 +104,6 @@ export class MobileCaptureClient {
       }
       await this.#store.savePairing(authenticated);
       await this.#store.saveOptions(pairingScope(authenticated), { projects: body.projects, tags: body.tags, reminders: body.reminders });
-      this.#legacyExportAcknowledged = false;
     } finally { this.#refreshControllers.delete(controller); }
   }
 

@@ -319,6 +319,11 @@ describe("offline mobile capture synchronization", () => {
     assert.deepEqual(await client.legacyRecoveryStatus(), { available: true, count: 1 });
     assert.match(await client.exportLegacyCaptures(), /Instance A recovery/);
     client.acknowledgeLegacyRecoveryExport(true);
+    await assert.rejects(() => client.pair({ ...destinationB, instanceUrl: "https://unavailable.example" }, undefined,
+      { replaceLegacy: true }), /fetch failed|could not be authenticated/i);
+    assert.deepEqual(await client.legacyRecoveryStatus(), { available: true, count: 1 });
+    await assert.rejects(() => client.pair(destinationB, undefined, { replaceLegacy: true }), LegacyRecoveryRequired);
+    client.acknowledgeLegacyRecoveryExport(true);
     await client.pair(destinationB, undefined, { replaceLegacy: true });
     assert.equal((await store.loadPairing())?.instanceUrl, destinationB.instanceUrl);
     assert.equal((await store.listCaptures()).length, 1);

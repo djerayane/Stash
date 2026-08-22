@@ -33,14 +33,28 @@ export default function PairingScreen() {
     } }
   };
   const exportLegacy = async () => {
-    const result = await Share.share({ message: await client.exportLegacyCaptures(), title: "Stash legacy capture recovery" });
-    const shared = result.action === Share.sharedAction;
-    client.acknowledgeLegacyRecoveryExport(shared);
-    if (mounted.current) setLegacyExported(shared);
+    try {
+      const result = await Share.share({ message: await client.exportLegacyCaptures(), title: "Stash legacy capture recovery" });
+      const shared = result.action === Share.sharedAction;
+      client.acknowledgeLegacyRecoveryExport(shared);
+      if (mounted.current) { setLegacyExported(shared); if (!shared) setError("Legacy export was cancelled. Export it before continuing."); }
+    } catch (cause) {
+      client.acknowledgeLegacyRecoveryExport(false);
+      if (mounted.current && !controller.signal.aborted) {
+        setLegacyExported(false); setError(cause instanceof Error ? cause.message : "Legacy captures could not be exported.");
+      }
+    }
   };
   const continuePairing = async () => {
-    await client.pair(pairing(), controller.signal, { replaceLegacy: true });
-    if (mounted.current) router.back();
+    try {
+      await client.pair(pairing(), controller.signal, { replaceLegacy: true });
+      if (mounted.current) router.back();
+    } catch (cause) {
+      if (mounted.current && !controller.signal.aborted) {
+        setLegacyExported(false); setLegacyRecovery((await client.legacyRecoveryStatus()).available);
+        setError(cause instanceof Error ? cause.message : "The new pairing could not be completed.");
+      }
+    }
   };
   useEffect(() => () => { mounted.current = false; controller.abort(); client.cancelRequests(); }, [client, controller]);
   return <ScrollView contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled"
