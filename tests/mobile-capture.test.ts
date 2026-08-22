@@ -18,7 +18,7 @@ import type { NoteRecord, PortableNoteProjection } from "../src/notes.js";
 import type { MemberAccessResolver } from "../src/workspaces-projects.js";
 import { EncryptedStateMobileCaptureStore, type CiphertextStateRepository, type MobileCipher } from "../mobile/src/encrypted-mobile-store.js";
 import { presentMobileSyncResult } from "../mobile/src/sync-status.js";
-import { loadCachedOptionsOnFocus } from "../mobile/src/capture-options-focus.js";
+import { loadCachedOptionsOnFocus, reconcileCaptureSelections } from "../mobile/src/capture-options-focus.js";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const projectId = "22222222-2222-4222-8222-222222222222";
@@ -472,6 +472,41 @@ describe("offline mobile capture synchronization", () => {
     const options = await focused;
     assert.deepEqual(options.projects, [{ id: projectId, name: "Launch" }]);
     assert.deepEqual(options.tags, ["mobile"]);
+  });
+
+  it("clears another pairing's structural selections on focus before offline capture", async () => {
+    const { baseUrl } = await run();
+    const store = new MemoryEncryptedStore();
+    let online = true;
+    const client = new MobileCaptureClient(store, async (input, init) => {
+      if (!online) throw new TypeError("Network request failed");
+      return fetch(input, init);
+    }, { allowInsecureInstanceForTest: true });
+    await client.pair({ instanceUrl: baseUrl, memberToken: "member-ada", workspaceId });
+    await client.cacheOptions({
+      projects: [{ id: projectId, name: "Launch" }],
+      tags: ["mobile"],
+      reminders: [{ id: "ada-only", label: "Ada only", offsetMinutes: 123 }],
+    });
+    const selections = { projectId, tag: "mobile", reminderOffset: 123 };
+    assert.deepEqual(reconcileCaptureSelections(await client.options(), selections), selections);
+
+    await client.pair({ instanceUrl: baseUrl, memberToken: "member-grace", workspaceId });
+    online = false;
+    const focused = new Promise<MobileCaptureOptions>((resolve) => { loadCachedOptionsOnFocus(client, resolve); });
+    const graceOptions = await focused;
+    const reconciled = reconcileCaptureSelections(graceOptions, selections);
+    assert.deepEqual(reconciled, {});
+    assert.deepEqual(reconcileCaptureSelections(graceOptions, { reminderOffset: 60 }), { reminderOffset: 60 });
+    await client.captureText("Grace offline capture", {
+      ...(reconciled.projectId ? { projectId: reconciled.projectId } : {}),
+      ...(reconciled.tag ? { tags: [reconciled.tag] } : {}),
+      ...(reconciled.reminderOffset ? { reminder: { at: new Date(Date.now() + reconciled.reminderOffset * 60_000).toISOString() } } : {}),
+    });
+    const [queued] = await client.outbox();
+    assert.equal(queued?.projectId, undefined);
+    assert.equal(queued?.tags, undefined);
+    assert.equal(queued?.reminder, undefined);
   });
 
   it("keeps permanent attention visible when a later capture is retriable", async () => {

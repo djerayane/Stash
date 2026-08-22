@@ -11,7 +11,7 @@ import { NativeChoice } from "@/components/native-choice";
 import { StatusFeedback } from "@/components/status-feedback";
 import { colors } from "@/theme/colors";
 import { presentMobileSyncResult } from "@/src/sync-status";
-import { loadCachedOptionsOnFocus } from "@/src/capture-options-focus";
+import { loadCachedOptionsOnFocus, reconcileCaptureSelections } from "@/src/capture-options-focus";
 
 export default function CaptureScreen() {
   useColorScheme();
@@ -25,7 +25,14 @@ export default function CaptureScreen() {
   const [tag, setTag] = useState<string>();
   const [reminderOffset, setReminderOffset] = useState<number>();
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  useFocusEffect(useCallback(() => loadCachedOptionsOnFocus(client, (value) => { if (mounted.current) setOptions(value); }), [client]));
+  useFocusEffect(useCallback(() => loadCachedOptionsOnFocus(client, (value) => {
+    if (!mounted.current) return;
+    setOptions(value);
+    setProjectId((current) => reconcileCaptureSelections(value, { ...(current ? { projectId: current } : {}) }).projectId);
+    setTag((current) => reconcileCaptureSelections(value, { ...(current ? { tag: current } : {}) }).tag);
+    setReminderOffset((current) => reconcileCaptureSelections(value,
+      { ...(current !== undefined ? { reminderOffset: current } : {}) }).reminderOffset);
+  }), [client]));
   useEffect(() => client.watchConnectivity(
     (listener) => NetInfo.addEventListener((state) => listener(Boolean(state.isConnected && state.isInternetReachable !== false))),
     (result) => {
