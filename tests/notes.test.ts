@@ -348,6 +348,9 @@ describe("editing Notes", () => {
     assert.match(html, /linked-tasks/);
     assert.match(html, /task-links/);
     assert.match(html, /aria-label.*Linked Tasks/);
+    assert.match(html, /relationshipState===['"]linked['"]/);
+    assert.match(html, /Block relationship needs repair/);
+    assert.match(html, /relationshipState===['"]ambiguous['"]/);
     assert.match(html, /\/assets\/gsap\.min\.js/);
     assert.match(html, /prefers-reduced-motion/);
     assert.match(html, /Checklist state/);

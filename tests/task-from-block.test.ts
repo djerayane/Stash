@@ -50,7 +50,8 @@ class TaskFromBlockFake implements DatabaseProbe, TaskFromBlockRepository {
     if (this.revokeAtBoundRead) this.canRead = false;
     if (!this.canRead || memberId !== "ada" || sourceNoteId !== noteId) return { status: "note_not_found" as const };
     return { status: "found" as const, tasks: this.tasks.map((task) => ({ id: task.id, key: task.key, title: task.title,
-      status: task.status, sourceBlock: task.sourceBlocks![0]! })) };
+      status: task.status, sourceBlock: task.sourceBlocks![0]!, relationshipState: this.duplicateBlockId ? "ambiguous" as const
+        : this.source.blockId === task.sourceBlocks![0]!.blockId ? "linked" as const : "broken" as const })) };
   }
   async linkTaskToBlock(memberId: string, taskId: string, sourceNoteId: string, sourceBlockKey: string) {
     if (this.linkFailure) throw new Error("postgres://relationship-secret");
@@ -214,7 +215,7 @@ describe("creating a Task from a stable Note Block", () => {
   });
 
   it("surfaces duplicate imported Block identities as ambiguous without creating a relationship", async () => {
-    const { database, create, taskSources } = await run();
+    const { database, create, linked, taskSources } = await run();
     const first = await create(blockKey, { projectId, title: "Ship release notes" });
     const { task } = await first.json() as { task: PortableTaskProjection };
     database.secondSource.blockId = secondBlockId;
@@ -227,6 +228,8 @@ describe("creating a Task from a stable Note Block", () => {
 
     const sources = await taskSources(task.id);
     assert.deepEqual((await sources.json() as { sourceBlocks: unknown[] }).sourceBlocks, [{ noteId, blockId, state: "ambiguous" }]);
+    const noteRelationships = await linked();
+    assert.deepEqual((await noteRelationships.json() as { tasks: Array<{ relationshipState: string }> }).tasks.map((item) => item.relationshipState), ["ambiguous"]);
   });
 
   it("hides Task relationships across authorization boundaries and reports invalid link requests", async () => {

@@ -15,6 +15,7 @@ export interface LinkedTaskReadModel {
   id: string; key: string; title: string;
   status: PortableTaskProjection["status"];
   sourceBlock: TaskSourceBlockReference;
+  relationshipState: "linked" | "broken" | "ambiguous";
 }
 export interface TaskSourceBlockReadModel extends TaskSourceBlockReference {
   state: "linked" | "broken" | "ambiguous";

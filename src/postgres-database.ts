@@ -484,7 +484,7 @@ export class PostgresDatabase implements
     try {
       await this.#ensureNoteSchema(client);
       const result = await client.query<any>(`SELECT task.id, task.task_key, task.title, status.id AS status_id,
-        status.name AS status_name, status.category, source.block_id
+        status.name AS status_name, status.category, source.block_id, note.document
         FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id = note.workspace_id
         LEFT JOIN stash_task_block_sources source ON source.note_id = note.id
         LEFT JOIN stash_tasks task ON task.id = source.task_id
@@ -494,8 +494,12 @@ export class PostgresDatabase implements
           WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)))
         ORDER BY task.created_at NULLS FIRST, task.id NULLS FIRST`, [noteId, memberId]);
       if (!result.rowCount) return { status: "note_not_found" as const };
-      const tasks: LinkedTaskReadModel[] = result.rows.filter((row: any) => row.id !== null).map((row: any) => ({ id: row.id, key: row.task_key, title: row.title,
-        status: { id: row.status_id, name: row.status_name, category: row.category }, sourceBlock: { noteId, blockId: row.block_id } }));
+      const tasks: LinkedTaskReadModel[] = result.rows.filter((row: any) => row.id !== null).map((row: any) => {
+        const matches = Array.isArray(row.document?.blocks) ? row.document.blocks.filter((block: any) => block.id === row.block_id).length : 0;
+        return { id: row.id, key: row.task_key, title: row.title,
+          status: { id: row.status_id, name: row.status_name, category: row.category }, sourceBlock: { noteId, blockId: row.block_id },
+          relationshipState: matches === 1 ? "linked" : matches > 1 ? "ambiguous" : "broken" };
+      });
       return { status: "found" as const, tasks };
     } finally { client.release(); }
   }

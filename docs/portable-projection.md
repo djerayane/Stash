@@ -136,6 +136,9 @@ The running Instance exposes linked Tasks as a permission-aware Note read model.
 Task's current canonical Workflow status at read time, and the WYSIWYG editor renders that Task key,
 title, and status adjacent to the referenced Block. This live state is never written into the Note's
 authored Markdown, so a reload can show status changes without content churn.
+The Note read model also counts exact Block identity occurrences: only one occurrence receives the
+live badge. Missing or repeated identities produce a visible repair notice in the editor instead of
+attaching Task state to a guessed Block.
 
 An existing Task can gain another source relationship through
 `POST /api/tasks/{taskId}/source-blocks` with a stable `noteId` and editor `blockKey`. The operation
