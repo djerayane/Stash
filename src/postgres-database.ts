@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import { Pool, type PoolClient } from "pg";
 
 import type { DatabaseProbe } from "./instance.js";
@@ -7,6 +8,7 @@ import type { AccountAuthenticationRecord, PasswordAuthRepository, SessionRecord
 import type { OidcAuthRepository, OidcIdentityKey, OidcIdentityRecord, OidcOrganizationConfiguration } from "./oidc-auth.js";
 import type { AccountRecoveryRepository, ClaimedEmailRecoveryDelivery, EmailRecoveryDeliveryClaim, EmailRecoveryDeliveryJob, EmailRecoveryRecord, PasskeyRecord, RecoveryCodeRecord } from "./account-recovery.js";
 import type { BuiltInOrganizationRole, OrganizationRoleRepository } from "./organization-roles.js";
+import type { InvitationRecord, InvitationRepository, ProjectAccessSummary } from "./invitations.js";
 import {
   createAuthenticationKeyCheck,
   verifyAuthenticationKeyCheck,
@@ -35,7 +37,8 @@ export class PostgresDatabase implements
   OidcAuthRepository,
   AccountRecoveryRepository,
   OrganizationRoleRepository,
-  MemberLocalizationRepository
+  MemberLocalizationRepository,
+  InvitationRepository
 {
   readonly #pool: Pool;
   readonly #authenticationSecrets: AuthenticationSecretCodec;
@@ -401,6 +404,110 @@ export class PostgresDatabase implements
     });
   }
 
+  async createInvitation(record: InvitationRecord, token: string): Promise<"created" | "forbidden" | "project_forbidden"> {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureInvitationSchema(client);
+      const memberships = await this.#lockedOrganizationMemberships(client, record.organizationId);
+      const actorRole = memberships.find(({ account_id }) => account_id === record.invitedByAccountId)?.role;
+      if (actorRole !== "Owner" && actorRole !== "Admin") return "forbidden";
+      if (actorRole === "Admin" && record.access.kind === "member" && record.access.role !== "Member") return "forbidden";
+      if (record.access.kind === "guest") {
+        const allowed = await client.query<{ id: string }>(
+          `SELECT project.id FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
+           WHERE project.id = ANY($1::uuid[]) AND workspace.organization_owner_id = $2`,
+          [record.access.projectIds, record.organizationId],
+        );
+        if (allowed.rowCount !== record.access.projectIds.length) return "project_forbidden";
+      }
+      await client.query(
+        `INSERT INTO stash_invitations (id, organization_id, token_lookup, token_secret, kind, member_role, invited_by_account_id, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [record.id, record.organizationId, this.#authenticationSecrets.blindIndex(token, "invitation-v1"), this.#authenticationSecrets.encrypt(token, "invitation-v1"), record.access.kind, record.access.kind === "member" ? record.access.role : null, record.invitedByAccountId, record.expiresAt],
+      );
+      if (record.access.kind === "guest") for (const projectId of record.access.projectIds) {
+        await client.query("INSERT INTO stash_invitation_projects (invitation_id, project_id) VALUES ($1, $2)", [record.id, projectId]);
+      }
+      return "created";
+    });
+  }
+
+  async acceptInvitation(token: string, accountId: string, acceptedAt: string): Promise<
+    | { status: "accepted"; access: { kind: "member"; organizationId: string; role: BuiltInOrganizationRole } | { kind: "guest"; organizationId: string; projectIds: string[] } }
+    | "invalid_invitation"
+  > {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureInvitationSchema(client);
+      await client.query("UPDATE stash_invitations SET token_lookup = NULL, token_secret = NULL WHERE accepted_at IS NULL AND expires_at <= $1", [acceptedAt]);
+      const result = await client.query<{ id: string; organization_id: string; kind: "member" | "guest"; member_role: BuiltInOrganizationRole | null; token_secret: string }>(
+        `SELECT id, organization_id, kind, member_role, token_secret FROM stash_invitations
+         WHERE token_lookup = $1 AND accepted_at IS NULL AND expires_at > $2 FOR UPDATE`, [this.#authenticationSecrets.blindIndex(token, "invitation-v1"), acceptedAt],
+      );
+      const invitation = result.rows[0];
+      if (!invitation || !this.#invitationTokenMatches(invitation.token_secret, token)) return "invalid_invitation";
+      if (invitation.kind === "member") {
+        const memberships = await this.#lockedOrganizationMemberships(client, invitation.organization_id);
+        const invitedRole = invitation.member_role!;
+        const existingRole = memberships.find(({ account_id }) => account_id === accountId)?.role;
+        const role = existingRole && this.#roleRank(existingRole) >= this.#roleRank(invitedRole) ? existingRole : invitedRole;
+        if (!existingRole) await client.query("INSERT INTO stash_organization_memberships (organization_id, account_id, role) VALUES ($1, $2, $3)", [invitation.organization_id, accountId, role]);
+        else if (existingRole !== role) await client.query("UPDATE stash_organization_memberships SET role = $3 WHERE organization_id = $1 AND account_id = $2", [invitation.organization_id, accountId, role]);
+        await client.query("UPDATE stash_invitations SET accepted_at = $2, accepted_by_account_id = $3, token_lookup = NULL, token_secret = NULL WHERE id = $1", [invitation.id, acceptedAt, accountId]);
+        return { status: "accepted", access: { kind: "member", organizationId: invitation.organization_id, role } };
+      }
+      const projects = await client.query<{ project_id: string; workspace_id: string }>(
+        `SELECT selected.project_id, project.workspace_id FROM stash_invitation_projects selected
+         JOIN stash_projects project ON project.id = selected.project_id WHERE selected.invitation_id = $1 ORDER BY selected.project_id`, [invitation.id]);
+      const guest = await client.query<{ id: string; name: string }>("SELECT id, name FROM stash_accounts WHERE id = $1", [accountId]);
+      if (!guest.rows[0]) throw new Error("guest_identity_unavailable");
+      for (const { project_id } of projects.rows) {
+        await client.query("INSERT INTO stash_project_guests (project_id, account_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [project_id, accountId]);
+      }
+      const inviter = await client.query<{ id: string; name: string }>(
+        `SELECT account.id, account.name FROM stash_invitations invitation
+         JOIN stash_accounts account ON account.id = invitation.invited_by_account_id WHERE invitation.id = $1`, [invitation.id]);
+      if (!inviter.rows[0]) throw new Error("inviter_identity_unavailable");
+      const projection = { schema: "stash.guest-project-access.v1" as const, id: invitation.id, organizationId: invitation.organization_id,
+        guest: { localAccountId: guest.rows[0].id, displayName: guest.rows[0].name },
+        projects: projects.rows.map(({ project_id, workspace_id }) => ({ projectId: project_id, workspaceId: workspace_id })),
+        acceptedAt, invitedBy: { localAccountId: inviter.rows[0].id, displayName: inviter.rows[0].name } };
+      await this.#recordPortableProjection(client, "GuestProjectAccess", invitation.id, projection.schema, projection);
+      await client.query("UPDATE stash_invitations SET accepted_at = $2, accepted_by_account_id = $3, token_lookup = NULL, token_secret = NULL WHERE id = $1", [invitation.id, acceptedAt, accountId]);
+      return { status: "accepted", access: { kind: "guest", organizationId: invitation.organization_id, projectIds: projects.rows.map(({ project_id }) => project_id) } };
+    });
+  }
+
+  async readProject(accountId: string, projectId: string): Promise<ProjectAccessSummary | undefined> {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureInvitationSchema(client);
+      const result = await client.query<{ id: string; organization_id: string; name: string; project_key: string; creator_id: string; creator_name: string }>(
+        `SELECT project.id, workspace.organization_owner_id AS organization_id, project.name, project.project_key,
+                creator.id AS creator_id, creator.name AS creator_name
+         FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
+         JOIN stash_accounts creator ON creator.id = project.created_by_account_id
+         WHERE project.id = $1 AND (
+           EXISTS (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)
+           OR EXISTS (SELECT 1 FROM stash_project_guests guest WHERE guest.project_id = project.id AND guest.account_id = $2)
+         )`, [projectId, accountId],
+      );
+      const row = result.rows[0];
+      return row ? { id: row.id, organizationId: row.organization_id, name: row.name, key: row.project_key, createdBy: { localAccountId: row.creator_id, displayName: row.creator_name } } : undefined;
+    } finally { client.release(); }
+  }
+
+  async canWriteProject(accountId: string, projectId: string): Promise<boolean> {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureInvitationSchema(client);
+      const result = await client.query(
+        `SELECT 1 FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
+         JOIN stash_organization_memberships membership ON membership.organization_id = workspace.organization_owner_id
+         WHERE project.id = $1 AND membership.account_id = $2`, [projectId, accountId],
+      );
+      return result.rowCount === 1;
+    } finally { client.release(); }
+  }
+
   async #lockedOrganizationMemberships(client: PoolClient, organizationId: string) {
     await this.#ensureBootstrapSchema(client);
     const memberships = await client.query<{ account_id: string; role: BuiltInOrganizationRole }>(
@@ -419,6 +526,16 @@ export class PostgresDatabase implements
       && memberships.some(
         (membership) => membership.account_id === accountId && membership.role === "Owner",
       );
+  }
+
+  #roleRank(role: BuiltInOrganizationRole): number { return { Member: 0, Admin: 1, Owner: 2 }[role]; }
+
+  #invitationTokenMatches(encryptedToken: string, candidate: string): boolean {
+    try {
+      const expected = Buffer.from(this.#authenticationSecrets.decrypt(encryptedToken, "invitation-v1"));
+      const actual = Buffer.from(candidate);
+      return expected.length === actual.length && timingSafeEqual(expected, actual);
+    } catch { return false; }
   }
 
   #canManageRoles(
@@ -856,12 +973,64 @@ export class PostgresDatabase implements
     }
   }
 
+  async #ensureInvitationSchema(client: PoolClient): Promise<void> {
+    await this.#ensureWorkspaceProjectSchema(client);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS stash_invitations (
+        id UUID PRIMARY KEY,
+        organization_id UUID NOT NULL REFERENCES stash_organizations(id),
+        token_lookup TEXT UNIQUE,
+        token_secret TEXT,
+        kind TEXT NOT NULL CHECK (kind IN ('member', 'guest')),
+        member_role TEXT CHECK (member_role IN ('Owner', 'Admin', 'Member')),
+        invited_by_account_id UUID NOT NULL REFERENCES stash_accounts(id),
+        expires_at TIMESTAMPTZ NOT NULL,
+        accepted_at TIMESTAMPTZ,
+        accepted_by_account_id UUID REFERENCES stash_accounts(id),
+        CHECK ((token_lookup IS NULL) = (token_secret IS NULL)),
+        CHECK ((kind = 'member' AND member_role IS NOT NULL) OR (kind = 'guest' AND member_role IS NULL))
+      );
+      CREATE TABLE IF NOT EXISTS stash_invitation_projects (
+        invitation_id UUID NOT NULL REFERENCES stash_invitations(id) ON DELETE CASCADE,
+        project_id UUID NOT NULL REFERENCES stash_projects(id),
+        PRIMARY KEY (invitation_id, project_id)
+      );
+      CREATE TABLE IF NOT EXISTS stash_project_guests (
+        project_id UUID NOT NULL REFERENCES stash_projects(id),
+        account_id UUID NOT NULL REFERENCES stash_accounts(id),
+        PRIMARY KEY (project_id, account_id)
+      );
+    `);
+    await client.query("SELECT pg_advisory_xact_lock(1465271063)");
+    await client.query(`
+      ALTER TABLE stash_invitations ADD COLUMN IF NOT EXISTS token_lookup TEXT;
+      ALTER TABLE stash_invitations ADD COLUMN IF NOT EXISTS token_secret TEXT;
+      DO $migration$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'stash_invitations' AND column_name = 'token_hash') THEN
+          DELETE FROM stash_invitations WHERE token_lookup IS NULL OR token_secret IS NULL;
+          ALTER TABLE stash_invitations DROP COLUMN token_hash;
+        END IF;
+        IF EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conrelid = 'stash_portable_projection_outbox'::regclass
+          AND conname = 'stash_portable_projection_outbox_object_kind_check'
+          AND pg_get_constraintdef(oid) NOT LIKE '%GuestProjectAccess%'
+        ) THEN
+          ALTER TABLE stash_portable_projection_outbox DROP CONSTRAINT stash_portable_projection_outbox_object_kind_check;
+          ALTER TABLE stash_portable_projection_outbox ADD CONSTRAINT stash_portable_projection_outbox_object_kind_check
+            CHECK (object_kind IN ('Workspace', 'Project', 'Note', 'GuestProjectAccess'));
+        END IF;
+      END
+      $migration$;
+    `);
+  }
+
   async #recordPortableProjection(
     client: PoolClient,
-    objectKind: "Workspace" | "Project" | "Note",
+    objectKind: "Workspace" | "Project" | "Note" | "GuestProjectAccess",
     objectId: string,
-    projectionSchema: "stash.workspace.v1" | "stash.project.v1" | "stash.note.v1",
-    payload: PortableWorkspaceProjection | PortableProjectProjection | PortableNoteProjection,
+    projectionSchema: "stash.workspace.v1" | "stash.project.v1" | "stash.note.v1" | "stash.guest-project-access.v1",
+    payload: PortableWorkspaceProjection | PortableProjectProjection | PortableNoteProjection | Record<string, unknown>,
   ): Promise<void> {
     await client.query(
       `INSERT INTO stash_portable_projection_outbox

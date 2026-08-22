@@ -25,6 +25,8 @@ import { accountRecoveryRoute } from "./account-recovery-routes.js";
 import type { AccountRecoveryService } from "./account-recovery.js";
 import { memberLocalizationRoutes } from "./member-localization-routes.js";
 import type { MemberLocalizationService } from "./member-localization.js";
+import { invitationRoutes } from "./invitation-routes.js";
+import type { InvitationService } from "./invitations.js";
 
 export interface DatabaseProbe {
   verifyConnection(): Promise<void>;
@@ -53,6 +55,7 @@ interface InstanceOptions {
   oidcCallbackOrigin?: string;
   allowInsecureOidcCallbackOriginForTest?: boolean;
   accountRecovery?: AccountRecoveryService;
+  invitations?: InvitationService;
   diagnostics?: Diagnostics;
   acceleration?: OptionalRedisAcceleration;
 }
@@ -126,6 +129,9 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
         options.organizationRoles,
         (options.memberAccess ?? options.passwordAuth)!,
       )]
+      : []),
+    ...(options.invitations && (options.memberAccess ?? options.passwordAuth)
+      ? [invitationRoutes(options.invitations, (options.memberAccess ?? options.passwordAuth)!)]
       : []),
     ...(options.notes && (options.memberAccess ?? options.passwordAuth)
       ? [noteRoutes(options.notes, (options.memberAccess ?? options.passwordAuth)!)]

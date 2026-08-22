@@ -1,9 +1,9 @@
 import { createCipheriv, createDecipheriv, createHmac, randomBytes } from "node:crypto";
 
 export interface AuthenticationSecretCodec {
-  encrypt(value: string): string;
-  decrypt(value: string): string;
-  blindIndex(value: string): string;
+  encrypt(value: string, purpose?: string): string;
+  decrypt(value: string, purpose?: string): string;
+  blindIndex(value: string, purpose?: string): string;
 }
 
 const authenticationKeyCheckValue = "stash-instance-authentication-key-v1";
@@ -34,21 +34,23 @@ export function createAuthenticationSecretCodec(encodedMasterKey: string): Authe
     throw new Error("INSTANCE_MASTER_KEY must be a base64-encoded 32-byte key");
   }
   return {
-    encrypt(value) {
+    encrypt(value, purpose) {
       const nonce = randomBytes(12);
       const cipher = createCipheriv("aes-256-gcm", masterKey, nonce);
+      if (purpose) cipher.setAAD(Buffer.from(`stash-${purpose}`));
       const ciphertext = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
       return `v1.${nonce.toString("base64url")}.${cipher.getAuthTag().toString("base64url")}.${ciphertext.toString("base64url")}`;
     },
-    decrypt(value) {
+    decrypt(value, purpose) {
       const [version, nonceValue, tagValue, ciphertextValue] = value.split(".");
       if (version !== "v1" || !nonceValue || !tagValue || !ciphertextValue) throw new Error("invalid encrypted authentication material");
       const decipher = createDecipheriv("aes-256-gcm", masterKey, Buffer.from(nonceValue, "base64url"));
+      if (purpose) decipher.setAAD(Buffer.from(`stash-${purpose}`));
       decipher.setAuthTag(Buffer.from(tagValue, "base64url"));
       return Buffer.concat([decipher.update(Buffer.from(ciphertextValue, "base64url")), decipher.final()]).toString("utf8");
     },
-    blindIndex(value) {
-      return createHmac("sha256", masterKey).update(`stash-session-v1:${value}`).digest("base64");
+    blindIndex(value, purpose = "session-v1") {
+      return createHmac("sha256", masterKey).update(`stash-${purpose}:${value}`).digest("base64");
     },
   };
 }
