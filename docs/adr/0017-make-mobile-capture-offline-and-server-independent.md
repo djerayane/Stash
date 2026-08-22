@@ -1,0 +1,3 @@
+# Make mobile capture offline and server-independent
+
+The mobile client stores new text, checklist, photo, file, voice, share-sheet, and widget captures in an encrypted local outbox and synchronizes them when its configured Instance becomes reachable, with cached optional structure and loss-preserving conflict handling. Original media remains a Workspace Attachment, while AI transcription or handwriting recognition is optional future enrichment. Clients connect directly to a user-provided HTTPS Instance URL through a pairing flow; Stash may support local discovery and document reverse proxies or private networks, but no proprietary relay service is required.

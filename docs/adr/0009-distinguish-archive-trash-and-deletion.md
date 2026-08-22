@@ -1,0 +1,3 @@
+# Distinguish Archive, trash, and permanent deletion
+
+Archive removes durable objects from normal active views while retaining their content and relationships; deletion moves them to recoverable Workspace trash for a configurable retention period. Projects archive by default, while Project and Organization deletion requires explicit authority, export or backup warnings, typed confirmation, and delayed asynchronous removal. Permanent deletion removes content from active systems and future backups on a documented schedule, while remaining references retain only a content-free tombstone so deletion does not secretly preserve the material being removed.

@@ -1,0 +1,3 @@
+# Govern agent actions with scoped Grants and optional Proposals
+
+External agents act through revocable Agent Grants sponsored by Members and limited by Organization, Project, capabilities, lifetime, and confirmation policy. Each capability and scope is Direct, Propose, or Deny, with cautious presets and automatic escalation of high-impact bulk work; destructive operations, permission and integration changes, exports, and external Git actions require confirmation by default. Proposals retain their base versions, rebase only unambiguous changes, flag overlaps, and apply reversible work as one attributable and undoable Activity entry.
