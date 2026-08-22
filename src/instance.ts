@@ -34,6 +34,8 @@ import { taskRoutes } from "./task-routes.js";
 import type { TaskService } from "./tasks.js";
 import { attachmentRoutes } from "./attachment-routes.js";
 import type { AttachmentService } from "./attachments.js";
+import { mobileCaptureRoutes } from "./mobile-capture-routes.js";
+import type { MobileCaptureService } from "./mobile-captures.js";
 
 export interface DatabaseProbe {
   verifyConnection(): Promise<void>;
@@ -68,6 +70,7 @@ export interface InstanceOptions {
   repositoryConnections?: RepositoryConnectionService;
   tasks?: TaskService;
   attachments?: AttachmentService;
+  mobileCaptures?: MobileCaptureService;
 }
 
 const browserSurface = `<!doctype html>
@@ -153,6 +156,9 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
       : []),
     ...(options.attachments && (options.memberAccess ?? options.passwordAuth)
       ? [attachmentRoutes(options.attachments, (options.memberAccess ?? options.passwordAuth)!)] : []),
+    ...(options.mobileCaptures && (options.memberAccess ?? options.passwordAuth)
+      ? [mobileCaptureRoutes(options.mobileCaptures, (options.memberAccess ?? options.passwordAuth)!)]
+      : []),
     ...(options.repositoryConnections && (options.memberAccess ?? options.passwordAuth)
       ? [repositoryConnectionRoutes(options.repositoryConnections, (options.memberAccess ?? options.passwordAuth)!)]
       : []),
