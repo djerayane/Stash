@@ -99,7 +99,7 @@ function taskPlanningReadModelFromRow(row: any): TaskPlanningReadModel {
 function taskConflictFromRow(row: any): TaskEditConflict {
   return { id: row.id, taskId: row.task_id, baseRevision: row.base_revision, currentRevision: row.current_revision,
     fields: row.fields, contribution: row.contribution, createdAt: new Date(row.created_at).toISOString(),
-    createdBy: { displayName: row.created_by_name, attribution: "recorded" },
+    createdBy: { displayName: row.created_by_display_name, attribution: "recorded" },
     ...(row.resolved_at ? { resolvedAt: new Date(row.resolved_at).toISOString(), resolution: row.resolution } : {}) };
 }
 
@@ -1005,12 +1005,13 @@ export class PostgresDatabase implements
     return this.#withTransaction(async (client) => {
       await this.#ensureNoteSchema(client);
       await this.#ensureInvitationSchema(client);
-      const writable = await client.query(`SELECT 1 FROM stash_projects project
+      const writable = await client.query<{ workspace_id: string }>(`SELECT workspace.id AS workspace_id FROM stash_projects project
         JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
         WHERE project.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2)
           OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
             WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)))`, [projectId, memberId]);
       if (!writable.rowCount) return { status: "not_found" as const };
+      if (update.dependencies !== undefined) await client.query("SELECT pg_advisory_xact_lock(hashtext('stash-task-dependencies'),hashtext($1))", [writable.rows[0]!.workspace_id]);
       const current = await client.query<any>(`${taskPlanningSelect} FOR UPDATE OF task`, [projectId, taskKey, memberId]);
       const row = current.rows[0];
       if (!row) return { status: "not_found" as const };
@@ -1060,16 +1061,21 @@ export class PostgresDatabase implements
         next.status = status.rows[0];
       }
       delete next.statusId;
+      const nextRevision = Number(row.revision) + 1;
+      const nextFieldRevisions = { ...(row.field_revisions ?? {}) };
+      for (const field of Object.keys(update)) nextFieldRevisions[field] = nextRevision;
       await client.query(`UPDATE stash_tasks SET title = $2, workflow_status_id = $3, assignee_ids = $4::jsonb, priority = $5,
         label_names = $6::jsonb, due_date = $7, estimate = $8, linked_note_ids = $9::jsonb,
-        development_links = $10::jsonb WHERE id = $1`, [row.id, next.title.trim(), next.status.id,
+        development_links = $10::jsonb, revision = $11, field_revisions = $12::jsonb WHERE id = $1`, [row.id, next.title.trim(), next.status.id,
         JSON.stringify([...new Set(next.assigneeIds ?? [])]), next.priority ?? "none",
         JSON.stringify([...new Set((next.labelNames ?? []).map((label) => label.trim()))]), next.dueDate ?? null, next.estimate ?? null,
-        JSON.stringify([...new Set(next.linkedNoteIds ?? [])]), JSON.stringify(next.developmentLinks ?? [])]);
+        JSON.stringify([...new Set(next.linkedNoteIds ?? [])]), JSON.stringify(next.developmentLinks ?? []), nextRevision, JSON.stringify(nextFieldRevisions)]);
       const saved = await client.query<any>(taskPlanningSelect, [projectId, taskKey, memberId]);
       const task = taskPlanningReadModelFromRow(saved.rows[0]);
       await this.#recordPortableProjection(client, "Task", task.id, task.schema, taskProjectionFromRow(saved.rows[0]));
       for (const affectedId of (row.affected_dependency_task_ids ?? []).filter((id: string) => id !== task.id)) {
+        await client.query(`UPDATE stash_tasks SET revision=revision+1,
+          field_revisions=jsonb_set(field_revisions,'{dependencies}',to_jsonb(revision+1),true) WHERE id=$1`, [affectedId]);
         const affected = await client.query<any>(taskPlanningSelectById, [affectedId, memberId]);
         if (affected.rows[0]) {
           const projection = taskProjectionFromRow(affected.rows[0]);
@@ -1083,11 +1089,12 @@ export class PostgresDatabase implements
   async applyStructuredTaskEdit(memberId: string, projectId: string, taskKey: string, batch: TaskEditBatch) {
     return this.#withTransaction(async (client) => {
       await this.#ensureNoteSchema(client); await this.#ensureInvitationSchema(client);
-      const writable = await client.query(`SELECT 1 FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
+      const writable = await client.query<{ workspace_id: string }>(`SELECT workspace.id AS workspace_id FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
         WHERE project.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR
         (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
           WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)))`, [projectId, memberId]);
       if (!writable.rowCount) return { status: "not_found" as const };
+      if (batch.changes.dependencies !== undefined) await client.query("SELECT pg_advisory_xact_lock(hashtext('stash-task-dependencies'),hashtext($1))", [writable.rows[0]!.workspace_id]);
       const current = await client.query<any>(`${taskPlanningSelect} FOR UPDATE OF task`, [projectId, taskKey, memberId]);
       const row = current.rows[0]; if (!row) return { status: "not_found" as const };
       const digest = taskEditDigest(batch);
@@ -1113,9 +1120,9 @@ export class PostgresDatabase implements
           currentRevision: row.revision, fields: incompatible, contribution, createdAt: batch.createdAt,
           createdBy: { displayName: batch.createdBy.displayName, attribution: "recorded" } };
         await client.query(`INSERT INTO stash_task_edit_conflicts
-          (id,task_id,base_revision,current_revision,fields,contribution,created_by_account_id,created_at)
-          VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8)`, [conflictId, row.id, batch.baseRevision, row.revision,
-          JSON.stringify(incompatible), JSON.stringify(contribution), memberId, batch.createdAt]);
+          (id,task_id,base_revision,current_revision,fields,contribution,created_by_account_id,created_by_display_name,created_at)
+          VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9)`, [conflictId, row.id, batch.baseRevision, row.revision,
+          JSON.stringify(incompatible), JSON.stringify(contribution), memberId, batch.createdBy.displayName, batch.createdAt]);
         outcome = { status: "conflict_preserved", conflict };
       } else {
         const saved = await client.query<any>(taskPlanningSelect, [projectId, taskKey, memberId]);
@@ -1144,8 +1151,7 @@ export class PostgresDatabase implements
       if (!writable.rowCount) return { status: "not_found" as const };
       const task = await client.query<any>(taskPlanningSelect, [projectId, taskKey, memberId]);
       if (!task.rows[0]) return { status: "not_found" as const };
-      const rows = await client.query<any>(`SELECT conflict.*, account.name AS created_by_name FROM stash_task_edit_conflicts conflict
-        JOIN stash_accounts account ON account.id = conflict.created_by_account_id
+      const rows = await client.query<any>(`SELECT conflict.* FROM stash_task_edit_conflicts conflict
         WHERE conflict.task_id = $1 AND conflict.resolved_at IS NULL ORDER BY conflict.created_at, conflict.id`, [task.rows[0].id]);
       return { status: "found" as const, revision: task.rows[0].revision, conflicts: rows.rows.map(taskConflictFromRow) };
     } finally { client.release(); }
@@ -1155,15 +1161,16 @@ export class PostgresDatabase implements
     resolution: "keep_current" | "apply_contribution", expectedRevision: number) {
     return this.#withTransaction(async (client) => {
       await this.#ensureNoteSchema(client); await this.#ensureInvitationSchema(client);
-      const writable = await client.query(`SELECT 1 FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
+      const writable = await client.query<{ workspace_id: string }>(`SELECT workspace.id AS workspace_id FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
         WHERE project.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR
         (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
           WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)))`, [projectId, memberId]);
       if (!writable.rowCount) return { status: "not_found" as const };
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('stash-task-dependencies'),hashtext($1))", [writable.rows[0]!.workspace_id]);
       const taskResult = await client.query<any>(`${taskPlanningSelect} FOR UPDATE OF task`, [projectId, taskKey, memberId]);
       const row = taskResult.rows[0]; if (!row) return { status: "not_found" as const };
-      const found = await client.query<any>(`SELECT conflict.*, account.name AS created_by_name FROM stash_task_edit_conflicts conflict
-        JOIN stash_accounts account ON account.id = conflict.created_by_account_id WHERE conflict.id = $1 AND conflict.task_id = $2 FOR UPDATE OF conflict`, [conflictId, row.id]);
+      const found = await client.query<any>(`SELECT conflict.* FROM stash_task_edit_conflicts conflict
+        WHERE conflict.id = $1 AND conflict.task_id = $2 FOR UPDATE OF conflict`, [conflictId, row.id]);
       const conflictRow = found.rows[0]; if (!conflictRow) return { status: "conflict_not_found" as const };
       if (conflictRow.resolved_at) return { status: "already_resolved" as const };
       if (row.revision !== expectedRevision) return { status: "conflict_changed" as const, conflict: { ...taskConflictFromRow(conflictRow), currentRevision: row.revision } };
@@ -1210,6 +1217,8 @@ export class PostgresDatabase implements
       await client.query("DELETE FROM stash_task_dependencies WHERE dependent_task_id=$1 OR prerequisite_task_id=$1",[row.id]);
       for(const edge of proposed) await client.query("INSERT INTO stash_task_dependencies (dependent_task_id,prerequisite_task_id) VALUES ($1,$2) ON CONFLICT DO NOTHING",[edge.dependent_task_id,edge.prerequisite_task_id]);
       for (const affectedId of [...new Set([...previous,...proposed].flatMap((edge)=>[edge.dependent_task_id,edge.prerequisite_task_id]))].filter((id)=>id!==row.id)) {
+        await client.query(`UPDATE stash_tasks SET revision=revision+1,
+          field_revisions=jsonb_set(field_revisions,'{dependencies}',to_jsonb(revision+1),true) WHERE id=$1`,[affectedId]);
         const affected=await client.query<any>(taskPlanningSelectById,[affectedId,memberId]);
         if(affected.rows[0]) { const projection=taskProjectionFromRow(affected.rows[0]); await this.#recordPortableProjection(client,"Task",projection.id,projection.schema,projection); }
       }
@@ -1245,7 +1254,8 @@ export class PostgresDatabase implements
         status: { id: row.workflow_status_id, name: row.status_name, category: row.status_category } };
       await client.query(`INSERT INTO stash_task_key_aliases (project_id, task_key, task_id, created_at)
         VALUES ($1,$2,$3,now())`, [row.project_id, row.task_key, row.id]);
-      await client.query("UPDATE stash_tasks SET project_id = $2, task_key = $3, workflow_status_id = $4 WHERE id = $1",
+      await client.query(`UPDATE stash_tasks SET project_id = $2, task_key = $3, workflow_status_id = $4, revision=revision+1,
+        field_revisions=field_revisions || jsonb_build_object('projectId',revision+1,'key',revision+1,'statusId',revision+1) WHERE id = $1`,
         [row.id, destinationProjectId, nextKey, destinationStatus.id]);
       const saved = await client.query<any>(taskPlanningSelect, [destinationProjectId, nextKey, memberId]);
       const task = taskPlanningReadModelFromRow(saved.rows[0]);
@@ -2403,9 +2413,14 @@ export class PostgresDatabase implements
       CREATE TABLE IF NOT EXISTS stash_task_edit_conflicts (
         id UUID PRIMARY KEY, task_id UUID NOT NULL REFERENCES stash_tasks(id) ON DELETE CASCADE,
         base_revision INTEGER NOT NULL, current_revision INTEGER NOT NULL, fields JSONB NOT NULL,
-        contribution JSONB NOT NULL, created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id), created_at TIMESTAMPTZ NOT NULL,
+        contribution JSONB NOT NULL, created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id), created_by_display_name TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL,
         resolved_at TIMESTAMPTZ, resolution TEXT CHECK (resolution IN ('keep_current','apply_contribution'))
       );
+      ALTER TABLE stash_task_edit_conflicts ADD COLUMN IF NOT EXISTS created_by_display_name TEXT;
+      UPDATE stash_task_edit_conflicts conflict SET created_by_display_name = account.name FROM stash_accounts account
+        WHERE conflict.created_by_account_id = account.id AND conflict.created_by_display_name IS NULL;
+      ALTER TABLE stash_task_edit_conflicts ALTER COLUMN created_by_display_name SET NOT NULL;
       CREATE TABLE IF NOT EXISTS stash_task_note_sources (
         task_id UUID NOT NULL REFERENCES stash_tasks(id), note_id UUID NOT NULL REFERENCES stash_notes(id), PRIMARY KEY (task_id, note_id)
       );
