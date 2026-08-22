@@ -158,7 +158,10 @@ identity, Project, Task Key, source relationships, creator, and creation time ca
 through this boundary. Clearing an optional due date or estimate uses JSON `null`; arrays use an empty
 array. References to unavailable statuses, Members, Notes, or Tasks are rejected atomically. A Guest
 may resolve Tasks only in Projects explicitly shared with them; that read-only grant never authorizes
-Task updates.
+Task updates. Dependency replacements lock and validate the complete Workspace Task graph in one
+transaction. `depends_on` points from the updated Task to its prerequisite; `required_by` expresses
+the inverse direction. Any direct or indirect cycle rejects the whole update before canonical state
+or its portable projection changes.
 
 The operational Note body is a versioned rich-text document rendered by Stash's WYSIWYG editor.
 Every successful edit atomically increments the Note revision and records another `stash.note.v1`

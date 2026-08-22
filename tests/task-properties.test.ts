@@ -14,6 +14,7 @@ const inProgressStatusId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const assigneeId = "55555555-5555-4555-8555-555555555555";
 const linkedNoteId = "66666666-6666-4666-8666-666666666666";
 const dependencyTaskId = "99999999-9999-4999-8999-999999999999";
+const thirdTaskId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 
 class TaskPlanningFake implements DatabaseProbe, TaskPlanningRepository {
   task: PortableTaskProjection = {
@@ -22,14 +23,19 @@ class TaskPlanningFake implements DatabaseProbe, TaskPlanningRepository {
     assigneeIds: [], priority: "none", labelNames: [], sourceNoteIds: [], linkedNoteIds: [], dependencies: [], developmentLinks: [],
     createdAt: "2026-08-22T08:00:00.000Z", createdBy: { localAccountId: "ada", displayName: "Ada Lovelace" },
   };
+  readonly otherTasks: PortableTaskProjection[] = [
+    { ...structuredClone(this.task), id: dependencyTaskId, key: "STASH-13", title: "Publish release" },
+    { ...structuredClone(this.task), id: thirdTaskId, key: "STASH-14", title: "Announce release" },
+  ];
   canRead = true;
   fail = false;
   async verifyConnection() {}
   async close() {}
   async findTaskByKey(memberId: string, requestedProjectId: string, key: string) {
-    if (!this.canRead || !["ada", "grace"].includes(memberId) || requestedProjectId !== projectId || key.toUpperCase() !== this.task.key)
+    const task = [this.task, ...this.otherTasks].find((candidate) => candidate.key === key.toUpperCase());
+    if (!this.canRead || !["ada", "grace"].includes(memberId) || requestedProjectId !== projectId || !task)
       return { status: "not_found" as const };
-    return { status: "found" as const, task: structuredClone(this.task) };
+    return { status: "found" as const, task: structuredClone(task) };
   }
   async updateTaskByKey(memberId: string, requestedProjectId: string, key: string, update: TaskPlanningUpdate) {
     if (this.fail) throw new Error("postgres://secret");
@@ -39,15 +45,38 @@ class TaskPlanningFake implements DatabaseProbe, TaskPlanningRepository {
     if (update.statusId !== undefined && update.statusId !== inProgressStatusId
       || update.assigneeIds?.some((id) => id !== assigneeId)
       || update.linkedNoteIds?.some((id) => id !== linkedNoteId)
-      || update.dependencies?.some(({ taskId: id }) => id !== dependencyTaskId)) return { status: "invalid_reference" as const };
+      || update.dependencies?.some(({ taskId: id }) => ![this.task, ...this.otherTasks].some((task) => task.id === id) || id === found.task.id))
+      return { status: "invalid_reference" as const };
     const { statusId: nextStatusId, dueDate, estimate, ...properties } = update;
-    this.task = { ...this.task, ...properties,
+    const next = { ...found.task, ...properties,
       ...(nextStatusId ? { status: { id: nextStatusId, name: "In Progress", category: "started" as const } } : {}),
       ...(dueDate ? { dueDate } : {}), ...(estimate === null || estimate === undefined ? {} : { estimate }) };
-    if (update.dueDate === null) delete this.task.dueDate;
-    if (update.estimate === null) delete this.task.estimate;
-    return { status: "updated" as const, task: structuredClone(this.task) };
+    if (update.dependencies !== undefined) {
+      const graph = new Map([this.task, ...this.otherTasks].map((task) => [task.id, task.id === next.id ? update.dependencies! : task.dependencies ?? []]));
+      if (fakeHasCycle(graph)) return { status: "invalid_reference" as const };
+    }
+    if (update.dueDate === null) delete next.dueDate;
+    if (update.estimate === null) delete next.estimate;
+    if (next.id === this.task.id) this.task = next;
+    else this.otherTasks.splice(this.otherTasks.findIndex(({ id }) => id === next.id), 1, next);
+    return { status: "updated" as const, task: structuredClone(next) };
   }
+}
+
+function fakeHasCycle(graph: ReadonlyMap<string, NonNullable<PortableTaskProjection["dependencies"]>>): boolean {
+  const outgoing = new Map<string, string[]>([...graph.keys()].map((id) => [id, []]));
+  for (const [id, dependencies] of graph) for (const dependency of dependencies) {
+    const source = dependency.type === "depends_on" ? id : dependency.taskId;
+    const target = dependency.type === "depends_on" ? dependency.taskId : id;
+    outgoing.get(source)!.push(target);
+  }
+  const active = new Set<string>(); const done = new Set<string>();
+  const visit = (id: string): boolean => {
+    if (active.has(id)) return true; if (done.has(id)) return false;
+    active.add(id); for (const target of outgoing.get(id) ?? []) if (visit(target)) return true;
+    active.delete(id); done.add(id); return false;
+  };
+  return [...outgoing.keys()].some(visit);
 }
 
 const access: MemberAccessResolver = { async authenticateBearer(value) {
@@ -118,6 +147,28 @@ describe("planning Tasks through Project-scoped Task Keys", () => {
       assert.equal(response.status, 422);
       assert.deepEqual(database.task, before);
     }
+  });
+
+  it("rejects a two-Task Dependency cycle without applying the rest of the update", async () => {
+    const { database, patch } = await run();
+    assert.equal((await patch({ dependencies: [{ taskId: dependencyTaskId, type: "depends_on" }] })).status, 200);
+    const before = structuredClone(database.otherTasks[0]);
+    const response = await patch({ title: "Must not persist", dependencies: [{ taskId, type: "depends_on" }] }, projectId, "STASH-13");
+    assert.equal(response.status, 422);
+    assert.deepEqual(database.otherTasks[0], before);
+    assert.equal(database.task.title, "Plan release");
+  });
+
+  it("rejects a longer cycle that mixes Depends on and Required by semantics", async () => {
+    const { database, patch } = await run();
+    assert.equal((await patch({ dependencies: [{ taskId: dependencyTaskId, type: "depends_on" }] })).status, 200);
+    const before = structuredClone(database.otherTasks[1]);
+    const response = await patch({ title: "Must not persist", dependencies: [
+      { taskId: dependencyTaskId, type: "required_by" },
+      { taskId, type: "depends_on" },
+    ] }, projectId, "STASH-14");
+    assert.equal(response.status, 422);
+    assert.deepEqual(database.otherTasks[1], before);
   });
 
   it("allows selected Project Guests to read but not mutate a Task", async () => {

@@ -655,9 +655,14 @@ export class PostgresDatabase implements
         const note = await client.query("SELECT 1 FROM stash_notes WHERE id = $1 AND workspace_id = $2", [noteId, row.workspace_id]);
         if (!note.rowCount) return { status: "invalid_reference" as const };
       }
-      for (const dependency of update.dependencies ?? []) {
-        const task = await client.query("SELECT 1 FROM stash_tasks WHERE id = $1 AND workspace_id = $2 AND id <> $3", [dependency.taskId, row.workspace_id, row.id]);
-        if (!task.rowCount) return { status: "invalid_reference" as const };
+      if (update.dependencies !== undefined) {
+        const graphRows = await client.query<{ id: string; dependencies: PortableTaskProjection["dependencies"] }>(
+          "SELECT id, dependencies FROM stash_tasks WHERE workspace_id = $1 ORDER BY id FOR UPDATE", [row.workspace_id]);
+        const graph = new Map(graphRows.rows.map((task) => [task.id, task.dependencies ?? []]));
+        if (update.dependencies.some((dependency) => dependency.taskId === row.id || !graph.has(dependency.taskId)))
+          return { status: "invalid_reference" as const };
+        graph.set(row.id, update.dependencies);
+        if (hasDependencyCycle(graph)) return { status: "invalid_reference" as const };
       }
       const next = { ...taskProjectionFromRow(row), ...update } as PortableTaskProjection & { statusId?: string };
       if (update.statusId) {
@@ -2002,6 +2007,24 @@ export class PostgresDatabase implements
       client.release();
     }
   }
+}
+
+function hasDependencyCycle(graph: ReadonlyMap<string, NonNullable<PortableTaskProjection["dependencies"]>>): boolean {
+  const outgoing = new Map<string, Set<string>>([...graph.keys()].map((id) => [id, new Set()]));
+  for (const [taskId, dependencies] of graph) for (const dependency of dependencies) {
+    const source = dependency.type === "depends_on" ? taskId : dependency.taskId;
+    const target = dependency.type === "depends_on" ? dependency.taskId : taskId;
+    outgoing.get(source)?.add(target);
+  }
+  const visiting = new Set<string>(); const visited = new Set<string>();
+  const visit = (id: string): boolean => {
+    if (visiting.has(id)) return true;
+    if (visited.has(id)) return false;
+    visiting.add(id);
+    for (const target of outgoing.get(id) ?? []) if (visit(target)) return true;
+    visiting.delete(id); visited.add(id); return false;
+  };
+  return [...outgoing.keys()].some(visit);
 }
 
 interface AccountRow { id: string; name: string; email: string; password_hash: string }
