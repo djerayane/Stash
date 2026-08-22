@@ -1,6 +1,7 @@
 import { Pool, type PoolClient } from "pg";
 
 import type { DatabaseProbe } from "./instance.js";
+import type { NoteRecord, NoteRepository } from "./notes.js";
 import type { BootstrapRecord, OwnerBootstrapRepository } from "./owner-bootstrap.js";
 import type { AccountAuthenticationRecord, PasswordAuthRepository, SessionRecord } from "./password-auth.js";
 import type { OidcAuthRepository, OidcIdentityKey, OidcIdentityRecord, OidcOrganizationConfiguration } from "./oidc-auth.js";
@@ -29,6 +30,7 @@ export class PostgresDatabase implements
   OwnerBootstrapRepository,
   PasswordAuthRepository,
   WorkspaceProjectRepository,
+  NoteRepository,
   OidcAuthRepository,
   AccountRecoveryRepository,
   OrganizationRoleRepository
@@ -194,6 +196,50 @@ export class PostgresDatabase implements
         record.id,
         "stash.project.v1",
         projection,
+      );
+      return "created";
+    });
+  }
+
+  async createNote(
+    memberId: string,
+    note: NoteRecord,
+  ): Promise<"created" | "workspace_forbidden" | "project_forbidden"> {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureNoteSchema(client);
+      const access = await client.query<{ allowed: boolean }>(
+        `SELECT (
+           (owner_type = 'personal' AND personal_owner_id = $2)
+           OR (owner_type = 'organization' AND EXISTS (
+             SELECT 1 FROM stash_organization_memberships membership
+             WHERE membership.organization_id = stash_workspaces.organization_owner_id
+               AND membership.account_id = $2
+           ))
+         ) AS allowed
+         FROM stash_workspaces WHERE id = $1`,
+        [note.workspaceId, memberId],
+      );
+      if (!access.rows[0]?.allowed) return "workspace_forbidden";
+      if (note.projectId) {
+        const project = await client.query(
+          "SELECT 1 FROM stash_projects WHERE id = $1 AND workspace_id = $2",
+          [note.projectId, note.workspaceId],
+        );
+        if (!project.rowCount) return "project_forbidden";
+      }
+      await client.query(
+        `INSERT INTO stash_notes
+          (id, workspace_id, project_id, content, tags, reminder_at, created_by_account_id)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)`,
+        [
+          note.id,
+          note.workspaceId,
+          note.projectId ?? null,
+          note.content,
+          JSON.stringify(note.tags),
+          note.reminder?.at ?? null,
+          note.createdByMemberId,
+        ],
       );
       return "created";
     });
@@ -715,6 +761,21 @@ export class PostgresDatabase implements
         created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (object_kind, object_id, revision)
       );
+    `);
+  }
+
+  async #ensureNoteSchema(client: PoolClient): Promise<void> {
+    await this.#ensureWorkspaceProjectSchema(client);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS stash_notes (
+        id UUID PRIMARY KEY,
+        workspace_id UUID NOT NULL REFERENCES stash_workspaces(id),
+        project_id UUID REFERENCES stash_projects(id),
+        content TEXT NOT NULL CHECK (length(content) > 0),
+        tags JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(tags) = 'array'),
+        reminder_at TIMESTAMPTZ,
+        created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id)
+      )
     `);
   }
 

@@ -4,6 +4,7 @@ import { PostgresDatabase } from "./postgres-database.js";
 import { PasswordAuthService } from "./password-auth.js";
 import { OidcAuthService } from "./oidc-auth.js";
 import { OidcManagementService } from "./oidc-management.js";
+import { NoteService } from "./notes.js";
 import { createAuthenticationSecretCodec } from "./authentication-secrets.js";
 import { AccountRecoveryService } from "./account-recovery.js";
 import { resolveWebAuthnConfiguration, WebAuthnPasskeyVerifier } from "./passkey-verifier.js";
@@ -53,6 +54,7 @@ async function main(): Promise<void> {
     passwordAuth,
     workspaceProjects: new WorkspaceProjectService(database),
     organizationRoles: new OrganizationRoleService(database),
+    notes: new NoteService(database),
     oidcAuth: new OidcAuthService(database),
     oidcManagement: new OidcManagementService(database),
     oidcCallbackOrigin: publicOrigin,
