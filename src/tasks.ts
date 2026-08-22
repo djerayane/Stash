@@ -41,12 +41,25 @@ export interface TaskActorRepository {
   findPortableMemberIdentity(memberId: string): Promise<PortableIdentity | undefined>;
 }
 
+export type TaskPlanningUpdate = Partial<Pick<PortableTaskProjection,
+  "title" | "assigneeIds" | "priority" | "labelNames" | "linkedNoteIds" | "dependencies" | "developmentLinks">>
+  & { statusId?: string; dueDate?: string | null; estimate?: number | null };
+
+export interface TaskPlanningRepository {
+  findTaskByKey(memberId: string, projectId: string, taskKey: string): Promise<
+    { status: "found"; task: PortableTaskProjection } | { status: "not_found" }
+  >;
+  updateTaskByKey(memberId: string, projectId: string, taskKey: string, update: TaskPlanningUpdate): Promise<
+    { status: "updated"; task: PortableTaskProjection } | { status: "not_found" | "invalid_reference" }
+  >;
+}
+
 export class InvalidTaskFromBlockInput extends Error {}
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export class TaskService {
-  constructor(private readonly tasks: TaskFromBlockRepository, private readonly actors: TaskActorRepository) {}
+  constructor(private readonly tasks: Partial<TaskFromBlockRepository & TaskPlanningRepository>, private readonly actors: TaskActorRepository) {}
 
   async createFromBlock(memberId: string, noteId: string, blockKey: string, value: unknown): Promise<CreateTaskFromBlockOutcome> {
     if (!uuid.test(noteId) || !uuid.test(blockKey) || value === null || typeof value !== "object" || Array.isArray(value))
@@ -57,6 +70,7 @@ export class TaskService {
       || !Object.keys(input).every((key) => key === "projectId" || key === "title")) throw new InvalidTaskFromBlockInput();
     const actor = await this.actors.findPortableMemberIdentity(memberId);
     if (!actor) throw new Error("member_identity_unavailable");
+    if (!this.tasks.createTaskFromBlock) throw new Error("task_creation_unavailable");
     return this.tasks.createTaskFromBlock(memberId, noteId, blockKey, {
       id: randomUUID(), projectId: input.projectId, title: input.title.trim(),
       createdAt: new Date().toISOString(), createdBy: actor,
@@ -65,6 +79,7 @@ export class TaskService {
 
   async listLinked(memberId: string, noteId: string) {
     if (!uuid.test(noteId)) throw new InvalidTaskFromBlockInput();
+    if (!this.tasks.listLinkedTasks) throw new Error("task_read_unavailable");
     return this.tasks.listLinkedTasks(memberId, noteId);
   }
 
@@ -76,11 +91,67 @@ export class TaskService {
       || typeof input.blockKey !== "string" || !uuid.test(input.blockKey)
       || !Object.keys(input).every((key) => key === "noteId" || key === "blockKey"))
       throw new InvalidTaskFromBlockInput();
+    if (!this.tasks.linkTaskToBlock) throw new Error("task_link_unavailable");
     return this.tasks.linkTaskToBlock(memberId, taskId, input.noteId, input.blockKey);
   }
 
   async listSourceBlocks(memberId: string, taskId: string) {
     if (!uuid.test(taskId)) throw new InvalidTaskFromBlockInput();
+    if (!this.tasks.listTaskSourceBlocks) throw new Error("task_read_unavailable");
     return this.tasks.listTaskSourceBlocks(memberId, taskId);
   }
+  async findByKey(memberId: string, projectId: string, taskKey: string) {
+    if (!uuid.test(projectId) || !isTaskKey(taskKey) || !this.tasks.findTaskByKey) throw new InvalidTaskFromBlockInput();
+    return this.tasks.findTaskByKey(memberId, projectId, taskKey.toUpperCase());
+  }
+
+  async updateByKey(memberId: string, projectId: string, taskKey: string, value: unknown) {
+    if (!uuid.test(projectId) || !isTaskKey(taskKey) || !this.tasks.updateTaskByKey || !isPlanningUpdate(value))
+      throw new InvalidTaskFromBlockInput();
+    const update = { ...value } as TaskPlanningUpdate;
+    if (typeof update.title === "string") update.title = update.title.trim();
+    if (update.assigneeIds) update.assigneeIds = [...new Set(update.assigneeIds)];
+    if (update.labelNames) update.labelNames = [...new Set(update.labelNames.map((label) => label.trim()))];
+    if (update.linkedNoteIds) update.linkedNoteIds = [...new Set(update.linkedNoteIds)];
+    return this.tasks.updateTaskByKey(memberId, projectId, taskKey.toUpperCase(), update);
+  }
+}
+
+function isTaskKey(value: string): boolean { return /^[A-Za-z][A-Za-z0-9-]{1,19}-[1-9][0-9]*$/.test(value); }
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+function isPlanningUpdate(value: unknown): value is TaskPlanningUpdate {
+  if (!isPlainObject(value) || Object.keys(value).length === 0) return false;
+  const allowed = ["title", "statusId", "assigneeIds", "priority", "labelNames", "dueDate", "estimate", "linkedNoteIds", "dependencies", "developmentLinks"];
+  if (!Object.keys(value).every((key) => allowed.includes(key))) return false;
+  if (value.title !== undefined && (typeof value.title !== "string" || !value.title.trim() || value.title.trim().length > 500)) return false;
+  if (value.statusId !== undefined && (typeof value.statusId !== "string" || !uuid.test(value.statusId))) return false;
+  for (const key of ["assigneeIds", "linkedNoteIds"] as const) {
+    const ids = value[key];
+    if (ids !== undefined && (!Array.isArray(ids) || ids.length > 100 || ids.some((id) => typeof id !== "string" || !uuid.test(id)))) return false;
+  }
+  if (value.priority !== undefined && !["none", "low", "medium", "high", "urgent"].includes(value.priority as string)) return false;
+  if (value.labelNames !== undefined && (!Array.isArray(value.labelNames) || value.labelNames.length > 100
+    || value.labelNames.some((label) => typeof label !== "string" || !label.trim() || label.trim().length > 100))) return false;
+  if (value.dueDate !== undefined && value.dueDate !== null && (typeof value.dueDate !== "string" || !isCalendarDate(value.dueDate))) return false;
+  if (value.estimate !== undefined && value.estimate !== null && (typeof value.estimate !== "number" || !Number.isFinite(value.estimate)
+    || value.estimate < 0 || value.estimate > 1_000_000)) return false;
+  if (value.dependencies !== undefined && (!Array.isArray(value.dependencies) || value.dependencies.length > 100
+    || value.dependencies.some((dependency) => !isPlainObject(dependency) || typeof dependency.taskId !== "string" || !uuid.test(dependency.taskId)
+      || !["depends_on", "required_by"].includes(dependency.type as string) || Object.keys(dependency).some((key) => !["taskId", "type"].includes(key))))) return false;
+  if (value.developmentLinks !== undefined && (!Array.isArray(value.developmentLinks) || value.developmentLinks.length > 100
+    || value.developmentLinks.some((link) => !isPlainObject(link) || typeof link.provider !== "string" || !link.provider.trim()
+      || typeof link.url !== "string" || !isHttpUrl(link.url) || !["branch", "commit", "pull_request"].includes(link.kind as string)
+      || Object.keys(link).some((key) => !["provider", "url", "kind"].includes(key))))) return false;
+  return true;
+}
+function isHttpUrl(value: string): boolean {
+  try { const url = new URL(value); return url.protocol === "https:" || url.protocol === "http:"; } catch { return false; }
+}
+function isCalendarDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split("-").map(Number) as [number, number, number];
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
 }

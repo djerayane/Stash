@@ -6,7 +6,8 @@ export function taskRoutes(service: TaskService, memberAccess: MemberAccessResol
   return {
     matches: (request, url) => (request.method === "POST" && /^\/api\/notes\/[^/]+\/blocks\/[^/]+\/tasks$/.test(url.pathname))
       || (request.method === "GET" && /^\/api\/notes\/[^/]+\/linked-tasks$/.test(url.pathname))
-      || (["GET", "POST"].includes(request.method ?? "") && /^\/api\/tasks\/[^/]+\/source-blocks$/.test(url.pathname)),
+      || (["GET", "POST"].includes(request.method ?? "") && /^\/api\/tasks\/[^/]+\/source-blocks$/.test(url.pathname))
+      || ((request.method === "GET" || request.method === "PATCH") && /^\/api\/projects\/[^/]+\/tasks\/[^/]+$/.test(url.pathname)),
     async handle(request, response, url) {
       const access = await memberAccess.authenticateBearer(request.headers.authorization);
       if (!access) { json(response, 401, { error: "unauthorized", message: "A valid Member session is required." }); return true; }
@@ -27,6 +28,17 @@ export function taskRoutes(service: TaskService, memberAccess: MemberAccessResol
             message: "That Block identity occurs more than once. Repair the Note before linking it." });
           else json(response, 404, { error: result.status, message: result.status === "task_not_found" ? "This Task is unavailable."
             : result.status === "note_not_found" ? "This Note is unavailable." : "That Block does not exist in this Note." });
+          return true;
+        }
+        if (/^\/api\/projects\//.test(url.pathname)) {
+          let projectId: string; let taskKey: string;
+          try { const segments = url.pathname.split("/"); projectId = decodeURIComponent(segments[3]!); taskKey = decodeURIComponent(segments[5]!); }
+          catch { throw new InvalidTaskFromBlockInput(); }
+          const result = request.method === "GET" ? await service.findByKey(access.accountId, projectId!, taskKey!)
+            : await service.updateByKey(access.accountId, projectId!, taskKey!, await readJson(request));
+          if (result.status === "found" || result.status === "updated") json(response, 200, { task: result.task });
+          else if (result.status === "invalid_reference") json(response, 422, { error: result.status, message: "One or more Task properties refer to unavailable Project data." });
+          else json(response, 404, { error: "task_not_found", message: "This Task is unavailable in that Project." });
           return true;
         }
         if (request.method === "GET") {

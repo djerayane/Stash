@@ -149,6 +149,25 @@ as `linked` only while its exact Block identity occurs once, `broken` after the 
 or `ambiguous` when malformed imported content repeats the identity. Linking rejects that ambiguity
 without mutation; Stash never guesses which Block is the intended target.
 
+Members may also resolve a Task through `/api/projects/{projectId}/tasks/{taskKey}`. Keys are
+case-insensitive at the HTTP boundary and canonical uppercase values are returned. The Project id is
+part of the lookup, so the same readable sequence remains scoped to its Project. Task updates append
+a complete `stash.task.v1` projection revision and may manage the title, Workflow status, assignees,
+priority, labels, due date, estimate, linked Notes, Dependencies, and development links. Stable Task
+identity, Project, Task Key, source relationships, creator, and creation time cannot be overwritten
+through this boundary. Clearing an optional due date or estimate uses JSON `null`; arrays use an empty
+array. References to unavailable statuses, Members, Notes, or Tasks are rejected atomically. A Guest
+may resolve Tasks only in Projects explicitly shared with them; that read-only grant never authorizes
+Task updates. Dependencies are stored once as canonical directed edges. Reads derive `depends_on`
+for the dependent endpoint and `required_by` for the prerequisite endpoint; either endpoint can
+replace its complete visible relationship set without creating a second copy of an edge. Dependency
+replacements lock and validate the complete Workspace Task graph in one transaction. Any direct or
+indirect cycle rejects the whole update before canonical state changes. Successful changes append
+portable projection revisions for every endpoint whose derived view changed.
+Instances that briefly used the earlier per-Task dependency JSON upgrade it once into canonical
+edges (deduplicating equivalent inverse forms), then remove that operational column. It is never a
+second read or write source.
+
 The operational Note body is a versioned rich-text document rendered by Stash's WYSIWYG editor.
 Every successful edit atomically increments the Note revision and records another `stash.note.v1`
 outbox revision whose `content` is the complete Markdown rendering. Ordinary Blocks have no
