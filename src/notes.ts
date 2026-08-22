@@ -67,6 +67,18 @@ export type NoteEditOperation =
   | { id: string; type: "insert_block"; blockKey: string; afterBlockKey: string | null; block: RichTextBlock }
   | { id: string; type: "delete_block"; blockKey: string };
 export interface NoteEditBatch { baseRevision: number; operations: NoteEditOperation[] }
+export interface NoteEditConflict {
+  id: string;
+  noteId: string;
+  baseRevision: number;
+  preservedDocument: RichTextDocument;
+  preservedMarkdown: string;
+  operations: NoteEditOperation[];
+  createdAt: string;
+  resolvedAt?: string;
+  resolution?: NoteConflictResolution;
+}
+export type NoteConflictResolution = "keep_current" | "apply_contribution";
 function canonicalJson(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalJson);
   if (value !== null && typeof value === "object") return Object.fromEntries(Object.entries(value as Record<string, unknown>)
@@ -80,7 +92,10 @@ export function noteOperationDigest(operation: NoteEditOperation): string {
   return createHash("sha256").update(JSON.stringify(canonicalJson(canonical))).digest("hex");
 }
 export type NoteEditOutcome = { status: "updated" | "duplicate"; note: NoteRecord; projection: PortableNoteProjection }
-  | { status: "not_found" | "conflict_preserved" | "invalid_reference" };
+  | { status: "conflict_preserved"; conflictId?: string }
+  | { status: "not_found" | "invalid_reference" };
+export type NoteConflictResolutionOutcome = { status: "resolved"; note: NoteRecord; projection: PortableNoteProjection }
+  | { status: "not_found" | "conflict_not_found" | "already_resolved" | "invalid_reference" };
 
 export interface NoteRepository {
   findPortableMemberIdentity(memberId: string): Promise<PortableIdentity | undefined>;
@@ -98,6 +113,10 @@ export interface NoteRepository {
   >;
   findNoteForMember(memberId: string, noteId: string): Promise<NoteRecord | undefined>;
   applyNoteOperations(memberId: string, noteId: string, batch: NoteEditBatch): Promise<NoteEditOutcome>;
+  listNoteEditConflicts(memberId: string, noteId: string): Promise<
+    { status: "found"; conflicts: NoteEditConflict[] } | { status: "not_found" }
+  >;
+  resolveNoteEditConflict(memberId: string, noteId: string, conflictId: string, resolution: NoteConflictResolution): Promise<NoteConflictResolutionOutcome>;
 }
 
 export class InvalidNoteInput extends Error {}
@@ -230,6 +249,18 @@ export class NoteService {
     }
     if (new Set(operations.map(({ id }) => id)).size !== operations.length) throw new InvalidNoteEdit();
     return this.#repository.applyNoteOperations(memberId, noteId, { baseRevision: value.baseRevision as number, operations });
+  }
+
+  async listConflicts(memberId: string, noteId: string) {
+    if (!isUuid(noteId)) throw new InvalidNoteEdit();
+    return this.#repository.listNoteEditConflicts(memberId, noteId);
+  }
+
+  async resolveConflict(memberId: string, noteId: string, conflictId: string, value: unknown): Promise<NoteConflictResolutionOutcome> {
+    if (!isUuid(noteId) || !isUuid(conflictId) || !isPlainObject(value)
+      || (value.resolution !== "keep_current" && value.resolution !== "apply_contribution")
+      || Object.keys(value).length !== 1) throw new InvalidNoteEdit();
+    return this.#repository.resolveNoteEditConflict(memberId, noteId, conflictId, value.resolution);
   }
 }
 

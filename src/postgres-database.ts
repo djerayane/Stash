@@ -2,7 +2,7 @@ import { randomUUID, timingSafeEqual } from "node:crypto";
 import { Pool, type PoolClient } from "pg";
 
 import type { DatabaseProbe } from "./instance.js";
-import { noteOperationDigest, type NoteEditBatch, type NoteRecord, type NoteRepository, type NoteTriageChange, type NoteTriageResult, type PortableNoteProjection, type PortableTaskProjection, type TaskCreation } from "./notes.js";
+import { noteOperationDigest, type NoteConflictResolution, type NoteEditBatch, type NoteEditConflict, type NoteRecord, type NoteRepository, type NoteTriageChange, type NoteTriageResult, type PortableNoteProjection, type PortableTaskProjection, type TaskCreation } from "./notes.js";
 import { richTextToMarkdown } from "./rich-text.js";
 import type { BootstrapRecord, OwnerBootstrapRepository } from "./owner-bootstrap.js";
 import type { AccountAuthenticationRecord, PasswordAuthRepository, SessionRecord } from "./password-auth.js";
@@ -568,7 +568,7 @@ export class PostgresDatabase implements
         await client.query("INSERT INTO stash_note_edit_conflicts (id, note_id, base_revision, document, markdown, operations, created_by_account_id) VALUES ($1,$2,$3,$4::jsonb,$5,$6::jsonb,$7)",
           [conflictId, noteId, batch.baseRevision, JSON.stringify(current.document), current.content, JSON.stringify(pending), memberId]);
         for (const operation of pending) await client.query("INSERT INTO stash_note_conflict_operations (note_id,operation_id,conflict_id,operation_digest) VALUES ($1,$2,$3,$4)", [noteId, operation.id, conflictId, noteOperationDigest(operation)]);
-        return { status: "conflict_preserved" as const };
+        return { status: "conflict_preserved" as const, conflictId };
       }
       const blocks = [...current.document.blocks];
       for (const operation of pending) {
@@ -594,6 +594,91 @@ export class PostgresDatabase implements
       for (const operation of pending) await client.query("INSERT INTO stash_note_operations (note_id,operation_id,base_revision,applied_revision,block_key,operation_digest) VALUES ($1,$2,$3,$4,$5,$6)", [noteId, operation.id, batch.baseRevision, note.revision, operation.blockKey, noteOperationDigest(operation)]);
       await this.#recordPortableProjection(client, "Note", note.id, "stash.note.v1", projection);
       return { status: "updated" as const, note, projection };
+    });
+  }
+
+  async listNoteEditConflicts(memberId: string, noteId: string) {
+    await this.#ensureNoteSchemaForPool();
+    const result = await this.#pool.query<{
+      id: string; note_id: string; base_revision: number; document: NoteRecord["document"]; markdown: string;
+      operations: NoteEditBatch["operations"] | null; created_at: Date; resolved_at: Date | null; resolution: NoteConflictResolution | null;
+    }>(`SELECT conflict.id, conflict.note_id, conflict.base_revision, conflict.document, conflict.markdown,
+        conflict.operations, conflict.created_at, conflict.resolved_at, conflict.resolution
+      FROM stash_note_edit_conflicts conflict
+      JOIN stash_notes note ON note.id = conflict.note_id
+      JOIN stash_workspaces workspace ON workspace.id = note.workspace_id
+      WHERE conflict.note_id = $1 AND conflict.resolved_at IS NULL
+        AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2)
+          OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+            WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)))
+      ORDER BY conflict.created_at, conflict.id`, [noteId, memberId]);
+    if (!result.rowCount) {
+      const note = await this.findNoteForMember(memberId, noteId);
+      if (!note) return { status: "not_found" as const };
+    }
+    const conflicts: NoteEditConflict[] = result.rows.map((row) => ({ id: row.id, noteId: row.note_id,
+      baseRevision: row.base_revision, preservedDocument: row.document, preservedMarkdown: row.markdown,
+      operations: row.operations ?? [], createdAt: row.created_at.toISOString(),
+      ...(row.resolved_at ? { resolvedAt: row.resolved_at.toISOString() } : {}), ...(row.resolution ? { resolution: row.resolution } : {}) }));
+    return { status: "found" as const, conflicts };
+  }
+
+  async resolveNoteEditConflict(memberId: string, noteId: string, conflictId: string, resolution: NoteConflictResolution) {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureNoteSchema(client);
+      const access = await client.query<any>(`SELECT note.*, creator.name AS creator_name
+        FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id = note.workspace_id
+        JOIN stash_accounts creator ON creator.id = note.created_by_account_id
+        WHERE note.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2)
+          OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+            WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)))
+        FOR UPDATE OF note`, [noteId, memberId]);
+      const row = access.rows[0];
+      if (!row) return { status: "not_found" as const };
+      const found = await client.query<{ operations: NoteEditBatch["operations"] | null; resolved_at: Date | null }>(
+        "SELECT operations, resolved_at FROM stash_note_edit_conflicts WHERE id = $1 AND note_id = $2 FOR UPDATE", [conflictId, noteId]);
+      const conflict = found.rows[0];
+      if (!conflict) return { status: "conflict_not_found" as const };
+      if (conflict.resolved_at) return { status: "already_resolved" as const };
+      const current: NoteRecord = { id: row.id, workspaceId: row.workspace_id, content: row.content, document: row.document,
+        revision: row.revision, tags: row.tags, createdByMemberId: row.created_by_account_id, createdAt: new Date(row.created_at).toISOString(),
+        ...(row.project_id ? { projectId: row.project_id } : {}), ...(row.reminder_at ? { reminder: { at: new Date(row.reminder_at).toISOString() } } : {}),
+        ...(row.archived_at ? { archivedAt: new Date(row.archived_at).toISOString() } : {}) };
+      const projectionFor = (note: NoteRecord): PortableNoteProjection => ({ schema: "stash.note.v1", id: note.id,
+        workspaceId: note.workspaceId, content: note.content, tags: note.tags, createdAt: note.createdAt,
+        createdBy: { localAccountId: row.created_by_account_id, displayName: row.creator_name },
+        ...(note.projectId ? { projectId: note.projectId } : {}), ...(note.reminder ? { reminder: note.reminder } : {}) });
+      let note = current;
+      if (resolution === "apply_contribution") {
+        const operations = conflict.operations ?? [];
+        const blocks = [...current.document.blocks];
+        for (const operation of operations) {
+          const index = blocks.findIndex(({ blockKey }) => blockKey === operation.blockKey);
+          if (operation.type === "insert_block") {
+            if (index >= 0 || operation.block.id) return { status: "invalid_reference" as const };
+            const after = operation.afterBlockKey === null ? -1 : blocks.findIndex(({ blockKey }) => blockKey === operation.afterBlockKey);
+            if (operation.afterBlockKey !== null && after < 0) return { status: "invalid_reference" as const };
+            blocks.splice(after + 1, 0, operation.block);
+          } else if (operation.type === "delete_block") {
+            if (index < 0 || blocks[index]!.id) return { status: "invalid_reference" as const };
+            blocks.splice(index, 1);
+          } else {
+            if (index < 0 || blocks[index]!.id !== operation.block.id) return { status: "invalid_reference" as const };
+            blocks[index] = operation.block;
+          }
+        }
+        if (!blocks.length) return { status: "invalid_reference" as const };
+        const document = { type: "doc" as const, blocks };
+        note = { ...current, document, content: richTextToMarkdown(document), revision: current.revision + 1 };
+        await client.query("UPDATE stash_notes SET content=$2, document=$3::jsonb, revision=$4 WHERE id=$1", [noteId, note.content, JSON.stringify(document), note.revision]);
+        for (const operation of operations) await client.query(`INSERT INTO stash_note_operations
+          (note_id,operation_id,base_revision,applied_revision,block_key,operation_digest) VALUES ($1,$2,$3,$4,$5,$6)
+          ON CONFLICT (note_id, operation_id) DO NOTHING`, [noteId, operation.id, current.revision, note.revision, operation.blockKey, noteOperationDigest(operation)]);
+        await this.#recordPortableProjection(client, "Note", note.id, "stash.note.v1", projectionFor(note));
+      }
+      await client.query(`UPDATE stash_note_edit_conflicts SET resolved_at = CURRENT_TIMESTAMP, resolution = $3,
+        resolved_by_account_id = $4 WHERE id = $1 AND note_id = $2`, [conflictId, noteId, resolution, memberId]);
+      return { status: "resolved" as const, note, projection: projectionFor(note) };
     });
   }
   async close(): Promise<void> {
@@ -1449,9 +1534,13 @@ export class PostgresDatabase implements
       operations JSONB,
       created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id),
       created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      resolved_at TIMESTAMPTZ
+      resolved_at TIMESTAMPTZ,
+      resolution TEXT CHECK (resolution IN ('keep_current', 'apply_contribution')),
+      resolved_by_account_id UUID REFERENCES stash_accounts(id)
     )`);
     await client.query("ALTER TABLE stash_note_edit_conflicts ADD COLUMN IF NOT EXISTS operations JSONB");
+    await client.query("ALTER TABLE stash_note_edit_conflicts ADD COLUMN IF NOT EXISTS resolution TEXT CHECK (resolution IN ('keep_current', 'apply_contribution'))");
+    await client.query("ALTER TABLE stash_note_edit_conflicts ADD COLUMN IF NOT EXISTS resolved_by_account_id UUID REFERENCES stash_accounts(id)");
     await client.query(`CREATE TABLE IF NOT EXISTS stash_note_conflict_operations (
       note_id UUID NOT NULL REFERENCES stash_notes(id) ON DELETE CASCADE,
       operation_id UUID NOT NULL,

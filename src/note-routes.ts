@@ -8,6 +8,8 @@ export function noteRoutes(service: NoteService, memberAccess: MemberAccessResol
     matches: (request, url) => (request.method === "POST" && /^\/api\/workspaces\/[^/]+\/notes$/.test(url.pathname))
       || (request.method === "GET" && /^\/api\/workspaces\/[^/]+\/inbox$/.test(url.pathname))
       || (request.method === "POST" && /^\/api\/workspaces\/[^/]+\/inbox\/[^/]+\/triage$/.test(url.pathname))
+      || (request.method === "GET" && /^\/api\/notes\/[^/]+\/conflicts$/.test(url.pathname))
+      || (request.method === "PUT" && /^\/api\/notes\/[^/]+\/conflicts\/[^/]+$/.test(url.pathname))
       || (["GET", "PUT"].includes(request.method ?? "") && /^\/api\/notes\/[^/]+$/.test(url.pathname)),
     async handle(request, response, url) {
       const access = await memberAccess.authenticateBearer(request.headers.authorization);
@@ -16,6 +18,27 @@ export function noteRoutes(service: NoteService, memberAccess: MemberAccessResol
         return true;
       }
       try {
+        if (request.method === "GET" && url.pathname.endsWith("/conflicts")) {
+          let noteId: string;
+          try { noteId = decodeURIComponent(url.pathname.split("/")[3]!); } catch { throw new InvalidNoteEdit(); }
+          const result = await service.listConflicts(access.accountId, noteId);
+          if (result.status === "not_found") json(response, 404, { error: "note_not_found", message: "This Note is unavailable." });
+          else json(response, 200, { conflicts: result.conflicts });
+          return true;
+        }
+        if (request.method === "PUT" && url.pathname.includes("/conflicts/")) {
+          let noteId: string; let conflictId: string;
+          try { noteId = decodeURIComponent(url.pathname.split("/")[3]!); conflictId = decodeURIComponent(url.pathname.split("/")[5]!); }
+          catch { throw new InvalidNoteEdit(); }
+          const result = await service.resolveConflict(access.accountId, noteId, conflictId, await readJson(request));
+          if (result.status === "resolved") {
+            const { createdByMemberId: _, ...note } = result.note;
+            json(response, 200, { ...note, portableProjection: { format: result.projection.schema, state: "recorded" } });
+          } else if (result.status === "already_resolved") json(response, 409, { error: "conflict_already_resolved", message: "This conflict has already been resolved." });
+          else if (result.status === "invalid_reference") json(response, 422, { error: "invalid_block_reference", message: "The preserved contribution no longer has an unambiguous Block target." });
+          else json(response, 404, { error: result.status, message: "The requested Note conflict could not be found." });
+          return true;
+        }
         if (request.method === "GET" && url.pathname.startsWith("/api/notes/")) {
           let noteId: string;
           try { noteId = decodeURIComponent(url.pathname.split("/")[3]!); } catch { throw new InvalidNoteEdit(); }
@@ -32,7 +55,8 @@ export function noteRoutes(service: NoteService, memberAccess: MemberAccessResol
             const { createdByMemberId: _, ...note } = result.note;
             json(response, 200, { ...note, portableProjection: { format: result.projection.schema, state: "recorded" } });
           } else if (result.status === "conflict_preserved") {
-            json(response, 409, { error: "revision_conflict", message: "This Note changed since editing began. Your version was preserved for conflict resolution." });
+            json(response, 409, { error: "revision_conflict", message: "This Note changed since editing began. Your version was preserved for conflict resolution.",
+              ...(result.conflictId ? { conflictId: result.conflictId } : {}) });
           } else if (result.status === "invalid_reference") {
             json(response, 422, { error: "invalid_block_reference", message: "A Block reference is missing or ambiguous. Reload the Note and repair it explicitly." });
           } else json(response, 404, { error: "note_not_found", message: "This Note is unavailable." });

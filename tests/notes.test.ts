@@ -23,6 +23,7 @@ class ProtocolCompatibleNoteDatabase implements DatabaseProbe, NoteRepository {
   readonly conflicts: NoteEditBatch[] = [];
   readonly applied = new Map<string, { revision: number; blockKey: string; digest: string }>();
   readonly conflictIds = new Set<string>();
+  readonly editConflicts = new Map<string, import("../src/notes.js").NoteEditConflict>();
   failure: Error | undefined;
   projectionFailure: Error | undefined;
   updateFailure: Error | undefined;
@@ -67,7 +68,11 @@ class ProtocolCompatibleNoteDatabase implements DatabaseProbe, NoteRepository {
     if (!pending.length) return batch.operations.some(({ id }) => this.conflictIds.has(id)) ? { status: "conflict_preserved" as const }
       : { status: "duplicate" as const, note: current, projection: projection(current) };
     if (pending.some(({ blockKey }) => [...this.applied.values()].some((entry) => entry.revision > batch.baseRevision && entry.blockKey === blockKey))) {
-      this.conflicts.push(batch); for (const operation of pending) this.conflictIds.add(operation.id); return { status: "conflict_preserved" as const };
+      this.conflicts.push(batch); for (const operation of pending) this.conflictIds.add(operation.id);
+      const id = "99999999-9999-4999-8999-999999999999";
+      this.editConflicts.set(id, { id, noteId, baseRevision: batch.baseRevision, preservedDocument: current.document,
+        preservedMarkdown: current.content, operations: pending, createdAt: "2026-08-22T10:00:00.000Z" });
+      return { status: "conflict_preserved" as const, conflictId: id };
     }
     const blocks = [...current.document.blocks];
     for (const operation of pending) { const index = blocks.findIndex(({ blockKey }) => blockKey === operation.blockKey);
@@ -80,6 +85,30 @@ class ProtocolCompatibleNoteDatabase implements DatabaseProbe, NoteRepository {
     for (const operation of pending) this.applied.set(operation.id, { revision: note.revision, blockKey: operation.blockKey, digest: noteOperationDigest(operation) });
     this.notes.set(note.id, note); this.portableProjectionOutbox.push(projection(note));
     return { status: "updated" as const, note, projection: projection(note) };
+  }
+
+  async listNoteEditConflicts(memberId: string, noteId: string) {
+    if ((memberId !== "ada" && memberId !== "grace") || !this.notes.has(noteId)) return { status: "not_found" as const };
+    return { status: "found" as const, conflicts: [...this.editConflicts.values()].filter((conflict) => conflict.noteId === noteId && !conflict.resolvedAt) };
+  }
+
+  async resolveNoteEditConflict(memberId: string, noteId: string, conflictId: string, resolution: "keep_current" | "apply_contribution") {
+    const current = this.notes.get(noteId); const conflict = this.editConflicts.get(conflictId);
+    if ((memberId !== "ada" && memberId !== "grace") || !current) return { status: "not_found" as const };
+    if (!conflict || conflict.noteId !== noteId) return { status: "conflict_not_found" as const };
+    if (conflict.resolvedAt) return { status: "already_resolved" as const };
+    if (resolution === "keep_current") { conflict.resolvedAt = "2026-08-22T10:01:00.000Z"; conflict.resolution = resolution;
+      return { status: "resolved" as const, note: current, projection: this.portableProjectionOutbox.at(-1)! }; }
+    const blocks = [...current.document.blocks];
+    for (const operation of conflict.operations) { const index = blocks.findIndex(({ blockKey }) => blockKey === operation.blockKey);
+      if (operation.type === "replace_block" && index >= 0) blocks[index] = operation.block;
+      else if (operation.type === "delete_block" && index >= 0 && !blocks[index]!.id) blocks.splice(index, 1);
+      else if (operation.type === "insert_block" && index < 0) { const after = operation.afterBlockKey === null ? -1 : blocks.findIndex(({ blockKey }) => blockKey === operation.afterBlockKey); if (operation.afterBlockKey !== null && after < 0) return { status: "invalid_reference" as const }; blocks.splice(after + 1, 0, operation.block); }
+      else return { status: "invalid_reference" as const }; }
+    const document = { type: "doc" as const, blocks }; const note = { ...current, document, content: richTextToMarkdown(document), revision: current.revision + 1 };
+    this.notes.set(noteId, note); conflict.resolvedAt = "2026-08-22T10:01:00.000Z"; conflict.resolution = resolution;
+    const projection = { ...this.portableProjectionOutbox.at(-1)!, content: note.content }; this.portableProjectionOutbox.push(projection);
+    return { status: "resolved" as const, note, projection };
   }
 }
 
@@ -370,5 +399,56 @@ describe("editing Notes", () => {
     assert.equal(unavailable.status, 503);
     assert.doesNotMatch(await unavailable.text(), /secret/i);
     assert.match(database.notes.get(note.id)!.content, /First changed/);
+  });
+
+  it("exposes a focused conflict and explicitly applies the preserved contribution", async () => {
+    const { baseUrl, database, note } = await run();
+    const block = database.notes.get(note.id)!.document.blocks[0]!;
+    const update = (id: string, text: string) => fetch(`${baseUrl}/api/notes/${note.id}`, { method: "PUT",
+      headers: { authorization: "Bearer member-ada", "content-type": "application/json" },
+      body: JSON.stringify({ baseRevision: 1, operations: [{ id, type: "replace_block", blockKey: block.blockKey,
+        block: { ...block, content: [{ text }] } }] }) });
+    assert.equal((await update(operationId, "Published contribution")).status, 200);
+    const conflicted = await update(conflictOperationId, "Preserved contribution");
+    assert.equal(conflicted.status, 409);
+    const conflictBody = await conflicted.json() as { conflictId: string };
+    assert.equal(conflictBody.conflictId, "99999999-9999-4999-8999-999999999999");
+
+    const listed = await fetch(`${baseUrl}/api/notes/${note.id}/conflicts`, { headers: { authorization: "Bearer member-grace" } });
+    assert.equal(listed.status, 200);
+    const listBody = await listed.json() as { conflicts: Array<Record<string, unknown>> };
+    assert.equal(listBody.conflicts.length, 1);
+    assert.equal(listBody.conflicts[0]?.createdByMemberId, undefined);
+    assert.deepEqual((listBody.conflicts[0]?.operations as NoteEditBatch["operations"])[0], database.conflicts[0]!.operations[0]);
+
+    const resolved = await fetch(`${baseUrl}/api/notes/${note.id}/conflicts/${conflictBody.conflictId}`, { method: "PUT",
+      headers: { authorization: "Bearer member-grace", "content-type": "application/json" }, body: JSON.stringify({ resolution: "apply_contribution" }) });
+    assert.equal(resolved.status, 200);
+    assert.match((await resolved.json() as NoteRecord).content, /Preserved contribution/);
+    assert.equal((await fetch(`${baseUrl}/api/notes/${note.id}/conflicts/${conflictBody.conflictId}`, { method: "PUT",
+      headers: { authorization: "Bearer member-grace", "content-type": "application/json" }, body: JSON.stringify({ resolution: "apply_contribution" }) })).status, 409);
+    assert.deepEqual((await (await fetch(`${baseUrl}/api/notes/${note.id}/conflicts`, { headers: { authorization: "Bearer member-grace" } })).json() as { conflicts: unknown[] }).conflicts, []);
+  });
+
+  it("keeps the published Note when a Member dismisses a preserved contribution", async () => {
+    const { baseUrl, database, note } = await run();
+    const block = database.notes.get(note.id)!.document.blocks[0]!;
+    const replace = (id: string, text: string) => ({ baseRevision: 1, operations: [{ id, type: "replace_block", blockKey: block.blockKey,
+      block: { ...block, content: [{ text }] } }] });
+    const request = (body: unknown, token = "member-ada") => fetch(`${baseUrl}/api/notes/${note.id}`, { method: "PUT",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(body) });
+    assert.equal((await request(replace(operationId, "Published"))).status, 200);
+    const conflict = await request(replace(conflictOperationId, "Dismissed"));
+    const { conflictId } = await conflict.json() as { conflictId: string };
+    const endpoint = `${baseUrl}/api/notes/${note.id}/conflicts/${conflictId}`;
+    assert.equal((await fetch(endpoint, { method: "PUT", headers: { authorization: "Bearer unknown", "content-type": "application/json" },
+      body: JSON.stringify({ resolution: "keep_current" }) })).status, 401);
+    assert.equal((await fetch(endpoint, { method: "PUT", headers: { authorization: "Bearer member-ada", "content-type": "application/json" },
+      body: JSON.stringify({ resolution: "guess" }) })).status, 422);
+    const dismissed = await fetch(endpoint, { method: "PUT", headers: { authorization: "Bearer member-ada", "content-type": "application/json" },
+      body: JSON.stringify({ resolution: "keep_current" }) });
+    assert.equal(dismissed.status, 200);
+    assert.match((await dismissed.json() as NoteRecord).content, /Published/);
+    assert.equal(database.notes.get(note.id)!.revision, 2);
   });
 });
