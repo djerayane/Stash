@@ -17,6 +17,7 @@ import { MemberLocalizationService } from "./member-localization.js";
 import { InvitationService } from "./invitations.js";
 import { GitHubAppClient } from "./github-app.js";
 import { RepositoryConnectionService } from "./repository-connections.js";
+import { TaskService } from "./tasks.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -65,6 +66,7 @@ async function main(): Promise<void> {
     invitations: new InvitationService(database),
     ...(githubApp ? { repositoryConnections: new RepositoryConnectionService(database, githubApp) } : {}),
     notes: new NoteService(database),
+    tasks: new TaskService(database, database),
     memberLocalization: new MemberLocalizationService(database),
     oidcAuth: new OidcAuthService(database),
     oidcManagement: new OidcManagementService(database),

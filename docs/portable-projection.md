@@ -111,6 +111,12 @@ inside the same transaction so keys are never duplicated or reused. The source N
 All referenced Notes and Projects must exist in the same authorized Workspace; a failed validation
 or outbox write rolls back the whole triage operation.
 
+Tasks created from a Block additionally record `sourceBlocks` entries containing the stable Note and
+Block identities. The first successful relationship sparsely assigns the Block's portable UUID and
+records the updated Note projection in the same transaction as the Task key, Backlog status,
+relationship, and Task projection. Later Tasks from that Block reuse the UUID; the authored Block
+content stays in place and is not copied into the Task.
+
 The operational Note body is a versioned rich-text document rendered by Stash's WYSIWYG editor.
 Every successful edit atomically increments the Note revision and records another `stash.note.v1`
 outbox revision whose `content` is the complete Markdown rendering. Ordinary Blocks have no

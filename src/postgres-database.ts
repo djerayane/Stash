@@ -25,6 +25,7 @@ import type {
 } from "./workspaces-projects.js";
 import type { MemberLocalizationPreferences, MemberLocalizationRepository } from "./member-localization.js";
 import type { PortableRepositoryConnectionProjection, RepositoryConnectionRecord, RepositoryConnectionRepository } from "./repository-connections.js";
+import type { CreateTaskFromBlockDraft, TaskFromBlockRepository } from "./tasks.js";
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
@@ -47,7 +48,8 @@ export class PostgresDatabase implements
   OrganizationRoleRepository,
   MemberLocalizationRepository,
   InvitationRepository,
-  RepositoryConnectionRepository
+  RepositoryConnectionRepository,
+  TaskFromBlockRepository
 {
   readonly #pool: Pool;
   readonly #authenticationSecrets: AuthenticationSecretCodec;
@@ -333,6 +335,49 @@ export class PostgresDatabase implements
         triageObjectKind(result), triageObjectId(result, noteId),
         projection.schema, projection);
       return { status: "updated" as const, result };
+    });
+  }
+
+  async createTaskFromBlock(memberId: string, noteId: string, blockKey: string, draft: CreateTaskFromBlockDraft) {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureNoteSchema(client);
+      const source = await client.query<any>(`SELECT note.workspace_id, note.content, note.document, note.revision,
+        note.tags, note.project_id, note.reminder_at, note.created_by_account_id, note.created_at, note.archived_at
+        , creator.name AS created_by_name FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id = note.workspace_id
+        JOIN stash_accounts creator ON creator.id = note.created_by_account_id
+        WHERE note.id = $1 AND note.archived_at IS NULL AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2)
+        OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2))) FOR UPDATE`,
+      [noteId, memberId]);
+      const row = source.rows[0];
+      if (!row) return { status: "note_not_found" as const };
+      const project = await client.query("SELECT 1 FROM stash_projects WHERE id = $1 AND workspace_id = $2", [draft.projectId, row.workspace_id]);
+      if (!project.rowCount) return { status: "project_forbidden" as const };
+      const blocks = row.document.blocks as Array<{ blockKey?: string; id?: string }>;
+      const matches = blocks.filter((block) => block.blockKey === blockKey);
+      if (matches.length !== 1) return { status: "block_not_found" as const };
+      const block = matches[0]!;
+      const blockId = block.id ?? randomUUID();
+      const noteProjection = () => ({ schema: "stash.note.v1" as const, id: noteId, workspaceId: row.workspace_id,
+        content: row.content, tags: row.tags, createdAt: new Date(row.created_at).toISOString(),
+        createdBy: { localAccountId: row.created_by_account_id, displayName: row.created_by_name },
+        ...(row.project_id ? { projectId: row.project_id } : {}), ...(row.reminder_at ? { reminder: { at: new Date(row.reminder_at).toISOString() } } : {}) });
+      if (!block.id) {
+        block.id = blockId;
+        const content = richTextToMarkdown(row.document);
+        await client.query("UPDATE stash_notes SET document = $2::jsonb, content = $3, revision = revision + 1 WHERE id = $1",
+          [noteId, JSON.stringify(row.document), content]);
+        row.content = content;
+        await this.#recordPortableProjection(client, "Note", noteId, "stash.note.v1", noteProjection());
+      }
+      const task = await this.#createTask(client, { ...draft, workspaceId: row.workspace_id, sourceNoteIds: [noteId],
+        sourceBlocks: [{ noteId, blockId }] });
+      await client.query("INSERT INTO stash_tasks (id, workspace_id, project_id, task_key, workflow_status_id, title, created_by_account_id, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+        [task.id, row.workspace_id, task.projectId, task.key, task.status.id, task.title, memberId, task.createdAt]);
+      await client.query("INSERT INTO stash_task_note_sources (task_id, note_id) VALUES ($1,$2)", [task.id, noteId]);
+      await client.query("INSERT INTO stash_task_block_sources (task_id, note_id, block_id) VALUES ($1,$2,$3)", [task.id, noteId, blockId]);
+      await this.#recordPortableProjection(client, "Task", task.id, task.schema, task);
+      return { status: "created" as const, task, blockId };
     });
   }
 
@@ -1317,6 +1362,10 @@ export class PostgresDatabase implements
       );
       CREATE TABLE IF NOT EXISTS stash_task_note_sources (
         task_id UUID NOT NULL REFERENCES stash_tasks(id), note_id UUID NOT NULL REFERENCES stash_notes(id), PRIMARY KEY (task_id, note_id)
+      );
+      CREATE TABLE IF NOT EXISTS stash_task_block_sources (
+        task_id UUID NOT NULL REFERENCES stash_tasks(id), note_id UUID NOT NULL REFERENCES stash_notes(id), block_id UUID NOT NULL,
+        PRIMARY KEY (task_id, note_id, block_id)
       )
     `);
     await client.query("ALTER TABLE stash_notes ADD COLUMN IF NOT EXISTS document JSONB");
