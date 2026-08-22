@@ -12,8 +12,18 @@ export class EncryptedStateMobileCaptureStore implements EncryptedMobileCaptureS
   async listCaptures() { await this.#writeBarrier; return this.#read<MobileCapture[]>(outboxKey, []); }
   async saveCapture(capture: MobileCapture) { await this.#mutate((items) => [...items.filter(({ id }) => id !== capture.id), capture]); }
   async removeCapture(id: string) { await this.#mutate((items) => items.filter((capture) => capture.id !== id)); }
-  loadOptions() { return this.#read<MobileCaptureOptions>(optionsKey, { projects: [], tags: [], reminders: [] }); }
-  saveOptions(options: MobileCaptureOptions) { return this.#write(optionsKey, options); }
+  async loadOptions(scope: string) {
+    await this.#writeBarrier;
+    return (await this.#read<Record<string, MobileCaptureOptions>>(optionsKey, {}))[scope]
+      ?? { projects: [], tags: [], reminders: [] };
+  }
+  async saveOptions(scope: string, options: MobileCaptureOptions) {
+    const write = this.#writeBarrier.then(async () => {
+      const scoped = await this.#read<Record<string, MobileCaptureOptions>>(optionsKey, {});
+      await this.#write(optionsKey, { ...scoped, [scope]: options });
+    });
+    this.#writeBarrier = write.catch(() => undefined); await write;
+  }
   async #read<T>(key: string, fallback: T): Promise<T> {
     const ciphertext = await this.repository.read(key);
     return ciphertext ? JSON.parse(await this.cipher.decrypt(ciphertext)) as T : fallback;

@@ -23,8 +23,8 @@ const projectId = "22222222-2222-4222-8222-222222222222";
 class MemoryEncryptedStore implements EncryptedMobileCaptureStore {
   pairing: MobileCapturePairing | undefined;
   captures: MobileCapture[] = [];
-  options = { projects: [] as { id: string; name: string }[], tags: [] as string[],
-    reminders: [] as { id: string; label: string; offsetMinutes: number }[] };
+  options = new Map<string, { projects: { id: string; name: string }[]; tags: string[];
+    reminders: { id: string; label: string; offsetMinutes: number }[] }>();
 
   async loadPairing() { return this.pairing; }
   async savePairing(pairing: MobileCapturePairing) { this.pairing = pairing; }
@@ -33,8 +33,9 @@ class MemoryEncryptedStore implements EncryptedMobileCaptureStore {
     this.captures = [...this.captures.filter(({ id }) => id !== capture.id), structuredClone(capture)];
   }
   async removeCapture(id: string) { this.captures = this.captures.filter((capture) => capture.id !== id); }
-  async loadOptions() { return structuredClone(this.options); }
-  async saveOptions(options: typeof this.options) { this.options = structuredClone(options); }
+  async loadOptions(scope: string) { return structuredClone(this.options.get(scope) ?? { projects: [], tags: [], reminders: [] }); }
+  async saveOptions(scope: string, options: { projects: { id: string; name: string }[]; tags: string[];
+    reminders: { id: string; label: string; offsetMinutes: number }[] }) { this.options.set(scope, structuredClone(options)); }
 }
 
 class RecordingCiphertextRepository implements CiphertextStateRepository {
@@ -199,6 +200,29 @@ describe("offline mobile capture synchronization", () => {
     assert.equal((await client.outbox()).length, 0);
   });
 
+  it("does not submit or expose cached options across Member pairings at the same destination", async () => {
+    const { database, baseUrl } = await run();
+    const store = new MemoryEncryptedStore();
+    let requests = 0;
+    const client = new MobileCaptureClient(store, async (input, init) => { requests += 1; return fetch(input, init); },
+      { allowInsecureInstanceForTest: true });
+    await client.pair({ instanceUrl: baseUrl, memberToken: "member-ada", workspaceId });
+    await client.cacheOptions({ projects: [{ id: projectId, name: "Ada private" }], tags: ["ada"], reminders: [] });
+    await client.captureText("Ada private capture");
+
+    await client.pair({ instanceUrl: baseUrl, memberToken: "member-grace", workspaceId });
+    assert.deepEqual(await client.options(), { projects: [], tags: [], reminders: [] });
+    await assert.rejects(() => client.refreshOptions(), /valid Member session/i);
+    assert.deepEqual(await client.options(), { projects: [], tags: [], reminders: [] });
+    assert.deepEqual(await client.sync(), { status: "attention_required", count: 0, error: "capture_pairing_mismatch" });
+    assert.equal(requests, 1);
+    assert.equal(database.notes.size, 0);
+
+    await client.pair({ instanceUrl: baseUrl, memberToken: "member-ada", workspaceId });
+    assert.deepEqual(await client.options(), { projects: [{ id: projectId, name: "Ada private" }], tags: ["ada"], reminders: [] });
+    assert.deepEqual(await client.sync(), { status: "synced", count: 1 });
+  });
+
   it("returns a visible conflict and retains a reused capture ID with different content", async () => {
     const { baseUrl } = await run();
     const store = new MemoryEncryptedStore();
@@ -235,14 +259,16 @@ describe("offline mobile capture synchronization", () => {
     assert.equal(retained?.lastError, "A valid Member session is required.");
 
     await client.pair({ instanceUrl: baseUrl, memberToken: "member-ada", workspaceId });
-    await store.saveCapture({ ...retained!, projectId: "33333333-3333-4333-8333-333333333333" });
+    await store.removeCapture(retained!.id);
+    const validPairingCapture = await client.captureChecklist("Launch steps", ["Invite testers", "Publish notes"],
+      { projectId: "33333333-3333-4333-8333-333333333333", tags: ["mobile"] });
     const forbidden = await client.sync();
     assert.equal(forbidden.status, "attention_required");
     assert.equal(forbidden.status === "attention_required" && forbidden.error, "workspace_forbidden");
     assert.match((await client.outbox())[0]!.lastError!, /cannot capture/i);
 
-    await store.removeCapture(retained!.id);
-    await store.saveCapture({ ...retained!, id: "invalid-client-id" });
+    await store.removeCapture(validPairingCapture.id);
+    await store.saveCapture({ ...validPairingCapture, id: "invalid-client-id" });
     const invalid = await client.sync();
     assert.equal(invalid.status, "attention_required");
     assert.equal(invalid.status === "attention_required" && invalid.error, "invalid_input");
@@ -298,9 +324,11 @@ describe("offline mobile capture synchronization", () => {
 
   it("aborts an in-flight synchronization and suppresses callbacks after cleanup", async () => {
     const store = new MemoryEncryptedStore();
-    await store.savePairing({ instanceUrl: "https://stash.example", memberToken: "member-ada", workspaceId });
+    const pairing = { instanceUrl: "https://stash.example", memberToken: "member-ada", workspaceId, pairingId: "pairing-ada" };
+    await store.savePairing(pairing);
     await store.saveCapture({ id: "44444444-4444-4444-8444-444444444444", kind: "text", content: "Wait",
-      createdAt: new Date().toISOString(), attempts: 0, origin: { instanceUrl: "https://stash.example", workspaceId } });
+      createdAt: new Date().toISOString(), attempts: 0,
+      origin: { instanceUrl: "https://stash.example", workspaceId, pairingId: pairing.pairingId } });
     let requestSignal: AbortSignal | undefined;
     const client = new MobileCaptureClient(store, async (_input, init) => {
       requestSignal = init?.signal ?? undefined;
@@ -325,9 +353,11 @@ describe("offline mobile capture synchronization", () => {
 
   it("joins concurrent sync triggers without cancelling an options refresh", async () => {
     const store = new MemoryEncryptedStore();
-    await store.savePairing({ instanceUrl: "https://stash.example", memberToken: "member-ada", workspaceId });
+    const pairing = { instanceUrl: "https://stash.example", memberToken: "member-ada", workspaceId, pairingId: "pairing-ada" };
+    await store.savePairing(pairing);
     await store.saveCapture({ id: "44444444-4444-4444-8444-444444444444", kind: "text", content: "Wait",
-      createdAt: "2026-08-22T10:00:00.000Z", attempts: 0, origin: { instanceUrl: "https://stash.example", workspaceId } });
+      createdAt: "2026-08-22T10:00:00.000Z", attempts: 0,
+      origin: { instanceUrl: "https://stash.example", workspaceId, pairingId: pairing.pairingId } });
     let refreshSignal: AbortSignal | undefined;
     let syncRequests = 0;
     let resolveRefresh!: (response: Response) => void;
