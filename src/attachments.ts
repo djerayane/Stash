@@ -28,13 +28,14 @@ export class InvalidAttachment extends Error { constructor(readonly kind: "filen
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const allowedTypes = /^(image\/(?:png|jpeg|gif|webp)|application\/pdf|application\/octet-stream|text\/plain)$/;
 const windowsDeviceName = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
-function portablePathComponent(filename: string): string {
+export function encodePortableFilename(filename: string): string {
   return encodeURIComponent(filename).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 export class AttachmentService {
   constructor(private readonly repository: AttachmentRepository, private readonly storage: AttachmentStorage, private readonly limits = { maxBytes: 10 * 1024 * 1024 }) {}
   async create(memberId: string, workspaceId: string, input: { filename: string; contentType: string; source: AttachmentSource; content: Buffer }) {
-    if (!uuid.test(workspaceId) || !input.filename || input.filename.length > 255 || input.filename !== input.filename.trim()
+    const encodedFilename = encodePortableFilename(input.filename);
+    if (!uuid.test(workspaceId) || !input.filename || input.filename.length > 255 || Buffer.byteLength(encodedFilename) > 255 || input.filename !== input.filename.trim()
       || /[\/\\\u0000-\u001f\u007f]/.test(input.filename) || /[. ]$/.test(input.filename)
       || windowsDeviceName.test(input.filename) || input.filename === "." || input.filename === "..") throw new InvalidAttachment("filename");
     if (!allowedTypes.test(input.contentType)) throw new InvalidAttachment("content_type");
@@ -42,7 +43,7 @@ export class AttachmentService {
     if (!await this.repository.canCreateAttachment(memberId, workspaceId)) return { status: "workspace_forbidden" as const };
     const createdBy = await this.repository.findPortableMemberIdentity(memberId);
     if (!createdBy) throw new Error("member_identity_unavailable");
-    const id = randomUUID(); const storageKey = `${workspaceId}/${id}`; const relativePath = `./attachments/${id}/${portablePathComponent(input.filename)}`;
+    const id = randomUUID(); const storageKey = `${workspaceId}/${id}`; const relativePath = `./attachments/${id}/${encodedFilename}`;
     const record: AttachmentRecord = { id, workspaceId, filename: input.filename, contentType: input.contentType, size: input.content.length, relativePath, storageKey, source: input.source, createdByMemberId: memberId, createdAt: new Date().toISOString() };
     const projection: PortableAttachmentProjection = { schema: "stash.attachment.v1", id, workspaceId, filename: record.filename, contentType: record.contentType, size: record.size, relativePath, source: record.source, createdAt: record.createdAt, createdBy };
     await this.storage.put(storageKey, input.content);

@@ -69,8 +69,10 @@ describe("Workspace Attachments", () => {
 
     const hostile = await upload(baseUrl, "member-ada", "safe bytes", "x](javascript:alert(1)).txt");
     assert.equal(hostile.status, 201);
-    const hostileAttachment = await hostile.json() as { portableLink: string; relativePath: string };
+    const hostileAttachment = await hostile.json() as { portableLink: string; relativePath: string; contentUrl: string };
     assert.equal(hostileAttachment.portableLink, `[x\\](javascript:alert(1)).txt](<${hostileAttachment.relativePath}>)`);
+    const hostileServed = await fetch(`${baseUrl}${hostileAttachment.contentUrl}`, { headers: { authorization: "Bearer member-ada" } });
+    assert.match(hostileServed.headers.get("content-disposition") ?? "", /filename\*=UTF-8''x%5D%28javascript%3Aalert%281%29%29\.txt$/);
 
     const windowsInvalid = await upload(baseUrl, "member-ada", "portable", "report*.txt");
     assert.equal(windowsInvalid.status, 201);
@@ -92,6 +94,7 @@ describe("Workspace Attachments", () => {
     assert.deepEqual(await readdir(directory), []);
     assert.equal((await upload(baseUrl, "member-ada", "x", "../secret.txt")).status, 422);
     for (const filename of ["CON", "con.txt", "LPT9.log", "trailing."]) assert.equal((await upload(baseUrl, "member-ada", "x", filename)).status, 422, filename);
+    await assert.rejects(() => new AttachmentService(database, storage, { maxBytes: 12 }).create("ada", workspaceId, { filename: `${"界".repeat(29)}.txt`, contentType: "text/plain", source: "upload", content: Buffer.from("x") }));
     await assert.rejects(() => new AttachmentService(database, storage, { maxBytes: 12 }).create("ada", workspaceId, { filename: "trailing ", contentType: "text/plain", source: "upload", content: Buffer.from("x") }));
     await assert.rejects(() => new AttachmentService(database, storage, { maxBytes: 12 }).create("ada", workspaceId, { filename: "control\u0001.txt", contentType: "text/plain", source: "upload", content: Buffer.from("x") }));
     assert.equal((await upload(baseUrl, "member-ada", "x", "script.html", "text/html")).status, 415);

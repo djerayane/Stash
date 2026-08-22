@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { json, type HttpRoute } from "./http-routing.js";
-import { InvalidAttachment, type AttachmentService, type AttachmentSource } from "./attachments.js";
+import { encodePortableFilename, InvalidAttachment, type AttachmentService, type AttachmentSource } from "./attachments.js";
 import type { MemberAccessResolver } from "./workspaces-projects.js";
 import { escapeMarkdownText } from "./rich-text.js";
 
@@ -22,7 +22,7 @@ async function download(service: AttachmentService, memberId: string, response: 
   response.writeHead(200, {
     "content-type": result.record.contentType,
     "content-length": result.record.size,
-    "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(result.record.filename)}`,
+    "content-disposition": `attachment; filename*=UTF-8''${encodePortableFilename(result.record.filename)}`,
     "x-content-type-options": "nosniff",
     "cache-control": "private, no-store",
   });
