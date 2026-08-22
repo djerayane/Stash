@@ -14,7 +14,9 @@ class ProtocolCompatibleDatabase implements DatabaseProbe, WorkspaceProjectRepos
   readonly organizationMembers = new Map<string, Set<string>>();
   readonly workspaces = new Map<string, WorkspaceRecord>();
   readonly projects = new Map<string, WorkspaceProjectRecord>();
+  readonly portableProjectionOutbox: object[] = [];
   failure: Error | undefined;
+  projectionFailure: Error | undefined;
 
   async verifyConnection(): Promise<void> {}
   async close(): Promise<void> {}
@@ -25,6 +27,8 @@ class ProtocolCompatibleDatabase implements DatabaseProbe, WorkspaceProjectRepos
       record.owner.type === "organization"
       && !this.organizationMembers.get(record.owner.id)?.has(record.createdByMemberId)
     ) return "organization_forbidden";
+    if (this.projectionFailure) throw this.projectionFailure;
+    this.portableProjectionOutbox.push({ schema: "stash.workspace.v1", ...record });
     this.workspaces.set(record.id, record);
     return "created";
   }
@@ -43,6 +47,8 @@ class ProtocolCompatibleDatabase implements DatabaseProbe, WorkspaceProjectRepos
     if ([...this.projects.values()].some(
       (project) => project.workspaceId === record.workspaceId && project.key === record.key,
     )) return "key_conflict";
+    if (this.projectionFailure) throw this.projectionFailure;
+    this.portableProjectionOutbox.push({ schema: "stash.project.v1", ...record });
     this.projects.set(record.id, record);
     return "created";
   }
@@ -103,9 +109,18 @@ describe("creating Workspaces and Projects", () => {
     });
 
     assert.equal(response.status, 201);
-    const workspace = await response.json() as { id: string; name: string; owner: object };
+    const workspace = await response.json() as {
+      id: string;
+      name: string;
+      owner: object;
+      portableProjection: object;
+    };
     assert.equal(workspace.name, "Ada's Workspace");
     assert.deepEqual(workspace.owner, { type: "personal", id: "ada" });
+    assert.deepEqual(workspace.portableProjection, {
+      format: "stash.workspace.v1",
+      state: "recorded",
+    });
 
     const denied = await createProject(baseUrl, workspace.id, "member-grace", {
       name: "Private Project",
@@ -137,6 +152,10 @@ describe("creating Workspaces and Projects", () => {
     assert.equal(project.workspaceId, workspace.id);
     assert.equal(project.name, "Launch");
     assert.equal(project.key, "LAUNCH");
+    assert.deepEqual(project.portableProjection, {
+      format: "stash.project.v1",
+      state: "recorded",
+    });
   });
 
   it("does not reveal whether a Workspace belongs to another Organization", async () => {
@@ -210,5 +229,39 @@ describe("creating Workspaces and Projects", () => {
     const text = await unavailable.text();
     assert.doesNotMatch(text, /postgres|secret/i);
     assert.equal(database.workspaces.size, 1);
+  });
+
+  it("rejects malformed Workspace identifiers instead of reporting a persistence outage", async () => {
+    const { baseUrl } = await run();
+
+    for (const workspaceId of ["not-a-uuid", "%E0%A4%A"]) {
+      const response = await createProject(baseUrl, workspaceId, "member-ada", {
+        name: "Invalid target",
+        key: "INVALID",
+      });
+      assert.equal(response.status, 422);
+      assert.deepEqual(await response.json(), {
+        error: "invalid_input",
+        message: "A Project requires a valid Workspace id, name, and 2-20 character key.",
+      });
+    }
+  });
+
+  it("does not persist creation when its portable projection cannot be recorded", async () => {
+    const { baseUrl, database } = await run();
+    database.projectionFailure = new Error("projection unavailable");
+
+    const response = await createWorkspace(baseUrl, "member-ada", {
+      name: "Must stay atomic",
+      owner: { type: "personal" },
+    });
+
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), {
+      error: "workspace_unavailable",
+      message: "The Workspace or Project could not be created. Try again.",
+    });
+    assert.equal(database.workspaces.size, 0);
+    assert.equal(database.portableProjectionOutbox.length, 0);
   });
 });

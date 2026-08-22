@@ -36,16 +36,27 @@ export function workspaceProjectRoutes(
             });
           } else {
             const { createdByMemberId: _, ...workspace } = result.workspace;
-            json(response, 201, workspace);
+            json(response, 201, {
+              ...workspace,
+              portableProjection: { format: "stash.workspace.v1", state: "recorded" },
+            });
           }
           return true;
         }
 
-        const workspaceId = decodeURIComponent(url.pathname.split("/")[3]!);
+        let workspaceId: string;
+        try {
+          workspaceId = decodeURIComponent(url.pathname.split("/")[3]!);
+        } catch {
+          throw new InvalidProjectInput();
+        }
         const result = await service.createProject(access.accountId, workspaceId, input);
         if (result.status === "created") {
           const { createdByMemberId: _, ...project } = result.project;
-          json(response, 201, project);
+          json(response, 201, {
+            ...project,
+            portableProjection: { format: "stash.project.v1", state: "recorded" },
+          });
         } else if (result.status === "key_conflict") {
           json(response, 409, {
             error: result.status,
@@ -63,7 +74,7 @@ export function workspaceProjectRoutes(
             error: "invalid_input",
             message: error instanceof InvalidWorkspaceInput
               ? "A Workspace requires a valid name and personal or Organization owner."
-              : "A Project requires a valid name and 2-20 character key.",
+              : "A Project requires a valid Workspace id, name, and 2-20 character key.",
           });
           return true;
         }

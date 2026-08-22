@@ -76,13 +76,17 @@ export class PostgresDatabase implements
     const client = await this.#pool.connect();
     try {
       await this.#ensureWorkspaceProjectSchema(client);
+      await client.query("BEGIN");
       if (record.owner.type === "organization") {
         const membership = await client.query(
           `SELECT 1 FROM stash_organization_memberships
            WHERE organization_id = $1 AND account_id = $2`,
           [record.owner.id, record.createdByMemberId],
         );
-        if (!membership.rowCount) return "organization_forbidden";
+        if (!membership.rowCount) {
+          await client.query("ROLLBACK");
+          return "organization_forbidden";
+        }
       }
       await client.query(
         `INSERT INTO stash_workspaces
@@ -97,7 +101,18 @@ export class PostgresDatabase implements
           record.createdByMemberId,
         ],
       );
+      await this.#recordPortableProjection(
+        client,
+        "Workspace",
+        record.id,
+        "stash.workspace.v1",
+        record,
+      );
+      await client.query("COMMIT");
       return "created";
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
     } finally {
       client.release();
     }
@@ -110,6 +125,7 @@ export class PostgresDatabase implements
     const client = await this.#pool.connect();
     try {
       await this.#ensureWorkspaceProjectSchema(client);
+      await client.query("BEGIN");
       const access = await client.query<{ allowed: boolean }>(
         `SELECT (
            (owner_type = 'personal' AND personal_owner_id = $2)
@@ -122,8 +138,14 @@ export class PostgresDatabase implements
          FROM stash_workspaces WHERE id = $1`,
         [record.workspaceId, memberId],
       );
-      if (!access.rowCount) return "workspace_not_found";
-      if (!access.rows[0]!.allowed) return "workspace_forbidden";
+      if (!access.rowCount) {
+        await client.query("ROLLBACK");
+        return "workspace_not_found";
+      }
+      if (!access.rows[0]!.allowed) {
+        await client.query("ROLLBACK");
+        return "workspace_forbidden";
+      }
       try {
         await client.query(
           `INSERT INTO stash_projects (id, workspace_id, name, project_key, created_by_account_id)
@@ -135,10 +157,24 @@ export class PostgresDatabase implements
           error instanceof Error
           && "code" in error
           && (error as Error & { code?: string }).code === "23505"
-        ) return "key_conflict";
+        ) {
+          await client.query("ROLLBACK");
+          return "key_conflict";
+        }
         throw error;
       }
+      await this.#recordPortableProjection(
+        client,
+        "Project",
+        record.id,
+        "stash.project.v1",
+        record,
+      );
+      await client.query("COMMIT");
       return "created";
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
     } finally {
       client.release();
     }
@@ -335,7 +371,32 @@ export class PostgresDatabase implements
         created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id),
         UNIQUE (workspace_id, project_key)
       );
+      CREATE TABLE IF NOT EXISTS stash_portable_projection_outbox (
+        object_kind TEXT NOT NULL CHECK (object_kind IN ('Workspace', 'Project')),
+        object_id UUID NOT NULL,
+        revision INTEGER NOT NULL CHECK (revision > 0),
+        projection_schema TEXT NOT NULL,
+        payload JSONB NOT NULL,
+        state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'projected')),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (object_kind, object_id, revision)
+      );
     `);
+  }
+
+  async #recordPortableProjection(
+    client: PoolClient,
+    objectKind: "Workspace" | "Project",
+    objectId: string,
+    projectionSchema: "stash.workspace.v1" | "stash.project.v1",
+    payload: WorkspaceRecord | WorkspaceProjectRecord,
+  ): Promise<void> {
+    await client.query(
+      `INSERT INTO stash_portable_projection_outbox
+        (object_kind, object_id, revision, projection_schema, payload)
+       VALUES ($1, $2, 1, $3, $4::jsonb)`,
+      [objectKind, objectId, projectionSchema, JSON.stringify(payload)],
+    );
   }
 }
 

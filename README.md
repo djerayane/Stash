@@ -65,6 +65,10 @@ Stopping or deleting Redis does not remove durable Stash data. Do not include Re
 
 The Compose health check uses readiness, so a container is not marked healthy while PostgreSQL is unavailable.
 
+Successful Workspace and Project creation atomically records a versioned portable-projection
+event. The API reports its schema and `recorded` state; creation fails visibly if that event cannot
+be committed. See [the portable projection format](docs/portable-projection.md).
+
 ## Development and acceptance tests
 
 ```sh
