@@ -9,6 +9,8 @@ import { diagnosticsAdminRoute, diagnosticsSchemaRoute } from "./diagnostics-rou
 import { createDiagnostics, type Diagnostics } from "./diagnostics.js";
 import { json, requireInstanceAdministrator } from "./http-routing.js";
 import { instanceAdminRoute } from "./instance-route.js";
+import { noteRoutes } from "./note-routes.js";
+import type { NoteService } from "./notes.js";
 import type { OwnerBootstrapService } from "./owner-bootstrap.js";
 import { organizationRoleRoutes } from "./organization-role-routes.js";
 import type { OrganizationRoleService } from "./organization-roles.js";
@@ -40,6 +42,7 @@ interface InstanceOptions {
   ownerBootstrap?: OwnerBootstrapService;
   passwordAuth?: PasswordAuthService;
   workspaceProjects?: WorkspaceProjectService;
+  notes?: NoteService;
   memberAccess?: MemberAccessResolver;
   organizationRoles?: OrganizationRoleService;
   oidcAuth?: OidcAuthService;
@@ -117,6 +120,9 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
         options.organizationRoles,
         (options.memberAccess ?? options.passwordAuth)!,
       )]
+      : []),
+    ...(options.notes && (options.memberAccess ?? options.passwordAuth)
+      ? [noteRoutes(options.notes, (options.memberAccess ?? options.passwordAuth)!)]
       : []),
   ];
 
