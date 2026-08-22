@@ -174,7 +174,7 @@ export class TaskService {
   async applyStructuredEdit(memberId: string, projectId: string, taskKey: string, value: unknown) {
     if (!uuid.test(projectId) || !isTaskKey(taskKey) || !this.tasks.applyStructuredTaskEdit || !isPlainObject(value)
       || typeof value.operationId !== "string" || !uuid.test(value.operationId)
-      || !Number.isSafeInteger(value.baseRevision) || (value.baseRevision as number) < 0 || !isPlanningUpdate(value.changes)
+      || !Number.isSafeInteger(value.baseRevision) || (value.baseRevision as number) < 1 || !isPlanningUpdate(value.changes)
       || Object.keys(value).some((key) => !["operationId", "baseRevision", "changes"].includes(key))) throw new InvalidTaskFromBlockInput();
     const actor = await this.actors.findPortableMemberIdentity(memberId);
     if (!actor) throw new Error("member_identity_unavailable");

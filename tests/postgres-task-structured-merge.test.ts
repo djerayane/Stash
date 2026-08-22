@@ -37,9 +37,47 @@ describe("PostgreSQL structured Task collaboration", { skip: !databaseUrl }, () 
     if (otherNote.status !== "created") return;
     const other = await tasks.createFromBlock(owner.ownerId, otherNote.note.id, otherNote.note.document.blocks[0]!.blockKey!, { projectId: project.project.id, title: "Publish release" });
     assert.equal(other.status, "created"); if (other.status !== "created") return;
+    const createTask = async (title: string) => { const captured = await new NoteService(database).capture(owner.ownerId, workspace.workspace.id, { content: title });
+      assert.equal(captured.status, "created"); if (captured.status !== "created") throw new Error("capture failed");
+      const task = await tasks.createFromBlock(owner.ownerId, captured.note.id, captured.note.document.blocks[0]!.blockKey!, { projectId: project.project.id, title });
+      assert.equal(task.status, "created"); if (task.status !== "created") throw new Error("task creation failed"); return task.task; };
+    const differentTask = await createTask("Concurrent different fields"); const sameTask = await createTask("Concurrent same field");
+    const retryTask = await createTask("Concurrent retry");
+    const setup = new Pool({ connectionString: databaseUrl! });
+    await setup.query(`CREATE OR REPLACE FUNCTION stash_test_delay_task_receipt() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN PERFORM pg_sleep(0.08); RETURN NEW; END $$;
+      CREATE TRIGGER stash_test_delay_task_receipt BEFORE INSERT ON stash_task_edit_operations
+      FOR EACH ROW EXECUTE FUNCTION stash_test_delay_task_receipt()`); await setup.end();
     instance = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin", tasks,
       memberAccess: { async authenticateBearer(value) { return value === "Bearer test" ? { accountId: owner.ownerId, sessionId: "test" } : undefined; } } });
     const base = `${instance.url}/api/projects/${project.project.id}/tasks/${created.task.key}`;
+    const taskBase = (key: string, selectedProjectId = project.project.id) => `${instance.url}/api/projects/${selectedProjectId}/tasks/${key}`;
+    const concurrentEdit = (key: string, operationId: string, changes: unknown, revision = 1) => fetch(`${taskBase(key)}/edits`, { method: "POST",
+      headers: { authorization: "Bearer test", "content-type": "application/json" }, body: JSON.stringify({ operationId, baseRevision: revision, changes }) });
+    const different = await Promise.all([concurrentEdit(differentTask.key, randomUUID(), { title: "Changed concurrently" }),
+      concurrentEdit(differentTask.key, randomUUID(), { priority: "high" })]); assert.deepEqual(different.map(({ status }) => status).sort(), [200, 200]);
+    const differentRead = await (await fetch(taskBase(differentTask.key), { headers: { authorization: "Bearer test" } })).json() as any;
+    assert.equal(differentRead.task.title, "Changed concurrently"); assert.equal(differentRead.task.priority, "high");
+    const same = await Promise.all([concurrentEdit(sameTask.key, randomUUID(), { title: "Contribution A" }),
+      concurrentEdit(sameTask.key, randomUUID(), { title: "Contribution B" })]); assert.deepEqual(same.map(({ status }) => status).sort(), [200, 409]);
+    const sameConflict = await same.find(({ status }) => status === 409)!.json() as any; assert.equal(sameConflict.conflict.createdBy.displayName, "Ada Lovelace");
+    const patchAndResolve = await Promise.all([fetch(taskBase(sameTask.key), { method: "PATCH", headers: { authorization: "Bearer test", "content-type": "application/json" },
+      body: JSON.stringify({ priority: "low" }) }), fetch(`${taskBase(sameTask.key)}/conflicts/${sameConflict.conflict.id}`, { method: "PUT",
+      headers: { authorization: "Bearer test", "content-type": "application/json" }, body: JSON.stringify({ resolution: "apply_contribution", expectedRevision: 2 }) })]);
+    assert.equal(patchAndResolve[0].status, 200); assert.ok([200, 409].includes(patchAndResolve[1].status));
+    const retryId = randomUUID(); const duplicate = await Promise.all([concurrentEdit(retryTask.key, retryId, { priority: "urgent" }),
+      concurrentEdit(retryTask.key, retryId, { priority: "urgent" })]); assert.deepEqual(duplicate.map(({ status }) => status), [200, 200]);
+    assert.deepEqual((await Promise.all(duplicate.map((response) => response.json() as Promise<any>))).map(({ revision }) => revision), [2, 2]);
+    const patchAndEdit = await Promise.all([fetch(taskBase(retryTask.key), { method: "PATCH", headers: { authorization: "Bearer test", "content-type": "application/json" },
+      body: JSON.stringify({ labelNames: ["parallel"] }) }), concurrentEdit(retryTask.key, randomUUID(), { title: "Parallel PATCH" }, 1)]);
+    assert.deepEqual(patchAndEdit.map(({ status }) => status), [200, 200]);
+    const overlapped = await (await fetch(taskBase(retryTask.key), { headers: { authorization: "Bearer test" } })).json() as any;
+    assert.equal(overlapped.task.title, "Parallel PATCH"); assert.deepEqual(overlapped.task.labelNames, ["parallel"]);
+    const graphAndMove = await Promise.all([fetch(taskBase(differentTask.key), { method: "PATCH", headers: { authorization: "Bearer test", "content-type": "application/json" },
+      body: JSON.stringify({ dependencies: [{ taskId: sameTask.id, type: "depends_on" }] }) }),
+    fetch(`${taskBase(sameTask.key)}/move`, { method: "POST", headers: { authorization: "Bearer test", "content-type": "application/json" },
+      body: JSON.stringify({ destinationProjectId: destination.project.id }) })]);
+    assert.deepEqual(graphAndMove.map(({ status }) => status), [200, 200]);
     const edit = (operationId: string, changes: unknown) => fetch(`${base}/edits`, { method: "POST", headers: { authorization: "Bearer test", "content-type": "application/json" },
       body: JSON.stringify({ operationId, baseRevision: 1, changes }) });
     const firstId = randomUUID(); const secondId = randomUUID();

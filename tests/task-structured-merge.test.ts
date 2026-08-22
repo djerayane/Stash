@@ -91,7 +91,7 @@ describe("field-level Task collaboration", () => {
   it("rejects reused identities, invalid input and unauthorized writes, and surfaces recoverable failures", async () => {
     const { database, edit } = await run(); await edit({ operationId: operationA, baseRevision: 1, changes: { priority: "low" } });
     assert.equal((await edit({ operationId: operationA, baseRevision: 1, changes: { priority: "high" } })).status, 409);
-    assert.equal((await edit({ operationId: operationB, baseRevision: -1, changes: { priority: "high" } })).status, 422);
+    assert.equal((await edit({ operationId: operationB, baseRevision: 0, changes: { priority: "high" } })).status, 422);
     assert.equal((await edit({ operationId: operationB, baseRevision: 1, changes: { unknown: true } })).status, 422);
     assert.equal((await edit({ operationId: operationB, baseRevision: 1, changes: { priority: "high" } }, "unknown")).status, 401);
     database.fail = true; const failed = await edit({ operationId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", baseRevision: 1, changes: { title: "Retry me" } });
