@@ -1,7 +1,7 @@
 import { lookup } from "node:dns/promises";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
-import { isIP } from "node:net";
+import { BlockList, isIP } from "node:net";
 
 interface ResolvedAddress { address: string; family: number }
 
@@ -18,7 +18,20 @@ export interface OidcHttpClient {
   validateUrl(url: string): Promise<void>;
 }
 
-function privateAddress(address: string): boolean {
+const nonPublicIpv4 = new BlockList();
+for (const [network, prefix] of [
+  ["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8],
+  ["169.254.0.0", 16], ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.0.2.0", 24],
+  ["192.88.99.0", 24], ["192.168.0.0", 16], ["198.18.0.0", 15], ["198.51.100.0", 24],
+  ["203.0.113.0", 24], ["224.0.0.0", 4], ["240.0.0.0", 4],
+] as const) nonPublicIpv4.addSubnet(network, prefix, "ipv4");
+
+const nonPublicIpv6 = new BlockList();
+for (const [network, prefix] of [
+  ["2001::", 23], ["2001:db8::", 32], ["2002::", 16], ["3fff::", 20],
+] as const) nonPublicIpv6.addSubnet(network, prefix, "ipv6");
+
+export function isPublicOidcAddress(address: string): boolean {
   const normalized = address.toLowerCase().split("%")[0]!;
   if (isIP(normalized) === 6 && normalized.startsWith("::ffff:")) {
     const dotted = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)?.[1];
@@ -26,17 +39,14 @@ function privateAddress(address: string): boolean {
     const mapped = dotted ?? (hexadecimal
       ? `${Number.parseInt(hexadecimal[1]!, 16) >> 8}.${Number.parseInt(hexadecimal[1]!, 16) & 255}.${Number.parseInt(hexadecimal[2]!, 16) >> 8}.${Number.parseInt(hexadecimal[2]!, 16) & 255}`
       : undefined);
-    return mapped ? privateAddress(mapped) : true;
+    return mapped ? isPublicOidcAddress(mapped) : false;
   }
-  if (isIP(normalized) === 6 && (!/^[23]/.test(normalized) || normalized.startsWith("2001:db8:")
-    || normalized.startsWith("2002:"))) return true;
+  if (isIP(normalized) === 6) {
+    return /^[23]/.test(normalized) && !nonPublicIpv6.check(normalized, "ipv6");
+  }
   const mapped = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)?.[1];
   const ipv4 = mapped ?? (isIP(normalized) === 4 ? normalized : undefined);
-  if (!ipv4) return false;
-  const [a, b] = ipv4.split(".").map(Number);
-  return a === 0 || a === 10 || a === 127 || a! >= 224
-    || (a === 169 && b === 254) || (a === 172 && b! >= 16 && b! <= 31)
-    || (a === 192 && b === 168) || (a === 100 && b! >= 64 && b! <= 127);
+  return !!ipv4 && !nonPublicIpv4.check(ipv4, "ipv4");
 }
 
 export function createOidcHttpClient(options: OidcHttpClientOptions = {}): OidcHttpClient {
@@ -51,7 +61,7 @@ export function createOidcHttpClient(options: OidcHttpClientOptions = {}): OidcH
     }
     const addresses = await resolve(url.hostname);
     if (!addresses.length || addresses.some(({ address }) => !isIP(address)
-      || (!testException && privateAddress(address)))) throw new Error("OIDC address is not allowed");
+      || (!testException && !isPublicOidcAddress(address)))) throw new Error("OIDC address is not allowed");
     return addresses[0]!;
   }
 
