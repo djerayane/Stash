@@ -10,11 +10,17 @@ const noteId = "11111111-1111-4111-8111-111111111111";
 const projectId = "22222222-2222-4222-8222-222222222222";
 const blockKey = "33333333-3333-4333-8333-333333333333";
 const blockId = "44444444-4444-4444-8444-444444444444";
+const secondNoteId = "99999999-9999-4999-8999-999999999999";
+const secondBlockKey = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const secondBlockId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
 class TaskFromBlockFake implements DatabaseProbe, TaskFromBlockRepository {
   readonly source = { content: "Plan the release", revision: 1, blockId: undefined as string | undefined };
+  readonly secondSource = { content: "Confirm the rollout", revision: 1, blockId: undefined as string | undefined };
   readonly tasks: PortableTaskProjection[] = [];
   failure = false;
+  linkFailure = false;
+  duplicateBlockId = false;
   revokeAtBoundRead = false;
   private canRead = true;
   private serial = Promise.resolve();
@@ -44,7 +50,37 @@ class TaskFromBlockFake implements DatabaseProbe, TaskFromBlockRepository {
     if (this.revokeAtBoundRead) this.canRead = false;
     if (!this.canRead || memberId !== "ada" || sourceNoteId !== noteId) return { status: "note_not_found" as const };
     return { status: "found" as const, tasks: this.tasks.map((task) => ({ id: task.id, key: task.key, title: task.title,
-      status: task.status, sourceBlock: task.sourceBlocks![0]! })) };
+      status: task.status, sourceBlock: task.sourceBlocks![0]!, relationshipState: this.duplicateBlockId ? "ambiguous" as const
+        : this.source.blockId === task.sourceBlocks![0]!.blockId ? "linked" as const : "broken" as const })) };
+  }
+  async linkTaskToBlock(memberId: string, taskId: string, sourceNoteId: string, sourceBlockKey: string) {
+    if (this.linkFailure) throw new Error("postgres://relationship-secret");
+    if (memberId !== "ada") return { status: "task_not_found" as const };
+    const task = this.tasks.find((candidate) => candidate.id === taskId);
+    if (!task) return { status: "task_not_found" as const };
+    const source = sourceNoteId === noteId ? this.source : sourceNoteId === secondNoteId ? this.secondSource : undefined;
+    if (!source) return { status: "note_not_found" as const };
+    const expectedKey = sourceNoteId === noteId ? blockKey : secondBlockKey;
+    if (sourceBlockKey !== expectedKey) return { status: "block_not_found" as const };
+    const sourceBlock = { noteId: sourceNoteId, blockId: source.blockId ?? (sourceNoteId === noteId ? blockId : secondBlockId) };
+    if (this.duplicateBlockId && source.blockId) return { status: "ambiguous_block" as const };
+    source.blockId = sourceBlock.blockId;
+    task.sourceBlocks ??= [];
+    if (task.sourceBlocks.some((candidate) => candidate.noteId === sourceNoteId && candidate.blockId === sourceBlock.blockId))
+      return { status: "already_linked" as const, task, sourceBlock };
+    task.sourceBlocks.push(sourceBlock);
+    if (!task.sourceNoteIds.includes(sourceNoteId)) task.sourceNoteIds.push(sourceNoteId);
+    return { status: "linked" as const, task, sourceBlock };
+  }
+  async listTaskSourceBlocks(memberId: string, taskId: string) {
+    if (memberId !== "ada") return { status: "task_not_found" as const };
+    const task = this.tasks.find((candidate) => candidate.id === taskId);
+    if (!task) return { status: "task_not_found" as const };
+    return { status: "found" as const, sourceBlocks: (task.sourceBlocks ?? []).map((sourceBlock) => ({
+      ...sourceBlock,
+      state: this.duplicateBlockId ? "ambiguous" as const
+        : (sourceBlock.noteId === noteId ? this.source : this.secondSource).blockId === sourceBlock.blockId ? "linked" as const : "broken" as const,
+    })) };
   }
 }
 
@@ -68,7 +104,11 @@ describe("creating a Task from a stable Note Block", () => {
     const linked = (token = "member-ada") => fetch(`${instance!.url}/api/notes/${noteId}/linked-tasks`, {
       headers: { authorization: `Bearer ${token}` },
     });
-    return { database, create, linked };
+    const taskSources = (taskId: string, method: "GET" | "POST" = "GET", body?: unknown, token = "member-ada") => fetch(`${instance!.url}/api/tasks/${taskId}/source-blocks`, {
+      method, headers: { authorization: `Bearer ${token}`, ...(body === undefined ? {} : { "content-type": "application/json" }) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    return { database, create, linked, taskSources };
   }
 
   it("creates independent canonical Tasks while preserving one sparse Block identity and source content", async () => {
@@ -143,5 +183,69 @@ describe("creating a Task from a stable Note Block", () => {
     assert.equal(database.tasks.length, 0);
     assert.equal(database.source.blockId, undefined);
     assert.equal(database.source.content, "Plan the release");
+  });
+
+  it("links one Task to additional Blocks without copying authored content", async () => {
+    const { database, create, taskSources } = await run();
+    const created = await create(blockKey, { projectId, title: "Ship release notes" });
+    const { task } = await created.json() as { task: PortableTaskProjection };
+    const linked = await taskSources(task.id, "POST", { noteId: secondNoteId, blockKey: secondBlockKey });
+    assert.equal(linked.status, 201);
+    const body = await linked.json() as { task: PortableTaskProjection; sourceBlock: { noteId: string; blockId: string } };
+    assert.deepEqual(body.task.sourceBlocks, [{ noteId, blockId }, { noteId: secondNoteId, blockId: secondBlockId }]);
+    assert.deepEqual(body.task.sourceNoteIds, [noteId, secondNoteId]);
+    assert.equal(database.source.content, "Plan the release");
+    assert.equal(database.secondSource.content, "Confirm the rollout");
+
+    const duplicate = await taskSources(task.id, "POST", { noteId: secondNoteId, blockKey: secondBlockKey });
+    assert.equal(duplicate.status, 200);
+    assert.equal((await duplicate.json() as { result: string }).result, "already_linked");
+    assert.equal(database.tasks[0]!.sourceBlocks!.length, 2);
+  });
+
+  it("surfaces broken Block references explicitly instead of guessing a replacement", async () => {
+    const { database, create, taskSources } = await run();
+    const created = await create(blockKey, { projectId, title: "Ship release notes" });
+    const { task } = await created.json() as { task: PortableTaskProjection };
+    database.source.blockId = undefined;
+
+    const response = await taskSources(task.id);
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json() as { sourceBlocks: unknown[] }).sourceBlocks, [{ noteId, blockId, state: "broken" }]);
+  });
+
+  it("surfaces duplicate imported Block identities as ambiguous without creating a relationship", async () => {
+    const { database, create, linked, taskSources } = await run();
+    const first = await create(blockKey, { projectId, title: "Ship release notes" });
+    const { task } = await first.json() as { task: PortableTaskProjection };
+    database.secondSource.blockId = secondBlockId;
+    database.duplicateBlockId = true;
+
+    const link = await taskSources(task.id, "POST", { noteId: secondNoteId, blockKey: secondBlockKey });
+    assert.equal(link.status, 422);
+    assert.equal((await link.json() as { error: string }).error, "ambiguous_block");
+    assert.equal(database.tasks[0]!.sourceBlocks!.length, 1);
+
+    const sources = await taskSources(task.id);
+    assert.deepEqual((await sources.json() as { sourceBlocks: unknown[] }).sourceBlocks, [{ noteId, blockId, state: "ambiguous" }]);
+    const noteRelationships = await linked();
+    assert.deepEqual((await noteRelationships.json() as { tasks: Array<{ relationshipState: string }> }).tasks.map((item) => item.relationshipState), ["ambiguous"]);
+  });
+
+  it("hides Task relationships across authorization boundaries and reports invalid link requests", async () => {
+    const { database, create, taskSources } = await run();
+    const created = await create(blockKey, { projectId, title: "Private release work" });
+    const { task } = await created.json() as { task: PortableTaskProjection };
+    assert.equal((await taskSources(task.id, "GET", undefined, "unknown")).status, 401);
+    assert.equal((await taskSources("77777777-7777-4777-8777-777777777777")).status, 404);
+    assert.equal((await taskSources(task.id, "POST", { noteId, blockKey: "missing" })).status, 422);
+    assert.equal((await taskSources(task.id, "POST", { noteId: "77777777-7777-4777-8777-777777777777", blockKey })).status, 404);
+    assert.equal((await taskSources(task.id, "POST", { noteId, blockKey: "66666666-6666-4666-8666-666666666666" })).status, 404);
+    database.linkFailure = true;
+    const failed = await taskSources(task.id, "POST", { noteId: secondNoteId, blockKey: secondBlockKey });
+    assert.equal(failed.status, 503);
+    assert.doesNotMatch(await failed.text(), /postgres|secret/i);
+    assert.equal(database.secondSource.blockId, undefined);
+    assert.equal(database.tasks[0]!.sourceBlocks!.length, 1);
   });
 });
