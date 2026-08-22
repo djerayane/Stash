@@ -50,11 +50,12 @@ async function upload(service: AttachmentService, memberId: string, request: Inc
     contentType: request.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase() ?? "application/octet-stream",
     source: source as AttachmentSource,
     content: await readBodyWithLimit(request, 10 * 1024 * 1024 + 1),
-  });
+  }, typeof request.headers["x-stash-operation-key"] === "string" ? request.headers["x-stash-operation-key"] : undefined);
   if (result.status === "workspace_forbidden") { json(response, 403, { error: "workspace_forbidden", message: "This Member cannot add Attachments to that Workspace." }); return; }
+  if (result.status === "conflict") { json(response, 409, { error: "attachment_conflict", message: "This Attachment operation key was already used for different content." }); return; }
   const { createdByMemberId: _, storageKey: __, ...attachment } = result.record;
   const portableHref = portableAttachmentHref(attachment.relativePath);
-  json(response, 201, { ...attachment, contentUrl: `/api/attachments/${attachment.id}/content`, portableHref, portableLink: `[${escapeMarkdownText(attachment.filename)}](<${portableHref}>)`, portableProjection: { format: result.projection.schema, state: "recorded" } });
+  json(response, result.status === "duplicate" ? 200 : 201, { ...attachment, contentUrl: `/api/attachments/${attachment.id}/content`, portableHref, portableLink: `[${escapeMarkdownText(attachment.filename)}](<${portableHref}>)`, portableProjection: { format: result.projection.schema, state: "recorded" } });
 }
 
 export function attachmentRoutes(service: AttachmentService, access: MemberAccessResolver): HttpRoute {

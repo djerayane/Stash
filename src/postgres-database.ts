@@ -441,14 +441,47 @@ export class PostgresDatabase implements
     } finally { client.release(); }
   }
 
-  async createAttachment(memberId: string, record: AttachmentRecord, projection: PortableAttachmentProjection): Promise<"created" | "workspace_forbidden"> {
+  async findAttachmentReceipt(memberId: string, workspaceId: string, operationKey: string) {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureAttachmentSchema(client);
+      const result = await client.query<any>(`SELECT receipt.payload_digest, receipt.projection, attachment.*
+        FROM stash_attachment_operation_receipts receipt JOIN stash_attachments attachment ON attachment.id = receipt.attachment_id
+        JOIN stash_workspaces workspace ON workspace.id = receipt.workspace_id
+        WHERE receipt.operation_key = $1 AND receipt.workspace_id = $2 AND receipt.created_by_account_id = $3
+        AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $3) OR EXISTS
+          (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $3))`,
+      [operationKey, workspaceId, memberId]);
+      const row = result.rows[0];
+      if (!row) return undefined;
+      return { digest: row.payload_digest, record: attachmentRecord(row), projection: row.projection as PortableAttachmentProjection };
+    } finally { client.release(); }
+  }
+
+  async createAttachment(memberId: string, record: AttachmentRecord, projection: PortableAttachmentProjection,
+    operation?: { key: string; digest: string }) {
     return this.#withTransaction(async (client) => {
       await this.#ensureAttachmentSchema(client);
       const access = await client.query(`SELECT 1 FROM stash_workspaces workspace WHERE workspace.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR EXISTS (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2))`, [record.workspaceId, memberId]);
-      if (!access.rowCount) return "workspace_forbidden";
+      if (!access.rowCount) return { status: "workspace_forbidden" as const };
+      if (operation) {
+        await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`${record.workspaceId}:${memberId}:${operation.key}`]);
+        const receipt = await client.query<any>(`SELECT receipt.payload_digest, receipt.projection, attachment.*
+          FROM stash_attachment_operation_receipts receipt JOIN stash_attachments attachment ON attachment.id = receipt.attachment_id
+          WHERE receipt.operation_key = $1 AND receipt.workspace_id = $2 AND receipt.created_by_account_id = $3`,
+        [operation.key, record.workspaceId, memberId]);
+        const existing = receipt.rows[0];
+        if (existing) return existing.payload_digest === operation.digest
+          ? { status: "duplicate" as const, digest: existing.payload_digest, record: attachmentRecord(existing),
+            projection: existing.projection as PortableAttachmentProjection }
+          : { status: "conflict" as const };
+      }
       await client.query(`INSERT INTO stash_attachments (id, workspace_id, filename, content_type, byte_size, relative_path, storage_key, source, created_by_account_id, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [record.id, record.workspaceId, record.filename, record.contentType, record.size, record.relativePath, record.storageKey, record.source, memberId, record.createdAt]);
       await this.#recordPortableProjection(client, "Attachment", record.id, projection.schema, projection);
-      return "created";
+      if (operation) await client.query(`INSERT INTO stash_attachment_operation_receipts
+        (operation_key, workspace_id, created_by_account_id, payload_digest, attachment_id, projection)
+        VALUES ($1,$2,$3,$4,$5,$6::jsonb)`, [operation.key, record.workspaceId, memberId, operation.digest, record.id, JSON.stringify(projection)]);
+      return { status: "created" as const };
     });
   }
 
@@ -467,7 +500,7 @@ export class PostgresDatabase implements
       await this.#ensureAttachmentSchema(client);
       const result = await client.query<AttachmentRow>(`SELECT attachment.* FROM stash_attachments attachment JOIN stash_workspaces workspace ON workspace.id = attachment.workspace_id WHERE attachment.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR EXISTS (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2))`, [attachmentId, memberId]);
       const row = result.rows[0];
-      return row ? { id: row.id, workspaceId: row.workspace_id, filename: row.filename, contentType: row.content_type, size: Number(row.byte_size), relativePath: row.relative_path, storageKey: row.storage_key, source: row.source, createdByMemberId: row.created_by_account_id, createdAt: new Date(row.created_at).toISOString() } : undefined;
+      return row ? attachmentRecord(row) : undefined;
     } finally { client.release(); }
   }
 
@@ -2260,6 +2293,11 @@ export class PostgresDatabase implements
   async #ensureAttachmentSchema(client: PoolClient): Promise<void> {
     await this.#ensureWorkspaceProjectSchema(client);
     await client.query(`CREATE TABLE IF NOT EXISTS stash_attachments (id UUID PRIMARY KEY, workspace_id UUID NOT NULL REFERENCES stash_workspaces(id), filename TEXT NOT NULL, content_type TEXT NOT NULL, byte_size BIGINT NOT NULL CHECK (byte_size > 0), relative_path TEXT NOT NULL, storage_key TEXT NOT NULL UNIQUE, source TEXT NOT NULL CHECK (source IN ('upload','paste')), created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id), created_at TIMESTAMPTZ NOT NULL)`);
+    await client.query(`CREATE TABLE IF NOT EXISTS stash_attachment_operation_receipts (
+      operation_key UUID NOT NULL, workspace_id UUID NOT NULL REFERENCES stash_workspaces(id),
+      created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id), payload_digest TEXT NOT NULL,
+      attachment_id UUID NOT NULL UNIQUE REFERENCES stash_attachments(id), projection JSONB NOT NULL,
+      PRIMARY KEY (operation_key, workspace_id, created_by_account_id))`);
   }
 
   async #ensureDiscussionSchema(client: PoolClient): Promise<void> {
@@ -2554,6 +2592,11 @@ interface MemberLocalizationRow {
 }
 interface RepositoryConnectionRow { id: string; organization_id: string; provider: "github"; installation_id: string | number; repository_id: string; repository_url: string; created_by_account_id: string; created_by_attribution: "recorded" | "inferred-during-upgrade"; project_ids: string[] }
 interface AttachmentRow { id: string; workspace_id: string; filename: string; content_type: string; byte_size: string | number; relative_path: string; storage_key: string; source: "upload" | "paste"; created_by_account_id: string; created_at: Date | string }
+function attachmentRecord(row: AttachmentRow): AttachmentRecord {
+  return { id: row.id, workspaceId: row.workspace_id, filename: row.filename, contentType: row.content_type,
+    size: Number(row.byte_size), relativePath: row.relative_path, storageKey: row.storage_key, source: row.source,
+    createdByMemberId: row.created_by_account_id, createdAt: new Date(row.created_at).toISOString() };
+}
 function repositoryConnectionRecord(row: RepositoryConnectionRow): RepositoryConnectionRecord {
   return { id: row.id, organizationId: row.organization_id, provider: row.provider, installationId: Number(row.installation_id), repositoryId: row.repository_id, repositoryUrl: row.repository_url, createdByMemberId: row.created_by_account_id, createdByAttribution: row.created_by_attribution, projectIds: row.project_ids };
 }

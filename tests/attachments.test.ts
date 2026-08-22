@@ -14,15 +14,26 @@ const workspaceId = "11111111-1111-4111-8111-111111111111";
 class RecordingLocalStorage extends LocalAttachmentStorage { writes = 0; override async put(key: string, content: Buffer) { this.writes += 1; await super.put(key, content); } }
 class AttachmentDatabase implements DatabaseProbe, AttachmentRepository, NoteRepository {
   records = new Map<string, AttachmentRecord>(); projections: PortableAttachmentProjection[] = [];
+  receipts = new Map<string, { digest: string; record: AttachmentRecord; projection: PortableAttachmentProjection }>();
   notes = new Map<string, NoteRecord>(); noteProjections: PortableNoteProjection[] = [];
   fail = false;
   async verifyConnection() {} async close() {}
   async findPortableMemberIdentity(memberId: string) { return memberId === "ada" ? { localAccountId: "ada", displayName: "Ada Lovelace" } : undefined; }
   async canCreateAttachment(memberId: string, requestedWorkspaceId: string) { return memberId === "ada" && requestedWorkspaceId === workspaceId; }
-  async createAttachment(memberId: string, record: AttachmentRecord, projection: PortableAttachmentProjection) {
-    if (memberId !== "ada" || record.workspaceId !== workspaceId) return "workspace_forbidden" as const;
+  async findAttachmentReceipt(memberId: string, requestedWorkspaceId: string, operationKey: string) {
+    return memberId === "ada" && requestedWorkspaceId === workspaceId ? this.receipts.get(operationKey) : undefined;
+  }
+  async createAttachment(memberId: string, record: AttachmentRecord, projection: PortableAttachmentProjection,
+    operation?: { key: string; digest: string }) {
+    if (memberId !== "ada" || record.workspaceId !== workspaceId) return { status: "workspace_forbidden" as const };
     if (this.fail) throw new Error("database unavailable");
-    this.records.set(record.id, record); this.projections.push(projection); return "created" as const;
+    if (operation) {
+      const existing = this.receipts.get(operation.key);
+      if (existing) return existing.digest === operation.digest ? { status: "duplicate" as const, ...existing } : { status: "conflict" as const };
+    }
+    this.records.set(record.id, record); this.projections.push(projection);
+    if (operation) this.receipts.set(operation.key, { digest: operation.digest, record, projection });
+    return { status: "created" as const };
   }
   async findAttachmentForMember(memberId: string, id: string) { return memberId === "ada" ? this.records.get(id) : undefined; }
   async createNote(memberId: string, note: NoteRecord, projection: PortableNoteProjection) { if (!await this.canCreateAttachment(memberId, note.workspaceId)) return "workspace_forbidden" as const; this.notes.set(note.id, note); this.noteProjections.push(projection); return "created" as const; }
@@ -51,7 +62,7 @@ describe("Workspace Attachments", () => {
       attachments: new AttachmentService(database, storage, { maxBytes: 12 }), notes: new NoteService(database) });
     return { database, directory, storage, baseUrl: instance.url };
   }
-  const upload = (baseUrl: string, token: string, body: string, filename = "design notes.txt", contentType = "text/plain") => fetch(`${baseUrl}/api/workspaces/${workspaceId}/attachments`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": contentType, "x-stash-filename": encodePortableFilename(filename), "x-stash-source": "paste" }, body });
+  const upload = (baseUrl: string, token: string, body: string, filename = "design notes.txt", contentType = "text/plain", operationKey?: string) => fetch(`${baseUrl}/api/workspaces/${workspaceId}/attachments`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": contentType, "x-stash-filename": encodePortableFilename(filename), "x-stash-source": "paste", ...(operationKey ? { "x-stash-operation-key": operationKey } : {}) }, body });
 
   it("uploads pasted bytes, records a portable relative link, and serves them only to Workspace Members", async () => {
     const { baseUrl, database, directory, storage } = await run();
@@ -119,5 +130,24 @@ describe("Workspace Attachments", () => {
     assert.equal((await upload(baseUrl, "member-ada", "1234567890123")).status, 413);
     database.fail = true; assert.equal((await upload(baseUrl, "member-ada", "retryable")).status, 503);
     await assert.rejects(readFile(join(directory, workspaceId, [...database.records.keys()][0] ?? "missing")));
+  });
+
+  it("returns the committed Attachment after a lost response and rejects operation-key payload changes", async () => {
+    const { baseUrl, database, storage } = await run();
+    const operationKey = "44444444-4444-4444-8444-444444444444";
+    const first = await upload(baseUrl, "member-ada", "original", "photo.txt", "text/plain", operationKey);
+    assert.equal(first.status, 201);
+    const created = await first.json() as { id: string };
+
+    const retry = await upload(baseUrl, "member-ada", "original", "photo.txt", "text/plain", operationKey);
+    assert.equal(retry.status, 200);
+    assert.equal((await retry.json() as { id: string }).id, created.id);
+    assert.equal(storage.writes, 1);
+    assert.equal(database.records.size, 1);
+
+    const changed = await upload(baseUrl, "member-ada", "changed", "photo.txt", "text/plain", operationKey);
+    assert.equal(changed.status, 409);
+    assert.equal((await changed.json() as { error: string }).error, "attachment_conflict");
+    assert.equal(storage.writes, 1);
   });
 });

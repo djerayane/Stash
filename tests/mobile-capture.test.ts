@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 
 import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
+import { AttachmentService, type AttachmentRecord, type AttachmentRepository, type AttachmentStorage, type PortableAttachmentProjection } from "../src/attachments.js";
 import {
   MobileCaptureClient,
   LegacyRecoveryRequired,
@@ -23,6 +24,9 @@ import {
   loadCachedOptionsOnFocus,
   reconcileCaptureSelections,
 } from "../mobile/src/capture-options-focus.js";
+import { IncomingCaptureDeliveryGate, parseIncomingCapture } from "../mobile/src/incoming-capture.js";
+import { IncomingShareDeliveryBatch, SerializedIncomingShareDrain, drainIncomingShares, incomingShareFingerprint } from "../mobile/src/incoming-share-deliveries.js";
+import { MAX_ATTACHMENT_BYTES, readBoundedOriginal } from "../mobile/src/media-input.js";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const projectId = "22222222-2222-4222-8222-222222222222";
@@ -43,6 +47,20 @@ class MemoryEncryptedStore implements EncryptedMobileCaptureStore {
   async loadOptions(scope: string) { return structuredClone(this.options.get(scope) ?? { projects: [], tags: [], reminders: [] }); }
   async saveOptions(scope: string, options: { projects: { id: string; name: string }[]; tags: string[];
     reminders: { id: string; label: string; offsetMinutes: number }[] }) { this.options.set(scope, structuredClone(options)); }
+  incomingShares: import("../src/mobile-capture-client.js").IncomingShareDelivery[] = [];
+  nativeShare: { fingerprint: string; ids: string[] } | undefined;
+  async stageIncomingShares(fingerprint: string, deliveries: import("../src/mobile-capture-client.js").IncomingShareDelivery[]) {
+    if (this.nativeShare?.fingerprint !== fingerprint) {
+      this.incomingShares.push(...structuredClone(deliveries)); this.nativeShare = { fingerprint, ids: deliveries.map(({ id }) => id) };
+    }
+    return structuredClone(this.incomingShares.filter(({ id }) => this.nativeShare!.ids.includes(id)));
+  }
+  async acknowledgeNativeShares(fingerprint?: string) { if (!fingerprint || this.nativeShare?.fingerprint === fingerprint) this.nativeShare = undefined; }
+  async listIncomingShares() { return structuredClone(this.incomingShares); }
+  async removeIncomingShare(id: string) { this.incomingShares = this.incomingShares.filter((item) => item.id !== id); }
+  async saveIncomingShare(delivery: import("../src/mobile-capture-client.js").IncomingShareDelivery) {
+    this.incomingShares = [...this.incomingShares.filter(({ id }) => id !== delivery.id), structuredClone(delivery)];
+  }
 }
 
 class RecordingCiphertextRepository implements CiphertextStateRepository {
@@ -55,9 +73,18 @@ const testCipher: MobileCipher = {
   async decrypt(value) { return [...Buffer.from(value, "base64").toString()].reverse().join(""); },
 };
 
-class MobileProtocolDatabase implements DatabaseProbe, MobileCaptureRepository {
+class MemoryAttachmentStorage implements AttachmentStorage {
+  readonly content = new Map<string, Buffer>();
+  async put(key: string, content: Buffer) { this.content.set(key, Buffer.from(content)); }
+  async get(key: string) { const content = this.content.get(key); if (!content) throw new Error("missing"); return Buffer.from(content); }
+  async delete(key: string) { this.content.delete(key); }
+}
+
+class MobileProtocolDatabase implements DatabaseProbe, MobileCaptureRepository, AttachmentRepository {
   readonly notes = new Map<string, NoteRecord>();
   readonly receipts = new Map<string, { noteId: string; payloadDigest: string }>();
+  readonly attachments = new Map<string, AttachmentRecord>();
+  readonly attachmentReceipts = new Map<string, { digest: string; record: AttachmentRecord; projection: PortableAttachmentProjection }>();
   failure: Error | undefined;
   failingContent: string | undefined;
 
@@ -66,6 +93,26 @@ class MobileProtocolDatabase implements DatabaseProbe, MobileCaptureRepository {
   async findPortableMemberIdentity(memberId: string) {
     return memberId === "ada" ? { localAccountId: "ada", displayName: "Ada Lovelace" }
       : memberId === "grace" ? { localAccountId: "grace", displayName: "Grace Hopper" } : undefined;
+  }
+  async canCreateAttachment(memberId: string, requestedWorkspaceId: string) {
+    return (memberId === "ada" || memberId === "grace") && requestedWorkspaceId === workspaceId;
+  }
+  async findAttachmentReceipt(memberId: string, requestedWorkspaceId: string, operationKey: string) {
+    return await this.canCreateAttachment(memberId, requestedWorkspaceId) ? this.attachmentReceipts.get(operationKey) : undefined;
+  }
+  async createAttachment(memberId: string, record: AttachmentRecord, projection: PortableAttachmentProjection,
+    operation?: { key: string; digest: string }) {
+    if (!await this.canCreateAttachment(memberId, record.workspaceId)) return { status: "workspace_forbidden" as const };
+    if (operation) {
+      const existing = this.attachmentReceipts.get(operation.key);
+      if (existing) return existing.digest === operation.digest ? { status: "duplicate" as const, ...existing } : { status: "conflict" as const };
+    }
+    this.attachments.set(record.id, record);
+    if (operation) this.attachmentReceipts.set(operation.key, { digest: operation.digest, record, projection });
+    return { status: "created" as const };
+  }
+  async findAttachmentForMember(memberId: string, attachmentId: string) {
+    return memberId === "ada" || memberId === "grace" ? this.attachments.get(attachmentId) : undefined;
   }
   async listMobileCaptureOptions(memberId: string, requestedWorkspaceId: string) {
     return memberId === "ada" && requestedWorkspaceId === workspaceId
@@ -97,16 +144,134 @@ const access: MemberAccessResolver = {
 };
 
 describe("offline mobile capture synchronization", () => {
+  it("rejects an oversized original before base64 materialization", async () => {
+    let reads = 0;
+    await assert.rejects(() => readBoundedOriginal({ size: MAX_ATTACHMENT_BYTES + 1, async base64() { reads += 1; return "YQ=="; } }),
+      /larger than the 10 MB limit/);
+    assert.equal(reads, 0);
+  });
+
+  it("keeps stable per-item share delivery receipts across a partial batch retry", () => {
+    const ids = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222",
+      "33333333-3333-4333-8333-333333333333"];
+    const batch = new IncomingShareDeliveryBatch(() => ids.shift()!);
+    const payloads = [{ shareType: "text", value: "saved" }, { shareType: "file", value: "file://retry" }];
+    const first = batch.receiveInvocation(payloads);
+    assert.equal(batch.acknowledge(first[0]!.id), false);
+    assert.deepEqual(batch.pending(), [first[1]]);
+    assert.equal(batch.acknowledge(first[1]!.id), true);
+    assert.notEqual(batch.receiveInvocation(payloads)[0]!.id, first[0]!.id, "a later identical user action gets a fresh delivery ID");
+  });
+
+  it("captures interleaved OS invocations exactly once while an older item awaits retry", async () => {
+    let sequence = 0;
+    const batch = new IncomingShareDeliveryBatch(() => `00000000-0000-4000-8000-${String(++sequence).padStart(12, "0")}`);
+    const store = new MemoryEncryptedStore();
+    store.pairing = { instanceUrl: "https://stash.example", memberToken: "token", workspaceId, memberId: "ada" };
+    const client = new MobileCaptureClient(store, async () => new Response());
+    const [savedA, failedA] = batch.receiveInvocation([
+      { shareType: "text", value: "A saved" }, { shareType: "file", value: "file://A-retry" },
+    ]);
+    await client.captureSharedContent(savedA!.payload.value, "share_sheet", {}, savedA!.id);
+    batch.acknowledge(savedA!.id);
+    const pending = batch.receiveInvocation([{ shareType: "text", value: "A saved" }]);
+    const invocationB = pending.at(-1)!;
+    assert.notEqual(invocationB.id, savedA!.id, "identical content from invocation B has its own delivery identity");
+    await client.captureSharedContent(invocationB.payload.value, "share_sheet", {}, invocationB.id);
+    batch.acknowledge(invocationB.id);
+    assert.deepEqual(batch.pending(), [failedA]);
+    await client.captureMedia({ kind: "file", filename: "A-retry.txt", contentType: "text/plain", base64: "cmVjb3ZlcmVk" }, "", {}, failedA!.id);
+    assert.equal(batch.acknowledge(failedA!.id), true);
+    assert.deepEqual(batch.pending(), []);
+    assert.deepEqual(store.captures.map(({ id }) => id), [savedA!.id, invocationB.id, failedA!.id]);
+  });
+
+  it("encrypts a native share inbox before acknowledgement and resumes it after restart", async () => {
+    const repository = new RecordingCiphertextRepository();
+    const firstStore = new EncryptedStateMobileCaptureStore(repository, testCipher);
+    const payload = { shareType: "text", value: "survive restart" };
+    const fingerprint = incomingShareFingerprint([payload]);
+    const original = [{ id: "11111111-1111-4111-8111-111111111111", payload }];
+    await firstStore.stageIncomingShares(fingerprint, original);
+    assert.doesNotMatch([...repository.ciphertext.values()].join(" "), /survive restart/);
+    const restartedStore = new EncryptedStateMobileCaptureStore(repository, testCipher);
+    assert.deepEqual(await restartedStore.listIncomingShares(), original);
+    const replay = await restartedStore.stageIncomingShares(fingerprint,
+      [{ id: "22222222-2222-4222-8222-222222222222", payload }]);
+    assert.deepEqual(replay, original, "restart reuses the durable delivery identity before native acknowledgement");
+    await restartedStore.acknowledgeNativeShares(fingerprint);
+  });
+
+  it("reruns a serialized drain when B is staged while A is awaiting a failed write", async () => {
+    const pending = ["A"];
+    const captured: string[] = [];
+    let release!: () => void;
+    const paused = new Promise<void>((resolve) => { release = resolve; });
+    let attempts = 0;
+    const errors: unknown[] = [];
+    const drain = new SerializedIncomingShareDrain(async () => {
+      attempts += 1;
+      if (attempts === 1) { await paused; throw new Error("temporary encrypted write failure"); }
+      while (pending.length) captured.push(pending.shift()!);
+    }, (error) => errors.push(error));
+    const running = drain.request();
+    pending.push("B");
+    const joined = drain.request();
+    release();
+    await Promise.all([running, joined]);
+    assert.deepEqual(captured, ["A", "B"]);
+    assert.equal(errors.length, 1);
+    assert.equal(attempts, 2);
+  });
+
+  it("quarantines permanent A without blocking B and requires explicit removal", async () => {
+    const store = new MemoryEncryptedStore();
+    store.incomingShares = [
+      { id: "11111111-1111-4111-8111-111111111111", payload: { shareType: "file", value: "A" } },
+      { id: "22222222-2222-4222-8222-222222222222", payload: { shareType: "text", value: "B" } },
+    ];
+    const captured: string[] = [];
+    await drainIncomingShares(store, async ({ payload }) => {
+      if (payload.value === "A") throw new Error("The original file type is not supported.");
+      captured.push(payload.value);
+    });
+    assert.deepEqual(captured, ["B"]);
+    assert.equal(store.incomingShares[0]?.status, "quarantined");
+    await store.removeIncomingShare(store.incomingShares[0]!.id);
+    assert.deepEqual(await store.listIncomingShares(), []);
+  });
+
+  it("retains transient A while processing B and retries A on the next drain", async () => {
+    const store = new MemoryEncryptedStore();
+    store.incomingShares = [
+      { id: "11111111-1111-4111-8111-111111111111", payload: { shareType: "file", value: "A" } },
+      { id: "22222222-2222-4222-8222-222222222222", payload: { shareType: "text", value: "B" } },
+    ];
+    let unavailable = true;
+    const captured: string[] = [];
+    const consume = async ({ payload }: import("../src/mobile-capture-client.js").IncomingShareDelivery) => {
+      if (payload.value === "A" && unavailable) throw new Error("The original could not be read right now.");
+      captured.push(payload.value);
+    };
+    await drainIncomingShares(store, consume);
+    assert.deepEqual(captured, ["B"]);
+    assert.equal(store.incomingShares[0]?.status, "retry_pending");
+    unavailable = false;
+    await drainIncomingShares(store, consume);
+    assert.deepEqual(captured, ["B", "A"]);
+    assert.deepEqual(await store.listIncomingShares(), []);
+  });
   let instance: RunningInstance | undefined;
   afterEach(async () => { await instance?.close(); instance = undefined; });
 
   async function run() {
     const database = new MobileProtocolDatabase();
+    const attachmentStorage = new MemoryAttachmentStorage();
     instance = await startInstance({
       database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin",
-      mobileCaptures: new MobileCaptureService(database), memberAccess: access,
+      mobileCaptures: new MobileCaptureService(database), attachments: new AttachmentService(database, attachmentStorage), memberAccess: access,
     });
-    return { database, baseUrl: instance.url };
+    return { database, attachmentStorage, baseUrl: instance.url };
   }
 
   it("queues text offline, retries, and treats duplicate delivery as one Note", async () => {
@@ -163,6 +328,175 @@ describe("offline mobile capture synchronization", () => {
     assert.equal((await client.sync()).status, "synced");
     assert.equal(database.notes.size, 1);
     assert.equal((await client.outbox()).length, 0);
+  });
+
+  it("retains an original photo offline, uploads it, and links the Workspace Attachment in the captured Note", async () => {
+    const store = new MemoryEncryptedStore();
+    await store.savePairing({ instanceUrl: "https://stash.example", memberToken: "member-ada", workspaceId, memberId: "ada" });
+    const requests: { url: string; init?: RequestInit }[] = [];
+    const client = new MobileCaptureClient(store, async (input, init) => {
+      requests.push({ url: String(input), ...(init ? { init } : {}) });
+      if (String(input).endsWith("/attachments")) return new Response(JSON.stringify({
+        id: "77777777-7777-4777-8777-777777777777",
+        portableLink: "[camera-original.jpg](<./attachments/77777777-7777-4777-8777-777777777777/camera-original.jpg>)",
+      }), { status: 201, headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify({ status: "created" }), { status: 201 });
+    });
+
+    const queued = await client.captureMedia({ kind: "photo", filename: "camera-original.jpg", contentType: "image/jpeg",
+      base64: Buffer.from("original-camera-bytes").toString("base64") }, "Whiteboard sketch");
+    assert.equal(queued.attachment?.base64, Buffer.from("original-camera-bytes").toString("base64"));
+
+    assert.deepEqual(await client.sync(), { status: "synced", count: 1 });
+    assert.equal(requests.length, 2);
+    assert.match(requests[0]!.url, /\/api\/workspaces\/.+\/attachments$/);
+    assert.equal(requests[0]!.init?.headers && (requests[0]!.init.headers as Record<string, string>)["x-stash-filename"],
+      encodeURIComponent("camera-original.jpg"));
+    assert.deepEqual(Buffer.from(await new Response(requests[0]!.init?.body).arrayBuffer()), Buffer.from("original-camera-bytes"));
+    assert.match(String(requests[1]!.init?.body), /camera-original\.jpg/);
+    assert.equal((await client.outbox()).length, 0);
+  });
+
+  it("synchronizes original media end to end through a running Instance", async () => {
+    const { database, attachmentStorage, baseUrl } = await run();
+    const store = new MemoryEncryptedStore();
+    const client = new MobileCaptureClient(store, fetch, { allowInsecureInstanceForTest: true });
+    await client.pair({ instanceUrl: baseUrl, memberToken: "member-ada", workspaceId });
+    await client.captureMedia({ kind: "voice", filename: "decision.m4a", contentType: "audio/mp4",
+      base64: Buffer.from("original voice bytes").toString("base64") }, "Architecture decision");
+
+    assert.deepEqual(await client.sync(), { status: "synced", count: 1 });
+    const [attachment] = database.attachments.values();
+    const [note] = database.notes.values();
+    assert.equal(attachment?.filename, "decision.m4a");
+    assert.deepEqual(attachment && attachmentStorage.content.get(attachment.storageKey), Buffer.from("original voice bytes"));
+    assert.match(note?.content ?? "", /Architecture decision[\s\S]+decision\.m4a/);
+    assert.equal((await client.outbox()).length, 0);
+  });
+
+  it("keeps original media queued and exposes permission and validation failures", async () => {
+    const store = new MemoryEncryptedStore();
+    await store.savePairing({ instanceUrl: "https://stash.example", memberToken: "member-ada", workspaceId, memberId: "ada" });
+    const client = new MobileCaptureClient(store, async () => new Response(JSON.stringify({
+      error: "attachment_unavailable", message: "The Attachment could not be stored or retrieved. Try again.",
+    }), { status: 503, headers: { "content-type": "application/json" } }));
+    await assert.rejects(() => client.captureMedia({ kind: "file", filename: "../secret.txt", contentType: "text/plain", base64: "YQ==" }),
+      /filename/i);
+    const document = await client.captureMedia({ kind: "file", filename: "brief.docx",
+      contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", base64: "ZG9j" });
+    assert.equal(document.attachment?.contentType, "application/octet-stream");
+    const photo = await client.captureMedia({ kind: "photo", filename: "original.heic", contentType: "image/heic", base64: "aGVpYw==" });
+    assert.equal(photo.attachment?.contentType, "image/heic");
+    await client.captureMedia({ kind: "voice", filename: "voice.m4a", contentType: "audio/mp4", base64: "dm9pY2U=" });
+    assert.deepEqual(await client.sync(), { status: "retry_pending", count: 0 });
+    assert.equal((await client.outbox()).find(({ kind }) => kind === "voice")?.attachment?.base64, "dm9pY2U=");
+  });
+
+  it("does not upload an original twice when Note synchronization retries", async () => {
+    const store = new MemoryEncryptedStore();
+    await store.savePairing({ instanceUrl: "https://stash.example", memberToken: "member-ada", workspaceId, memberId: "ada" });
+    let now = Date.parse("2026-08-22T10:00:00Z");
+    let uploads = 0; let noteAttempts = 0;
+    const client = new MobileCaptureClient(store, async (input) => {
+      if (String(input).endsWith("/attachments")) {
+        uploads += 1;
+        return new Response(JSON.stringify({ id: "77777777-7777-4777-8777-777777777777",
+          portableLink: "[retry.m4a](<./attachments/77777777-7777-4777-8777-777777777777/retry.m4a>)" }), { status: 201 });
+      }
+      noteAttempts += 1;
+      return new Response(JSON.stringify(noteAttempts === 1 ? { message: "Try again." } : { status: "created" }),
+        { status: noteAttempts === 1 ? 503 : 201 });
+    }, { now: () => now });
+    await client.captureMedia({ kind: "voice", filename: "retry.m4a", contentType: "audio/mp4", base64: "dm9pY2U=" });
+
+    assert.deepEqual(await client.sync(), { status: "retry_pending", count: 0 });
+    assert.equal((await client.outbox())[0]?.attachment?.remote?.id, "77777777-7777-4777-8777-777777777777");
+    now += 1_000;
+    assert.deepEqual(await client.sync(), { status: "synced", count: 1 });
+    assert.equal(uploads, 1);
+  });
+
+  it("recovers an Attachment after its committed upload response is lost", async () => {
+    const { database, attachmentStorage, baseUrl } = await run();
+    const store = new MemoryEncryptedStore();
+    let loseUploadResponse = true;
+    const client = new MobileCaptureClient(store, async (input, init) => {
+      const response = await fetch(input, init);
+      if (loseUploadResponse && String(input).endsWith("/attachments")) {
+        loseUploadResponse = false;
+        await response.arrayBuffer();
+        throw new TypeError("connection closed after commit");
+      }
+      return response;
+    }, { allowInsecureInstanceForTest: true });
+    await client.pair({ instanceUrl: baseUrl, memberToken: "member-ada", workspaceId });
+    await client.captureMedia({ kind: "photo", filename: "lost.jpg", contentType: "image/jpeg", base64: "b3JpZ2luYWw=" });
+
+    assert.deepEqual(await client.sync(), { status: "offline", count: 0 });
+    assert.equal(database.attachments.size, 1);
+    assert.equal(attachmentStorage.content.size, 1);
+    assert.deepEqual(await client.sync(), { status: "synced", count: 1 });
+    assert.equal(database.attachments.size, 1);
+    assert.equal(attachmentStorage.content.size, 1);
+    assert.equal((await client.outbox()).length, 0);
+  });
+
+  it("queues shared text, URLs, and widget input through their observable source", async () => {
+    const store = new MemoryEncryptedStore();
+    await store.savePairing({ instanceUrl: "https://stash.example", memberToken: "member-ada", workspaceId, memberId: "ada" });
+    const client = new MobileCaptureClient(store, async () => { throw new TypeError("offline"); });
+    await client.captureSharedContent("https://example.com/reference", "share_sheet");
+    await client.captureSharedContent("Call Grace", "widget");
+    const captures = await client.outbox();
+    assert.deepEqual(captures.map(({ content, source }) => ({ content, source })), [
+      { content: "https://example.com/reference", source: "share_sheet" },
+      { content: "Call Grace", source: "widget" },
+    ]);
+    assert.deepEqual(parseIncomingCapture("stash://capture?source=share_sheet&content=https%3A%2F%2Fexample.com%2Freference"),
+      { kind: "capture", capture: { content: "https://example.com/reference", source: "share_sheet" } });
+    assert.deepEqual(parseIncomingCapture("stash://capture?source=widget&content=Call%20Grace"),
+      { kind: "capture", capture: { content: "Call Grace", source: "widget" } });
+    assert.deepEqual(parseIncomingCapture("https://evil.example/capture?source=widget&content=secret"), { kind: "ignored" });
+    assert.deepEqual(parseIncomingCapture("stash://capture?source=widget"),
+      { kind: "error", message: "Shared and widget captures require content." });
+    assert.deepEqual(parseIncomingCapture(`stash://capture?source=widget&content=${"x".repeat(20_001)}`),
+      { kind: "error", message: "Shared and widget captures cannot exceed 20,000 characters." });
+  });
+
+  it("suppresses only the immediate initial-link duplicate and allows repeated user actions", () => {
+    const gate = new IncomingCaptureDeliveryGate();
+    const url = "stash://capture?source=widget&content=Repeat";
+    assert.equal(gate.accept(url, "initial", 1_000), true);
+    assert.equal(gate.accept(url, "event", 1_100), false);
+    assert.equal(gate.accept(url, "event", 1_200), true);
+    assert.equal(gate.accept(url, "initial", 10_000), true);
+    assert.equal(gate.accept(url, "event", 12_001), true);
+    const reverse = new IncomingCaptureDeliveryGate();
+    assert.equal(reverse.accept(url, "event", 20_000), true);
+    assert.equal(reverse.accept(url, "initial", 20_100), false);
+    assert.equal(reverse.accept(url, "event", 20_200), true, "later intentional event remains allowed");
+  });
+
+  it("preserves per-URL launch dedupe candidates across interleaved links", () => {
+    const a = "stash://capture?source=widget&content=A";
+    const b = "stash://capture?source=widget&content=B";
+    const initialFirst = new IncomingCaptureDeliveryGate();
+    assert.equal(initialFirst.accept(a, "initial", 1_000), true);
+    assert.equal(initialFirst.accept(b, "event", 1_010), true);
+    assert.equal(initialFirst.accept(a, "event", 1_020), false);
+    const eventFirst = new IncomingCaptureDeliveryGate();
+    assert.equal(eventFirst.accept(a, "event", 2_000), true);
+    assert.equal(eventFirst.accept(b, "initial", 2_010), true);
+    assert.equal(eventFirst.accept(a, "initial", 2_020), false);
+    assert.equal(eventFirst.accept(a, "event", 5_000), true, "the same intentional action is allowed after the window");
+  });
+
+  it("bounds and expires unmatched deep-link candidates", () => {
+    const gate = new IncomingCaptureDeliveryGate(100, 3);
+    for (let index = 0; index < 20; index += 1) gate.accept(`stash://capture?source=widget&content=${index}`, "initial", index);
+    assert.equal(gate.pendingCount(), 3);
+    gate.accept("stash://capture?source=widget&content=fresh", "event", 1_000);
+    assert.equal(gate.pendingCount(), 1, "expired candidates are pruned before accepting a new URL");
   });
 
   it("rejects a reused capture ID when its creation timestamp changes", async () => {
