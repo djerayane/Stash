@@ -4,11 +4,20 @@ import type { MemberAccessResolver } from "./workspaces-projects.js";
 
 export function taskRoutes(service: TaskService, memberAccess: MemberAccessResolver): HttpRoute {
   return {
-    matches: (request, url) => request.method === "POST" && /^\/api\/notes\/[^/]+\/blocks\/[^/]+\/tasks$/.test(url.pathname),
+    matches: (request, url) => (request.method === "POST" && /^\/api\/notes\/[^/]+\/blocks\/[^/]+\/tasks$/.test(url.pathname))
+      || (request.method === "GET" && /^\/api\/notes\/[^/]+\/linked-tasks$/.test(url.pathname)),
     async handle(request, response, url) {
       const access = await memberAccess.authenticateBearer(request.headers.authorization);
       if (!access) { json(response, 401, { error: "unauthorized", message: "A valid Member session is required." }); return true; }
       try {
+        if (request.method === "GET") {
+          let noteId: string;
+          try { noteId = decodeURIComponent(url.pathname.split("/")[3]!); } catch { throw new InvalidTaskFromBlockInput(); }
+          const result = await service.listLinked(access.accountId, noteId);
+          if (result.status === "found") json(response, 200, { tasks: result.tasks });
+          else json(response, 404, { error: "note_not_found", message: "This Note is unavailable." });
+          return true;
+        }
         let noteId: string; let blockKey: string;
         try {
           const segments = url.pathname.split("/");
@@ -17,7 +26,7 @@ export function taskRoutes(service: TaskService, memberAccess: MemberAccessResol
         }
         catch { throw new InvalidTaskFromBlockInput(); }
         const result = await service.createFromBlock(access.accountId, noteId!, blockKey!, await readJson(request));
-        if (result.status === "created") json(response, 201, { task: result.task, sourceBlock: { noteId, blockId: result.blockId } });
+        if (result.status === "created") json(response, 201, { task: result.task, sourceBlock: result.sourceBlock });
         else if (result.status === "project_forbidden") json(response, 403, { error: result.status, message: "This Member cannot create a Task in that Project." });
         else json(response, 404, { error: result.status, message: result.status === "note_not_found" ? "This Note is unavailable." : "That Block does not exist in this Note." });
       } catch (error) {

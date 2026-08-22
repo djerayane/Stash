@@ -298,6 +298,9 @@ describe("editing Notes", () => {
     assert.match(html, />Checklist</);
     assert.match(html, />Code block</);
     assert.match(html, /dataset\.blockId/);
+    assert.match(html, /linked-tasks/);
+    assert.match(html, /task-links/);
+    assert.match(html, /aria-label.*Linked Tasks/);
     assert.match(html, /\/assets\/gsap\.min\.js/);
     assert.match(html, /prefers-reduced-motion/);
     assert.match(html, /Checklist state/);

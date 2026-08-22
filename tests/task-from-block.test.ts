@@ -15,9 +15,15 @@ class TaskFromBlockFake implements DatabaseProbe, TaskFromBlockRepository {
   readonly source = { content: "Plan the release", revision: 1, blockId: undefined as string | undefined };
   readonly tasks: PortableTaskProjection[] = [];
   failure = false;
+  private serial = Promise.resolve();
   async verifyConnection() {}
   async close() {}
   async createTaskFromBlock(memberId: string, sourceNoteId: string, sourceBlockKey: string, draft: CreateTaskFromBlockDraft) {
+    let release!: () => void;
+    const previous = this.serial;
+    this.serial = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try {
     if (this.failure) throw new Error("postgres://secret");
     if (memberId !== "ada" || sourceNoteId !== noteId) return { status: "note_not_found" as const };
     if (sourceBlockKey !== blockKey) return { status: "block_not_found" as const };
@@ -29,7 +35,13 @@ class TaskFromBlockFake implements DatabaseProbe, TaskFromBlockRepository {
       sourceNoteIds: [noteId], sourceBlocks: [{ noteId, blockId: stableBlockId }], createdAt: draft.createdAt, createdBy: draft.createdBy };
     this.source.blockId = stableBlockId;
     this.tasks.push(task);
-    return { status: "created" as const, task, blockId: stableBlockId };
+    return { status: "created" as const, task, sourceBlock: { noteId, blockId: stableBlockId } };
+    } finally { release(); }
+  }
+  async listLinkedTasks(memberId: string, sourceNoteId: string) {
+    if (memberId !== "ada" || sourceNoteId !== noteId) return { status: "note_not_found" as const };
+    return { status: "found" as const, tasks: this.tasks.map((task) => ({ id: task.id, key: task.key, title: task.title,
+      status: task.status, sourceBlock: task.sourceBlocks![0]! })) };
   }
 }
 
@@ -50,7 +62,10 @@ describe("creating a Task from a stable Note Block", () => {
     const create = (key: string, body: unknown, token = "member-ada") => fetch(`${instance!.url}/api/notes/${noteId}/blocks/${key}/tasks`, {
       method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(body),
     });
-    return { database, create };
+    const linked = (token = "member-ada") => fetch(`${instance!.url}/api/notes/${noteId}/linked-tasks`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    return { database, create, linked };
   }
 
   it("creates independent canonical Tasks while preserving one sparse Block identity and source content", async () => {
@@ -72,6 +87,32 @@ describe("creating a Task from a stable Note Block", () => {
     assert.notEqual(secondBody.task.id, firstBody.task.id);
     assert.deepEqual(secondBody.task.sourceBlocks, [{ noteId, blockId }]);
     assert.equal(database.tasks.length, 2);
+  });
+
+  it("serializes simultaneous first links onto one stable Block identity", async () => {
+    const { database, create } = await run();
+    const [first, second] = await Promise.all([
+      create(blockKey, { projectId, title: "Ship release notes" }),
+      create(blockKey, { projectId, title: "Publish release notes" }),
+    ]);
+    assert.deepEqual([first.status, second.status], [201, 201]);
+    const bodies = await Promise.all([first.json(), second.json()]) as Array<{ task: PortableTaskProjection; sourceBlock: { noteId: string; blockId: string } }>;
+    assert.deepEqual(new Set(bodies.map(({ sourceBlock }) => sourceBlock.blockId)), new Set([blockId]));
+    assert.deepEqual(new Set(bodies.map(({ task }) => task.key)), new Set(["STASH-1", "STASH-2"]));
+    assert.equal(database.tasks.length, 2);
+    assert.equal(database.tasks.every((task) => task.sourceBlocks?.[0]?.blockId === blockId), true);
+  });
+
+  it("reads permission-aware linked Tasks with live canonical Workflow status", async () => {
+    const { database, create, linked } = await run();
+    await create(blockKey, { projectId, title: "Ship release notes" });
+    database.tasks[0]!.status = { id: "99999999-9999-4999-8999-999999999999", name: "In Progress", category: "started" };
+    const response = await linked();
+    assert.equal(response.status, 200);
+    const body = await response.json() as { tasks: Array<{ key: string; status: { name: string }; sourceBlock: { blockId: string } }> };
+    assert.equal(body.tasks[0]?.status.name, "In Progress");
+    assert.equal(body.tasks[0]?.sourceBlock.blockId, blockId);
+    assert.equal((await linked("unknown")).status, 401);
   });
 
   it("surfaces authorization, invalid references, input, and failures without partial state", async () => {

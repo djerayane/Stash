@@ -25,7 +25,7 @@ import type {
 } from "./workspaces-projects.js";
 import type { MemberLocalizationPreferences, MemberLocalizationRepository } from "./member-localization.js";
 import type { PortableRepositoryConnectionProjection, RepositoryConnectionRecord, RepositoryConnectionRepository } from "./repository-connections.js";
-import type { CreateTaskFromBlockDraft, TaskFromBlockRepository } from "./tasks.js";
+import type { CreateTaskFromBlockDraft, LinkedTaskReadModel, TaskFromBlockRepository, TaskSourceBlockReference } from "./tasks.js";
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
@@ -377,8 +377,29 @@ export class PostgresDatabase implements
       await client.query("INSERT INTO stash_task_note_sources (task_id, note_id) VALUES ($1,$2)", [task.id, noteId]);
       await client.query("INSERT INTO stash_task_block_sources (task_id, note_id, block_id) VALUES ($1,$2,$3)", [task.id, noteId, blockId]);
       await this.#recordPortableProjection(client, "Task", task.id, task.schema, task);
-      return { status: "created" as const, task, blockId };
+      const sourceBlock: TaskSourceBlockReference = { noteId, blockId };
+      return { status: "created" as const, task, sourceBlock };
     });
+  }
+
+  async listLinkedTasks(memberId: string, noteId: string) {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureNoteSchema(client);
+      const note = await client.query(`SELECT 1 FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id = note.workspace_id
+        WHERE note.id = $1 AND note.archived_at IS NULL AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2)
+        OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)))`, [noteId, memberId]);
+      if (!note.rowCount) return { status: "note_not_found" as const };
+      const result = await client.query<any>(`SELECT task.id, task.task_key, task.title, status.id AS status_id,
+        status.name AS status_name, status.category, source.block_id
+        FROM stash_task_block_sources source JOIN stash_tasks task ON task.id = source.task_id
+        JOIN stash_workflow_statuses status ON status.id = task.workflow_status_id
+        WHERE source.note_id = $1 ORDER BY task.created_at, task.id`, [noteId]);
+      const tasks: LinkedTaskReadModel[] = result.rows.map((row: any) => ({ id: row.id, key: row.task_key, title: row.title,
+        status: { id: row.status_id, name: row.status_name, category: row.category }, sourceBlock: { noteId, blockId: row.block_id } }));
+      return { status: "found" as const, tasks };
+    } finally { client.release(); }
   }
 
   async #applyTriageChange(client: PoolClient, memberId: string, workspaceId: string, noteId: string, change: NoteTriageChange): Promise<

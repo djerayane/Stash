@@ -10,12 +10,20 @@ export interface CreateTaskFromBlockDraft {
   createdBy: PortableIdentity;
 }
 
+export interface TaskSourceBlockReference { noteId: string; blockId: string }
+export interface LinkedTaskReadModel {
+  id: string; key: string; title: string;
+  status: PortableTaskProjection["status"];
+  sourceBlock: TaskSourceBlockReference;
+}
+
 export type CreateTaskFromBlockOutcome =
-  | { status: "created"; task: PortableTaskProjection; blockId: string }
+  | { status: "created"; task: PortableTaskProjection; sourceBlock: TaskSourceBlockReference }
   | { status: "note_not_found" | "block_not_found" | "project_forbidden" };
 
 export interface TaskFromBlockRepository {
   createTaskFromBlock(memberId: string, noteId: string, blockKey: string, draft: CreateTaskFromBlockDraft): Promise<CreateTaskFromBlockOutcome>;
+  listLinkedTasks(memberId: string, noteId: string): Promise<{ status: "found"; tasks: LinkedTaskReadModel[] } | { status: "note_not_found" }>;
 }
 
 export interface TaskActorRepository {
@@ -42,5 +50,10 @@ export class TaskService {
       id: randomUUID(), projectId: input.projectId, title: input.title.trim(),
       createdAt: new Date().toISOString(), createdBy: actor,
     });
+  }
+
+  async listLinked(memberId: string, noteId: string) {
+    if (!uuid.test(noteId)) throw new InvalidTaskFromBlockInput();
+    return this.tasks.listLinkedTasks(memberId, noteId);
   }
 }

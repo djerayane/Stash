@@ -117,6 +117,11 @@ records the updated Note projection in the same transaction as the Task key, Bac
 relationship, and Task projection. Later Tasks from that Block reuse the UUID; the authored Block
 content stays in place and is not copied into the Task.
 
+The running Instance exposes linked Tasks as a permission-aware Note read model. It resolves each
+Task's current canonical Workflow status at read time, and the WYSIWYG editor renders that Task key,
+title, and status adjacent to the referenced Block. This live state is never written into the Note's
+authored Markdown, so a reload can show status changes without content churn.
+
 The operational Note body is a versioned rich-text document rendered by Stash's WYSIWYG editor.
 Every successful edit atomically increments the Note revision and records another `stash.note.v1`
 outbox revision whose `content` is the complete Markdown rendering. Ordinary Blocks have no
