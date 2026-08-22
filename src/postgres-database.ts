@@ -1831,21 +1831,70 @@ export class PostgresDatabase implements
         CHECK (dependent_task_id <> prerequisite_task_id)
       )
     `);
-    const legacyDependencies = await client.query<{ present: boolean }>(`SELECT EXISTS (
-      SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema()
-      AND table_name = 'stash_tasks' AND column_name = 'dependencies') AS present`);
-    if (legacyDependencies.rows[0]?.present) {
-      await client.query(`INSERT INTO stash_task_dependencies (dependent_task_id, prerequisite_task_id)
-        SELECT CASE relation->>'type' WHEN 'depends_on' THEN task.id ELSE related.id END,
-          CASE relation->>'type' WHEN 'depends_on' THEN related.id ELSE task.id END
-        FROM stash_tasks task CROSS JOIN LATERAL jsonb_array_elements(task.dependencies) relation
-        JOIN stash_tasks related ON related.id = CASE WHEN relation->>'taskId' ~
-          '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
-          THEN (relation->>'taskId')::uuid END AND related.workspace_id = task.workspace_id
-        WHERE relation->>'type' IN ('depends_on', 'required_by') AND task.id <> related.id
-        ON CONFLICT DO NOTHING`);
-      await client.query("ALTER TABLE stash_tasks DROP COLUMN dependencies");
+    const legacyColumn = await client.query<{ present: boolean }>(`SELECT EXISTS (SELECT 1 FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = 'stash_tasks' AND column_name = 'dependencies') AS present`);
+    if (legacyColumn.rows[0]?.present) {
+      const [legacyRows, existingEdges] = await Promise.all([
+        client.query<{ id: string; workspace_id: string; dependencies: unknown }>("SELECT id, workspace_id, dependencies FROM stash_tasks"),
+        client.query<{ dependent_task_id: string; prerequisite_task_id: string }>("SELECT dependent_task_id, prerequisite_task_id FROM stash_task_dependencies"),
+      ]);
+      planLegacyTaskDependencyMigration(legacyRows.rows.map((row) => ({ id: row.id, workspaceId: row.workspace_id, dependencies: row.dependencies })),
+        existingEdges.rows.map((edge) => ({ dependentTaskId: edge.dependent_task_id, prerequisiteTaskId: edge.prerequisite_task_id })));
     }
+    await client.query(`DO $legacy_task_dependencies$
+      DECLARE invalid_count BIGINT; cycle_found BOOLEAN;
+      BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema()
+          AND table_name = 'stash_tasks' AND column_name = 'dependencies') THEN
+          EXECUTE $validate_shape$
+            SELECT count(*) FROM stash_tasks task CROSS JOIN LATERAL jsonb_array_elements(task.dependencies) relation
+            WHERE jsonb_typeof(relation) <> 'object' OR jsonb_object_length(relation) <> 2
+              OR NOT (relation ? 'taskId' AND relation ? 'type')
+              OR relation->>'type' NOT IN ('depends_on', 'required_by')
+              OR relation->>'taskId' !~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
+          $validate_shape$ INTO invalid_count;
+          IF invalid_count > 0 THEN
+            RAISE EXCEPTION 'Legacy Task dependency migration aborted: % malformed relationship entries; repair stash_tasks.dependencies before retrying.', invalid_count;
+          END IF;
+
+          EXECUTE $validate_references$
+            SELECT count(*) FROM stash_tasks task CROSS JOIN LATERAL jsonb_array_elements(task.dependencies) relation
+            LEFT JOIN stash_tasks related ON related.id = (relation->>'taskId')::uuid
+            WHERE related.id IS NULL OR related.workspace_id <> task.workspace_id OR related.id = task.id
+          $validate_references$ INTO invalid_count;
+          IF invalid_count > 0 THEN
+            RAISE EXCEPTION 'Legacy Task dependency migration aborted: % missing, cross-Workspace, or self relationships; repair stash_tasks.dependencies before retrying.', invalid_count;
+          END IF;
+
+          EXECUTE $validate_cycles$
+            WITH RECURSIVE normalized_edges(dependent_id, prerequisite_id) AS (
+              SELECT edge.dependent_task_id, edge.prerequisite_task_id FROM stash_task_dependencies edge
+              UNION
+              SELECT CASE relation->>'type' WHEN 'depends_on' THEN task.id ELSE (relation->>'taskId')::uuid END,
+                CASE relation->>'type' WHEN 'depends_on' THEN (relation->>'taskId')::uuid ELSE task.id END
+              FROM stash_tasks task CROSS JOIN LATERAL jsonb_array_elements(task.dependencies) relation
+            ), reach(source_id, target_id) AS (
+              SELECT dependent_id, prerequisite_id FROM normalized_edges
+              UNION
+              SELECT reach.source_id, edge.prerequisite_id FROM reach
+              JOIN normalized_edges edge ON edge.dependent_id = reach.target_id
+            ) SELECT EXISTS (SELECT 1 FROM reach WHERE source_id = target_id)
+          $validate_cycles$ INTO cycle_found;
+          IF cycle_found THEN
+            RAISE EXCEPTION 'Legacy Task dependency migration aborted: the normalized relationship graph contains a cycle; repair stash_tasks.dependencies before retrying.';
+          END IF;
+
+          EXECUTE $backfill$
+            INSERT INTO stash_task_dependencies (dependent_task_id, prerequisite_task_id)
+            SELECT CASE relation->>'type' WHEN 'depends_on' THEN task.id ELSE (relation->>'taskId')::uuid END,
+              CASE relation->>'type' WHEN 'depends_on' THEN (relation->>'taskId')::uuid ELSE task.id END
+            FROM stash_tasks task CROSS JOIN LATERAL jsonb_array_elements(task.dependencies) relation
+            ON CONFLICT DO NOTHING
+          $backfill$;
+          EXECUTE 'ALTER TABLE stash_tasks DROP COLUMN dependencies';
+        END IF;
+      END
+    $legacy_task_dependencies$`);
     await client.query("ALTER TABLE stash_notes ADD COLUMN IF NOT EXISTS document JSONB");
     await client.query("ALTER TABLE stash_notes ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0)");
     await client.query("UPDATE stash_notes SET document = jsonb_build_object('type', 'doc', 'blocks', jsonb_build_array(jsonb_build_object('type', 'paragraph', 'content', jsonb_build_array(jsonb_build_object('text', content))))) WHERE document IS NULL");
@@ -2073,6 +2122,36 @@ function hasDependencyCycle(taskIds: ReadonlySet<string>, edges: ReadonlyArray<{
     visiting.delete(id); visited.add(id); return false;
   };
   return [...outgoing.keys()].some(visit);
+}
+
+export function planLegacyTaskDependencyMigration(rows: ReadonlyArray<{ id: string; workspaceId: string; dependencies: unknown }>,
+  existingEdges: ReadonlyArray<{ dependentTaskId: string; prerequisiteTaskId: string }> = []) {
+  const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const tasks = new Map(rows.map((row) => [row.id, row]));
+  const normalized = new Map(existingEdges.map((edge) => [`${edge.dependentTaskId}:${edge.prerequisiteTaskId}`,
+    { dependent_task_id: edge.dependentTaskId, prerequisite_task_id: edge.prerequisiteTaskId }]));
+  for (const row of rows) {
+    if (!Array.isArray(row.dependencies)) throw new Error("Legacy Task dependency migration aborted: malformed relationship collection.");
+    for (const value of row.dependencies) {
+      if (value === null || typeof value !== "object" || Array.isArray(value))
+        throw new Error("Legacy Task dependency migration aborted: malformed relationship entry.");
+      const relation = value as Record<string, unknown>;
+      if (Object.keys(relation).length !== 2 || typeof relation.taskId !== "string" || !uuidPattern.test(relation.taskId)
+        || (relation.type !== "depends_on" && relation.type !== "required_by"))
+        throw new Error("Legacy Task dependency migration aborted: malformed relationship entry.");
+      const related = tasks.get(relation.taskId);
+      if (!related || related.workspaceId !== row.workspaceId || related.id === row.id)
+        throw new Error("Legacy Task dependency migration aborted: missing, cross-Workspace, or self relationship.");
+      const edge = relation.type === "depends_on"
+        ? { dependent_task_id: row.id, prerequisite_task_id: related.id }
+        : { dependent_task_id: related.id, prerequisite_task_id: row.id };
+      normalized.set(`${edge.dependent_task_id}:${edge.prerequisite_task_id}`, edge);
+    }
+  }
+  const edges = [...normalized.values()];
+  if (hasDependencyCycle(new Set(tasks.keys()), edges))
+    throw new Error("Legacy Task dependency migration aborted: normalized relationship graph contains a cycle.");
+  return edges;
 }
 
 interface AccountRow { id: string; name: string; email: string; password_hash: string }
