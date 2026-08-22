@@ -9,6 +9,10 @@ import {
   type AuthenticationSecretCodec,
 } from "./authentication-secrets.js";
 import type {
+  PortableIdentity,
+  PortableOrganizationIdentity,
+  PortableProjectProjection,
+  PortableWorkspaceProjection,
   WorkspaceProjectRecord,
   WorkspaceProjectRepository,
   WorkspaceRecord,
@@ -72,21 +76,55 @@ export class PostgresDatabase implements
     }
   }
 
-  async createWorkspace(record: WorkspaceRecord): Promise<"created" | "organization_forbidden"> {
+  async findPortableMemberIdentity(memberId: string): Promise<PortableIdentity | undefined> {
     const client = await this.#pool.connect();
     try {
+      await this.#ensureBootstrapSchema(client);
+      const result = await client.query<{ id: string; name: string }>(
+        "SELECT id, name FROM stash_accounts WHERE id = $1",
+        [memberId],
+      );
+      const member = result.rows[0];
+      return member
+        ? { localAccountId: member.id, displayName: member.name }
+        : undefined;
+    } finally {
+      client.release();
+    }
+  }
+
+  async findPortableOrganizationIdentity(
+    organizationId: string,
+  ): Promise<PortableOrganizationIdentity | undefined> {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureBootstrapSchema(client);
+      const result = await client.query<{ id: string; name: string }>(
+        "SELECT id, name FROM stash_organizations WHERE id = $1",
+        [organizationId],
+      );
+      const organization = result.rows[0];
+      return organization
+        ? { localOrganizationId: organization.id, displayName: organization.name }
+        : undefined;
+    } finally {
+      client.release();
+    }
+  }
+
+  async createWorkspace(
+    record: WorkspaceRecord,
+    projection: PortableWorkspaceProjection,
+  ): Promise<"created" | "organization_forbidden"> {
+    return this.#withTransaction(async (client) => {
       await this.#ensureWorkspaceProjectSchema(client);
-      await client.query("BEGIN");
       if (record.owner.type === "organization") {
         const membership = await client.query(
           `SELECT 1 FROM stash_organization_memberships
            WHERE organization_id = $1 AND account_id = $2`,
           [record.owner.id, record.createdByMemberId],
         );
-        if (!membership.rowCount) {
-          await client.query("ROLLBACK");
-          return "organization_forbidden";
-        }
+        if (!membership.rowCount) return "organization_forbidden";
       }
       await client.query(
         `INSERT INTO stash_workspaces
@@ -106,26 +144,19 @@ export class PostgresDatabase implements
         "Workspace",
         record.id,
         "stash.workspace.v1",
-        record,
+        projection,
       );
-      await client.query("COMMIT");
       return "created";
-    } catch (error) {
-      await client.query("ROLLBACK").catch(() => undefined);
-      throw error;
-    } finally {
-      client.release();
-    }
+    });
   }
 
   async createProject(
     memberId: string,
     record: WorkspaceProjectRecord,
+    projection: PortableProjectProjection,
   ): Promise<"created" | "workspace_forbidden" | "workspace_not_found" | "key_conflict"> {
-    const client = await this.#pool.connect();
-    try {
+    return this.#withTransaction(async (client) => {
       await this.#ensureWorkspaceProjectSchema(client);
-      await client.query("BEGIN");
       const access = await client.query<{ allowed: boolean }>(
         `SELECT (
            (owner_type = 'personal' AND personal_owner_id = $2)
@@ -138,46 +169,25 @@ export class PostgresDatabase implements
          FROM stash_workspaces WHERE id = $1`,
         [record.workspaceId, memberId],
       );
-      if (!access.rowCount) {
-        await client.query("ROLLBACK");
-        return "workspace_not_found";
-      }
-      if (!access.rows[0]!.allowed) {
-        await client.query("ROLLBACK");
-        return "workspace_forbidden";
-      }
-      try {
-        await client.query(
-          `INSERT INTO stash_projects (id, workspace_id, name, project_key, created_by_account_id)
-           VALUES ($1, $2, $3, $4, $5)`,
-          [record.id, record.workspaceId, record.name, record.key, record.createdByMemberId],
-        );
-      } catch (error) {
-        if (
-          error instanceof Error
-          && "code" in error
-          && (error as Error & { code?: string }).code === "23505"
-        ) {
-          await client.query("ROLLBACK");
-          return "key_conflict";
-        }
-        throw error;
-      }
+      if (!access.rowCount) return "workspace_not_found";
+      if (!access.rows[0]!.allowed) return "workspace_forbidden";
+      const inserted = await client.query(
+        `INSERT INTO stash_projects (id, workspace_id, name, project_key, created_by_account_id)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (workspace_id, project_key) DO NOTHING
+         RETURNING id`,
+        [record.id, record.workspaceId, record.name, record.key, record.createdByMemberId],
+      );
+      if (!inserted.rowCount) return "key_conflict";
       await this.#recordPortableProjection(
         client,
         "Project",
         record.id,
         "stash.project.v1",
-        record,
+        projection,
       );
-      await client.query("COMMIT");
       return "created";
-    } catch (error) {
-      await client.query("ROLLBACK").catch(() => undefined);
-      throw error;
-    } finally {
-      client.release();
-    }
+    });
   }
 
   async close(): Promise<void> {
@@ -389,7 +399,7 @@ export class PostgresDatabase implements
     objectKind: "Workspace" | "Project",
     objectId: string,
     projectionSchema: "stash.workspace.v1" | "stash.project.v1",
-    payload: WorkspaceRecord | WorkspaceProjectRecord,
+    payload: PortableWorkspaceProjection | PortableProjectProjection,
   ): Promise<void> {
     await client.query(
       `INSERT INTO stash_portable_projection_outbox
@@ -397,6 +407,21 @@ export class PostgresDatabase implements
        VALUES ($1, $2, 1, $3, $4::jsonb)`,
       [objectKind, objectId, projectionSchema, JSON.stringify(payload)],
     );
+  }
+
+  async #withTransaction<Result>(operation: (client: PoolClient) => Promise<Result>): Promise<Result> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await operation(client);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 }
 

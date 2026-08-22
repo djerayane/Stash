@@ -38,7 +38,12 @@ export function workspaceProjectRoutes(
             const { createdByMemberId: _, ...workspace } = result.workspace;
             json(response, 201, {
               ...workspace,
-              portableProjection: { format: "stash.workspace.v1", state: "recorded" },
+              portableProjection: {
+                format: result.projection.schema,
+                state: "recorded",
+                owner: result.projection.owner,
+                createdBy: result.projection.createdBy,
+              },
             });
           }
           return true;
@@ -55,7 +60,11 @@ export function workspaceProjectRoutes(
           const { createdByMemberId: _, ...project } = result.project;
           json(response, 201, {
             ...project,
-            portableProjection: { format: "stash.project.v1", state: "recorded" },
+            portableProjection: {
+              format: result.projection.schema,
+              state: "recorded",
+              createdBy: result.projection.createdBy,
+            },
           });
         } else if (result.status === "key_conflict") {
           json(response, 409, {

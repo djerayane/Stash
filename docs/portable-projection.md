@@ -15,13 +15,23 @@ that a complete export has already been generated.
 {
   "id": "89fa5772-0439-4cc1-b67a-bdeb12ae0ed5",
   "name": "Acme Product",
-  "owner": { "type": "organization", "id": "c4c75c6b-68f7-44e0-b6d3-89920d216dc9" },
-  "createdByMemberId": "dd24a52e-f591-42a8-90af-a981e1449877"
+  "owner": {
+    "type": "organization",
+    "identity": {
+      "localOrganizationId": "c4c75c6b-68f7-44e0-b6d3-89920d216dc9",
+      "displayName": "Acme"
+    }
+  },
+  "createdBy": {
+    "localAccountId": "dd24a52e-f591-42a8-90af-a981e1449877",
+    "displayName": "Ada Lovelace"
+  }
 }
 ```
 
-For a personal Workspace, `owner.type` is `personal` and `owner.id` is the owning Member's stable
-account identifier.
+For a personal Workspace, `owner.type` is `personal` and `owner.identity` has the same shape as
+`createdBy`. Identity fields are resolved from authenticated Instance records; clients cannot
+submit display names for the projection.
 
 ## `stash.project.v1`
 
@@ -31,9 +41,17 @@ account identifier.
   "workspaceId": "89fa5772-0439-4cc1-b67a-bdeb12ae0ed5",
   "name": "Launch",
   "key": "LAUNCH",
-  "createdByMemberId": "dd24a52e-f591-42a8-90af-a981e1449877"
+  "createdBy": {
+    "localAccountId": "dd24a52e-f591-42a8-90af-a981e1449877",
+    "displayName": "Ada Lovelace"
+  }
 }
 ```
+
+On import into another Instance, a matching stable local reference may be mapped explicitly. If no
+matching account or Organization is available, importers preserve `displayName` so ownership and
+attribution remain intelligible without impersonating a local Member. Account identities degrade
+to Identity Stubs rather than being matched by name automatically.
 
 The outbox envelope stores `object_kind`, `object_id`, `revision`, `projection_schema`, the JSON
 `payload`, creation time, and processing `state`. Consumers select the format using

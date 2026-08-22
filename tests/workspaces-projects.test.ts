@@ -5,12 +5,27 @@ import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/
 import {
   WorkspaceProjectService,
   type MemberAccessResolver,
+  type PortableIdentity,
+  type PortableOrganizationIdentity,
+  type PortableProjectProjection,
+  type PortableWorkspaceProjection,
   type WorkspaceProjectRecord,
   type WorkspaceProjectRepository,
   type WorkspaceRecord,
 } from "../src/workspaces-projects.js";
 
+const acmeOrganizationId = "11111111-1111-4111-8111-111111111111";
+const otherOrganizationId = "22222222-2222-4222-8222-222222222222";
+
 class ProtocolCompatibleDatabase implements DatabaseProbe, WorkspaceProjectRepository {
+  readonly members = new Map<string, PortableIdentity>([
+    ["ada", { localAccountId: "ada", displayName: "Ada Lovelace" }],
+    ["grace", { localAccountId: "grace", displayName: "Grace Hopper" }],
+  ]);
+  readonly organizations = new Map<string, PortableOrganizationIdentity>([
+    [acmeOrganizationId, { localOrganizationId: acmeOrganizationId, displayName: "Acme" }],
+    [otherOrganizationId, { localOrganizationId: otherOrganizationId, displayName: "Other Org" }],
+  ]);
   readonly organizationMembers = new Map<string, Set<string>>();
   readonly workspaces = new Map<string, WorkspaceRecord>();
   readonly projects = new Map<string, WorkspaceProjectRecord>();
@@ -21,14 +36,25 @@ class ProtocolCompatibleDatabase implements DatabaseProbe, WorkspaceProjectRepos
   async verifyConnection(): Promise<void> {}
   async close(): Promise<void> {}
 
-  async createWorkspace(record: WorkspaceRecord): Promise<"created" | "organization_forbidden"> {
+  async findPortableMemberIdentity(memberId: string) {
+    return this.members.get(memberId);
+  }
+
+  async findPortableOrganizationIdentity(organizationId: string) {
+    return this.organizations.get(organizationId);
+  }
+
+  async createWorkspace(
+    record: WorkspaceRecord,
+    projection: PortableWorkspaceProjection,
+  ): Promise<"created" | "organization_forbidden"> {
     if (this.failure) throw this.failure;
     if (
       record.owner.type === "organization"
       && !this.organizationMembers.get(record.owner.id)?.has(record.createdByMemberId)
     ) return "organization_forbidden";
     if (this.projectionFailure) throw this.projectionFailure;
-    this.portableProjectionOutbox.push({ schema: "stash.workspace.v1", ...record });
+    this.portableProjectionOutbox.push(projection);
     this.workspaces.set(record.id, record);
     return "created";
   }
@@ -36,6 +62,7 @@ class ProtocolCompatibleDatabase implements DatabaseProbe, WorkspaceProjectRepos
   async createProject(
     memberId: string,
     record: WorkspaceProjectRecord,
+    projection: PortableProjectProjection,
   ): Promise<"created" | "workspace_forbidden" | "workspace_not_found" | "key_conflict"> {
     if (this.failure) throw this.failure;
     const workspace = this.workspaces.get(record.workspaceId);
@@ -48,7 +75,7 @@ class ProtocolCompatibleDatabase implements DatabaseProbe, WorkspaceProjectRepos
       (project) => project.workspaceId === record.workspaceId && project.key === record.key,
     )) return "key_conflict";
     if (this.projectionFailure) throw this.projectionFailure;
-    this.portableProjectionOutbox.push({ schema: "stash.project.v1", ...record });
+    this.portableProjectionOutbox.push(projection);
     this.projects.set(record.id, record);
     return "created";
   }
@@ -71,8 +98,8 @@ describe("creating Workspaces and Projects", () => {
 
   async function run() {
     const database = new ProtocolCompatibleDatabase();
-    database.organizationMembers.set("org-acme", new Set(["ada"]));
-    database.organizationMembers.set("org-other", new Set(["grace"]));
+    database.organizationMembers.set(acmeOrganizationId, new Set(["ada"]));
+    database.organizationMembers.set(otherOrganizationId, new Set(["grace"]));
     instance = await startInstance({
       database,
       host: "127.0.0.1",
@@ -120,6 +147,11 @@ describe("creating Workspaces and Projects", () => {
     assert.deepEqual(workspace.portableProjection, {
       format: "stash.workspace.v1",
       state: "recorded",
+      createdBy: { localAccountId: "ada", displayName: "Ada Lovelace" },
+      owner: {
+        type: "personal",
+        identity: { localAccountId: "ada", displayName: "Ada Lovelace" },
+      },
     });
 
     const denied = await createProject(baseUrl, workspace.id, "member-grace", {
@@ -137,11 +169,24 @@ describe("creating Workspaces and Projects", () => {
     const { baseUrl } = await run();
     const workspaceResponse = await createWorkspace(baseUrl, "member-ada", {
       name: "Acme Product",
-      owner: { type: "organization", organizationId: "org-acme" },
+      owner: { type: "organization", organizationId: acmeOrganizationId },
     });
     assert.equal(workspaceResponse.status, 201);
-    const workspace = await workspaceResponse.json() as { id: string; owner: object };
-    assert.deepEqual(workspace.owner, { type: "organization", id: "org-acme" });
+    const workspace = await workspaceResponse.json() as {
+      id: string;
+      owner: object;
+      portableProjection: object;
+    };
+    assert.deepEqual(workspace.owner, { type: "organization", id: acmeOrganizationId });
+    assert.deepEqual(workspace.portableProjection, {
+      format: "stash.workspace.v1",
+      state: "recorded",
+      createdBy: { localAccountId: "ada", displayName: "Ada Lovelace" },
+      owner: {
+        type: "organization",
+        identity: { localOrganizationId: acmeOrganizationId, displayName: "Acme" },
+      },
+    });
 
     const projectResponse = await createProject(baseUrl, workspace.id, "member-ada", {
       name: "Launch",
@@ -155,6 +200,7 @@ describe("creating Workspaces and Projects", () => {
     assert.deepEqual(project.portableProjection, {
       format: "stash.project.v1",
       state: "recorded",
+      createdBy: { localAccountId: "ada", displayName: "Ada Lovelace" },
     });
   });
 
@@ -162,7 +208,7 @@ describe("creating Workspaces and Projects", () => {
     const { baseUrl } = await run();
     const workspaceResponse = await createWorkspace(baseUrl, "member-ada", {
       name: "Acme Product",
-      owner: { type: "organization", organizationId: "org-acme" },
+      owner: { type: "organization", organizationId: acmeOrganizationId },
     });
     const workspace = await workspaceResponse.json() as { id: string };
 
@@ -180,7 +226,7 @@ describe("creating Workspaces and Projects", () => {
 
     const foreignOwner = await createWorkspace(baseUrl, "member-grace", {
       name: "Not Grace's Organization",
-      owner: { type: "organization", organizationId: "org-acme" },
+      owner: { type: "organization", organizationId: acmeOrganizationId },
     });
     assert.equal(foreignOwner.status, 403);
     assert.deepEqual(await foreignOwner.json(), {
@@ -245,6 +291,23 @@ describe("creating Workspaces and Projects", () => {
         message: "A Project requires a valid Workspace id, name, and 2-20 character key.",
       });
     }
+  });
+
+  it("rejects a malformed Organization identifier before persistence", async () => {
+    const { baseUrl, database } = await run();
+
+    const response = await createWorkspace(baseUrl, "member-ada", {
+      name: "Invalid Organization Workspace",
+      owner: { type: "organization", organizationId: "not-a-uuid" },
+    });
+
+    assert.equal(response.status, 422);
+    assert.deepEqual(await response.json(), {
+      error: "invalid_input",
+      message: "A Workspace requires a valid name and personal or Organization owner.",
+    });
+    assert.equal(database.workspaces.size, 0);
+    assert.equal(database.portableProjectionOutbox.length, 0);
   });
 
   it("does not persist creation when its portable projection cannot be recorded", async () => {

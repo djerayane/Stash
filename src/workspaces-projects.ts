@@ -22,11 +22,48 @@ export interface WorkspaceProjectRecord {
   createdByMemberId: string;
 }
 
+export interface PortableIdentity {
+  localAccountId: string;
+  displayName: string;
+}
+
+export interface PortableOrganizationIdentity {
+  localOrganizationId: string;
+  displayName: string;
+}
+
+export interface PortableWorkspaceProjection {
+  schema: "stash.workspace.v1";
+  id: string;
+  name: string;
+  owner:
+    | { type: "personal"; identity: PortableIdentity }
+    | { type: "organization"; identity: PortableOrganizationIdentity };
+  createdBy: PortableIdentity;
+}
+
+export interface PortableProjectProjection {
+  schema: "stash.project.v1";
+  id: string;
+  workspaceId: string;
+  name: string;
+  key: string;
+  createdBy: PortableIdentity;
+}
+
 export interface WorkspaceProjectRepository {
-  createWorkspace(record: WorkspaceRecord): Promise<"created" | "organization_forbidden">;
+  findPortableMemberIdentity(memberId: string): Promise<PortableIdentity | undefined>;
+  findPortableOrganizationIdentity(
+    organizationId: string,
+  ): Promise<PortableOrganizationIdentity | undefined>;
+  createWorkspace(
+    record: WorkspaceRecord,
+    projection: PortableWorkspaceProjection,
+  ): Promise<"created" | "organization_forbidden">;
   createProject(
     memberId: string,
     record: WorkspaceProjectRecord,
+    projection: PortableProjectProjection,
   ): Promise<"created" | "workspace_forbidden" | "workspace_not_found" | "key_conflict">;
 }
 
@@ -57,8 +94,7 @@ function isWorkspaceInput(value: unknown): value is WorkspaceInput {
   }
   return value.owner.type === "organization"
     && typeof value.owner.organizationId === "string"
-    && value.owner.organizationId.length > 0
-    && value.owner.organizationId.length <= 200
+    && isUuid(value.owner.organizationId)
     && Object.keys(value.owner).length === 2;
 }
 
@@ -83,10 +119,26 @@ export class WorkspaceProjectService {
   }
 
   async createWorkspace(memberId: string, value: unknown): Promise<
-    | { status: "created"; workspace: WorkspaceRecord }
+    | {
+      status: "created";
+      workspace: WorkspaceRecord;
+      projection: PortableWorkspaceProjection;
+    }
     | { status: "organization_forbidden" }
   > {
     if (!isWorkspaceInput(value)) throw new InvalidWorkspaceInput();
+    const createdBy = await this.#repository.findPortableMemberIdentity(memberId);
+    if (!createdBy) throw new Error("member_identity_unavailable");
+    let portableOwner: PortableWorkspaceProjection["owner"];
+    if (value.owner.type === "personal") {
+      portableOwner = { type: "personal", identity: createdBy };
+    } else {
+      const identity = await this.#repository.findPortableOrganizationIdentity(
+        value.owner.organizationId,
+      );
+      if (!identity) return { status: "organization_forbidden" };
+      portableOwner = { type: "organization", identity };
+    }
     const workspace: WorkspaceRecord = {
       id: randomUUID(),
       name: value.name.trim(),
@@ -95,15 +147,28 @@ export class WorkspaceProjectService {
         : { type: "organization", id: value.owner.organizationId },
       createdByMemberId: memberId,
     };
-    const status = await this.#repository.createWorkspace(workspace);
-    return status === "created" ? { status, workspace } : { status };
+    const projection: PortableWorkspaceProjection = {
+      schema: "stash.workspace.v1",
+      id: workspace.id,
+      name: workspace.name,
+      owner: portableOwner,
+      createdBy,
+    };
+    const status = await this.#repository.createWorkspace(workspace, projection);
+    return status === "created" ? { status, workspace, projection } : { status };
   }
 
   async createProject(memberId: string, workspaceId: string, value: unknown): Promise<
-    | { status: "created"; project: WorkspaceProjectRecord }
+    | {
+      status: "created";
+      project: WorkspaceProjectRecord;
+      projection: PortableProjectProjection;
+    }
     | { status: "workspace_forbidden" | "workspace_not_found" | "key_conflict" }
   > {
     if (!isUuid(workspaceId) || !isProjectInput(value)) throw new InvalidProjectInput();
+    const createdBy = await this.#repository.findPortableMemberIdentity(memberId);
+    if (!createdBy) throw new Error("member_identity_unavailable");
     const project: WorkspaceProjectRecord = {
       id: randomUUID(),
       workspaceId,
@@ -111,7 +176,15 @@ export class WorkspaceProjectService {
       key: value.key.toUpperCase(),
       createdByMemberId: memberId,
     };
-    const status = await this.#repository.createProject(memberId, project);
-    return status === "created" ? { status, project } : { status };
+    const projection: PortableProjectProjection = {
+      schema: "stash.project.v1",
+      id: project.id,
+      workspaceId: project.workspaceId,
+      name: project.name,
+      key: project.key,
+      createdBy,
+    };
+    const status = await this.#repository.createProject(memberId, project, projection);
+    return status === "created" ? { status, project, projection } : { status };
   }
 }
