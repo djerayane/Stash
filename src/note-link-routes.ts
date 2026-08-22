@@ -15,7 +15,7 @@ export function noteLinkRoutes(service: NoteLinkService, access: MemberAccessRes
         let noteId: string; try { noteId = decodeURIComponent(segments[3]!); } catch { throw new InvalidNoteLinkInput(); }
         if (url.pathname.endsWith("/location")) {
           const result = await service.move(member.accountId, noteId, await readJson(request));
-          if (result.status === "moved") json(response, 200, { location: result.location });
+          if (result.status === "moved" || result.status === "unchanged") json(response, 200, { result: result.status, location: result.location });
           else if (result.status === "changed") json(response, 409, { error: "note_changed", message: "The Note location changed. Reload before moving it.", location: result.location });
           else if (result.status === "path_conflict") json(response, 409, { error: result.status, message: "That path or permanent alias already belongs to another Note." });
           else json(response, 404, { error: "note_not_found", message: "This Note is unavailable." });

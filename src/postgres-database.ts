@@ -2,7 +2,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { Pool, type PoolClient } from "pg";
 
 import type { DatabaseProbe } from "./instance.js";
-import { noteOperationDigest, type NoteConflictResolution, type NoteEditBatch, type NoteEditConflict, type NoteRecord, type NoteRepository, type NoteTriageChange, type NoteTriageResult, type PortableNoteProjection, type PortableTaskProjection, type TaskCreation } from "./notes.js";
+import { noteOperationDigest, type NoteConflictResolution, type NoteEditBatch, type NoteEditConflict, type NoteRecord, type NoteRepository, type NoteTriageChange, type NoteTriageResult, type PortableNoteLinkProjection, type PortableNoteProjection, type PortableTaskProjection, type TaskCreation } from "./notes.js";
 import { paragraphDocument, richTextToMarkdown } from "./rich-text.js";
 import type { BootstrapRecord, OwnerBootstrapRepository } from "./owner-bootstrap.js";
 import type { AccountAuthenticationRecord, PasswordAuthRepository, SessionRecord } from "./password-auth.js";
@@ -377,6 +377,7 @@ export class PostgresDatabase implements
           note.createdAt,
         ],
       );
+      await this.#recordInitialNoteLocation(client, note.id, note.workspaceId);
       await this.#recordPortableProjection(client, "Note", note.id, "stash.note.v1", projection);
       return "created";
     });
@@ -416,6 +417,7 @@ export class PostgresDatabase implements
         [note.id, note.workspaceId, note.projectId ?? null, note.content, JSON.stringify(note.document), note.revision,
           JSON.stringify(note.tags), note.reminder?.at ?? null, memberId, note.createdAt],
       );
+      await this.#recordInitialNoteLocation(client, note.id, note.workspaceId);
       await this.#recordPortableProjection(client, "Note", note.id, "stash.note.v1", projection);
       await client.query(
         "INSERT INTO stash_mobile_capture_receipts (account_id, client_capture_id, note_id, payload_digest) VALUES ($1, $2, $3, $4)",
@@ -772,6 +774,7 @@ export class PostgresDatabase implements
           (id, workspace_id, project_id, content, document, revision, tags, reminder_at, created_by_account_id, created_at)
           VALUES ($1,$2,NULL,$3,$4::jsonb,1,'[]'::jsonb,NULL,$5,$6)`,
         [draft.workId, discussion.workspaceId, content, JSON.stringify(paragraphDocument(content, randomUUID())), memberId, draft.createdAt]);
+        await this.#recordInitialNoteLocation(client, draft.workId, discussion.workspaceId);
         const projection = { schema: "stash.note.v1" as const, id: draft.workId, workspaceId: discussion.workspaceId,
           content, tags: [], createdAt: draft.createdAt, createdBy: draft.createdBy };
         await this.#recordPortableProjection(client, "Note", draft.workId, projection.schema, projection);
@@ -1466,6 +1469,7 @@ export class PostgresDatabase implements
       const current: NoteLocationRecord = { noteId: row.id, workspaceId: row.workspace_id, path: row.portable_path,
         aliases: row.aliases ?? [], revision: row.location_revision };
       if (current.revision !== expectedRevision) return { status: "changed" as const, location: current };
+      if (path === current.path) return { status: "unchanged" as const, location: current };
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`note-path:${current.workspaceId}`]);
       const conflict = await client.query(`SELECT 1 FROM stash_notes WHERE workspace_id=$1 AND id<>$2 AND portable_path=$3
         UNION ALL SELECT 1 FROM stash_note_path_aliases WHERE workspace_id=$1 AND note_id<>$2 AND path=$3 LIMIT 1`, [current.workspaceId, noteId, path]);
@@ -2559,6 +2563,15 @@ export class PostgresDatabase implements
       ALTER TABLE stash_notes ADD COLUMN IF NOT EXISTS location_revision INTEGER NOT NULL DEFAULT 1 CHECK (location_revision > 0);
       UPDATE stash_notes SET portable_path='notes/' || id::text || '.md' WHERE portable_path IS NULL;
       ALTER TABLE stash_notes ALTER COLUMN portable_path SET NOT NULL;
+      CREATE OR REPLACE FUNCTION stash_assign_note_portable_path() RETURNS TRIGGER AS $assign_note_path$
+      BEGIN
+        IF NEW.portable_path IS NULL THEN NEW.portable_path := 'notes/' || NEW.id::text || '.md'; END IF;
+        RETURN NEW;
+      END
+      $assign_note_path$ LANGUAGE plpgsql;
+      DROP TRIGGER IF EXISTS stash_assign_note_portable_path ON stash_notes;
+      CREATE TRIGGER stash_assign_note_portable_path BEFORE INSERT ON stash_notes
+        FOR EACH ROW EXECUTE FUNCTION stash_assign_note_portable_path();
       CREATE UNIQUE INDEX IF NOT EXISTS stash_notes_workspace_portable_path ON stash_notes(workspace_id,portable_path);
       CREATE TABLE IF NOT EXISTS stash_note_path_aliases (
         workspace_id UUID NOT NULL REFERENCES stash_workspaces(id), note_id UUID NOT NULL REFERENCES stash_notes(id), path TEXT NOT NULL,
@@ -2575,6 +2588,12 @@ export class PostgresDatabase implements
       ALTER TABLE stash_note_links ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0);
       UPDATE stash_note_links link SET target_path=note.portable_path FROM stash_notes note
         WHERE link.target_note_id=note.id AND link.target_path IS NULL;
+      INSERT INTO stash_portable_projection_outbox(object_kind,object_id,revision,projection_schema,payload)
+      SELECT 'NoteLocation',note.id,1,'stash.note-location.v1',jsonb_build_object(
+        'schema','stash.note-location.v1','noteId',note.id,'workspaceId',note.workspace_id,'path',note.portable_path,
+        'aliases','[]'::jsonb,'revision',note.location_revision)
+      FROM stash_notes note WHERE NOT EXISTS (SELECT 1 FROM stash_portable_projection_outbox projection
+        WHERE projection.object_kind='NoteLocation' AND projection.object_id=note.id);
       CREATE TABLE IF NOT EXISTS stash_workflow_statuses (
         id UUID PRIMARY KEY, project_id UUID NOT NULL REFERENCES stash_projects(id), name TEXT NOT NULL,
         category TEXT NOT NULL CHECK (category IN ('unstarted', 'started', 'completed')), position INTEGER NOT NULL,
@@ -2979,6 +2998,12 @@ export class PostgresDatabase implements
     );
   }
 
+  async #recordInitialNoteLocation(client: PoolClient, noteId: string, workspaceId: string): Promise<void> {
+    const projection: PortableNoteLocationProjection = { schema: "stash.note-location.v1", noteId, workspaceId,
+      path: `notes/${noteId}.md`, aliases: [], revision: 1 };
+    await this.#recordPortableProjection(client, "NoteLocation", noteId, projection.schema, projection);
+  }
+
   async #recordRepositoryConnectionProjection(client: PoolClient, record: RepositoryConnectionRecord, revision: number): Promise<void> {
     const identities = await client.query<{ organization_name: string; account_name: string }>(
       `SELECT organization.name AS organization_name, account.name AS account_name
@@ -3045,6 +3070,21 @@ export class PostgresDatabase implements
            WHERE object_kind = 'Note' AND object_id = note.id ORDER BY revision DESC LIMIT 1) projection ON TRUE
          WHERE note.workspace_id = $1 AND ($2::boolean OR note.project_id = ANY($3::uuid[]))
          ORDER BY note.id`, [workspaceId, permission.member, guestProjectIds]);
+      const noteLocations = await client.query<{ note_id: string; payload: PortableNoteLocationProjection | null }>(
+        `SELECT note.id AS note_id, projection.payload FROM stash_notes note
+         LEFT JOIN LATERAL (SELECT payload FROM stash_portable_projection_outbox
+           WHERE object_kind='NoteLocation' AND object_id=note.id ORDER BY revision DESC LIMIT 1) projection ON TRUE
+         WHERE note.workspace_id=$1 AND ($2::boolean OR note.project_id=ANY($3::uuid[])) ORDER BY note.id`,
+      [workspaceId, permission.member, guestProjectIds]);
+      const noteLinks = await client.query<{ id: string; payload: PortableNoteLinkStateProjection | PortableNoteLinkProjection | null }>(
+        `SELECT link.id, projection.payload FROM stash_note_links link
+         JOIN stash_notes source ON source.id=link.source_note_id
+         LEFT JOIN stash_notes target ON target.id=link.target_note_id
+         LEFT JOIN LATERAL (SELECT payload FROM stash_portable_projection_outbox
+           WHERE object_kind='NoteLink' AND object_id=link.id ORDER BY revision DESC LIMIT 1) projection ON TRUE
+         WHERE link.workspace_id=$1 AND ($2::boolean OR
+           source.project_id=ANY($3::uuid[]) AND target.project_id=ANY($3::uuid[])) ORDER BY link.id`,
+      [workspaceId, permission.member, guestProjectIds]);
       const tasks = await client.query<{ id: string; payload: PortableTaskProjection | null }>(
         `SELECT task.id, projection.payload FROM stash_tasks task
          LEFT JOIN LATERAL (SELECT payload FROM stash_portable_projection_outbox
@@ -3070,6 +3110,7 @@ export class PostgresDatabase implements
          ORDER BY attachment.id`, [workspaceId, permission.member, guestProjectIds]);
       if (notes.rows.some(({ payload }) => !payload) || tasks.rows.some(({ payload }) => !payload)
         || boards.rows.some(({ payload }) => !payload)
+        || noteLocations.rows.some(({ payload }) => !payload) || noteLinks.rows.some(({ payload }) => !payload)
         || attachments.rows.some(({ payload }) => !payload)) throw new Error("portable_projection_unavailable");
       await client.query("COMMIT");
       const noteProjections = notes.rows.map(({ payload }) => payload!); const taskProjections = tasks.rows.map(({ payload }) => payload!);
@@ -3090,6 +3131,8 @@ export class PostgresDatabase implements
         tasks: visibleTasks,
         boards: boards.rows.map(({ payload }) => payload!),
         attachments: attachments.rows.map(({ storage_key, payload }) => ({ storageKey: storage_key, projection: payload! })),
+        noteLocations: noteLocations.rows.map(({ payload }) => payload!),
+        noteLinks: noteLinks.rows.map(({ payload }) => payload!),
       } };
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);

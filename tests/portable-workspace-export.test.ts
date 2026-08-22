@@ -21,6 +21,9 @@ import type { MemberAccessResolver } from "../src/workspaces-projects.js";
 import { WorkspaceProjectService } from "../src/workspaces-projects.js";
 import { TaskService } from "../src/tasks.js";
 import { BoardService } from "../src/boards.js";
+import { MobileCaptureService } from "../src/mobile-captures.js";
+import { DiscussionService } from "../src/discussions.js";
+import { NoteLinkService } from "../src/note-links.js";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const secretWorkspaceId = "99999999-9999-4999-8999-999999999999";
@@ -42,6 +45,11 @@ const snapshot: PortableWorkspaceExportSnapshot = {
     name: "Delivery", groupBy: "status", createdAt: "2026-01-03T01:00:00.000Z" }],
   attachments: [{ projection: { schema: "stash.attachment.v1", id: "44444444-4444-4444-8444-444444444444", workspaceId,
     filename: "design v2.png", contentType: "image/png", size: 7, relativePath: "./attachments/44444444-4444-4444-8444-444444444444/design%20v2.png", source: "upload", createdAt: "2026-01-04T00:00:00.000Z", createdBy: actor }, content: Buffer.from([0, 1, 2, 3, 255, 4, 5]) }],
+  noteLocations: [{ schema: "stash.note-location.v1", noteId: "22222222-2222-4222-8222-222222222222", workspaceId,
+    path: "notes/engine.md", aliases: ["drafts/engine.md"], revision: 2 }],
+  noteLinks: [{ schema: "stash.note-link.v2", id: "99999999-9999-4999-8999-999999999999", workspaceId,
+    sourceNoteId: "22222222-2222-4222-8222-222222222222", targetNoteId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    label: "Decision", revision: 1 }],
 };
 
 function unzipStored(archive: Buffer): Map<string, Buffer> {
@@ -83,7 +91,8 @@ describe("readable Portable Workspace Export", () => {
     assert.deepEqual([...files.keys()], [
       "README.md", "attachments/44444444-4444-4444-8444-444444444444/design%20v2.png",
       "boards/12121212-1212-4212-8212-121212121212.json", "manifest.json",
-      "notes/22222222-2222-4222-8222-222222222222.md", "tasks/LAB-7--55555555-5555-4555-8555-555555555555.md",
+      "notes/22222222-2222-4222-8222-222222222222.md", "relationships/note-links.json",
+      "relationships/note-locations.json", "tasks/LAB-7--55555555-5555-4555-8555-555555555555.md",
     ]);
     assert.deepEqual(files.get("attachments/44444444-4444-4444-8444-444444444444/design%20v2.png"), snapshot.attachments[0]!.content);
     const note = files.get("notes/22222222-2222-4222-8222-222222222222.md")!.toString();
@@ -95,6 +104,8 @@ describe("readable Portable Workspace Export", () => {
     }));
     assert.deepEqual(taskMetadata, snapshot.tasks[0]);
     assert.deepEqual(JSON.parse(files.get("boards/12121212-1212-4212-8212-121212121212.json")!.toString()), snapshot.boards[0]);
+    assert.deepEqual(JSON.parse(files.get("relationships/note-locations.json")!.toString()), snapshot.noteLocations);
+    assert.deepEqual(JSON.parse(files.get("relationships/note-links.json")!.toString()), snapshot.noteLinks);
     const manifest = JSON.parse(files.get("manifest.json")!.toString()) as { schema: string; workspace: object; files: Array<{ path: string; sha256: string; bytes: number }> };
     assert.equal(manifest.schema, "stash.portable-workspace-export.v1"); assert.deepEqual(manifest.workspace, snapshot.workspace);
     assert.equal(manifest.files.some(({ path }) => path === "manifest.json"), false);
@@ -143,8 +154,8 @@ describe("readable Portable Workspace Export", () => {
     const { archive } = outcome; const classicEnd = archive.length - 22; const locator = classicEnd - 20; const zip64End = locator - 56;
     assert.equal(archive.readUInt32LE(classicEnd), 0x06054b50); assert.equal(archive.readUInt16LE(classicEnd + 8), 0xffff);
     assert.equal(archive.readUInt32LE(locator), 0x07064b50); assert.equal(Number(archive.readBigUInt64LE(locator + 8)), zip64End);
-    assert.equal(archive.readUInt32LE(zip64End), 0x06064b50); assert.equal(archive.readBigUInt64LE(zip64End + 24), 65_537n);
-    assert.equal(archive.readBigUInt64LE(zip64End + 32), 65_537n);
+    assert.equal(archive.readUInt32LE(zip64End), 0x06064b50); assert.equal(archive.readBigUInt64LE(zip64End + 24), 65_539n);
+    assert.equal(archive.readBigUInt64LE(zip64End + 32), 65_539n);
     const directoryOffset = Number(archive.readBigUInt64LE(zip64End + 48));
     assert.equal(archive.readUInt32LE(directoryOffset), 0x02014b50);
   });
@@ -183,6 +194,24 @@ describe("PostgreSQL readable export wiring", { skip: postgresUrl ? false : "STA
       const privateNote = await notes.capture(ownerId, createdWorkspace.workspace.id, { projectId: secondProject.project.id, content: "Private roadmap" });
       assert.equal(visibleNote.status, "created"); assert.equal(privateNote.status, "created");
       if (visibleNote.status !== "created" || privateNote.status !== "created") return;
+      const mobileNote = await new MobileCaptureService(database).capture(ownerId, createdWorkspace.workspace.id, {
+        protocol: "stash.mobile-capture.v1", id: randomUUID(), kind: "text", content: "Captured away from desk",
+        createdAt: "2026-08-23T12:00:00.000Z",
+      });
+      assert.equal(mobileNote.status, "created");
+      const discussions = new DiscussionService(database);
+      const discussion = await discussions.create(ownerId, { target: { kind: "note", noteId: visibleNote.note.id }, message: "Preserve this" });
+      assert.equal(discussion.status, "created"); if (discussion.status !== "created") return;
+      const discussionNote = await discussions.createWork(ownerId, discussion.discussion.id, { kind: "note",
+        messageIds: [discussion.discussion.messages[0]!.id], idempotencyKey: randomUUID() });
+      assert.equal(discussionNote.status, "created");
+      const noteLinks = new NoteLinkService(database);
+      const linked = await noteLinks.create(ownerId, visibleNote.note.id, { targetNoteId: privateNote.note.id, label: "Private roadmap" });
+      assert.equal(linked.status, "created");
+      const moved = await noteLinks.move(ownerId, privateNote.note.id, { expectedRevision: 1, path: "private/roadmap.md" });
+      assert.equal(moved.status, "moved");
+      const samePath = await noteLinks.move(ownerId, privateNote.note.id, { expectedRevision: 2, path: "private/roadmap.md" });
+      assert.equal(samePath.status, "unchanged"); assert.equal(samePath.location.revision, 2);
       const tasks = new TaskService(database, database);
       const visibleBlockKey = visibleNote.note.document.blocks[0]?.blockKey; const privateBlockKey = privateNote.note.document.blocks[0]?.blockKey;
       assert.ok(visibleBlockKey); assert.ok(privateBlockKey);
@@ -204,15 +233,22 @@ describe("PostgreSQL readable export wiring", { skip: postgresUrl ? false : "STA
         portableWorkspaceExports: new PortableWorkspaceExportService(database, storage) });
       const ownerFiles = unzipStored(Buffer.from(await (await fetch(`${running.url}/api/workspaces/${createdWorkspace.workspace.id}/export`,
         { headers: { authorization: "Bearer owner" } })).arrayBuffer()));
-      assert.equal([...ownerFiles.keys()].filter((path) => path.startsWith("notes/")).length, 2);
+      assert.equal([...ownerFiles.keys()].filter((path) => path.startsWith("notes/")).length, 4);
       assert.equal([...ownerFiles.keys()].filter((path) => path.startsWith("tasks/")).length, 2);
       assert.equal([...ownerFiles.keys()].filter((path) => path.startsWith("boards/")).length, 2);
+      const ownerLocations = JSON.parse(ownerFiles.get("relationships/note-locations.json")!.toString()) as any[];
+      const ownerLinks = JSON.parse(ownerFiles.get("relationships/note-links.json")!.toString()) as any[];
+      assert.equal(ownerLocations.length, 4); assert.equal(ownerLinks.length, 1);
+      assert.equal(ownerLocations.find(({ noteId }) => noteId === privateNote.note.id)?.path, "private/roadmap.md");
       const guestFiles = unzipStored(Buffer.from(await (await fetch(`${running.url}/api/workspaces/${createdWorkspace.workspace.id}/export`,
         { headers: { authorization: "Bearer guest" } })).arrayBuffer()));
       assert.equal([...guestFiles.keys()].filter((path) => path.startsWith("notes/")).length, 1);
       assert.equal([...guestFiles.keys()].filter((path) => path.startsWith("tasks/")).length, 1);
       assert.equal([...guestFiles.keys()].filter((path) => path.startsWith("boards/")).length, 1);
       assert.equal([...guestFiles.values()].some((value) => value.includes("Private board")), false);
+      const guestLocations = JSON.parse(guestFiles.get("relationships/note-locations.json")!.toString()) as any[];
+      const guestLinks = JSON.parse(guestFiles.get("relationships/note-links.json")!.toString()) as any[];
+      assert.deepEqual(guestLocations.map(({ noteId }) => noteId), [visibleNote.note.id]); assert.deepEqual(guestLinks, []);
       assert.equal([...guestFiles.values()].some((value) => value.includes("Private roadmap")), false);
       assert.deepEqual(guestFiles.get(uploaded.record.relativePath.slice(2)), Buffer.from([9, 8, 7, 6]));
       const corrupt = new Pool({ connectionString: `${connectionString}${separator}options=-csearch_path%3D${schema}` });

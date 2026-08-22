@@ -34,6 +34,7 @@ class ProtocolCompatibleNoteLinks implements DatabaseProbe, NoteLinkRepository {
     const current = this.locations.get(noteId);
     if (memberId !== "ada" || !current) return { status: "not_found" as const };
     if (current.revision !== expectedRevision) return { status: "changed" as const, location: current };
+    if (current.path === path) return { status: "unchanged" as const, location: current };
     if ([...this.locations.values()].some((location) => location.noteId !== noteId && (location.path === path || location.aliases.includes(path))))
       return { status: "path_conflict" as const };
     if (this.projectionFailure) throw new Error("projection unavailable");
@@ -124,6 +125,12 @@ describe("durable Note links", () => {
     assert.equal(first.status, 200);
     const stale = await request(base, `/api/notes/${targetId}/location`, { method: "PUT", body: JSON.stringify({ expectedRevision: 1, path: "notes/other.md" }) });
     assert.equal(stale.status, 409); assert.equal((await stale.json() as any).location.path, "notes/architecture.md");
+    const projectionCount = database.projections.length;
+    const unchanged = await request(base, `/api/notes/${targetId}/location`, { method: "PUT",
+      body: JSON.stringify({ expectedRevision: 2, path: "notes/architecture.md" }) });
+    assert.equal(unchanged.status, 200); const unchangedBody = await unchanged.json() as any;
+    assert.equal(unchangedBody.result, "unchanged"); assert.equal(unchangedBody.location.revision, 2);
+    assert.deepEqual(unchangedBody.location.aliases, ["notes/design.md"]); assert.equal(database.projections.length, projectionCount);
     database.projectionFailure = true;
     const unavailable = await request(base, `/api/notes/${sourceId}/location`, { method: "PUT", body: JSON.stringify({ expectedRevision: 1, path: "notes/renamed.md" }) });
     assert.equal(unavailable.status, 503); assert.equal(database.locations.get(sourceId)?.path, "notes/plan.md");

@@ -28,7 +28,7 @@ export type NoteLinkResolution =
 
 export interface NoteLinkRepository {
   moveNote(memberId: string, noteId: string, expectedRevision: number, path: string, projection: PortableNoteLocationProjection): Promise<
-    { status: "moved"; location: NoteLocationRecord } | { status: "changed"; location: NoteLocationRecord }
+    { status: "moved" | "unchanged"; location: NoteLocationRecord } | { status: "changed"; location: NoteLocationRecord }
     | { status: "not_found" } | { status: "path_conflict" }>;
   createNoteLink(memberId: string, link: NoteLinkRecord, projection: PortableNoteLinkStateProjection): Promise<
     { status: "created"; link: NoteLinkRecord } | { status: "source_not_found" | "target_not_found" | "already_linked" }>;
