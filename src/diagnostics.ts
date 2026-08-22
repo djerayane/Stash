@@ -40,6 +40,24 @@ export interface UpdateCheckPayload {
   channel: "stable";
 }
 
+type SubmissionResult =
+  | { status: "submitted"; submitted: number }
+  | { status: "failed"; submitted: number; error: "transport_unavailable" };
+
+async function drainQueue<T>(queue: T[], submit: (payload: T) => Promise<void>): Promise<SubmissionResult> {
+  let submitted = 0;
+  try {
+    while (queue.length > 0) {
+      await submit(queue[0]!);
+      queue.shift();
+      submitted += 1;
+    }
+    return { status: "submitted", submitted };
+  } catch {
+    return { status: "failed", submitted, error: "transport_unavailable" };
+  }
+}
+
 export interface Diagnostics {
   schema(): object;
   schemas(): object[];
@@ -151,18 +169,7 @@ export function createDiagnostics(options: {
       if (!currentSettings.diagnosticSubmissions) {
         return { status: "disabled", submitted: 0 };
       }
-
-      let submitted = 0;
-      try {
-        while (queue.length > 0) {
-          await options.transport.submit(queue[0]!);
-          queue.shift();
-          submitted += 1;
-        }
-        return { status: "submitted", submitted };
-      } catch {
-        return { status: "failed", submitted, error: "transport_unavailable" };
-      }
+      return drainQueue(queue, (payload) => options.transport.submit(payload));
     },
     async submitPendingCrashReports() {
       if (!currentSettings.crashReportSubmissions) {
@@ -171,17 +178,7 @@ export function createDiagnostics(options: {
       if (!options.transport.submitCrashReport) {
         return { status: "failed", submitted: 0, error: "transport_unavailable" };
       }
-      let submitted = 0;
-      try {
-        while (crashReports.length > 0) {
-          await options.transport.submitCrashReport(crashReports[0]!);
-          crashReports.shift();
-          submitted += 1;
-        }
-        return { status: "submitted", submitted };
-      } catch {
-        return { status: "failed", submitted, error: "transport_unavailable" };
-      }
+      return drainQueue(crashReports, (payload) => options.transport.submitCrashReport!(payload));
     },
     async checkForUpdates() {
       if (!currentSettings.updateChecks) return { status: "disabled" };
