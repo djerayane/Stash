@@ -4,7 +4,7 @@ import type { WorkflowStatus } from "./project-workflows.js";
 export type BoardGrouping = "status" | "priority";
 export interface Board { schema: "stash.board.v1"; id: string; projectId: string; name: string; groupBy: BoardGrouping; createdAt: string }
 export interface BoardTask { id: string; key: string; title: string; status: Pick<WorkflowStatus, "id" | "name" | "category">; assigneeIds: string[]; priority: "none" | "low" | "medium" | "high" | "urgent"; labelNames: string[] }
-export interface BoardColumn { id: string; name: string; tasks: BoardTask[] }
+export interface BoardColumn { id: string; name: string; archived: boolean; tasks: BoardTask[] }
 export interface BoardRepository {
   listBoards(memberId: string, projectId: string): Promise<{ status: "found"; boards: Board[] } | { status: "not_found" }>;
   createBoard(memberId: string, board: Board): Promise<{ status: "created"; board: Board } | { status: "forbidden" | "not_found" }>;
@@ -35,7 +35,11 @@ export class BoardService {
 }
 function plain(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value); }
 function columns(board: Board, tasks: BoardTask[], statuses: WorkflowStatus[]): BoardColumn[] {
-  if (board.groupBy === "status") return statuses.filter(({ archived }) => !archived).sort((a,b) => a.position-b.position).map((status) => ({ id: status.id, name: status.name, tasks: tasks.filter((task) => task.status.id === status.id) }));
+  if (board.groupBy === "status") return statuses.sort((a,b) => a.position-b.position)
+    .map((status) => ({ id: status.id, name: status.archived ? `${status.name} (archived)` : status.name,
+      archived: status.archived, tasks: tasks.filter((task) => task.status.id === status.id) }))
+    .filter((column) => !column.archived || column.tasks.length > 0);
   const priorities = ["none", "low", "medium", "high", "urgent"] as const;
-  return priorities.map((priority) => ({ id: priority, name: priority[0]!.toUpperCase() + priority.slice(1), tasks: tasks.filter((task) => task.priority === priority) }));
+  return priorities.map((priority) => ({ id: priority, name: priority[0]!.toUpperCase() + priority.slice(1), archived: false,
+    tasks: tasks.filter((task) => task.priority === priority) }));
 }

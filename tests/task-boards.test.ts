@@ -9,6 +9,7 @@ const projectId = "22222222-2222-4222-8222-222222222222";
 const backlogId = "33333333-3333-4333-8333-333333333333";
 const progressId = "44444444-4444-4444-8444-444444444444";
 const doneId = "55555555-5555-4555-8555-555555555555";
+const archivedId = "66666666-6666-4666-8666-666666666666";
 
 class BoardFake implements DatabaseProbe, BoardRepository {
   boards: Board[] = [];
@@ -38,6 +39,7 @@ class BoardFake implements DatabaseProbe, BoardRepository {
       { id: backlogId, name: "Backlog", category: "unstarted" as const, position: 0, archived: false },
       { id: progressId, name: "In Progress", category: "started" as const, position: 1, archived: false },
       { id: doneId, name: "Done", category: "completed" as const, position: 2, archived: false },
+      { id: archivedId, name: "Cancelled", category: "completed" as const, position: 3, archived: true },
     ] };
   }
   async moveTaskOnBoard(memberId: string, requestedProjectId: string, boardId: string, taskKey: string, statusId: string) {
@@ -92,6 +94,19 @@ describe("Task board views", () => {
     assert.doesNotMatch(surface, /if\(!message\.textContent\)/);
     assert.match(surface, /boards\.replaceChildren\(\);current=undefined;columns\.replaceChildren\(\);message\.dataset\.error='false';/);
     assert.match(surface, /if\(!body\.boards\.length\)\{message\.textContent='No board views exist yet\.';return\}/);
+    assert.match(surface, /body\.columns\.filter\(target=>!target\.archived\)/);
+    assert.match(surface, /read only destination/);
+  });
+
+  it("keeps Tasks in an occupied archived status visible without offering that status as a destination", async () => {
+    const { database, request } = await run();
+    database.tasks.push({ id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", key: "STASH-3", title: "Cancelled work",
+      status: { id: archivedId, name: "Cancelled", category: "completed" }, assigneeIds: [], priority: "none", labelNames: [] });
+    const board = (await (await request("", "POST", { name: "Delivery", groupBy: "status" })).json() as { board: Board }).board;
+    const body = await (await request(`/${board.id}`)).json() as any;
+    const archived = body.columns.find((column: any) => column.id === archivedId);
+    assert.equal(archived.name, "Cancelled (archived)"); assert.equal(archived.archived, true);
+    assert.deepEqual(archived.tasks.map((task: BoardTask) => task.key), ["STASH-3"]);
   });
 
   it("moves the canonical Task through a status board and exposes the result in every view", async () => {
