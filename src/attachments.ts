@@ -8,6 +8,7 @@ export interface AttachmentRecord { id: string; workspaceId: string; filename: s
 export interface PortableAttachmentProjection { schema: "stash.attachment.v1"; id: string; workspaceId: string; filename: string; contentType: string; size: number; relativePath: string; source: AttachmentSource; createdAt: string; createdBy: PortableIdentity }
 export interface AttachmentRepository {
   findPortableMemberIdentity(memberId: string): Promise<PortableIdentity | undefined>;
+  canCreateAttachment(memberId: string, workspaceId: string): Promise<boolean>;
   createAttachment(memberId: string, record: AttachmentRecord, projection: PortableAttachmentProjection): Promise<"created" | "workspace_forbidden">;
   findAttachmentForMember(memberId: string, attachmentId: string): Promise<AttachmentRecord | undefined>;
 }
@@ -32,9 +33,10 @@ export class AttachmentService {
     if (!uuid.test(workspaceId) || !input.filename || input.filename.length > 255 || input.filename !== input.filename.trim() || /[\/\\\0]/.test(input.filename) || input.filename === "." || input.filename === "..") throw new InvalidAttachment("filename");
     if (!allowedTypes.test(input.contentType)) throw new InvalidAttachment("content_type");
     if (!input.content.length || input.content.length > this.limits.maxBytes) throw new InvalidAttachment("size");
+    if (!await this.repository.canCreateAttachment(memberId, workspaceId)) return { status: "workspace_forbidden" as const };
     const createdBy = await this.repository.findPortableMemberIdentity(memberId);
     if (!createdBy) throw new Error("member_identity_unavailable");
-    const id = randomUUID(); const storageKey = `${workspaceId}/${id}`; const relativePath = `attachments/${id}/${encodeURIComponent(input.filename)}`;
+    const id = randomUUID(); const storageKey = `${workspaceId}/${id}`; const relativePath = `./attachments/${id}/${encodeURIComponent(input.filename)}`;
     const record: AttachmentRecord = { id, workspaceId, filename: input.filename, contentType: input.contentType, size: input.content.length, relativePath, storageKey, source: input.source, createdByMemberId: memberId, createdAt: new Date().toISOString() };
     const projection: PortableAttachmentProjection = { schema: "stash.attachment.v1", id, workspaceId, filename: record.filename, contentType: record.contentType, size: record.size, relativePath, source: record.source, createdAt: record.createdAt, createdBy };
     await this.storage.put(storageKey, input.content);

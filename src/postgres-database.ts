@@ -332,6 +332,15 @@ export class PostgresDatabase implements
     });
   }
 
+  async canCreateAttachment(memberId: string, workspaceId: string): Promise<boolean> {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureWorkspaceProjectSchema(client);
+      const access = await client.query(`SELECT 1 FROM stash_workspaces workspace WHERE workspace.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR EXISTS (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2))`, [workspaceId, memberId]);
+      return access.rowCount === 1;
+    } finally { client.release(); }
+  }
+
   async findAttachmentForMember(memberId: string, attachmentId: string): Promise<AttachmentRecord | undefined> {
     const client = await this.#pool.connect();
     try {

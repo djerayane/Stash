@@ -14,7 +14,7 @@ that a complete export has already been generated.
 
 An Attachment records its Workspace ownership, original safe filename, declared media type, byte
 size, capture source, creator attribution, creation time, and a portable path such as
-`attachments/<stable-id>/design-notes.pdf`.
+`./attachments/<stable-id>/design-notes.pdf`.
 The operational storage key is deliberately absent. Attachment metadata and its projection event
 commit in one database transaction; local bytes are written atomically before metadata becomes
 visible and are removed when that transaction fails. Notes and exports use `relativePath`, never an
