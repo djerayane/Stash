@@ -12,6 +12,7 @@ import { StatusFeedback } from "@/components/status-feedback";
 import { colors } from "@/theme/colors";
 import { presentMobileSyncResult } from "@/src/sync-status";
 import {
+  captureOptionsErrorMessage,
   captureOptionsLoadingMessage,
   ensureCaptureOptionsReady,
   loadCachedOptionsOnFocus,
@@ -31,6 +32,8 @@ export default function CaptureScreen() {
   const [reminderOffset, setReminderOffset] = useState<number>();
   const optionsReady = useRef(false);
   const [optionsLoading, setOptionsLoading] = useState(true);
+  const [optionsError, setOptionsError] = useState(false);
+  const [optionsReload, setOptionsReload] = useState(0);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useFocusEffect(useCallback(() => loadCachedOptionsOnFocus(client, (value) => {
     if (!mounted.current) return;
@@ -41,13 +44,22 @@ export default function CaptureScreen() {
       { ...(current !== undefined ? { reminderOffset: current } : {}) }).reminderOffset);
     optionsReady.current = true;
     setOptionsLoading(false);
+    setOptionsError(false);
   }, () => {
     optionsReady.current = false;
     if (mounted.current) {
       setOptionsLoading(true);
+      setOptionsError(false);
       setStatus(captureOptionsLoadingMessage);
     }
-  }), [client]));
+  }, () => {
+    optionsReady.current = false;
+    if (mounted.current) {
+      setOptionsLoading(false);
+      setOptionsError(true);
+      setStatus(captureOptionsErrorMessage);
+    }
+  }), [client, optionsReload]));
   useEffect(() => client.watchConnectivity(
     (listener) => NetInfo.addEventListener((state) => listener(Boolean(state.isConnected && state.isInternetReachable !== false))),
     (result) => {
@@ -107,8 +119,9 @@ export default function CaptureScreen() {
         items={options.tags.map((value) => ({ value, label: value }))} /> : null}
       {options.reminders.length ? <NativeChoice label="Reminder" value={reminderOffset?.toString()} onChange={(value) => setReminderOffset(value ? Number(value) : undefined)}
         items={options.reminders.map(({ offsetMinutes, label }) => ({ value: offsetMinutes.toString(), label }))} /> : null}
+      {optionsError ? <NativeActionButton label="Retry loading options" onPress={() => setOptionsReload((value) => value + 1)} /> : null}
       <NativeActionButton label={optionsLoading ? "Loading capture options" : "Save capture"}
-        disabled={optionsLoading || !content.trim()} onPress={save} />
+        disabled={optionsLoading || optionsError || !content.trim()} onPress={save} />
     </ScrollView>
   );
 }

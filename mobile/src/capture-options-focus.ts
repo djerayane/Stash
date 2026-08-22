@@ -1,6 +1,7 @@
 import type { MobileCaptureClient, MobileCaptureOptions } from "../../src/mobile-capture-client";
 
 export const captureOptionsLoadingMessage = "Loading options for this pairing before capture.";
+export const captureOptionsErrorMessage = "Capture options could not be loaded. Retry before saving.";
 
 export function ensureCaptureOptionsReady(ready: boolean): void {
   if (!ready) throw new Error(captureOptionsLoadingMessage);
@@ -10,10 +11,14 @@ export function loadCachedOptionsOnFocus(
   client: MobileCaptureClient,
   onOptions: (options: MobileCaptureOptions) => void,
   onLoading: () => void = () => undefined,
+  onError: (error: unknown) => void = () => undefined,
 ): () => void {
   let active = true;
   onLoading();
-  void client.options().then((options) => { if (active) onOptions(options); });
+  void client.options().then(
+    (options) => { if (active) onOptions(options); },
+    (error: unknown) => { if (active) onError(error); },
+  );
   return () => { active = false; };
 }
 

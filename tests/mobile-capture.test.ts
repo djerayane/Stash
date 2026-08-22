@@ -540,6 +540,26 @@ describe("offline mobile capture synchronization", () => {
     assert.doesNotThrow(() => ensureCaptureOptionsReady(ready));
   });
 
+  it("reports an active focused-options rejection and suppresses one after cleanup", async () => {
+    const failure = new Error("encrypted option store unavailable");
+    let rejectOptions: ((error: unknown) => void) | undefined;
+    const delayedClient = {
+      options: () => new Promise<MobileCaptureOptions>((_resolve, reject) => { rejectOptions = reject; }),
+    } as unknown as MobileCaptureClient;
+    let activeError: unknown;
+    loadCachedOptionsOnFocus(delayedClient, () => undefined, () => undefined, (error) => { activeError = error; });
+    rejectOptions?.(failure);
+    await Promise.resolve();
+    assert.equal(activeError, failure);
+
+    let lateError: unknown;
+    const cleanup = loadCachedOptionsOnFocus(delayedClient, () => undefined, () => undefined, (error) => { lateError = error; });
+    cleanup();
+    rejectOptions?.(failure);
+    await Promise.resolve();
+    assert.equal(lateError, undefined);
+  });
+
   it("keeps permanent attention visible when a later capture is retriable", async () => {
     const { database, baseUrl } = await run();
     const store = new MemoryEncryptedStore();
