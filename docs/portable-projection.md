@@ -156,7 +156,9 @@ a complete `stash.task.v1` projection revision and may manage the title, Workflo
 priority, labels, due date, estimate, linked Notes, Dependencies, and development links. Stable Task
 identity, Project, Task Key, source relationships, creator, and creation time cannot be overwritten
 through this boundary. Clearing an optional due date or estimate uses JSON `null`; arrays use an empty
-array. References to unavailable statuses, Members, Notes, or Tasks are rejected atomically.
+array. References to unavailable statuses, Members, Notes, or Tasks are rejected atomically. A Guest
+may resolve Tasks only in Projects explicitly shared with them; that read-only grant never authorizes
+Task updates.
 
 The operational Note body is a versioned rich-text document rendered by Stash's WYSIWYG editor.
 Every successful edit atomically increments the Note revision and records another `stash.note.v1`

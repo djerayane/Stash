@@ -50,7 +50,8 @@ const taskPlanningSelect = `SELECT task.*, status.name AS status_name, status.ca
   WHERE task.project_id = $1 AND task.task_key = $2
     AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $3)
       OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
-        WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $3)))`;
+        WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $3))
+      OR EXISTS (SELECT 1 FROM stash_project_guests guest WHERE guest.project_id = task.project_id AND guest.account_id = $3))`;
 
 function taskProjectionFromRow(row: any): PortableTaskProjection {
   return {
@@ -379,6 +380,7 @@ export class PostgresDatabase implements
     const client = await this.#pool.connect();
     try {
       await this.#ensureNoteSchema(client);
+      await this.#ensureInvitationSchema(client);
       const access = await client.query(`SELECT 1 FROM stash_workspaces workspace WHERE workspace.id = $1 AND (
         (workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR
         (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
@@ -617,6 +619,7 @@ export class PostgresDatabase implements
     const client = await this.#pool.connect();
     try {
       await this.#ensureNoteSchema(client);
+      await this.#ensureInvitationSchema(client);
       const result = await client.query<any>(taskPlanningSelect, [projectId, taskKey, memberId]);
       const row = result.rows[0];
       return row ? { status: "found" as const, task: taskProjectionFromRow(row) } : { status: "not_found" as const };
@@ -626,6 +629,13 @@ export class PostgresDatabase implements
   async updateTaskByKey(memberId: string, projectId: string, taskKey: string, update: TaskPlanningUpdate) {
     return this.#withTransaction(async (client) => {
       await this.#ensureNoteSchema(client);
+      await this.#ensureInvitationSchema(client);
+      const writable = await client.query(`SELECT 1 FROM stash_projects project
+        JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
+        WHERE project.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2)
+          OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+            WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)))`, [projectId, memberId]);
+      if (!writable.rowCount) return { status: "not_found" as const };
       const current = await client.query<any>(`${taskPlanningSelect} FOR UPDATE OF task`, [projectId, taskKey, memberId]);
       const row = current.rows[0];
       if (!row) return { status: "not_found" as const };
