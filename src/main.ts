@@ -6,7 +6,8 @@ import { OidcAuthService } from "./oidc-auth.js";
 import { OidcManagementService } from "./oidc-management.js";
 import { createAuthenticationSecretCodec } from "./authentication-secrets.js";
 import { AccountRecoveryService } from "./account-recovery.js";
-import { PublicKeyPasskeyVerifier } from "./passkey-verifier.js";
+import { WebAuthnPasskeyVerifier } from "./passkey-verifier.js";
+import { createRecoveryEmailSender } from "./recovery-email.js";
 import { startRedisAcceleration, type RunningRedisAcceleration } from "./redis-acceleration.js";
 import { WorkspaceProjectService } from "./workspaces-projects.js";
 
@@ -33,6 +34,15 @@ async function main(): Promise<void> {
   }
 
   const passwordAuth = new PasswordAuthService(database);
+  const publicOrigin = requiredEnvironment("PUBLIC_ORIGIN");
+  const origin = new URL(publicOrigin);
+  const smtpUrl = process.env.SMTP_URL?.trim();
+  const emailRecoveryFrom = process.env.EMAIL_RECOVERY_FROM?.trim();
+  const recoveryEmail = createRecoveryEmailSender({
+    ...(smtpUrl ? { smtpUrl } : {}),
+    ...(emailRecoveryFrom ? { from: emailRecoveryFrom } : {}),
+    publicOrigin,
+  });
   const instance = await startInstance({
     database,
     host: process.env.HOST ?? "0.0.0.0",
@@ -43,8 +53,16 @@ async function main(): Promise<void> {
     workspaceProjects: new WorkspaceProjectService(database),
     oidcAuth: new OidcAuthService(database),
     oidcManagement: new OidcManagementService(database),
-    oidcCallbackOrigin: requiredEnvironment("PUBLIC_ORIGIN"),
-    accountRecovery: new AccountRecoveryService(database, passwordAuth, { passkeys: new PublicKeyPasskeyVerifier() }),
+    oidcCallbackOrigin: publicOrigin,
+    accountRecovery: new AccountRecoveryService(database, passwordAuth, {
+      passkeys: new WebAuthnPasskeyVerifier({
+        rpId: process.env.WEBAUTHN_RP_ID?.trim() || origin.hostname,
+        rpName: process.env.WEBAUTHN_RP_NAME?.trim() || "Stash",
+        expectedOrigin: publicOrigin,
+      }),
+      secrets: authenticationSecrets,
+      ...(recoveryEmail ? { email: recoveryEmail } : {}),
+    }),
     ...(redis ? { acceleration: redis.acceleration } : {}),
   });
   console.log(`Stash Instance listening on ${instance.url}`);

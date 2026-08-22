@@ -11,7 +11,7 @@ export function accountRecoveryRoute(service: AccountRecoveryService): HttpRoute
       if (request.method === "POST" && url.pathname === "/api/auth/recovery-code-sessions") { json(response, 201, await service.signInWithRecoveryCode(await body(), request.headers["user-agent"])); return true; }
       if (request.method === "POST" && url.pathname === "/api/auth/email-recovery") { await service.requestEmailRecovery(await body()); json(response, 202, { status: "accepted" }); return true; }
       if (request.method === "POST" && url.pathname === "/api/auth/email-recovery-sessions") { json(response, 201, await service.signInWithEmailRecovery(await body(), request.headers["user-agent"])); return true; }
-      const member = await service.passwords.authenticateBearer(request.headers.authorization);
+      const member = await service.authenticateMember(request.headers.authorization);
       if (!member) { json(response, 401, { error: "unauthorized", message: "A valid Member session is required." }); return true; }
       if (request.method === "POST" && url.pathname === "/api/auth/passkeys/options") { json(response, 200, await service.registrationOptions(member)); return true; }
       if (request.method === "POST" && url.pathname === "/api/auth/passkeys") { json(response, 201, await service.registerPasskey(member, await body())); return true; }

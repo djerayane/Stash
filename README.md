@@ -32,6 +32,10 @@ The application fails at startup with a clear error when required configuration 
 | `HOST` | no | Bind address, defaults to `0.0.0.0` |
 | `PORT` | no | TCP port, defaults to `3000` |
 | `REDIS_URL` | no | Redis connection URL for best-effort acceleration; PostgreSQL remains authoritative |
+| `WEBAUTHN_RP_ID` | no | WebAuthn relying-party domain; defaults to the `PUBLIC_ORIGIN` hostname |
+| `WEBAUTHN_RP_NAME` | no | Name displayed by authenticators; defaults to `Stash` |
+| `SMTP_URL` | no | SMTP connection URL; enables email recovery only when paired with `EMAIL_RECOVERY_FROM` |
+| `EMAIL_RECOVERY_FROM` | no | Sender address for recovery messages; must be configured with `SMTP_URL` |
 
 Never commit production secrets or include them in a Portable Workspace Export.
 
@@ -50,6 +54,8 @@ Provider identities are explicitly linked to an existing Organization Member wit
 OIDC issuer, discovery, token, and JWKS endpoints must use HTTPS and resolve only to public addresses. Stash pins each validated DNS result to the outbound connection, revalidates controlled discovery/JWKS redirects, rejects token-endpoint redirects, and bounds response time and size. The plain-HTTP/private-address exception exists only as an explicitly injected test adapter and is not available through Instance configuration.
 
 OIDC callback URLs always use `PUBLIC_ORIGIN`; request `Host` and forwarding headers never influence them. Deployments behind a proxy must preserve the configured public URL when forwarding the callback. Production callback origins require HTTPS. The insecure-origin exception is injectable only by acceptance tests and is not available from environment configuration.
+
+Production passkeys require an HTTPS `PUBLIC_ORIGIN` whose hostname matches the configured relying-party ID. Email recovery stays visibly disabled when SMTP is absent. Partial SMTP configuration fails startup rather than presenting a recovery option that cannot deliver mail.
 
 `INSTANCE_MASTER_KEY` is part of the Instance's restore contract even though it is stored outside
 PostgreSQL. Instance backup procedures must preserve this exact key separately and operators must

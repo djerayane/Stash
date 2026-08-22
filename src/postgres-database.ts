@@ -335,18 +335,23 @@ export class PostgresDatabase implements
   async savePasskey(record: PasskeyRecord): Promise<void> {
     await this.#ensureRecoverySchema();
     await this.#pool.query(
-      "INSERT INTO stash_passkeys (credential_id, account_id, public_key, created_at) VALUES ($1, $2, $3, $4)",
-      [record.credentialId, record.accountId, this.#authenticationSecrets.encrypt(record.publicKey), record.createdAt],
+      "INSERT INTO stash_passkeys (credential_id, account_id, public_key, signature_counter, transports, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
+      [record.credentialId, record.accountId, this.#authenticationSecrets.encrypt(record.publicKey), record.counter, record.transports ?? null, record.createdAt],
     );
   }
 
   async findPasskey(credentialId: string): Promise<PasskeyRecord | undefined> {
     await this.#ensureRecoverySchema();
-    const result = await this.#pool.query<{ credential_id: string; account_id: string; public_key: string; created_at: Date | string }>(
-      "SELECT credential_id, account_id, public_key, created_at FROM stash_passkeys WHERE credential_id = $1", [credentialId],
+    const result = await this.#pool.query<{ credential_id: string; account_id: string; public_key: string; signature_counter: number; transports: string[] | null; created_at: Date | string }>(
+      "SELECT credential_id, account_id, public_key, signature_counter, transports, created_at FROM stash_passkeys WHERE credential_id = $1", [credentialId],
     );
     const row = result.rows[0];
-    return row ? { credentialId: row.credential_id, accountId: row.account_id, publicKey: this.#authenticationSecrets.decrypt(row.public_key), createdAt: new Date(row.created_at).toISOString() } : undefined;
+    return row ? { credentialId: row.credential_id, accountId: row.account_id, publicKey: this.#authenticationSecrets.decrypt(row.public_key), counter: row.signature_counter, ...(row.transports ? { transports: row.transports } : {}), createdAt: new Date(row.created_at).toISOString() } : undefined;
+  }
+
+  async updatePasskeyCounter(credentialId: string, previousCounter: number, newCounter: number): Promise<boolean> {
+    const result = await this.#pool.query("UPDATE stash_passkeys SET signature_counter = $3 WHERE credential_id = $1 AND signature_counter = $2", [credentialId, previousCounter, newCounter]);
+    return result.rowCount === 1;
   }
 
   async replaceRecoveryCodes(accountId: string, records: RecoveryCodeRecord[]): Promise<void> {
@@ -355,7 +360,7 @@ export class PostgresDatabase implements
     try {
       await client.query("BEGIN");
       await client.query("DELETE FROM stash_recovery_codes WHERE account_id = $1", [accountId]);
-      for (const record of records) await client.query("INSERT INTO stash_recovery_codes (account_id, code_lookup) VALUES ($1, $2)", [accountId, this.#authenticationSecrets.blindIndex(record.lookup)]);
+      for (const record of records) await client.query("INSERT INTO stash_recovery_codes (account_id, code_lookup, protected_secret) VALUES ($1, $2, $3)", [accountId, this.#authenticationSecrets.blindIndex(record.lookup), record.protectedSecret]);
       await client.query("COMMIT");
     } catch (error) { await client.query("ROLLBACK").catch(() => undefined); throw error; } finally { client.release(); }
   }
@@ -368,7 +373,7 @@ export class PostgresDatabase implements
 
   async saveEmailRecovery(record: EmailRecoveryRecord): Promise<void> {
     await this.#ensureRecoverySchema();
-    await this.#pool.query("INSERT INTO stash_email_recoveries (token_lookup, account_id, expires_at) VALUES ($1, $2, $3)", [this.#authenticationSecrets.blindIndex(record.tokenLookup), record.accountId, record.expiresAt]);
+    await this.#pool.query("INSERT INTO stash_email_recoveries (token_lookup, account_id, protected_secret, expires_at) VALUES ($1, $2, $3, $4)", [this.#authenticationSecrets.blindIndex(record.tokenLookup), record.accountId, record.protectedSecret, record.expiresAt]);
   }
 
   async consumeEmailRecovery(lookup: string, now: string): Promise<string | undefined> {
@@ -424,16 +429,20 @@ export class PostgresDatabase implements
         credential_id TEXT PRIMARY KEY,
         account_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
         public_key TEXT NOT NULL,
+        signature_counter BIGINT NOT NULL,
+        transports TEXT[],
         created_at TIMESTAMPTZ NOT NULL
       );
       CREATE TABLE IF NOT EXISTS stash_recovery_codes (
         account_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
         code_lookup TEXT NOT NULL,
+        protected_secret TEXT NOT NULL,
         PRIMARY KEY (account_id, code_lookup)
       );
       CREATE TABLE IF NOT EXISTS stash_email_recoveries (
         token_lookup TEXT PRIMARY KEY,
         account_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
+        protected_secret TEXT NOT NULL,
         expires_at TIMESTAMPTZ NOT NULL
       );
     `);
