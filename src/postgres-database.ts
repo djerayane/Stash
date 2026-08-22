@@ -27,6 +27,7 @@ import type { MemberLocalizationPreferences, MemberLocalizationRepository } from
 import type { PortableRepositoryConnectionProjection, RepositoryConnectionRecord, RepositoryConnectionRepository } from "./repository-connections.js";
 import type { CreateTaskFromBlockDraft, LinkedTaskReadModel, TaskFromBlockRepository, TaskSourceBlockReference } from "./tasks.js";
 import type { AttachmentRecord, AttachmentRepository, PortableAttachmentProjection } from "./attachments.js";
+import type { MobileCaptureRepository } from "./mobile-captures.js";
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
@@ -51,7 +52,8 @@ export class PostgresDatabase implements
   InvitationRepository,
   RepositoryConnectionRepository,
   TaskFromBlockRepository,
-  AttachmentRepository
+  AttachmentRepository,
+  MobileCaptureRepository
 {
   readonly #pool: Pool;
   readonly #authenticationSecrets: AuthenticationSecretCodec;
@@ -299,6 +301,64 @@ export class PostgresDatabase implements
       await this.#recordPortableProjection(client, "Note", note.id, "stash.note.v1", projection);
       return "created";
     });
+  }
+
+  async createMobileCapture(
+    memberId: string,
+    clientCaptureId: string,
+    note: NoteRecord,
+    projection: PortableNoteProjection,
+  ): Promise<{ status: "created" | "duplicate"; noteId: string } | { status: "workspace_forbidden" | "project_forbidden" }> {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureNoteSchema(client);
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [memberId, clientCaptureId]);
+      const receipt = await client.query<{ note_id: string }>(
+        "SELECT note_id FROM stash_mobile_capture_receipts WHERE account_id = $1 AND client_capture_id = $2",
+        [memberId, clientCaptureId],
+      );
+      if (receipt.rows[0]) return { status: "duplicate", noteId: receipt.rows[0].note_id };
+      const access = await client.query<{ allowed: boolean }>(
+        `SELECT ((owner_type = 'personal' AND personal_owner_id = $2) OR
+          (owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+            WHERE membership.organization_id = stash_workspaces.organization_owner_id AND membership.account_id = $2))) AS allowed
+         FROM stash_workspaces WHERE id = $1`, [note.workspaceId, memberId],
+      );
+      if (!access.rows[0]?.allowed) return { status: "workspace_forbidden" };
+      if (note.projectId) {
+        const project = await client.query("SELECT 1 FROM stash_projects WHERE id = $1 AND workspace_id = $2", [note.projectId, note.workspaceId]);
+        if (!project.rowCount) return { status: "project_forbidden" };
+      }
+      await client.query(
+        `INSERT INTO stash_notes (id, workspace_id, project_id, content, tags, reminder_at, created_by_account_id, created_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)`,
+        [note.id, note.workspaceId, note.projectId ?? null, note.content, JSON.stringify(note.tags),
+          note.reminder?.at ?? null, memberId, note.createdAt],
+      );
+      await this.#recordPortableProjection(client, "Note", note.id, "stash.note.v1", projection);
+      await client.query(
+        "INSERT INTO stash_mobile_capture_receipts (account_id, client_capture_id, note_id) VALUES ($1, $2, $3)",
+        [memberId, clientCaptureId, note.id],
+      );
+      return { status: "created", noteId: note.id };
+    });
+  }
+
+  async listMobileCaptureOptions(memberId: string, workspaceId: string) {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureNoteSchema(client);
+      const access = await client.query(`SELECT 1 FROM stash_workspaces workspace WHERE workspace.id = $1 AND (
+        (workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR
+        (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)))`, [workspaceId, memberId]);
+      if (!access.rowCount) return { status: "workspace_forbidden" as const };
+      const [projects, tags] = await Promise.all([
+        client.query<{ id: string; name: string }>("SELECT id, name FROM stash_projects WHERE workspace_id = $1 ORDER BY name, id", [workspaceId]),
+        client.query<{ tag: string }>(`SELECT DISTINCT jsonb_array_elements_text(tags) AS tag FROM stash_notes
+          WHERE workspace_id = $1 ORDER BY tag`, [workspaceId]),
+      ]);
+      return { status: "found" as const, projects: projects.rows, tags: tags.rows.map(({ tag }) => tag) };
+    } finally { client.release(); }
   }
 
   async listInboxNotes(memberId: string, workspaceId: string) {
@@ -1504,6 +1564,12 @@ export class PostgresDatabase implements
         created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id),
         created_at TIMESTAMPTZ NOT NULL,
         archived_at TIMESTAMPTZ
+      );
+      CREATE TABLE IF NOT EXISTS stash_mobile_capture_receipts (
+        account_id UUID NOT NULL REFERENCES stash_accounts(id),
+        client_capture_id UUID NOT NULL,
+        note_id UUID NOT NULL REFERENCES stash_notes(id),
+        PRIMARY KEY (account_id, client_capture_id)
       );
       ALTER TABLE stash_notes ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
       CREATE TABLE IF NOT EXISTS stash_note_links (
