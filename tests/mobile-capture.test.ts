@@ -25,6 +25,8 @@ import {
   reconcileCaptureSelections,
 } from "../mobile/src/capture-options-focus.js";
 import { IncomingCaptureDeliveryGate, parseIncomingCapture } from "../mobile/src/incoming-capture.js";
+import { IncomingShareDeliveryBatch } from "../mobile/src/incoming-share-deliveries.js";
+import { MAX_ATTACHMENT_BYTES, readBoundedOriginal } from "../mobile/src/media-input.js";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const projectId = "22222222-2222-4222-8222-222222222222";
@@ -128,6 +130,25 @@ const access: MemberAccessResolver = {
 };
 
 describe("offline mobile capture synchronization", () => {
+  it("rejects an oversized original before base64 materialization", async () => {
+    let reads = 0;
+    await assert.rejects(() => readBoundedOriginal({ size: MAX_ATTACHMENT_BYTES + 1, async base64() { reads += 1; return "YQ=="; } }),
+      /larger than the 10 MB limit/);
+    assert.equal(reads, 0);
+  });
+
+  it("keeps stable per-item share delivery receipts across a partial batch retry", () => {
+    const ids = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222",
+      "33333333-3333-4333-8333-333333333333"];
+    const batch = new IncomingShareDeliveryBatch(() => ids.shift()!);
+    const payloads = [{ shareType: "text", value: "saved" }, { shareType: "file", value: "file://retry" }];
+    const first = batch.receive(payloads);
+    assert.equal(batch.acknowledge(first[0]!.id), false);
+    assert.deepEqual(batch.receive(payloads), [first[1]]);
+    assert.equal(batch.acknowledge(first[1]!.id), true);
+    batch.reset();
+    assert.notEqual(batch.receive(payloads)[0]!.id, first[0]!.id, "a later identical user action gets a fresh delivery ID");
+  });
   let instance: RunningInstance | undefined;
   afterEach(async () => { await instance?.close(); instance = undefined; });
 

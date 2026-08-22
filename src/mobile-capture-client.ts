@@ -215,6 +215,7 @@ export class MobileCaptureClient {
     media: { kind: "photo" | "file" | "voice"; filename: string; contentType: string; base64: string },
     caption = "",
     structure: Pick<MobileCapture, "projectId" | "tags" | "reminder"> = {},
+    captureId: string = crypto.randomUUID(),
   ): Promise<MobileCapture> {
     if (!validPortableFilename(media.filename)) throw new Error("The original filename is invalid.");
     const contentType = media.kind === "file" && !supportedAttachmentType.test(media.contentType)
@@ -225,7 +226,7 @@ export class MobileCaptureClient {
     if (!validBase64(media.base64)) throw new Error("The original file is empty or invalid.");
     const pairing = await this.#pairingForCapture();
     const capture: MobileCapture = {
-      id: crypto.randomUUID(), kind: media.kind, content: caption.trim() || media.filename,
+      id: requireUuid(captureId), kind: media.kind, content: caption.trim() || media.filename,
       createdAt: new Date().toISOString(), attempts: 0, source: "app",
       origin: { instanceUrl: pairing.instanceUrl, workspaceId: pairing.workspaceId, memberId: pairing.memberId },
       attachment: { filename: media.filename, contentType, base64: media.base64 },
@@ -236,18 +237,18 @@ export class MobileCaptureClient {
     return capture;
   }
 
-  async captureSharedContent(content: string, source: "share_sheet" | "widget", structure: Pick<MobileCapture, "projectId" | "tags" | "reminder"> = {}) {
-    const capture = await this.#enqueue("text", content, undefined, structure);
+  async captureSharedContent(content: string, source: "share_sheet" | "widget", structure: Pick<MobileCapture, "projectId" | "tags" | "reminder"> = {}, captureId?: string) {
+    const capture = await this.#enqueue("text", content, undefined, structure, captureId);
     const sourced = { ...capture, source };
     await this.#store.saveCapture(sourced);
     return sourced;
   }
 
-  async #enqueue(kind: MobileCapture["kind"], content: string, checklist: MobileCapture["checklist"], structure: Pick<MobileCapture, "projectId" | "tags" | "reminder">) {
+  async #enqueue(kind: MobileCapture["kind"], content: string, checklist: MobileCapture["checklist"], structure: Pick<MobileCapture, "projectId" | "tags" | "reminder">, captureId: string = crypto.randomUUID()) {
     if (!content.trim()) throw new Error("A capture requires content.");
     const pairing = await this.#pairingForCapture();
     const capture: MobileCapture = {
-      id: crypto.randomUUID(), kind, content: content.trim(), createdAt: new Date().toISOString(), attempts: 0,
+      id: requireUuid(captureId), kind, content: content.trim(), createdAt: new Date().toISOString(), attempts: 0,
       origin: { instanceUrl: pairing.instanceUrl, workspaceId: pairing.workspaceId, memberId: pairing.memberId },
       ...(checklist ? { checklist } : {}), ...(structure.projectId ? { projectId: structure.projectId } : {}),
       ...(structure.tags ? { tags: structure.tags } : {}), ...(structure.reminder ? { reminder: structure.reminder } : {}),
@@ -377,7 +378,16 @@ function validPortableFilename(value: string) {
     && !/[. ]$/.test(value) && value !== "." && value !== ".." && !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(value));
 }
 const supportedAttachmentType = /^(?:image\/(?:png|jpeg|gif|webp|heic|heif)|audio\/(?:mp4|m4a|mpeg|wav|x-wav|aac|3gpp|ogg)|application\/(?:pdf|octet-stream)|text\/plain)$/;
-function validBase64(value: string) { return value.length > 0 && value.length <= 14_000_000 && /^[A-Za-z0-9+/]+={0,2}$/.test(value) && value.length % 4 === 0; }
+function validBase64(value: string) {
+  if (!value.length || !/^[A-Za-z0-9+/]+={0,2}$/.test(value) || value.length % 4 !== 0) return false;
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  return value.length * 3 / 4 - padding <= 10 * 1024 * 1024;
+}
+
+function requireUuid(value: string): string {
+  if (!isUuid(value)) throw new Error("Capture delivery ID must be a UUID.");
+  return value;
+}
 function decodeBase64(value: string) { const binary = atob(value); return Uint8Array.from(binary, (character) => character.charCodeAt(0)); }
 function encodePortableFilename(value: string) { return encodeURIComponent(value).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`); }
 

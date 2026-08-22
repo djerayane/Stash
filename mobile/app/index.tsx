@@ -23,6 +23,7 @@ import {
 } from "@/src/capture-options-focus";
 import { IncomingCaptureDeliveryGate, parseIncomingCapture } from "@/src/incoming-capture";
 import { useIncomingSharePayloads } from "@/src/incoming-share";
+import { readBoundedOriginal } from "@/src/media-input";
 
 export default function CaptureScreen() {
   useColorScheme();
@@ -101,28 +102,28 @@ export default function CaptureScreen() {
   }, [client]);
   useEffect(() => {
     if (incomingShare.error && mounted.current) setStatus("Shared content could not be read and was not saved.");
-    if (!incomingShare.sharedPayloads.length || processingShare.current) return;
+    if (!incomingShare.deliveries.length || processingShare.current) return;
     processingShare.current = true;
     void (async () => {
       try {
-        for (const payload of incomingShare.sharedPayloads) {
+        for (const { id, payload } of incomingShare.deliveries) {
           if (payload.shareType === "text" || payload.shareType === "url") {
-            await client.captureSharedContent(payload.value, "share_sheet");
+            await client.captureSharedContent(payload.value, "share_sheet", {}, id);
           } else {
             const filename = payload.value.split("/").pop() || `shared-${Date.now()}`;
             const kind = payload.shareType === "image" ? "photo" : payload.shareType === "audio" ? "voice" : "file";
             await client.captureMedia({ kind, filename, contentType: payload.mimeType ?? "application/octet-stream",
-              base64: await new File(payload.value).base64() });
+              base64: await readBoundedOriginal(new File(payload.value)) }, "", {}, id);
           }
+          incomingShare.acknowledge(id);
         }
-        incomingShare.clearSharedPayloads();
         if (mounted.current) setStatus("Shared content saved securely on this device.");
         const result = await client.sync();
         if (mounted.current) setStatus(presentMobileSyncResult(result, await client.outbox()));
       } catch (error) { if (mounted.current) setStatus(error instanceof Error ? error.message : "Shared content could not be saved."); }
       finally { processingShare.current = false; }
     })();
-  }, [client, incomingShare.error, incomingShare.sharedPayloads]);
+  }, [client, incomingShare.error, incomingShare.deliveries, incomingShare.acknowledge]);
 
   const save = async () => {
     try {

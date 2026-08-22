@@ -2,12 +2,13 @@ import * as DocumentPicker from "expo-document-picker";
 import * as ImagePicker from "expo-image-picker";
 import { File } from "expo-file-system";
 import { AudioModule, RecordingPresets, setAudioModeAsync, useAudioRecorder, useAudioRecorderState } from "expo-audio";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Text, View } from "react-native";
 
 import type { MobileCapture } from "../../src/mobile-capture-client";
 import { NativeActionButton } from "@/components/native-controls";
 import { colors } from "@/theme/colors";
+import { MAX_VOICE_DURATION_SECONDS, readBoundedOriginal } from "@/src/media-input";
 
 type MediaInput = { kind: "photo" | "file" | "voice"; filename: string; contentType: string; base64: string };
 
@@ -18,6 +19,7 @@ export function MediaCaptureControls({ onPicked, onError }: {
   const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const recording = useAudioRecorderState(recorder);
   const [busy, setBusy] = useState(false);
+  const savedVoiceUri = useRef<string | undefined>(undefined);
   const run = async (operation: () => Promise<void>) => {
     if (busy) return;
     setBusy(true);
@@ -25,8 +27,21 @@ export function MediaCaptureControls({ onPicked, onError }: {
     finally { setBusy(false); }
   };
   const queueFile = async (kind: MediaInput["kind"], uri: string, filename: string, contentType: string) => {
-    await onPicked({ kind, filename, contentType, base64: await new File(uri).base64() });
+    await onPicked({ kind, filename, contentType, base64: await readBoundedOriginal(new File(uri)) });
   };
+  const queueVoice = async () => {
+    const uri = recorder.uri;
+    if (!uri) throw new Error("The voice recording could not be read.");
+    if (savedVoiceUri.current === uri) return;
+    savedVoiceUri.current = uri;
+    try { await queueFile("voice", uri, `voice-${Date.now()}.m4a`, "audio/mp4"); }
+    catch (error) { savedVoiceUri.current = undefined; throw error; }
+  };
+  useEffect(() => {
+    if (recording.isRecording || recording.durationMillis < MAX_VOICE_DURATION_SECONDS * 1_000 || !recorder.uri
+      || savedVoiceUri.current === recorder.uri) return;
+    void run(queueVoice);
+  }, [recording.isRecording, recording.durationMillis, recorder.uri]);
   const choosePhoto = () => run(async () => {
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!permission.granted) throw new Error("Photo access was denied. Allow access in Settings to attach an original photo.");
@@ -46,18 +61,17 @@ export function MediaCaptureControls({ onPicked, onError }: {
   const toggleRecording = () => run(async () => {
     if (recording.isRecording) {
       await recorder.stop();
-      if (!recorder.uri) throw new Error("The voice recording could not be read.");
-      await queueFile("voice", recorder.uri, `voice-${Date.now()}.m4a`, "audio/mp4");
+      await queueVoice();
       return;
     }
     const permission = await AudioModule.requestRecordingPermissionsAsync();
     if (!permission.granted) throw new Error("Microphone access was denied. Allow access in Settings to capture voice.");
     await setAudioModeAsync({ playsInSilentMode: true, allowsRecording: true });
     await recorder.prepareToRecordAsync();
-    recorder.record();
+    recorder.record({ forDuration: MAX_VOICE_DURATION_SECONDS });
   });
   return <View accessibilityRole="summary" style={{ gap: 10 }}>
-    <Text selectable style={{ color: colors.secondaryLabel }}>Original photos, files, and voice stay encrypted here until they reach your Workspace.</Text>
+    <Text selectable style={{ color: colors.secondaryLabel }}>Original photos, files, and voice stay encrypted here until they reach your Workspace. Voice stops after five minutes.</Text>
     <NativeActionButton label="Choose photo" disabled={busy || recording.isRecording} onPress={choosePhoto} />
     <NativeActionButton label="Choose file" disabled={busy || recording.isRecording} onPress={chooseFile} />
     <NativeActionButton label={recording.isRecording ? "Stop and save voice" : "Record voice"} disabled={busy} onPress={toggleRecording} />

@@ -1,4 +1,4 @@
 export function useIncomingSharePayloads() {
-  return { sharedPayloads: [] as { value: string; shareType: string; mimeType?: string }[],
-    clearSharedPayloads: () => undefined, error: null as Error | null };
+  return { deliveries: [] as { id: string; payload: { value: string; shareType: string; mimeType?: string } }[],
+    acknowledge: (_id: string) => undefined, error: null as Error | null };
 }
