@@ -5,6 +5,8 @@ import { PasswordAuthService } from "./password-auth.js";
 import { OidcAuthService } from "./oidc-auth.js";
 import { OidcManagementService } from "./oidc-management.js";
 import { createAuthenticationSecretCodec } from "./authentication-secrets.js";
+import { AccountRecoveryService } from "./account-recovery.js";
+import { PublicKeyPasskeyVerifier } from "./passkey-verifier.js";
 import { startRedisAcceleration, type RunningRedisAcceleration } from "./redis-acceleration.js";
 import { WorkspaceProjectService } from "./workspaces-projects.js";
 
@@ -42,6 +44,7 @@ async function main(): Promise<void> {
     oidcAuth: new OidcAuthService(database),
     oidcManagement: new OidcManagementService(database),
     oidcCallbackOrigin: requiredEnvironment("PUBLIC_ORIGIN"),
+    accountRecovery: new AccountRecoveryService(database, passwordAuth, { passkeys: new PublicKeyPasskeyVerifier() }),
     ...(redis ? { acceleration: redis.acceleration } : {}),
   });
   console.log(`Stash Instance listening on ${instance.url}`);

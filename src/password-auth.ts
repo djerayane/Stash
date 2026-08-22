@@ -72,6 +72,10 @@ export class PasswordAuthService {
     return issueSession(this.#repository, { id: account.id, name: account.name, email: account.email }, userAgent);
   }
 
+  async createSession(account: AccountAuthenticationRecord, userAgent?: string) {
+    return issueSession(this.#repository, { id: account.id, name: account.name, email: account.email }, userAgent);
+  }
+
   async authenticateBearer(authorization: string | undefined): Promise<AuthenticatedMember | undefined> {
     if (!authorization?.startsWith("Bearer ")) return undefined;
     const token = authorization.slice(7);

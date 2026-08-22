@@ -4,6 +4,7 @@ import type { DatabaseProbe } from "./instance.js";
 import type { BootstrapRecord, OwnerBootstrapRepository } from "./owner-bootstrap.js";
 import type { AccountAuthenticationRecord, PasswordAuthRepository, SessionRecord } from "./password-auth.js";
 import type { BuiltInRole, OidcAuthRepository, OidcIdentityKey, OidcIdentityRecord, OidcOrganizationConfiguration } from "./oidc-auth.js";
+import type { AccountRecoveryRepository, EmailRecoveryRecord, PasskeyRecord, RecoveryCodeRecord } from "./account-recovery.js";
 import {
   createAuthenticationKeyCheck,
   verifyAuthenticationKeyCheck,
@@ -27,7 +28,8 @@ export class PostgresDatabase implements
   OwnerBootstrapRepository,
   PasswordAuthRepository,
   WorkspaceProjectRepository,
-  OidcAuthRepository
+  OidcAuthRepository,
+  AccountRecoveryRepository
 {
   readonly #pool: Pool;
   readonly #authenticationSecrets: AuthenticationSecretCodec;
@@ -330,6 +332,51 @@ export class PostgresDatabase implements
     }
   }
 
+  async savePasskey(record: PasskeyRecord): Promise<void> {
+    await this.#ensureRecoverySchema();
+    await this.#pool.query(
+      "INSERT INTO stash_passkeys (credential_id, account_id, public_key, created_at) VALUES ($1, $2, $3, $4)",
+      [record.credentialId, record.accountId, this.#authenticationSecrets.encrypt(record.publicKey), record.createdAt],
+    );
+  }
+
+  async findPasskey(credentialId: string): Promise<PasskeyRecord | undefined> {
+    await this.#ensureRecoverySchema();
+    const result = await this.#pool.query<{ credential_id: string; account_id: string; public_key: string; created_at: Date | string }>(
+      "SELECT credential_id, account_id, public_key, created_at FROM stash_passkeys WHERE credential_id = $1", [credentialId],
+    );
+    const row = result.rows[0];
+    return row ? { credentialId: row.credential_id, accountId: row.account_id, publicKey: this.#authenticationSecrets.decrypt(row.public_key), createdAt: new Date(row.created_at).toISOString() } : undefined;
+  }
+
+  async replaceRecoveryCodes(accountId: string, records: RecoveryCodeRecord[]): Promise<void> {
+    await this.#ensureRecoverySchema();
+    const client = await this.#pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("DELETE FROM stash_recovery_codes WHERE account_id = $1", [accountId]);
+      for (const record of records) await client.query("INSERT INTO stash_recovery_codes (account_id, code_lookup) VALUES ($1, $2)", [accountId, this.#authenticationSecrets.blindIndex(record.lookup)]);
+      await client.query("COMMIT");
+    } catch (error) { await client.query("ROLLBACK").catch(() => undefined); throw error; } finally { client.release(); }
+  }
+
+  async consumeRecoveryCode(accountId: string, lookup: string): Promise<boolean> {
+    await this.#ensureRecoverySchema();
+    const result = await this.#pool.query("DELETE FROM stash_recovery_codes WHERE account_id = $1 AND code_lookup = $2", [accountId, this.#authenticationSecrets.blindIndex(lookup)]);
+    return result.rowCount === 1;
+  }
+
+  async saveEmailRecovery(record: EmailRecoveryRecord): Promise<void> {
+    await this.#ensureRecoverySchema();
+    await this.#pool.query("INSERT INTO stash_email_recoveries (token_lookup, account_id, expires_at) VALUES ($1, $2, $3)", [this.#authenticationSecrets.blindIndex(record.tokenLookup), record.accountId, record.expiresAt]);
+  }
+
+  async consumeEmailRecovery(lookup: string, now: string): Promise<string | undefined> {
+    await this.#ensureRecoverySchema();
+    const result = await this.#pool.query<{ account_id: string }>("DELETE FROM stash_email_recoveries WHERE token_lookup = $1 AND expires_at > $2 RETURNING account_id", [this.#authenticationSecrets.blindIndex(lookup), now]);
+    return result.rows[0]?.account_id;
+  }
+
   async #ensureAuthSchema(): Promise<void> {
     await this.#pool.query(`
       CREATE TABLE IF NOT EXISTS stash_sessions (
@@ -370,6 +417,27 @@ export class PostgresDatabase implements
     );
   }
 
+  async #ensureRecoverySchema(): Promise<void> {
+    await this.#ensureAuthSchema();
+    await this.#pool.query(`
+      CREATE TABLE IF NOT EXISTS stash_passkeys (
+        credential_id TEXT PRIMARY KEY,
+        account_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
+        public_key TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS stash_recovery_codes (
+        account_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
+        code_lookup TEXT NOT NULL,
+        PRIMARY KEY (account_id, code_lookup)
+      );
+      CREATE TABLE IF NOT EXISTS stash_email_recoveries (
+        token_lookup TEXT PRIMARY KEY,
+        account_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
+        expires_at TIMESTAMPTZ NOT NULL
+      );
+    `);
+  }
   async #verifyAuthenticationKey(): Promise<void> {
     const client = await this.#pool.connect();
     try {

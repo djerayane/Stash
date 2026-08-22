@@ -17,6 +17,8 @@ import { passwordAuthRoute } from "./password-auth-routes.js";
 import type { PasswordAuthService } from "./password-auth.js";
 import { workspaceProjectRoutes } from "./workspace-project-routes.js";
 import type { MemberAccessResolver, WorkspaceProjectService } from "./workspaces-projects.js";
+import { accountRecoveryRoute } from "./account-recovery-routes.js";
+import type { AccountRecoveryService } from "./account-recovery.js";
 
 export interface DatabaseProbe {
   verifyConnection(): Promise<void>;
@@ -41,6 +43,7 @@ interface InstanceOptions {
   oidcManagement?: OidcManagementService;
   oidcCallbackOrigin?: string;
   allowInsecureOidcCallbackOriginForTest?: boolean;
+  accountRecovery?: AccountRecoveryService;
   diagnostics?: Diagnostics;
   acceleration?: OptionalRedisAcceleration;
 }
@@ -89,6 +92,7 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
   const routes = [
     ...(options.oidcManagement && options.passwordAuth ? [oidcManagementRoute(options.oidcManagement, options.passwordAuth)] : []),
     ...(options.oidcAuth && oidcCallbackOrigin ? [oidcAuthRoute(options.oidcAuth, oidcCallbackOrigin)] : []),
+    ...(options.accountRecovery ? [accountRecoveryRoute(options.accountRecovery)] : []),
     ...(options.passwordAuth ? [passwordAuthRoute(options.passwordAuth)] : []),
     diagnosticsSchemaRoute(diagnostics),
     requireInstanceAdministrator(options.instanceAdminToken, diagnosticsAdminRoute(diagnostics)),
