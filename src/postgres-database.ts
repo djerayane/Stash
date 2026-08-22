@@ -2839,21 +2839,21 @@ export class PostgresDatabase implements
       if (!permission.member && guestProjectIds.length === 0) { await client.query("COMMIT"); return { status: "workspace_forbidden" }; }
       if (!permission.workspace_projection) throw new Error("workspace_projection_unavailable");
 
-      const notes = await client.query<{ payload: PortableNoteProjection }>(
-        `SELECT projection.payload FROM stash_notes note
-         JOIN LATERAL (SELECT payload FROM stash_portable_projection_outbox
+      const notes = await client.query<{ id: string; payload: PortableNoteProjection | null }>(
+        `SELECT note.id, projection.payload FROM stash_notes note
+         LEFT JOIN LATERAL (SELECT payload FROM stash_portable_projection_outbox
            WHERE object_kind = 'Note' AND object_id = note.id ORDER BY revision DESC LIMIT 1) projection ON TRUE
          WHERE note.workspace_id = $1 AND ($2::boolean OR note.project_id = ANY($3::uuid[]))
          ORDER BY note.id`, [workspaceId, permission.member, guestProjectIds]);
-      const tasks = await client.query<{ payload: PortableTaskProjection }>(
-        `SELECT projection.payload FROM stash_tasks task
-         JOIN LATERAL (SELECT payload FROM stash_portable_projection_outbox
+      const tasks = await client.query<{ id: string; payload: PortableTaskProjection | null }>(
+        `SELECT task.id, projection.payload FROM stash_tasks task
+         LEFT JOIN LATERAL (SELECT payload FROM stash_portable_projection_outbox
            WHERE object_kind = 'Task' AND object_id = task.id ORDER BY revision DESC LIMIT 1) projection ON TRUE
          WHERE task.workspace_id = $1 AND ($2::boolean OR task.project_id = ANY($3::uuid[]))
          ORDER BY task.id`, [workspaceId, permission.member, guestProjectIds]);
-      const attachments = await client.query<{ storage_key: string; payload: PortableAttachmentProjection }>(
-        `SELECT attachment.storage_key, projection.payload FROM stash_attachments attachment
-         JOIN LATERAL (SELECT payload FROM stash_portable_projection_outbox
+      const attachments = await client.query<{ id: string; storage_key: string; payload: PortableAttachmentProjection | null }>(
+        `SELECT attachment.id, attachment.storage_key, projection.payload FROM stash_attachments attachment
+         LEFT JOIN LATERAL (SELECT payload FROM stash_portable_projection_outbox
            WHERE object_kind = 'Attachment' AND object_id = attachment.id ORDER BY revision DESC LIMIT 1) projection ON TRUE
          WHERE attachment.workspace_id = $1 AND ($2::boolean OR EXISTS (
            SELECT 1 FROM stash_notes note WHERE note.workspace_id = attachment.workspace_id
@@ -2861,11 +2861,14 @@ export class PostgresDatabase implements
              AND (strpos(note.content, attachment.relative_path) > 0
                OR strpos(note.content, replace(attachment.relative_path, '%', '%25')) > 0)))
          ORDER BY attachment.id`, [workspaceId, permission.member, guestProjectIds]);
+      if (notes.rows.some(({ payload }) => !payload) || tasks.rows.some(({ payload }) => !payload)
+        || attachments.rows.some(({ payload }) => !payload)) throw new Error("portable_projection_unavailable");
       await client.query("COMMIT");
-      const visibleNoteIds = new Set(notes.rows.map(({ payload }) => payload.id));
-      const visibleTaskIds = new Set(tasks.rows.map(({ payload }) => payload.id));
+      const noteProjections = notes.rows.map(({ payload }) => payload!); const taskProjections = tasks.rows.map(({ payload }) => payload!);
+      const visibleNoteIds = new Set(noteProjections.map(({ id }) => id));
+      const visibleTaskIds = new Set(taskProjections.map(({ id }) => id));
       const visibleProjectIds = new Set(guestProjectIds);
-      const visibleTasks = permission.member ? tasks.rows.map(({ payload }) => payload) : tasks.rows.map(({ payload }) => ({
+      const visibleTasks = permission.member ? taskProjections : taskProjections.map((payload) => ({
         ...payload,
         sourceNoteIds: payload.sourceNoteIds.filter((id) => visibleNoteIds.has(id)),
         ...(payload.sourceBlocks ? { sourceBlocks: payload.sourceBlocks.filter(({ noteId }) => visibleNoteIds.has(noteId)) } : {}),
@@ -2875,9 +2878,9 @@ export class PostgresDatabase implements
       }));
       return { status: "found", snapshot: {
         workspace: permission.workspace_projection,
-        notes: notes.rows.map(({ payload }) => payload),
+        notes: noteProjections,
         tasks: visibleTasks,
-        attachments: attachments.rows.map(({ storage_key, payload }) => ({ storageKey: storage_key, projection: payload })),
+        attachments: attachments.rows.map(({ storage_key, payload }) => ({ storageKey: storage_key, projection: payload! })),
       } };
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);

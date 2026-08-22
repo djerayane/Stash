@@ -124,6 +124,25 @@ describe("readable Portable Workspace Export", () => {
     const mismatchRepository: PortableWorkspaceExportRepository = { async readExportSnapshot() { return { status: "found", snapshot: mismatched }; } };
     await assert.rejects(() => new PortableWorkspaceExportService(mismatchRepository, storage).export("ada", workspaceId), /attachment_size_limit/);
   });
+
+  it("writes a valid ZIP64 directory when a large Workspace exceeds the classic entry-count limit", async () => {
+    const notes = Array.from({ length: 65_534 }, (_, index) => ({
+      schema: "stash.note.v1" as const,
+      id: `00000000-0000-4000-8000-${index.toString(16).padStart(12, "0")}`,
+      workspaceId, content: "x", tags: [], createdAt: "2026-01-01T00:00:00.000Z", createdBy: actor,
+    }));
+    const largeSnapshot: PortableWorkspaceExportSnapshot = { ...snapshot, notes, tasks: [], attachments: [] };
+    const repository: PortableWorkspaceExportRepository = { async readExportSnapshot() { return { status: "found", snapshot: largeSnapshot }; } };
+    const outcome = await new PortableWorkspaceExportService(repository).export("ada", workspaceId);
+    assert.equal(outcome.status, "exported"); if (outcome.status !== "exported") return;
+    const { archive } = outcome; const classicEnd = archive.length - 22; const locator = classicEnd - 20; const zip64End = locator - 56;
+    assert.equal(archive.readUInt32LE(classicEnd), 0x06054b50); assert.equal(archive.readUInt16LE(classicEnd + 8), 0xffff);
+    assert.equal(archive.readUInt32LE(locator), 0x07064b50); assert.equal(Number(archive.readBigUInt64LE(locator + 8)), zip64End);
+    assert.equal(archive.readUInt32LE(zip64End), 0x06064b50); assert.equal(archive.readBigUInt64LE(zip64End + 24), 65_536n);
+    assert.equal(archive.readBigUInt64LE(zip64End + 32), 65_536n);
+    const directoryOffset = Number(archive.readBigUInt64LE(zip64End + 48));
+    assert.equal(archive.readUInt32LE(directoryOffset), 0x02014b50);
+  });
 });
 
 const postgresUrl = process.env.STASH_TEST_DATABASE_URL;
@@ -184,6 +203,13 @@ describe("PostgreSQL readable export wiring", { skip: postgresUrl ? false : "STA
       assert.equal([...guestFiles.keys()].filter((path) => path.startsWith("tasks/")).length, 1);
       assert.equal([...guestFiles.values()].some((value) => value.includes("Private roadmap")), false);
       assert.deepEqual(guestFiles.get(uploaded.record.relativePath.slice(2)), Buffer.from([9, 8, 7, 6]));
+      const corrupt = new Pool({ connectionString: `${connectionString}${separator}options=-csearch_path%3D${schema}` });
+      await corrupt.query("DELETE FROM stash_portable_projection_outbox WHERE object_kind = 'Note' AND object_id = $1", [visibleNote.note.id]);
+      await corrupt.end();
+      const incomplete = await fetch(`${running.url}/api/workspaces/${createdWorkspace.workspace.id}/export`,
+        { headers: { authorization: "Bearer owner" } });
+      assert.equal(incomplete.status, 503); assert.equal(incomplete.headers.get("content-type"), "application/json; charset=utf-8");
+      assert.deepEqual(await incomplete.json(), { error: "export_unavailable", message: "The Workspace export could not be completed. No partial export was produced." });
     } finally {
       await running?.close().catch(() => undefined); if (!running) await database.close().catch(() => undefined);
       await administration.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined); await administration.end();

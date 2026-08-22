@@ -88,6 +88,15 @@ function zip(entries: ArchiveEntry[]): Buffer {
     offset += local.length + entry.content.length;
   }
   const directory = Buffer.concat(centrals); const end = Buffer.alloc(22); end.writeUInt32LE(0x06054b50, 0);
+  if (entries.length > 0xffff) {
+    const zip64EndOffset = offset + directory.length; const zip64End = Buffer.alloc(56); zip64End.writeUInt32LE(0x06064b50, 0);
+    zip64End.writeBigUInt64LE(44n, 4); zip64End.writeUInt16LE(45, 12); zip64End.writeUInt16LE(45, 14);
+    zip64End.writeBigUInt64LE(BigInt(entries.length), 24); zip64End.writeBigUInt64LE(BigInt(entries.length), 32);
+    zip64End.writeBigUInt64LE(BigInt(directory.length), 40); zip64End.writeBigUInt64LE(BigInt(offset), 48);
+    const locator = Buffer.alloc(20); locator.writeUInt32LE(0x07064b50, 0); locator.writeBigUInt64LE(BigInt(zip64EndOffset), 8); locator.writeUInt32LE(1, 16);
+    end.writeUInt16LE(0xffff, 8); end.writeUInt16LE(0xffff, 10); end.writeUInt32LE(directory.length, 12); end.writeUInt32LE(offset, 16);
+    return Buffer.concat([...locals, directory, zip64End, locator, end]);
+  }
   end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10); end.writeUInt32LE(directory.length, 12); end.writeUInt32LE(offset, 16);
   return Buffer.concat([...locals, directory, end]);
 }
@@ -103,7 +112,8 @@ function isSafeArchivePath(path: string): boolean {
     && !path.split("/").some((part) => part === "" || part === "." || part === "..");
 }
 function zipSize(entries: Array<{ path: string; bytes: number }>): number {
-  return 22 + entries.reduce((total, entry) => total + entry.bytes + 76 + 2 * Buffer.byteLength(entry.path), 0);
+  const endBytes = entries.length > 0xffff ? 98 : 22;
+  return endBytes + entries.reduce((total, entry) => total + entry.bytes + 76 + 2 * Buffer.byteLength(entry.path), 0);
 }
 
 export class PortableWorkspaceExportService {

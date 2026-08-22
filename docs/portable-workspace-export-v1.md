@@ -23,6 +23,8 @@ credentials, and other Instance secrets are never included.
 Every ZIP entry is stored without compression, uses a fixed archive timestamp,
 and is ordered by its UTF-8 path. Exporting an unchanged snapshot therefore
 produces identical bytes. `manifest.json` is omitted from its own checksum list.
+Archives above the classic ZIP entry-count ceiling use deterministic ZIP64 end
+records, allowing the documented large single-Instance object envelope.
 
 The repository boundary must read all included records and Attachment bytes as
 one consistent, authorization-filtered snapshot. Stash buffers and validates the
