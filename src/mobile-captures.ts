@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { normalizeExplicitOffsetTimestamp } from "./explicit-offset-timestamp.js";
 import type { NoteRecord, PortableNoteProjection } from "./notes.js";
 import { isUuid, type MobileCaptureOptions } from "./mobile-capture-client.js";
+import { paragraphDocument, richTextToMarkdown, type RichTextDocument } from "./rich-text.js";
 
 export interface MobileCaptureRepository {
   findPortableMemberIdentity(memberId: string): Promise<PortableNoteProjection["createdBy"] | undefined>;
@@ -31,9 +32,11 @@ export class MobileCaptureService {
     const checklist = value.kind === "checklist" ? (value.checklist as { text: string; checked: boolean }[]).map((item) => ({
       text: item.text.trim(), checked: item.checked,
     })) : undefined;
-    const content = checklist
-      ? `${normalizedContent}\n\n${checklist.map((item) => `- [${item.checked ? "x" : " "}] ${item.text}`).join("\n")}`
-      : normalizedContent;
+    const document: RichTextDocument = checklist ? { type: "doc", blocks: [
+      { type: "paragraph", blockKey: randomUUID(), content: [{ text: normalizedContent }] },
+      ...checklist.map((item) => ({ type: "check" as const, checked: item.checked, blockKey: randomUUID(), content: [{ text: item.text }] })),
+    ] } : paragraphDocument(normalizedContent, randomUUID());
+    const content = richTextToMarkdown(document);
     const tags = [...new Set(((value.tags ?? []) as string[]).map((tag) => tag.trim()))].sort();
     const reminderAt = value.reminder ? normalizeExplicitOffsetTimestamp(value.reminder.at)! : undefined;
     const payloadDigest = createHash("sha256").update(JSON.stringify({
@@ -47,7 +50,7 @@ export class MobileCaptureService {
     const createdBy = await this.repository.findPortableMemberIdentity(memberId);
     if (!createdBy) throw new Error("member_identity_unavailable");
     const note: NoteRecord = {
-      id: randomUUID(), workspaceId, content,
+      id: randomUUID(), workspaceId, content, document, revision: 1,
       tags,
       createdByMemberId: memberId, createdAt: normalizeExplicitOffsetTimestamp(value.createdAt)!,
       ...(value.projectId ? { projectId: value.projectId } : {}),

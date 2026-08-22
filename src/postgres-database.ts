@@ -332,10 +332,10 @@ export class PostgresDatabase implements
         if (!project.rowCount) return { status: "project_forbidden" };
       }
       await client.query(
-        `INSERT INTO stash_notes (id, workspace_id, project_id, content, tags, reminder_at, created_by_account_id, created_at)
-         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)`,
-        [note.id, note.workspaceId, note.projectId ?? null, note.content, JSON.stringify(note.tags),
-          note.reminder?.at ?? null, memberId, note.createdAt],
+        `INSERT INTO stash_notes (id, workspace_id, project_id, content, document, revision, tags, reminder_at, created_by_account_id, created_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::jsonb, $8, $9, $10)`,
+        [note.id, note.workspaceId, note.projectId ?? null, note.content, JSON.stringify(note.document), note.revision,
+          JSON.stringify(note.tags), note.reminder?.at ?? null, memberId, note.createdAt],
       );
       await this.#recordPortableProjection(client, "Note", note.id, "stash.note.v1", projection);
       await client.query(
