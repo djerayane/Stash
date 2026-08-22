@@ -1112,7 +1112,14 @@ export class PostgresDatabase implements
         "SELECT digest, outcome FROM stash_task_edit_operations WHERE task_id = $1 AND operation_id = $2", [row.id, batch.operationId]);
       if (prior.rows[0]) return prior.rows[0].digest === digest ? prior.rows[0].outcome : { status: "operation_identity_conflict" as const };
       const fields = Object.keys(batch.changes);
-      const incompatible = fields.filter((field) => Number(row.field_revisions?.[field] ?? 0) > batch.baseRevision);
+      const forcedConflicts = new Set<string>();
+      if (batch.changes.statusId) {
+        const status = await client.query<{ archived: boolean }>(
+          "SELECT archived FROM stash_workflow_statuses WHERE id=$1 AND project_id=$2 FOR UPDATE", [batch.changes.statusId, projectId]);
+        if (!status.rows[0]) return { status: "invalid_reference" as const };
+        if (status.rows[0].archived) forcedConflicts.add("statusId");
+      }
+      const incompatible = fields.filter((field) => forcedConflicts.has(field) || Number(row.field_revisions?.[field] ?? 0) > batch.baseRevision);
       const compatible = Object.fromEntries(Object.entries(batch.changes).filter(([field]) => !incompatible.includes(field))) as TaskPlanningUpdate;
       if (Object.keys(compatible).length) {
         const applied = await this.#applyStructuredTaskChanges(client, memberId, row, compatible);

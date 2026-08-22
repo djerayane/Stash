@@ -71,7 +71,9 @@ describe("PostgreSQL structured Task collaboration", { skip: !databaseUrl }, () 
     const future = await concurrentEdit(created.task.key, randomUUID(), { title: "Must not overwrite" }, Number.MAX_SAFE_INTEGER);
     assert.equal(future.status, 409); assert.equal((await future.json() as any).error, "invalid_revision");
     const archivedEdit = await concurrentEdit(created.task.key, randomUUID(), { statusId: archivedStatus.id });
-    assert.equal(archivedEdit.status, 422); assert.equal((await archivedEdit.json() as any).error, "invalid_reference");
+    assert.equal(archivedEdit.status, 409); assert.equal((await archivedEdit.json() as any).error, "task_edit_conflict");
+    const unknownStatus = await concurrentEdit(created.task.key, randomUUID(), { statusId: randomUUID() });
+    assert.equal(unknownStatus.status, 422); assert.equal((await unknownStatus.json() as any).error, "invalid_reference");
     const different = await Promise.all([concurrentEdit(differentTask.key, randomUUID(), { title: "Changed concurrently" }),
       concurrentEdit(differentTask.key, randomUUID(), { priority: "high" })]); assert.deepEqual(different.map(({ status }) => status).sort(), [200, 200]);
     const differentRead = await (await fetch(taskBase(differentTask.key), { headers: { authorization: "Bearer test" } })).json() as any;
@@ -128,7 +130,7 @@ describe("PostgreSQL structured Task collaboration", { skip: !databaseUrl }, () 
       body: JSON.stringify({ destinationProjectId: destination.project.id }) }); assert.equal(moved.status, 200); const movedTask = (await moved.json() as any).task;
     const staleStatus = await fetch(`${instance.url}/api/projects/${destination.project.id}/tasks/${movedTask.key}/edits`, { method: "POST",
       headers: { authorization: "Bearer test", "content-type": "application/json" },
-      body: JSON.stringify({ operationId: randomUUID(), baseRevision: 7, changes: { statusId: created.task.status.id } }) });
+      body: JSON.stringify({ operationId: randomUUID(), baseRevision: 7, changes: { statusId: movedTask.status.id } }) });
     assert.equal(staleStatus.status, 409); assert.deepEqual((await staleStatus.json() as any).conflict.fields, ["statusId"]);
 
     const beforeRename = await workflowService.find(owner.ownerId, project.project.id); assert.equal(beforeRename.status, "found"); if (beforeRename.status !== "found") return;
@@ -145,9 +147,24 @@ describe("PostgreSQL structured Task collaboration", { skip: !databaseUrl }, () 
     const overlapWorkflow = await workflowService.find(owner.ownerId, project.project.id); assert.equal(overlapWorkflow.status, "found"); if (overlapWorkflow.status !== "found") return;
     const inProgress = overlapWorkflow.workflow.statuses.find(({ name }) => name === "In Progress")!;
     const overlapRevision = ((await (await fetch(taskBase(workflowOverlapTask.key), { headers: { authorization: "Bearer test" } })).json() as any).task.revision);
-    const workflowAndEdit = await Promise.all([workflowService.replace(owner.ownerId, project.project.id, { expectedRevision: overlapWorkflow.workflow.revision,
-      statuses: overlapWorkflow.workflow.statuses.map(({ id, name, category, archived }) => ({ id, name, category, archived: id === inProgress.id ? true : archived })) }),
-    concurrentEdit(workflowOverlapTask.key, randomUUID(), { statusId: inProgress.id }, overlapRevision)]);
-    assert.equal(workflowAndEdit[0].status, "updated"); assert.ok([200, 422].includes(workflowAndEdit[1].status));
+    const blockerPool = new Pool({ connectionString: testDatabaseUrl }); const blocker = await blockerPool.connect();
+    const overlapOperationId = randomUUID(); let workflowOutcome: Awaited<ReturnType<typeof workflowService.replace>>; let editOutcome: Response;
+    try {
+      await blocker.query("BEGIN"); await blocker.query("SELECT id FROM stash_projects WHERE id=$1 FOR UPDATE", [project.project.id]);
+      const archivePromise = workflowService.replace(owner.ownerId, project.project.id, { expectedRevision: overlapWorkflow.workflow.revision,
+        statuses: overlapWorkflow.workflow.statuses.map(({ id, name, category, archived }) => ({ id, name, category, archived: id === inProgress.id ? true : archived })) });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const editPromise = concurrentEdit(workflowOverlapTask.key, overlapOperationId, { statusId: inProgress.id }, overlapRevision);
+      await new Promise((resolve) => setTimeout(resolve, 30)); await blocker.query("COMMIT");
+      [workflowOutcome, editOutcome] = await Promise.all([archivePromise, editPromise]);
+    } finally { await blocker.query("ROLLBACK").catch(() => undefined); blocker.release(); await blockerPool.end(); }
+    assert.equal(workflowOutcome.status, "updated"); assert.equal(editOutcome.status, 409); const overlapConflict = (await editOutcome.json() as any).conflict;
+    const overlapRetry = await concurrentEdit(workflowOverlapTask.key, overlapOperationId, { statusId: inProgress.id }, overlapRevision);
+    assert.equal(overlapRetry.status, 409); assert.equal((await overlapRetry.json() as any).conflict.id, overlapConflict.id);
+    const overlapConflicts = await fetch(`${taskBase(workflowOverlapTask.key)}/conflicts`, { headers: { authorization: "Bearer test" } });
+    assert.ok(((await overlapConflicts.json() as any).conflicts as any[]).some(({ id }) => id === overlapConflict.id));
+    const dismissed = await fetch(`${taskBase(workflowOverlapTask.key)}/conflicts/${overlapConflict.id}`, { method: "PUT",
+      headers: { authorization: "Bearer test", "content-type": "application/json" }, body: JSON.stringify({ resolution: "keep_current", expectedRevision: overlapRevision }) });
+    assert.equal(dismissed.status, 200);
   });
 });
