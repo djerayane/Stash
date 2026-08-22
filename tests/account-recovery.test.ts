@@ -32,10 +32,11 @@ class AuthDatabase implements DatabaseProbe, PasswordAuthRepository, AccountReco
   async updatePasskeyCounterAndCreateSession(id: string, previous: number, next: number, session: SessionRecord) { const passkey = this.passkeys.get(id); if (!passkey || passkey.counter !== previous) return false; return this.commitSession(session, () => { passkey.counter = next; }); }
   async replaceRecoveryCodes(accountId: string, records: RecoveryCodeRecord[]) { this.codes = records.filter((r) => r.accountId === accountId); }
   async consumeRecoveryCodeAndCreateSession(accountId: string, lookup: string, session?: SessionRecord) { this.recoverySignInWork += 1; const index = this.codes.findIndex((r) => r.accountId === accountId && r.lookup === lookup); if (index < 0 || !session) return false; return this.commitSession(session, () => { this.codes.splice(index, 1); }); }
-  async enqueueEmailRecovery(record: EmailRecoveryRecord | undefined, job: EmailRecoveryDeliveryJob) { this.recoveryRequestWork += 1; if (record) this.emailRecoveries.set(record.tokenLookup, record); this.emailJobs.set(job.id, job); }
-  async nextEmailRecoveryDelivery() { return this.emailJobs.values().next().value as EmailRecoveryDeliveryJob | undefined; }
-  async completeEmailRecoveryDelivery(id: string) { this.emailJobs.delete(id); this.deliveryFailures.delete(id); }
-  async retryEmailRecoveryDelivery(id: string, reason: string) { this.deliveryFailures.set(id, reason); }
+  async enqueueEmailRecovery(job: EmailRecoveryDeliveryJob) { this.recoveryRequestWork += 1; this.emailJobs.set(job.id, job); }
+  async claimEmailRecoveryDelivery(owner: string, _leaseUntil: string) { const job = [...this.emailJobs.values()].find((candidate) => !candidate.claimOwner); if (!job) return undefined; job.claimOwner = owner; job.claimVersion = (job.claimVersion ?? 0) + 1; return { ...job }; }
+  async renewEmailRecoveryDelivery(id: string, owner: string, version: number, _leaseUntil: string) { const job = this.emailJobs.get(id); return job?.claimOwner === owner && job.claimVersion === version; }
+  async completeEmailRecoveryDelivery(id: string, owner: string, version: number, activation?: EmailRecoveryRecord) { const job = this.emailJobs.get(id); if (job?.claimOwner !== owner || job.claimVersion !== version) return false; this.emailJobs.delete(id); this.deliveryFailures.delete(id); if (activation) this.emailRecoveries.set(activation.tokenLookup, activation); return true; }
+  async retryEmailRecoveryDelivery(id: string, owner: string, version: number, reason: string) { const job = this.emailJobs.get(id); if (job?.claimOwner !== owner || job.claimVersion !== version) return false; delete job.claimOwner; this.deliveryFailures.set(id, reason); return true; }
   async findEmailRecoveryAccount(lookup: string, now: string) { const record = this.emailRecoveries.get(lookup); return record && record.expiresAt > now ? record.accountId : undefined; }
   async consumeEmailRecoveryAndCreateSession(lookup: string, now: string, session: SessionRecord) { const record = this.emailRecoveries.get(lookup); if (!record || record.accountId !== session.accountId || record.expiresAt <= now) return false; return this.commitSession(session, () => { this.emailRecoveries.delete(lookup); }); }
   private async commitSession(session: SessionRecord, mutation: () => void) { if (this.sessionFailures > 0) { this.sessionFailures -= 1; throw new Error("session write failed"); } mutation(); this.sessions.set(session.id, session); return true; }
@@ -65,7 +66,7 @@ describe("Member account recovery on a running Stash Instance", () => {
     instance = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin", passwordAuth: passwords, accountRecovery: recovery });
     const signedIn = await fetch(`${instance.url}/api/auth/sessions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "ada@example.com", password: "correct horse battery staple" }) });
     const session = await signedIn.json() as { token: string };
-    return { database, delivered, baseUrl: instance.url, token: session.token, ...(email ? { worker: new EmailRecoveryWorker(database, secrets, email) } : {}) };
+    return { database, delivered, baseUrl: instance.url, token: session.token, secrets, email, ...(email ? { worker: new EmailRecoveryWorker(database, secrets, email) } : {}) };
   }
 
   it("registers a passkey and signs in after verifying its challenge", async () => {
@@ -158,6 +159,19 @@ describe("Member account recovery on a running Stash Instance", () => {
     assert.equal((await recover()).status, 201);
   });
 
+  it("activates the recovery window when delayed delivery succeeds, not when requested", async () => {
+    const requestedAt = Date.now();
+    const deliveredAt = requestedAt + 20 * 60_000;
+    const { baseUrl, database, secrets, email } = await run();
+    await fetch(`${baseUrl}/api/auth/email-recovery`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "ada@example.com" }) });
+    assert.equal(database.emailRecoveries.size, 0);
+    const delayedWorker = new EmailRecoveryWorker(database, secrets, email!, 30_000, () => deliveredAt);
+    assert.equal(await delayedWorker.processNext(), "delivered");
+    const recovery = [...database.emailRecoveries.values()][0]!;
+    assert.equal(Date.parse(recovery.expiresAt), deliveredAt + 15 * 60_000);
+    assert.ok(Date.parse(recovery.expiresAt) > requestedAt + 15 * 60_000);
+  });
+
   it("returns after local email queueing without waiting for SMTP and leaves failures retryable", async () => {
     let releaseDelivery!: () => void;
     const blocked = new Promise<void>((resolve) => { releaseDelivery = resolve; });
@@ -177,6 +191,28 @@ describe("Member account recovery on a running Stash Instance", () => {
     assert.equal(await failing.worker!.processNext(), "retry_scheduled");
     assert.equal(failing.database.emailJobs.size, 1);
     assert.match([...failing.database.deliveryFailures.values()][0] ?? "", /temporarily unavailable/);
+  });
+
+  it("allows only one worker to actively send a slow delivery", async () => {
+    let activeSends = 0;
+    let maximumActiveSends = 0;
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const { baseUrl, database, secrets, email } = await run(true, async () => {
+      activeSends += 1;
+      maximumActiveSends = Math.max(maximumActiveSends, activeSends);
+      await blocked;
+      activeSends -= 1;
+    });
+    await fetch(`${baseUrl}/api/auth/email-recovery`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "ada@example.com" }) });
+    const first = new EmailRecoveryWorker(database, secrets, email!, 60).processNext();
+    await new Promise((resolve) => setImmediate(resolve));
+    const second = await new EmailRecoveryWorker(database, secrets, email!, 60).processNext();
+    assert.equal(second, "idle");
+    assert.equal(maximumActiveSends, 1);
+    release();
+    assert.equal(await first, "delivered");
+    assert.equal(database.emailJobs.size, 0);
   });
 
   it("makes disabled email recovery and invalid recovery attempts visible", async () => {

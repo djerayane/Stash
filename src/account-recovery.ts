@@ -5,7 +5,7 @@ import type { AccountAuthenticationRecord, AuthenticatedMember, PasswordAuthServ
 export interface PasskeyRecord { credentialId: string; accountId: string; publicKey: string; counter: number; transports?: string[]; createdAt: string }
 export interface RecoveryCodeRecord { accountId: string; lookup: string; protectedSecret: string }
 export interface EmailRecoveryRecord { accountId: string; tokenLookup: string; protectedSecret: string; expiresAt: string }
-export interface EmailRecoveryDeliveryJob { id: string; protectedDelivery: string; createdAt: string }
+export interface EmailRecoveryDeliveryJob { id: string; protectedDelivery: string; createdAt: string; claimOwner?: string; claimVersion?: number }
 export interface AccountRecoveryRepository {
   findAccountByEmail(email: string): Promise<AccountAuthenticationRecord | undefined>;
   findAccountById(id: string): Promise<AccountAuthenticationRecord | undefined>;
@@ -14,10 +14,11 @@ export interface AccountRecoveryRepository {
   updatePasskeyCounterAndCreateSession(credentialId: string, previousCounter: number, newCounter: number, session: SessionRecord): Promise<boolean>;
   replaceRecoveryCodes(accountId: string, records: RecoveryCodeRecord[]): Promise<void>;
   consumeRecoveryCodeAndCreateSession(accountId: string, lookup: string, session?: SessionRecord): Promise<boolean>;
-  enqueueEmailRecovery(record: EmailRecoveryRecord | undefined, job: EmailRecoveryDeliveryJob): Promise<void>;
-  nextEmailRecoveryDelivery(): Promise<EmailRecoveryDeliveryJob | undefined>;
-  completeEmailRecoveryDelivery(id: string): Promise<void>;
-  retryEmailRecoveryDelivery(id: string, reason: string): Promise<void>;
+  enqueueEmailRecovery(job: EmailRecoveryDeliveryJob): Promise<void>;
+  claimEmailRecoveryDelivery(owner: string, leaseUntil: string): Promise<EmailRecoveryDeliveryJob | undefined>;
+  renewEmailRecoveryDelivery(id: string, owner: string, version: number, leaseUntil: string): Promise<boolean>;
+  completeEmailRecoveryDelivery(id: string, owner: string, version: number, activation?: EmailRecoveryRecord): Promise<boolean>;
+  retryEmailRecoveryDelivery(id: string, owner: string, version: number, reason: string): Promise<boolean>;
   findEmailRecoveryAccount(lookup: string, now: string): Promise<string | undefined>;
   consumeEmailRecoveryAndCreateSession(lookup: string, now: string, session: SessionRecord): Promise<boolean>;
 }
@@ -35,6 +36,7 @@ export class EmailRecoveryUnavailable extends Error {}
 function derivePurposeSeparatedLookup(purpose: "webauthn-challenge" | "recovery-code" | "email-recovery", value: string) {
   return createHash("sha256").update(`stash:${purpose}:v1\0${value}`).digest("base64");
 }
+export function deriveEmailRecoveryLookup(token: string) { return derivePurposeSeparatedLookup("email-recovery", token); }
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export class AccountRecoveryService {
@@ -103,14 +105,13 @@ export class AccountRecoveryService {
     const account = await this.#repository.findAccountByEmail(input.email.trim().toLowerCase());
     const token = randomBytes(32).toString("base64url");
     const now = new Date();
-    const recovery = account ? { accountId: account.id, tokenLookup: derivePurposeSeparatedLookup("email-recovery", token), protectedSecret: this.#adapters.secrets.encrypt(token), expiresAt: new Date(now.getTime() + 15 * 60_000).toISOString() } : undefined;
-    const protectedDelivery = this.#adapters.secrets.encrypt(JSON.stringify(account ? { address: account.email, token } : { dummy: true }));
-    await this.#repository.enqueueEmailRecovery(recovery, { id: randomUUID(), protectedDelivery, createdAt: now.toISOString() });
+    const protectedDelivery = this.#adapters.secrets.encrypt(JSON.stringify(account ? { accountId: account.id, address: account.email, token } : { dummy: true }));
+    await this.#repository.enqueueEmailRecovery({ id: randomUUID(), protectedDelivery, createdAt: now.toISOString() });
   }
   async signInWithEmailRecovery(value: unknown, userAgent?: string) {
     const input = this.#object(value);
     if (typeof input.token !== "string" || input.token.length < 32) throw new InvalidRecoveryInput();
-    const lookup = derivePurposeSeparatedLookup("email-recovery", input.token);
+    const lookup = deriveEmailRecoveryLookup(input.token);
     const now = new Date().toISOString();
     const accountId = await this.#repository.findEmailRecoveryAccount(lookup, now);
     if (!accountId) throw new RecoveryCredentialsRejected();

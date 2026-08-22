@@ -377,10 +377,9 @@ export class PostgresDatabase implements
     });
   }
 
-  async enqueueEmailRecovery(record: EmailRecoveryRecord | undefined, job: EmailRecoveryDeliveryJob): Promise<void> {
+  async enqueueEmailRecovery(job: EmailRecoveryDeliveryJob): Promise<void> {
     await this.#ensureRecoverySchema();
     await this.#transaction(async (client) => {
-      if (record) await client.query("INSERT INTO stash_email_recoveries (token_lookup, account_id, protected_secret, expires_at) VALUES ($1, $2, $3, $4)", [this.#authenticationSecrets.blindIndex(record.tokenLookup), record.accountId, record.protectedSecret, record.expiresAt]);
       await client.query("INSERT INTO stash_email_recovery_delivery_jobs (id, protected_delivery, created_at) VALUES ($1, $2, $3)", [job.id, job.protectedDelivery, job.createdAt]);
       return { commit: true, value: undefined };
     });
@@ -401,18 +400,33 @@ export class PostgresDatabase implements
     });
   }
 
-  async nextEmailRecoveryDelivery(): Promise<EmailRecoveryDeliveryJob | undefined> {
+  async claimEmailRecoveryDelivery(owner: string, leaseUntil: string): Promise<EmailRecoveryDeliveryJob | undefined> {
     await this.#ensureRecoverySchema();
     return this.#transaction(async (client) => {
-      const result = await client.query<{ id: string; protected_delivery: string; created_at: Date | string }>("SELECT id, protected_delivery, created_at FROM stash_email_recovery_delivery_jobs WHERE available_at <= NOW() ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED");
+      const result = await client.query<{ id: string; protected_delivery: string; created_at: Date | string; claim_version: number }>("SELECT id, protected_delivery, created_at, claim_version FROM stash_email_recovery_delivery_jobs WHERE available_at <= NOW() AND (lease_until IS NULL OR lease_until <= NOW()) ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED");
       const row = result.rows[0];
       if (!row) return { commit: false, value: undefined };
-      await client.query("UPDATE stash_email_recovery_delivery_jobs SET available_at = NOW() + INTERVAL '5 minutes' WHERE id = $1", [row.id]);
-      return { commit: true, value: { id: row.id, protectedDelivery: row.protected_delivery, createdAt: new Date(row.created_at).toISOString() } };
+      const claimVersion = Number(row.claim_version) + 1;
+      await client.query("UPDATE stash_email_recovery_delivery_jobs SET claim_owner = $2, claim_version = $3, lease_until = $4 WHERE id = $1", [row.id, owner, claimVersion, leaseUntil]);
+      return { commit: true, value: { id: row.id, protectedDelivery: row.protected_delivery, createdAt: new Date(row.created_at).toISOString(), claimOwner: owner, claimVersion } };
     });
   }
-  async completeEmailRecoveryDelivery(id: string): Promise<void> { await this.#pool.query("DELETE FROM stash_email_recovery_delivery_jobs WHERE id = $1", [id]); }
-  async retryEmailRecoveryDelivery(id: string, reason: string): Promise<void> { await this.#pool.query("UPDATE stash_email_recovery_delivery_jobs SET attempts = attempts + 1, last_error = $2, available_at = NOW() + INTERVAL '1 minute' WHERE id = $1", [id, reason.slice(0, 500)]); }
+  async renewEmailRecoveryDelivery(id: string, owner: string, version: number, leaseUntil: string): Promise<boolean> {
+    const result = await this.#pool.query("UPDATE stash_email_recovery_delivery_jobs SET lease_until = $4 WHERE id = $1 AND claim_owner = $2 AND claim_version = $3", [id, owner, version, leaseUntil]);
+    return result.rowCount === 1;
+  }
+  async completeEmailRecoveryDelivery(id: string, owner: string, version: number, activation?: EmailRecoveryRecord): Promise<boolean> {
+    return this.#transaction(async (client) => {
+      const deleted = await client.query("DELETE FROM stash_email_recovery_delivery_jobs WHERE id = $1 AND claim_owner = $2 AND claim_version = $3", [id, owner, version]);
+      if (deleted.rowCount !== 1) return { commit: false, value: false };
+      if (activation) await client.query("INSERT INTO stash_email_recoveries (token_lookup, account_id, protected_secret, expires_at) VALUES ($1, $2, $3, $4)", [this.#authenticationSecrets.blindIndex(activation.tokenLookup), activation.accountId, activation.protectedSecret, activation.expiresAt]);
+      return { commit: true, value: true };
+    });
+  }
+  async retryEmailRecoveryDelivery(id: string, owner: string, version: number, reason: string): Promise<boolean> {
+    const result = await this.#pool.query("UPDATE stash_email_recovery_delivery_jobs SET attempts = attempts + 1, last_error = $4, available_at = NOW() + INTERVAL '1 minute', claim_owner = NULL, lease_until = NULL WHERE id = $1 AND claim_owner = $2 AND claim_version = $3", [id, owner, version, reason.slice(0, 500)]);
+    return result.rowCount === 1;
+  }
 
   async #insertSession(client: PoolClient, session: SessionRecord): Promise<void> {
     await client.query(
@@ -505,7 +519,10 @@ export class PostgresDatabase implements
         created_at TIMESTAMPTZ NOT NULL,
         available_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         attempts INTEGER NOT NULL DEFAULT 0,
-        last_error TEXT
+        last_error TEXT,
+        claim_owner UUID,
+        claim_version BIGINT NOT NULL DEFAULT 0,
+        lease_until TIMESTAMPTZ
       );
     `);
   }
