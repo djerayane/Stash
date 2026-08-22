@@ -6,7 +6,7 @@ import { OidcAuthService } from "./oidc-auth.js";
 import { OidcManagementService } from "./oidc-management.js";
 import { createAuthenticationSecretCodec } from "./authentication-secrets.js";
 import { AccountRecoveryService } from "./account-recovery.js";
-import { WebAuthnPasskeyVerifier } from "./passkey-verifier.js";
+import { resolveWebAuthnConfiguration, WebAuthnPasskeyVerifier } from "./passkey-verifier.js";
 import { createRecoveryEmailSender } from "./recovery-email.js";
 import { EmailRecoveryWorker } from "./email-recovery-worker.js";
 import { startRedisAcceleration, type RunningRedisAcceleration } from "./redis-acceleration.js";
@@ -36,7 +36,6 @@ async function main(): Promise<void> {
 
   const passwordAuth = new PasswordAuthService(database);
   const publicOrigin = requiredEnvironment("PUBLIC_ORIGIN");
-  const origin = new URL(publicOrigin);
   const smtpUrl = process.env.SMTP_URL?.trim();
   const emailRecoveryFrom = process.env.EMAIL_RECOVERY_FROM?.trim();
   const recoveryEmail = createRecoveryEmailSender({
@@ -56,11 +55,10 @@ async function main(): Promise<void> {
     oidcManagement: new OidcManagementService(database),
     oidcCallbackOrigin: publicOrigin,
     accountRecovery: new AccountRecoveryService(database, passwordAuth, {
-      passkeys: new WebAuthnPasskeyVerifier({
-        rpId: process.env.WEBAUTHN_RP_ID?.trim() || origin.hostname,
-        rpName: process.env.WEBAUTHN_RP_NAME?.trim() || "Stash",
-        expectedOrigin: publicOrigin,
-      }),
+      passkeys: new WebAuthnPasskeyVerifier(resolveWebAuthnConfiguration(publicOrigin, {
+        ...(process.env.WEBAUTHN_RP_ID ? { rpId: process.env.WEBAUTHN_RP_ID } : {}),
+        ...(process.env.WEBAUTHN_RP_NAME ? { rpName: process.env.WEBAUTHN_RP_NAME } : {}),
+      })),
       secrets: authenticationSecrets,
       ...(recoveryEmail ? { email: recoveryEmail } : {}),
     }),

@@ -5,6 +5,18 @@ import type { PasskeyRecord, PasskeyVerifier } from "./account-recovery.js";
 
 export interface WebAuthnConfiguration { rpId: string; rpName: string; expectedOrigin: string }
 
+export function resolveWebAuthnConfiguration(
+  publicOrigin: string,
+  overrides: { rpId?: string; rpName?: string } = {},
+): WebAuthnConfiguration {
+  const origin = new URL(publicOrigin);
+  return {
+    rpId: overrides.rpId?.trim() || origin.hostname,
+    rpName: overrides.rpName?.trim() || "Stash",
+    expectedOrigin: origin.origin,
+  };
+}
+
 export class WebAuthnPasskeyVerifier implements PasskeyVerifier {
   constructor(readonly configuration: WebAuthnConfiguration) {}
   registrationOptions(challenge: string, account: AccountAuthenticationRecord) {
