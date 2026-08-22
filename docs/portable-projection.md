@@ -20,6 +20,8 @@ commit in one database transaction; local bytes are written atomically before me
 visible and are removed when that transaction fails. Notes and exports use `relativePath`, never an
 Instance URL, so moving a Workspace does not break its links. Portable exports copy the bytes to
 that relative path and contain no Instance secrets.
+Markdown links URI-encode the literal portable path separately; a percent sign in an encoded disk
+component is itself encoded as `%25`, so resolving the href names the exact exported file.
 
 ## `stash.workspace.v1`
 

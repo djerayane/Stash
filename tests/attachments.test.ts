@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 
-import { AttachmentService, LocalAttachmentStorage, type AttachmentRecord, type AttachmentRepository, type PortableAttachmentProjection } from "../src/attachments.js";
+import { AttachmentService, LocalAttachmentStorage, portableAttachmentHref, type AttachmentRecord, type AttachmentRepository, type PortableAttachmentProjection } from "../src/attachments.js";
 import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
 import type { MemberAccessResolver } from "../src/workspaces-projects.js";
 import { NoteService, type NoteEditBatch, type NoteRecord, type NoteRepository, type PortableNoteProjection } from "../src/notes.js";
@@ -52,11 +52,12 @@ describe("Workspace Attachments", () => {
   const upload = (baseUrl: string, token: string, body: string, filename = "design notes.txt", contentType = "text/plain") => fetch(`${baseUrl}/api/workspaces/${workspaceId}/attachments`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": contentType, "x-stash-filename": filename, "x-stash-source": "paste" }, body });
 
   it("uploads pasted bytes, records a portable relative link, and serves them only to Workspace Members", async () => {
-    const { baseUrl, database, directory } = await run();
+    const { baseUrl, database, directory, storage } = await run();
     const response = await upload(baseUrl, "member-ada", "hello stash"); assert.equal(response.status, 201);
-    const attachment = await response.json() as AttachmentRecord & { contentUrl: string; portableLink: string; portableProjection: object };
+    const attachment = await response.json() as AttachmentRecord & { contentUrl: string; portableHref: string; portableLink: string; portableProjection: object };
     assert.equal(attachment.source, "paste"); assert.equal(attachment.relativePath.startsWith("./attachments/"), true);
-    assert.equal(attachment.portableLink, `[design notes.txt](<${attachment.relativePath}>)`);
+    assert.equal(decodeURIComponent(new URL(attachment.portableHref, "file:///export/note.md").pathname).slice("/export/".length), attachment.relativePath.slice(2));
+    assert.equal(attachment.portableLink, `[design notes.txt](<${attachment.portableHref}>)`);
     assert.equal(await readFile(join(directory, workspaceId, attachment.id), "utf8"), "hello stash");
     assert.deepEqual(database.projections[0], { schema: "stash.attachment.v1", id: attachment.id, workspaceId, filename: "design notes.txt", contentType: "text/plain", size: 11, relativePath: attachment.relativePath, source: "paste", createdAt: attachment.createdAt, createdBy: { localAccountId: "ada", displayName: "Ada Lovelace" } });
     const served = await fetch(`${baseUrl}${attachment.contentUrl}`, { headers: { authorization: "Bearer member-ada" } });
@@ -69,22 +70,30 @@ describe("Workspace Attachments", () => {
 
     const hostile = await upload(baseUrl, "member-ada", "safe bytes", "x](javascript:alert(1)).txt");
     assert.equal(hostile.status, 201);
-    const hostileAttachment = await hostile.json() as { portableLink: string; relativePath: string; contentUrl: string };
-    assert.equal(hostileAttachment.portableLink, `[x\\](javascript:alert(1)).txt](<${hostileAttachment.relativePath}>)`);
+    const hostileAttachment = await hostile.json() as { portableLink: string; portableHref: string; relativePath: string; contentUrl: string };
+    assert.equal(hostileAttachment.portableLink, `[x\\](javascript:alert(1)).txt](<${hostileAttachment.portableHref}>)`);
     const hostileServed = await fetch(`${baseUrl}${hostileAttachment.contentUrl}`, { headers: { authorization: "Bearer member-ada" } });
     assert.match(hostileServed.headers.get("content-disposition") ?? "", /filename\*=UTF-8''x%5D%28javascript%3Aalert%281%29%29\.txt$/);
 
     const windowsInvalid = await upload(baseUrl, "member-ada", "portable", "report*.txt");
     assert.equal(windowsInvalid.status, 201);
-    const portable = await windowsInvalid.json() as { relativePath: string; contentUrl: string };
+    const portable = await windowsInvalid.json() as { relativePath: string; portableHref: string; contentUrl: string };
     assert.match(portable.relativePath, /report%2A\.txt$/);
+    assert.equal(decodeURIComponent(new URL(portable.portableHref, "file:///export/note.md").pathname).slice("/export/".length), portable.relativePath.slice(2));
     assert.equal(await (await fetch(`${baseUrl}${portable.contentUrl}`, { headers: { authorization: "Bearer member-ada" } })).text(), "portable");
+
+    const unicode = await new AttachmentService(database, storage, { maxBytes: 12 }).create("ada", workspaceId, { filename: "界.txt", contentType: "text/plain", source: "upload", content: Buffer.from("utf8") });
+    assert.equal(unicode.status, "created");
+    if (unicode.status === "created") {
+      const href = portableAttachmentHref(unicode.record.relativePath);
+      assert.equal(decodeURIComponent(new URL(href, "file:///export/note.md").pathname).slice("/export/".length), unicode.record.relativePath.slice(2));
+    }
 
     const captured = await fetch(`${baseUrl}/api/workspaces/${workspaceId}/notes`, { method: "POST", headers: { authorization: "Bearer member-ada", "content-type": "application/json" }, body: JSON.stringify({ content: "Design file" }) });
     const note = await captured.json() as NoteRecord; const block = database.notes.get(note.id)!.document.blocks[0]!;
-    const linked = await fetch(`${baseUrl}/api/notes/${note.id}`, { method: "PUT", headers: { authorization: "Bearer member-ada", "content-type": "application/json" }, body: JSON.stringify({ baseRevision: 1, operations: [{ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", type: "replace_block", blockKey: block.blockKey, block: { ...block, content: [{ text: attachment.filename, href: attachment.relativePath }] } }] }) });
+    const linked = await fetch(`${baseUrl}/api/notes/${note.id}`, { method: "PUT", headers: { authorization: "Bearer member-ada", "content-type": "application/json" }, body: JSON.stringify({ baseRevision: 1, operations: [{ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", type: "replace_block", blockKey: block.blockKey, block: { ...block, content: [{ text: attachment.filename, href: attachment.portableHref }] } }] }) });
     assert.equal(linked.status, 200);
-    assert.equal((await linked.json() as NoteRecord).content, `[design notes.txt](<${attachment.relativePath}>)`);
+    assert.equal((await linked.json() as NoteRecord).content, `[design notes.txt](<${attachment.portableHref}>)`);
   });
 
   it("rejects unsafe names, unsupported types, oversized bodies, and cleans stored bytes after metadata failure", async () => {

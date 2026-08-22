@@ -31,6 +31,9 @@ const windowsDeviceName = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
 export function encodePortableFilename(filename: string): string {
   return encodeURIComponent(filename).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
 }
+export function portableAttachmentHref(relativePath: string): string {
+  return relativePath.replaceAll("%", "%25");
+}
 export class AttachmentService {
   constructor(private readonly repository: AttachmentRepository, private readonly storage: AttachmentStorage, private readonly limits = { maxBytes: 10 * 1024 * 1024 }) {}
   async create(memberId: string, workspaceId: string, input: { filename: string; contentType: string; source: AttachmentSource; content: Buffer }) {
