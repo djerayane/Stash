@@ -22,6 +22,7 @@ class ProtocolCompatibleNoteDatabase implements DatabaseProbe, NoteRepository {
   readonly portableProjectionOutbox: PortableNoteProjection[] = [];
   readonly conflicts: NoteEditBatch[] = [];
   readonly applied = new Map<string, { revision: number; blockKey: string; digest: string }>();
+  readonly acknowledged = new Map<string, { blockKey: string; digest: string }>();
   readonly conflictIds = new Set<string>();
   readonly conflictByOperation = new Map<string, string>();
   readonly editConflicts = new Map<string, import("../src/notes.js").NoteEditConflict>();
@@ -60,14 +61,15 @@ class ProtocolCompatibleNoteDatabase implements DatabaseProbe, NoteRepository {
     if (this.updateFailure) throw this.updateFailure;
     const current = this.notes.get(noteId);
     if ((memberId !== "ada" && memberId !== "grace") || !current) return { status: "not_found" as const };
-    const reused = batch.operations.find((operation) => this.applied.has(operation.id) && this.applied.get(operation.id)!.digest !== noteOperationDigest(operation));
+    const reused = batch.operations.find((operation) => (this.applied.get(operation.id)?.digest ?? this.acknowledged.get(operation.id)?.digest) !== undefined
+      && (this.applied.get(operation.id)?.digest ?? this.acknowledged.get(operation.id)?.digest) !== noteOperationDigest(operation));
     if (reused) { this.conflicts.push(batch); const id = "88888888-8888-4888-8888-888888888888";
       this.editConflicts.set(id, { id, noteId, baseRevision: batch.baseRevision, preservedDocument: current.document,
         preservedMarkdown: current.content, operations: [reused], kind: "invalid_operation_id", currentRevision: current.revision,
         createdBy: { displayName: memberId === "grace" ? "Grace Hopper" : "Ada Lovelace", attribution: "recorded" }, createdAt: "2026-08-22T10:00:00.000Z" });
       return { status: "invalid_reference" as const }; }
     const createdBy = { localAccountId: current.createdByMemberId, displayName: "Ada Lovelace" };
-    const pending = batch.operations.filter(({ id }) => !this.applied.has(id) && !this.conflictIds.has(id));
+    const pending = batch.operations.filter(({ id }) => !this.applied.has(id) && !this.acknowledged.has(id) && !this.conflictIds.has(id));
     const projection = (note: NoteRecord): PortableNoteProjection => ({ schema: "stash.note.v1", id: note.id, workspaceId: note.workspaceId,
       content: note.content, tags: note.tags, createdAt: note.createdAt, createdBy });
     if (!pending.length) { const conflictId = batch.operations.map(({ id }) => this.conflictByOperation.get(id)).find(Boolean);
@@ -110,6 +112,8 @@ class ProtocolCompatibleNoteDatabase implements DatabaseProbe, NoteRepository {
     if (current.revision !== expectedRevision) { conflict.currentRevision = current.revision; return { status: "conflict_changed" as const, conflict }; }
     if (resolution === "apply_contribution" && conflict.kind === "invalid_operation_id") return { status: "invalid_operation_identity" as const };
     if (resolution === "keep_current") { conflict.resolvedAt = "2026-08-22T10:01:00.000Z"; conflict.resolution = resolution;
+      for (const operation of conflict.operations) { this.acknowledged.set(operation.id, { blockKey: operation.blockKey, digest: noteOperationDigest(operation) });
+        this.conflictIds.delete(operation.id); this.conflictByOperation.delete(operation.id); }
       return { status: "resolved" as const, note: current, projection: this.portableProjectionOutbox.at(-1)! }; }
     const blocks = [...current.document.blocks];
     for (const operation of conflict.operations) { const index = blocks.findIndex(({ blockKey }) => blockKey === operation.blockKey);
@@ -511,5 +515,9 @@ describe("editing Notes", () => {
     assert.equal(dismissed.status, 200);
     assert.match((await dismissed.json() as NoteRecord).content, /Published/);
     assert.equal(database.notes.get(note.id)!.revision, 2);
+    const retry = await request(replace(conflictOperationId, "Dismissed"));
+    assert.equal(retry.status, 200); assert.equal((await retry.json() as NoteRecord).revision, 2);
+    const reused = await request(replace(conflictOperationId, "Different reuse"));
+    assert.equal(reused.status, 422); assert.equal(database.notes.get(note.id)!.revision, 2);
   });
 });

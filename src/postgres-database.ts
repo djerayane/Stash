@@ -537,12 +537,14 @@ export class PostgresDatabase implements
       const createdBy = { localAccountId: row.created_by_account_id, displayName: row.creator_name };
       const existing = await client.query<{ operation_id: string; operation_digest: string | null }>("SELECT operation_id, operation_digest FROM stash_note_operations WHERE note_id = $1 AND operation_id = ANY($2::uuid[])", [noteId, batch.operations.map(({ id }) => id)]);
       const knownDigests = new Map(existing.rows.map(({ operation_id, operation_digest }) => [operation_id, operation_digest]));
+      const acknowledged = await client.query<{ operation_id: string; operation_digest: string }>("SELECT operation_id, operation_digest FROM stash_note_acknowledged_operations WHERE note_id = $1 AND operation_id = ANY($2::uuid[])", [noteId, batch.operations.map(({ id }) => id)]);
+      for (const { operation_id, operation_digest } of acknowledged.rows) if (!knownDigests.has(operation_id)) knownDigests.set(operation_id, operation_digest);
       const reused = batch.operations.find((operation) => knownDigests.has(operation.id) && knownDigests.get(operation.id) !== noteOperationDigest(operation));
       if (reused) {
         await client.query("INSERT INTO stash_note_edit_conflicts (id,note_id,base_revision,document,markdown,operations,created_by_account_id,kind) VALUES ($1,$2,$3,$4::jsonb,$5,$6::jsonb,$7,'invalid_operation_id')", [randomUUID(),noteId,batch.baseRevision,JSON.stringify(row.document),row.content,JSON.stringify([reused]),memberId]);
         return { status: "invalid_reference" as const };
       }
-      const applied = new Set(existing.rows.map(({ operation_id }) => operation_id));
+      const applied = new Set([...existing.rows, ...acknowledged.rows].map(({ operation_id }) => operation_id));
       const conflicted = await client.query<{ operation_id: string; operation_digest: string | null; conflict_id: string }>("SELECT operation_id, operation_digest, conflict_id FROM stash_note_conflict_operations WHERE note_id = $1 AND operation_id = ANY($2::uuid[])", [noteId, batch.operations.map(({ id }) => id)]);
       const conflictDigests = new Map(conflicted.rows.map(({ operation_id, operation_digest }) => [operation_id, operation_digest]));
       const reusedConflict = batch.operations.find((operation) => conflictDigests.has(operation.id) && conflictDigests.get(operation.id) !== noteOperationDigest(operation));
@@ -691,6 +693,11 @@ export class PostgresDatabase implements
           ON CONFLICT (note_id, operation_id) DO NOTHING`, [noteId, operation.id, conflict.base_revision, note.revision, operation.blockKey, noteOperationDigest(operation)]);
         await client.query("DELETE FROM stash_note_conflict_operations WHERE conflict_id = $1 AND note_id = $2", [conflictId, noteId]);
         await this.#recordPortableProjection(client, "Note", note.id, "stash.note.v1", projectionFor(note));
+      } else {
+        for (const operation of conflict.operations ?? []) await client.query(`INSERT INTO stash_note_acknowledged_operations
+          (note_id,operation_id,operation_digest) VALUES ($1,$2,$3) ON CONFLICT (note_id, operation_id) DO NOTHING`,
+          [noteId, operation.id, noteOperationDigest(operation)]);
+        await client.query("DELETE FROM stash_note_conflict_operations WHERE conflict_id = $1 AND note_id = $2", [conflictId, noteId]);
       }
       await client.query(`UPDATE stash_note_edit_conflicts SET resolved_at = CURRENT_TIMESTAMP, resolution = $3,
         resolved_by_account_id = $4 WHERE id = $1 AND note_id = $2`, [conflictId, noteId, resolution, memberId]);
@@ -1541,6 +1548,12 @@ export class PostgresDatabase implements
       PRIMARY KEY (note_id, operation_id)
     )`);
     await client.query("ALTER TABLE stash_note_operations ADD COLUMN IF NOT EXISTS operation_digest TEXT");
+    await client.query(`CREATE TABLE IF NOT EXISTS stash_note_acknowledged_operations (
+      note_id UUID NOT NULL REFERENCES stash_notes(id) ON DELETE CASCADE,
+      operation_id UUID NOT NULL,
+      operation_digest TEXT NOT NULL,
+      PRIMARY KEY (note_id, operation_id)
+    )`);
     await client.query(`CREATE TABLE IF NOT EXISTS stash_note_edit_conflicts (
       id UUID PRIMARY KEY,
       note_id UUID NOT NULL REFERENCES stash_notes(id) ON DELETE CASCADE,
