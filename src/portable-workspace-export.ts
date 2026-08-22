@@ -7,6 +7,7 @@ import type { PortableWorkspaceProjection } from "./workspaces-projects.js";
 import type { Board } from "./boards.js";
 import type { PortableNoteLinkProjection } from "./notes.js";
 import type { PortableNoteLinkStateProjection, PortableNoteLocationProjection } from "./note-links.js";
+import type { ActivityRecord, NoteHistoryRevision } from "./activity.js";
 
 export interface PortableExportAttachment {
   projection: PortableAttachmentProjection;
@@ -23,6 +24,8 @@ export interface PortableWorkspaceExportSnapshot {
   attachments: PortableExportAttachment[];
   noteLocations: PortableNoteLocationProjection[];
   noteLinks: Array<PortableNoteLinkProjection | PortableNoteLinkStateProjection>;
+  activities?: ActivityRecord[];
+  noteHistory?: NoteHistoryRevision[];
 }
 
 export interface PortableWorkspaceExportRepository {
@@ -149,7 +152,9 @@ export class PortableWorkspaceExportService {
       || snapshot.tasks.some((task) => task.workspaceId !== workspaceId)
       || snapshot.attachments.some(({ projection }) => projection.workspaceId !== workspaceId)
       || snapshot.noteLocations.some((location) => location.workspaceId !== workspaceId)
-      || snapshot.noteLinks.some((link) => link.workspaceId !== workspaceId)) {
+      || snapshot.noteLinks.some((link) => link.workspaceId !== workspaceId)
+      || snapshot.activities?.some((activity) => activity.workspaceId !== workspaceId)
+      || snapshot.noteHistory?.some((revision) => revision.workspaceId !== workspaceId)) {
       throw new Error("inconsistent_export_snapshot");
     }
     const readme = "# Stash Portable Workspace Export\n\nFormat: `stash.portable-workspace-export.v1`\n\nNotes and Tasks are readable Markdown. Board view configurations are deterministic JSON in `boards/`. Stable Note locations and links are deterministic JSON under `relationships/`, and links are also readable relative Markdown in their source Notes. `manifest.json` contains the Workspace identity, file checksums, and the schemas needed by importers. Attachment paths and bytes are preserved exactly.\n";
@@ -166,6 +171,10 @@ export class PortableWorkspaceExportService {
       { path: "relationships/note-locations.json", text: stableJson(snapshot.noteLocations) },
       { path: "relationships/note-links.json", text: stableJson(snapshot.noteLinks) },
     ];
+    const durableState = [
+      ...(snapshot.activities ? [{ path: "activity.json", text: stableJson(snapshot.activities) }] : []),
+      ...(snapshot.noteHistory ? [{ path: "note-history.json", text: stableJson(snapshot.noteHistory) }] : []),
+    ];
     const planned = [
       { path: "README.md", bytes: Buffer.byteLength(readme) },
       ...snapshot.attachments.map(({ projection }) => ({ path: attachmentPath(projection), bytes: projection.size })),
@@ -173,6 +182,7 @@ export class PortableWorkspaceExportService {
       ...taskTexts.map(({ path, text }) => ({ path, bytes: Buffer.byteLength(text) })),
       ...boardTexts.map(({ path, text }) => ({ path, bytes: Buffer.byteLength(text) })),
       ...relationshipTexts.map(({ path, text }) => ({ path, bytes: Buffer.byteLength(text) })),
+      ...durableState.map(({ path, text }) => ({ path, bytes: Buffer.byteLength(text) })),
     ].sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
     const seen = new Set<string>();
     if (planned.some(({ path, bytes }) => !isSafeArchivePath(path) || !Number.isSafeInteger(bytes) || bytes < 0 || seen.has(path) || !seen.add(path)))
@@ -195,6 +205,7 @@ export class PortableWorkspaceExportService {
       ...taskTexts.map(({ path, text }) => ({ path, content: Buffer.from(text) })),
       ...boardTexts.map(({ path, text }) => ({ path, content: Buffer.from(text) })),
       ...relationshipTexts.map(({ path, text }) => ({ path, content: Buffer.from(text) })),
+      ...durableState.map(({ path, text }) => ({ path, content: Buffer.from(text) })),
     ].sort(comparePaths);
     const manifestFiles: ManifestEntry[] = files.map(({ path, content }) => ({ path, bytes: content.length, sha256: createHash("sha256").update(content).digest("hex") }));
     files.push({ path: "manifest.json", content: Buffer.from(stableJson({ schema: "stash.portable-workspace-export.v1", workspace: snapshot.workspace, files: manifestFiles })) });

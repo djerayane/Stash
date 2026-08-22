@@ -54,6 +54,13 @@ const snapshot: PortableWorkspaceExportSnapshot = {
   noteLinks: [{ schema: "stash.note-link.v2", id: "99999999-9999-4999-8999-999999999999", workspaceId,
     sourceNoteId: "22222222-2222-4222-8222-222222222222", targetNoteId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     label: "Decision", revision: 1 }],
+  activities: [{ schema: "stash.activity.v1", id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", workspaceId,
+    object: { kind: "Note", id: "22222222-2222-4222-8222-222222222222" }, action: "note_edited", actor,
+    cause: { kind: "member" }, occurredAt: "2026-01-05T00:00:00.000Z", before: { revision: 1, content: "Draft" },
+    after: { revision: 2, content: "# Engine" } }],
+  noteHistory: [{ noteId: "22222222-2222-4222-8222-222222222222", workspaceId, revision: 1, content: "Draft",
+    document: { type: "doc", blocks: [{ type: "paragraph", blockKey: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", content: [{ text: "Draft" }] }] },
+    recordedAt: "2026-01-02T00:00:00.000Z", actor, cause: { kind: "member" } }],
 };
 
 function unzipStored(archive: Buffer): Map<string, Buffer> {
@@ -93,11 +100,13 @@ describe("readable Portable Workspace Export", () => {
     assert.match(first.headers.get("content-disposition") ?? "", /stash-workspace-11111111.*\.zip/);
     const archive = Buffer.from(await first.arrayBuffer()); const files = unzipStored(archive);
     assert.deepEqual([...files.keys()], [
-      "README.md", "attachments/44444444-4444-4444-8444-444444444444/design%20v2.png",
+      "README.md", "activity.json", "attachments/44444444-4444-4444-8444-444444444444/design%20v2.png",
       "boards/12121212-1212-4212-8212-121212121212.json", "decisions/decision.md", "manifest.json",
-      "notes/engine.md", "relationships/note-links.json",
+      "note-history.json", "notes/engine.md", "relationships/note-links.json",
       "relationships/note-locations.json", "tasks/LAB-7--55555555-5555-4555-8555-555555555555.md",
     ]);
+    assert.deepEqual(JSON.parse(files.get("activity.json")!.toString()), snapshot.activities);
+    assert.deepEqual(JSON.parse(files.get("note-history.json")!.toString()), snapshot.noteHistory);
     assert.deepEqual(files.get("attachments/44444444-4444-4444-8444-444444444444/design%20v2.png"), snapshot.attachments[0]!.content);
     const note = files.get("notes/engine.md")!.toString();
     assert.match(note, /schema: "stash.note.v1"/); assert.match(note, /projectId: "33333333/); assert.match(note, /\[drawing\]\(<\.\.\/attachments\//); assert.match(note, /\[\[stable-note-id\]\]/);
@@ -160,7 +169,8 @@ describe("readable Portable Workspace Export", () => {
       id: `00000000-0000-4000-8000-${index.toString(16).padStart(12, "0")}`,
       workspaceId, content: "x", tags: [], createdAt: "2026-01-01T00:00:00.000Z", createdBy: actor,
     }));
-    const largeSnapshot: PortableWorkspaceExportSnapshot = { ...snapshot, notes,
+    const { activities: _activities, noteHistory: _history, ...baseSnapshot } = snapshot;
+    const largeSnapshot: PortableWorkspaceExportSnapshot = { ...baseSnapshot, notes,
       noteLocations: notes.map(({ id }) => ({ schema: "stash.note-location.v1" as const, noteId: id, workspaceId,
         path: `notes/${id}.md`, aliases: [], revision: 1 })), noteLinks: [], tasks: [], attachments: [] };
     const repository: PortableWorkspaceExportRepository = { async readExportSnapshot() { return { status: "found", snapshot: largeSnapshot }; } };

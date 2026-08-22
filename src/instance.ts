@@ -47,6 +47,8 @@ import type { BoardService } from "./boards.js";
 import { boardSurfaceRoute } from "./board-surface.js";
 import { noteLinkRoutes } from "./note-link-routes.js";
 import type { NoteLinkService } from "./note-links.js";
+import { activityRoutes } from "./activity-routes.js";
+import type { ActivityService } from "./activity.js";
 
 export interface DatabaseProbe {
   verifyConnection(): Promise<void>;
@@ -87,6 +89,7 @@ export interface InstanceOptions {
   portableWorkspaceExports?: PortableWorkspaceExportService;
   boards?: BoardService;
   noteLinks?: NoteLinkService;
+  activities?: ActivityService;
 }
 
 const browserSurface = `<!doctype html>
@@ -187,6 +190,8 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
       ? [discussionRoutes(options.discussions, (options.memberAccess ?? options.passwordAuth)!)] : []),
     ...(options.portableWorkspaceExports && (options.memberAccess ?? options.passwordAuth)
       ? [portableWorkspaceExportRoute(options.portableWorkspaceExports, (options.memberAccess ?? options.passwordAuth)!)] : []),
+    ...(options.activities && (options.memberAccess ?? options.passwordAuth)
+      ? [activityRoutes(options.activities, (options.memberAccess ?? options.passwordAuth)!)] : []),
     ...(options.repositoryConnections && (options.memberAccess ?? options.passwordAuth)
       ? [repositoryConnectionRoutes(options.repositoryConnections, (options.memberAccess ?? options.passwordAuth)!)]
       : []),
