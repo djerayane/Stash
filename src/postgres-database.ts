@@ -3,8 +3,9 @@ import { Pool, type PoolClient } from "pg";
 import type { DatabaseProbe } from "./instance.js";
 import type { BootstrapRecord, OwnerBootstrapRepository } from "./owner-bootstrap.js";
 import type { AccountAuthenticationRecord, PasswordAuthRepository, SessionRecord } from "./password-auth.js";
-import type { BuiltInRole, OidcAuthRepository, OidcIdentityKey, OidcIdentityRecord, OidcOrganizationConfiguration } from "./oidc-auth.js";
+import type { OidcAuthRepository, OidcIdentityKey, OidcIdentityRecord, OidcOrganizationConfiguration } from "./oidc-auth.js";
 import type { AccountRecoveryRepository, ClaimedEmailRecoveryDelivery, EmailRecoveryDeliveryClaim, EmailRecoveryDeliveryJob, EmailRecoveryRecord, PasskeyRecord, RecoveryCodeRecord } from "./account-recovery.js";
+import type { BuiltInOrganizationRole, OrganizationRoleRepository } from "./organization-roles.js";
 import {
   createAuthenticationKeyCheck,
   verifyAuthenticationKeyCheck,
@@ -29,7 +30,8 @@ export class PostgresDatabase implements
   PasswordAuthRepository,
   WorkspaceProjectRepository,
   OidcAuthRepository,
-  AccountRecoveryRepository
+  AccountRecoveryRepository,
+  OrganizationRoleRepository
 {
   readonly #pool: Pool;
   readonly #authenticationSecrets: AuthenticationSecretCodec;
@@ -262,12 +264,86 @@ export class PostgresDatabase implements
     } : undefined;
   }
 
-  async organizationRole(organizationId: string, accountId: string): Promise<BuiltInRole | undefined> {
-    const result = await this.#pool.query<{ role: BuiltInRole }>(
+  async organizationRole(organizationId: string, accountId: string): Promise<BuiltInOrganizationRole | undefined> {
+    const result = await this.#pool.query<{ role: BuiltInOrganizationRole }>(
       "SELECT role FROM stash_organization_memberships WHERE organization_id = $1 AND account_id = $2",
       [organizationId, accountId],
     );
     return result.rows[0]?.role;
+  }
+
+  async assignBuiltInRole(
+    organizationId: string,
+    actorId: string,
+    accountId: string,
+    role: BuiltInOrganizationRole,
+  ): Promise<"updated" | "member_not_found" | "final_owner" | "forbidden"> {
+    return this.#withTransaction(async (client) => {
+      const memberships = await this.#lockedOrganizationMemberships(client, organizationId);
+      if (!this.#canManageRoles(memberships, actorId)) return "forbidden";
+      const target = memberships.find((membership) => membership.account_id === accountId);
+      if (!target) return "member_not_found";
+      if (target.role === "Owner" && role !== "Owner"
+        && this.#isOnlyOwner(memberships, accountId)) {
+        return "final_owner";
+      }
+      await client.query(
+        `UPDATE stash_organization_memberships SET role = $3
+         WHERE organization_id = $1 AND account_id = $2`,
+        [organizationId, accountId, role],
+      );
+      return "updated";
+    });
+  }
+
+  async removeOrganizationMember(
+    organizationId: string,
+    actorId: string,
+    accountId: string,
+  ): Promise<"removed" | "member_not_found" | "final_owner" | "forbidden"> {
+    return this.#withTransaction(async (client) => {
+      const memberships = await this.#lockedOrganizationMemberships(client, organizationId);
+      if (!this.#canManageRoles(memberships, actorId)) return "forbidden";
+      const target = memberships.find((membership) => membership.account_id === accountId);
+      if (!target) return "member_not_found";
+      if (target.role === "Owner" && this.#isOnlyOwner(memberships, accountId)) {
+        return "final_owner";
+      }
+      await client.query(
+        "DELETE FROM stash_organization_memberships WHERE organization_id = $1 AND account_id = $2",
+        [organizationId, accountId],
+      );
+      return "removed";
+    });
+  }
+
+  async #lockedOrganizationMemberships(client: PoolClient, organizationId: string) {
+    await this.#ensureBootstrapSchema(client);
+    const memberships = await client.query<{ account_id: string; role: BuiltInOrganizationRole }>(
+      `SELECT account_id, role FROM stash_organization_memberships
+       WHERE organization_id = $1 FOR UPDATE`,
+      [organizationId],
+    );
+    return memberships.rows;
+  }
+
+  #isOnlyOwner(
+    memberships: ReadonlyArray<{ account_id: string; role: BuiltInOrganizationRole }>,
+    accountId: string,
+  ): boolean {
+    return memberships.filter((membership) => membership.role === "Owner").length === 1
+      && memberships.some(
+        (membership) => membership.account_id === accountId && membership.role === "Owner",
+      );
+  }
+
+  #canManageRoles(
+    memberships: ReadonlyArray<{ account_id: string; role: BuiltInOrganizationRole }>,
+    accountId: string,
+  ): boolean {
+    return memberships.some(
+      (membership) => membership.account_id === accountId && membership.role === "Owner",
+    );
   }
 
   async saveOidcConfiguration(configuration: OidcOrganizationConfiguration): Promise<void> {

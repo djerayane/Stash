@@ -10,6 +10,8 @@ import { createDiagnostics, type Diagnostics } from "./diagnostics.js";
 import { json, requireInstanceAdministrator } from "./http-routing.js";
 import { instanceAdminRoute } from "./instance-route.js";
 import type { OwnerBootstrapService } from "./owner-bootstrap.js";
+import { organizationRoleRoutes } from "./organization-role-routes.js";
+import type { OrganizationRoleService } from "./organization-roles.js";
 import { oidcAuthRoute, oidcManagementRoute } from "./oidc-auth-routes.js";
 import type { OidcAuthService } from "./oidc-auth.js";
 import type { OidcManagementService } from "./oidc-management.js";
@@ -39,6 +41,7 @@ interface InstanceOptions {
   passwordAuth?: PasswordAuthService;
   workspaceProjects?: WorkspaceProjectService;
   memberAccess?: MemberAccessResolver;
+  organizationRoles?: OrganizationRoleService;
   oidcAuth?: OidcAuthService;
   oidcManagement?: OidcManagementService;
   oidcCallbackOrigin?: string;
@@ -106,6 +109,12 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
     ...(options.workspaceProjects && (options.memberAccess ?? options.passwordAuth)
       ? [workspaceProjectRoutes(
         options.workspaceProjects,
+        (options.memberAccess ?? options.passwordAuth)!,
+      )]
+      : []),
+    ...(options.organizationRoles && (options.memberAccess ?? options.passwordAuth)
+      ? [organizationRoleRoutes(
+        options.organizationRoles,
         (options.memberAccess ?? options.passwordAuth)!,
       )]
       : []),

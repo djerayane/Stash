@@ -9,6 +9,7 @@ import {
 import type { SessionRecord } from "./password-auth.js";
 import { issueSession } from "./auth-session.js";
 import { createOidcHttpClient, type OidcHttpClient } from "./oidc-http-client.js";
+import type { BuiltInOrganizationRole } from "./organization-roles.js";
 
 export interface OidcIdentityRecord {
   accountId: string;
@@ -26,12 +27,10 @@ export interface OidcAuthRepository {
   findOidcConfiguration(organizationId: string): Promise<OidcOrganizationConfiguration | undefined>;
   findOidcIdentity(key: OidcIdentityKey): Promise<OidcIdentityRecord | undefined>;
   createSession(session: SessionRecord): Promise<void>;
-  organizationRole(organizationId: string, accountId: string): Promise<BuiltInRole | undefined>;
+  organizationRole(organizationId: string, accountId: string): Promise<BuiltInOrganizationRole | undefined>;
   saveOidcConfiguration(configuration: OidcOrganizationConfiguration): Promise<void>;
   linkOidcIdentity(key: OidcIdentityKey, accountId: string): Promise<boolean>;
 }
-
-export type BuiltInRole = "Owner" | "Admin" | "Member";
 
 export interface OidcOrganizationConfiguration {
   organizationId: string;
