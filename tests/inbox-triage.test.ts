@@ -1,0 +1,128 @@
+import assert from "node:assert/strict";
+import { afterEach, describe, it } from "node:test";
+
+import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
+import {
+  NoteService,
+  type NoteRecord,
+  type NoteRepository,
+  type NoteTriageResult,
+  type PortableNoteProjection,
+} from "../src/notes.js";
+import type { MemberAccessResolver } from "../src/workspaces-projects.js";
+
+const workspaceId = "11111111-1111-4111-8111-111111111111";
+const projectId = "22222222-2222-4222-8222-222222222222";
+const noteId = "33333333-3333-4333-8333-333333333333";
+const targetNoteId = "44444444-4444-4444-8444-444444444444";
+
+class ProtocolCompatibleInboxDatabase implements DatabaseProbe, NoteRepository {
+  readonly note: NoteRecord = {
+    id: noteId, workspaceId, content: "Turn the release idea into work.", tags: [],
+    createdByMemberId: "ada", createdAt: "2026-08-22T10:00:00.000Z",
+  };
+  readonly projections: object[] = [];
+  archived = false;
+  failure: Error | undefined;
+
+  async verifyConnection() {}
+  async close() {}
+  async findPortableMemberIdentity() { return { localAccountId: "ada", displayName: "Ada Lovelace" }; }
+  async createNote(_memberId: string, _note: NoteRecord, _projection: PortableNoteProjection) { return "created" as const; }
+  async listInboxNotes(memberId: string, requestedWorkspaceId: string) {
+    if (memberId !== "ada" || requestedWorkspaceId !== workspaceId) return { status: "workspace_forbidden" as const };
+    return { status: "found" as const, notes: this.archived || this.note.projectId ? [] : [this.note] };
+  }
+  async triageNote(memberId: string, requestedWorkspaceId: string, requestedNoteId: string, change: NoteTriageResult) {
+    if (this.failure) throw this.failure;
+    if (memberId !== "ada" || requestedWorkspaceId !== workspaceId) return "workspace_forbidden" as const;
+    if (requestedNoteId !== noteId) return "note_not_found" as const;
+    if (change.kind === "organized") {
+      if (change.note.projectId !== projectId) return "project_forbidden" as const;
+      Object.assign(this.note, change.note);
+    } else if (change.kind === "archived") this.archived = true;
+    this.projections.push(...change.projections);
+    return "updated" as const;
+  }
+}
+
+const access: MemberAccessResolver = {
+  async authenticateBearer(header) {
+    return header === "Bearer member-ada" ? { accountId: "ada", sessionId: "session-ada" } : undefined;
+  },
+};
+
+describe("Inbox triage", () => {
+  let instance: RunningInstance | undefined;
+  afterEach(async () => { await instance?.close(); instance = undefined; });
+
+  async function run() {
+    const database = new ProtocolCompatibleInboxDatabase();
+    instance = await startInstance({ database, host: "127.0.0.1", port: 0,
+      instanceAdminToken: "admin", notes: new NoteService(database), memberAccess: access });
+    return { database, baseUrl: instance.url };
+  }
+
+  async function triage(baseUrl: string, body: unknown, id = noteId, token = "member-ada") {
+    return fetch(`${baseUrl}/api/workspaces/${workspaceId}/inbox/${id}/triage`, {
+      method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it("lists only unorganized active Notes in a Member's Workspace Inbox", async () => {
+    const { baseUrl } = await run();
+    const response = await fetch(`${baseUrl}/api/workspaces/${workspaceId}/inbox`, {
+      headers: { authorization: "Bearer member-ada" },
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { notes: [{
+      id: noteId, workspaceId, content: "Turn the release idea into work.", tags: [],
+      createdAt: "2026-08-22T10:00:00.000Z",
+    }] });
+  });
+
+  it("organizes an Inbox Note without changing its identity or content", async () => {
+    const { baseUrl, database } = await run();
+    const response = await triage(baseUrl, { action: "organize", projectId, tags: ["release", "release"] });
+    assert.equal(response.status, 200);
+    const body = await response.json() as any;
+    assert.equal(body.note.id, noteId);
+    assert.equal(body.note.content, "Turn the release idea into work.");
+    assert.equal(body.note.projectId, projectId);
+    assert.deepEqual(body.note.tags, ["release"]);
+    assert.equal(database.projections.length, 1);
+    assert.equal((database.projections[0] as any).schema, "stash.note.v2");
+  });
+
+  it("archives, links, and creates actionable work while preserving the source Note", async () => {
+    for (const [request, expectedKind] of [
+      [{ action: "archive" }, "archived"],
+      [{ action: "link", targetNoteId }, "linked"],
+      [{ action: "create_task", projectId, title: "Ship the release" }, "task_created"],
+    ] as const) {
+      const { baseUrl, database } = await run();
+      const response = await triage(baseUrl, request);
+      assert.equal(response.status, 200);
+      const body = await response.json() as any;
+      assert.equal(body.result, expectedKind);
+      assert.equal(database.note.content, "Turn the release idea into work.");
+      assert.ok(database.projections.length >= 1);
+      await instance?.close(); instance = undefined;
+    }
+  });
+
+  it("exposes authorization, invalid input, missing objects, and recoverable failures without partial changes", async () => {
+    const { baseUrl, database } = await run();
+    assert.equal((await triage(baseUrl, { action: "archive" }, noteId, "unknown")).status, 401);
+    assert.equal((await triage(baseUrl, { action: "organize", projectId: "bad" })).status, 422);
+    assert.equal((await triage(baseUrl, { action: "archive" }, targetNoteId)).status, 404);
+    assert.equal((await triage(baseUrl, { action: "organize", projectId: targetNoteId })).status, 403);
+    database.failure = new Error("postgres://secret");
+    const unavailable = await triage(baseUrl, { action: "archive" });
+    assert.equal(unavailable.status, 503);
+    assert.doesNotMatch(await unavailable.text(), /postgres|secret/i);
+    assert.equal(database.archived, false);
+    assert.deepEqual(database.projections, []);
+  });
+});
