@@ -72,6 +72,12 @@ describe("Workspace Attachments", () => {
     const hostileAttachment = await hostile.json() as { portableLink: string; relativePath: string };
     assert.equal(hostileAttachment.portableLink, `[x\\](javascript:alert(1)).txt](<${hostileAttachment.relativePath}>)`);
 
+    const windowsInvalid = await upload(baseUrl, "member-ada", "portable", "report*.txt");
+    assert.equal(windowsInvalid.status, 201);
+    const portable = await windowsInvalid.json() as { relativePath: string; contentUrl: string };
+    assert.match(portable.relativePath, /report%2A\.txt$/);
+    assert.equal(await (await fetch(`${baseUrl}${portable.contentUrl}`, { headers: { authorization: "Bearer member-ada" } })).text(), "portable");
+
     const captured = await fetch(`${baseUrl}/api/workspaces/${workspaceId}/notes`, { method: "POST", headers: { authorization: "Bearer member-ada", "content-type": "application/json" }, body: JSON.stringify({ content: "Design file" }) });
     const note = await captured.json() as NoteRecord; const block = database.notes.get(note.id)!.document.blocks[0]!;
     const linked = await fetch(`${baseUrl}/api/notes/${note.id}`, { method: "PUT", headers: { authorization: "Bearer member-ada", "content-type": "application/json" }, body: JSON.stringify({ baseRevision: 1, operations: [{ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", type: "replace_block", blockKey: block.blockKey, block: { ...block, content: [{ text: attachment.filename, href: attachment.relativePath }] } }] }) });
@@ -85,6 +91,9 @@ describe("Workspace Attachments", () => {
     assert.equal(storage.writes, 0);
     assert.deepEqual(await readdir(directory), []);
     assert.equal((await upload(baseUrl, "member-ada", "x", "../secret.txt")).status, 422);
+    for (const filename of ["CON", "con.txt", "LPT9.log", "trailing."]) assert.equal((await upload(baseUrl, "member-ada", "x", filename)).status, 422, filename);
+    await assert.rejects(() => new AttachmentService(database, storage, { maxBytes: 12 }).create("ada", workspaceId, { filename: "trailing ", contentType: "text/plain", source: "upload", content: Buffer.from("x") }));
+    await assert.rejects(() => new AttachmentService(database, storage, { maxBytes: 12 }).create("ada", workspaceId, { filename: "control\u0001.txt", contentType: "text/plain", source: "upload", content: Buffer.from("x") }));
     assert.equal((await upload(baseUrl, "member-ada", "x", "script.html", "text/html")).status, 415);
     assert.equal((await upload(baseUrl, "member-ada", "1234567890123")).status, 413);
     database.fail = true; assert.equal((await upload(baseUrl, "member-ada", "retryable")).status, 503);
