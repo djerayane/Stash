@@ -1,0 +1,123 @@
+export type DateFormat = "short" | "medium" | "long";
+export type WeekStart = "sunday" | "monday" | "saturday";
+
+export interface MemberLocalizationPreferences {
+  locale: string;
+  timeZone: string;
+  dateFormat: DateFormat;
+  weekStartsOn: WeekStart;
+  updatedAt: string;
+}
+
+export interface MemberLocalizationRepository {
+  findMemberLocalizationPreferences(memberId: string): Promise<MemberLocalizationPreferences | undefined>;
+  saveMemberLocalizationPreferences(memberId: string, preferences: MemberLocalizationPreferences): Promise<void>;
+}
+
+export const defaultMemberLocalizationPreferences: MemberLocalizationPreferences = {
+  locale: "en",
+  timeZone: "UTC",
+  dateFormat: "medium",
+  weekStartsOn: "monday",
+  updatedAt: "1970-01-01T00:00:00.000Z",
+};
+
+const englishCatalog = {
+  "instance.running": "This Instance is running.",
+} as const;
+
+export type MessageKey = keyof typeof englishCatalog;
+
+export class InvalidLocalizationPreferences extends Error {}
+export class InvalidLocalizationRenderRequest extends Error {}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function validLocale(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > 100) return false;
+  try {
+    return Intl.getCanonicalLocales(value).length === 1;
+  } catch {
+    return false;
+  }
+}
+
+function validTimeZone(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > 100) return false;
+  try {
+    new Intl.DateTimeFormat("en", { timeZone: value }).format();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function parsePreferences(value: unknown, updatedAt: string): MemberLocalizationPreferences {
+  if (!isPlainObject(value)
+    || Object.keys(value).length !== 4
+    || !validLocale(value.locale)
+    || !validTimeZone(value.timeZone)
+    || !["short", "medium", "long"].includes(value.dateFormat as string)
+    || !["sunday", "monday", "saturday"].includes(value.weekStartsOn as string)) {
+    throw new InvalidLocalizationPreferences();
+  }
+  return {
+    locale: Intl.getCanonicalLocales(value.locale)[0]!,
+    timeZone: value.timeZone,
+    dateFormat: value.dateFormat as DateFormat,
+    weekStartsOn: value.weekStartsOn as WeekStart,
+    updatedAt,
+  };
+}
+
+function pseudoLocalize(message: string): string {
+  const accents: Record<string, string> = {
+    a: "à", e: "ë", i: "ï", o: "ô", u: "ü",
+    A: "À", E: "Ë", I: "Ï", O: "Ô", U: "Ü",
+  };
+  return `[${[...message].map((character) => accents[character] ?? character).join("")} !!!]`;
+}
+
+export class MemberLocalizationService {
+  readonly #repository: MemberLocalizationRepository;
+  readonly #now: () => Date;
+
+  constructor(repository: MemberLocalizationRepository, now: () => Date = () => new Date()) {
+    this.#repository = repository;
+    this.#now = now;
+  }
+
+  async get(memberId: string): Promise<MemberLocalizationPreferences> {
+    return await this.#repository.findMemberLocalizationPreferences(memberId) ?? defaultMemberLocalizationPreferences;
+  }
+
+  async update(memberId: string, value: unknown): Promise<MemberLocalizationPreferences> {
+    const preferences = parsePreferences(value, this.#now().toISOString());
+    await this.#repository.saveMemberLocalizationPreferences(memberId, preferences);
+    return preferences;
+  }
+
+  async render(memberId: string, message: string | null, timestamp: string | null) {
+    if (!(message && message in englishCatalog)
+      || !timestamp
+      || !/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/.test(timestamp)) {
+      throw new InvalidLocalizationRenderRequest();
+    }
+    const instant = new Date(timestamp);
+    if (Number.isNaN(instant.valueOf())) throw new InvalidLocalizationRenderRequest();
+    const preferences = await this.get(memberId);
+    const english = englishCatalog[message as MessageKey];
+    const localeForDates = preferences.locale.toLowerCase() === "en-xa" ? "en" : preferences.locale;
+    return {
+      message: preferences.locale.toLowerCase() === "en-xa" ? pseudoLocalize(english) : english,
+      date: new Intl.DateTimeFormat(localeForDates, {
+        timeZone: preferences.timeZone,
+        dateStyle: preferences.dateFormat,
+      }).format(instant),
+      timestamp: instant.toISOString(),
+      weekStartsOn: preferences.weekStartsOn,
+    };
+  }
+}
