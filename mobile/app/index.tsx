@@ -27,12 +27,12 @@ export default function CaptureScreen() {
   useEffect(() => client.watchConnectivity(
     (listener) => NetInfo.addEventListener((state) => listener(Boolean(state.isConnected && state.isInternetReachable !== false))),
     (result) => {
-      if (mounted.current && result.status === "synced" && result.count) setStatus("Queued captures synchronized with your Instance.");
+      if (mounted.current) void client.outbox().then((outbox) => { if (mounted.current) setStatus(presentMobileSyncResult(result, outbox)); });
     },
   ), [client]);
   useEffect(() => {
     const synchronize = () => { void client.sync().then((result) => {
-      if (mounted.current && result.status === "synced" && result.count) setStatus("Queued captures synchronized with your Instance.");
+      if (mounted.current) void client.outbox().then((outbox) => { if (mounted.current) setStatus(presentMobileSyncResult(result, outbox)); });
     }); };
     synchronize();
     const subscription = AppState.addEventListener("change", (state) => { if (state === "active") synchronize(); else client.cancelRequests(); });
