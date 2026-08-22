@@ -15,11 +15,12 @@ export class EmailRecoveryWorker {
   ) {}
 
   async processNext(): Promise<"idle" | "dummy_completed" | "delivered" | "retry_scheduled" | "stale_claim"> {
-    const job = await this.repository.claimEmailRecoveryDelivery(this.#owner, this.#leaseUntil());
-    if (!job || job.claimVersion === undefined) return "idle";
+    const claimed = await this.repository.claimEmailRecoveryDelivery(this.#owner, this.#leaseUntil());
+    if (!claimed) return "idle";
+    const { job, claim } = claimed;
     let claimCurrent = true;
     const heartbeat = setInterval(() => {
-      void this.repository.renewEmailRecoveryDelivery(job.id, this.#owner, job.claimVersion!, this.#leaseUntil())
+      void this.repository.renewEmailRecoveryDelivery(claim, this.#leaseUntil())
         .then((renewed) => { if (!renewed) claimCurrent = false; })
         .catch(() => { claimCurrent = false; });
     }, Math.max(10, Math.floor(this.leaseMilliseconds / 3)));
@@ -27,15 +28,13 @@ export class EmailRecoveryWorker {
     try {
       const delivery = JSON.parse(this.secrets.decrypt(job.protectedDelivery)) as { accountId?: unknown; address?: unknown; token?: unknown; dummy?: unknown };
       if (delivery.dummy === true) {
-        clearInterval(heartbeat);
-        return await this.repository.completeEmailRecoveryDelivery(job.id, this.#owner, job.claimVersion) ? "dummy_completed" : "stale_claim";
+        return await this.repository.completeEmailRecoveryDelivery(claim) ? "dummy_completed" : "stale_claim";
       }
       if (typeof delivery.accountId !== "string" || typeof delivery.address !== "string" || typeof delivery.token !== "string") throw new Error("invalid protected email recovery delivery");
       await this.sender.deliver(delivery.address, delivery.token);
-      clearInterval(heartbeat);
       if (!claimCurrent) return "stale_claim";
       const completedAt = this.now();
-      const activated = await this.repository.completeEmailRecoveryDelivery(job.id, this.#owner, job.claimVersion, {
+      const activated = await this.repository.completeEmailRecoveryDelivery(claim, {
         accountId: delivery.accountId,
         tokenLookup: deriveEmailRecoveryLookup(delivery.token),
         protectedSecret: this.secrets.encrypt(delivery.token),
@@ -43,10 +42,11 @@ export class EmailRecoveryWorker {
       });
       return activated ? "delivered" : "stale_claim";
     } catch (error) {
-      clearInterval(heartbeat);
       if (!claimCurrent) return "stale_claim";
       const reason = error instanceof Error ? error.message : "unknown email recovery delivery failure";
-      return await this.repository.retryEmailRecoveryDelivery(job.id, this.#owner, job.claimVersion, reason) ? "retry_scheduled" : "stale_claim";
+      return await this.repository.retryEmailRecoveryDelivery(claim, reason) ? "retry_scheduled" : "stale_claim";
+    } finally {
+      clearInterval(heartbeat);
     }
   }
 

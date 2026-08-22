@@ -5,7 +5,9 @@ import type { AccountAuthenticationRecord, AuthenticatedMember, PasswordAuthServ
 export interface PasskeyRecord { credentialId: string; accountId: string; publicKey: string; counter: number; transports?: string[]; createdAt: string }
 export interface RecoveryCodeRecord { accountId: string; lookup: string; protectedSecret: string }
 export interface EmailRecoveryRecord { accountId: string; tokenLookup: string; protectedSecret: string; expiresAt: string }
-export interface EmailRecoveryDeliveryJob { id: string; protectedDelivery: string; createdAt: string; claimOwner?: string; claimVersion?: number }
+export interface EmailRecoveryDeliveryJob { id: string; protectedDelivery: string; createdAt: string }
+export interface EmailRecoveryDeliveryClaim { jobId: string; owner: string; version: number }
+export interface ClaimedEmailRecoveryDelivery { job: EmailRecoveryDeliveryJob; claim: EmailRecoveryDeliveryClaim }
 export interface AccountRecoveryRepository {
   findAccountByEmail(email: string): Promise<AccountAuthenticationRecord | undefined>;
   findAccountById(id: string): Promise<AccountAuthenticationRecord | undefined>;
@@ -15,10 +17,10 @@ export interface AccountRecoveryRepository {
   replaceRecoveryCodes(accountId: string, records: RecoveryCodeRecord[]): Promise<void>;
   consumeRecoveryCodeAndCreateSession(accountId: string, lookup: string, session?: SessionRecord): Promise<boolean>;
   enqueueEmailRecovery(job: EmailRecoveryDeliveryJob): Promise<void>;
-  claimEmailRecoveryDelivery(owner: string, leaseUntil: string): Promise<EmailRecoveryDeliveryJob | undefined>;
-  renewEmailRecoveryDelivery(id: string, owner: string, version: number, leaseUntil: string): Promise<boolean>;
-  completeEmailRecoveryDelivery(id: string, owner: string, version: number, activation?: EmailRecoveryRecord): Promise<boolean>;
-  retryEmailRecoveryDelivery(id: string, owner: string, version: number, reason: string): Promise<boolean>;
+  claimEmailRecoveryDelivery(owner: string, leaseUntil: string): Promise<ClaimedEmailRecoveryDelivery | undefined>;
+  renewEmailRecoveryDelivery(claim: EmailRecoveryDeliveryClaim, leaseUntil: string): Promise<boolean>;
+  completeEmailRecoveryDelivery(claim: EmailRecoveryDeliveryClaim, activation?: EmailRecoveryRecord): Promise<boolean>;
+  retryEmailRecoveryDelivery(claim: EmailRecoveryDeliveryClaim, reason: string): Promise<boolean>;
   findEmailRecoveryAccount(lookup: string, now: string): Promise<string | undefined>;
   consumeEmailRecoveryAndCreateSession(lookup: string, now: string, session: SessionRecord): Promise<boolean>;
 }

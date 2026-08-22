@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 
-import { AccountRecoveryService, type AccountRecoveryRepository, type RecoveryCodeRecord, type PasskeyRecord, type EmailRecoveryRecord, type EmailRecoveryDeliveryJob } from "../src/account-recovery.js";
+import { AccountRecoveryService, type AccountRecoveryRepository, type RecoveryCodeRecord, type PasskeyRecord, type EmailRecoveryRecord, type EmailRecoveryDeliveryClaim, type EmailRecoveryDeliveryJob } from "../src/account-recovery.js";
 import { PasswordAuthService, hashPassword, type AccountAuthenticationRecord, type PasswordAuthRepository, type SessionRecord } from "../src/password-auth.js";
 import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
 import { createAuthenticationSecretCodec } from "../src/authentication-secrets.js";
@@ -14,6 +14,8 @@ class AuthDatabase implements DatabaseProbe, PasswordAuthRepository, AccountReco
   codes: RecoveryCodeRecord[] = [];
   emailRecoveries = new Map<string, EmailRecoveryRecord>();
   emailJobs = new Map<string, EmailRecoveryDeliveryJob>();
+  emailClaims = new Map<string, EmailRecoveryDeliveryClaim>();
+  emailClaimVersions = new Map<string, number>();
   deliveryFailures = new Map<string, string>();
   recoveryRequestWork = 0;
   recoverySignInWork = 0;
@@ -33,13 +35,14 @@ class AuthDatabase implements DatabaseProbe, PasswordAuthRepository, AccountReco
   async replaceRecoveryCodes(accountId: string, records: RecoveryCodeRecord[]) { this.codes = records.filter((r) => r.accountId === accountId); }
   async consumeRecoveryCodeAndCreateSession(accountId: string, lookup: string, session?: SessionRecord) { this.recoverySignInWork += 1; const index = this.codes.findIndex((r) => r.accountId === accountId && r.lookup === lookup); if (index < 0 || !session) return false; return this.commitSession(session, () => { this.codes.splice(index, 1); }); }
   async enqueueEmailRecovery(job: EmailRecoveryDeliveryJob) { this.recoveryRequestWork += 1; this.emailJobs.set(job.id, job); }
-  async claimEmailRecoveryDelivery(owner: string, _leaseUntil: string) { const job = [...this.emailJobs.values()].find((candidate) => !candidate.claimOwner); if (!job) return undefined; job.claimOwner = owner; job.claimVersion = (job.claimVersion ?? 0) + 1; return { ...job }; }
-  async renewEmailRecoveryDelivery(id: string, owner: string, version: number, _leaseUntil: string) { const job = this.emailJobs.get(id); return job?.claimOwner === owner && job.claimVersion === version; }
-  async completeEmailRecoveryDelivery(id: string, owner: string, version: number, activation?: EmailRecoveryRecord) { const job = this.emailJobs.get(id); if (job?.claimOwner !== owner || job.claimVersion !== version) return false; this.emailJobs.delete(id); this.deliveryFailures.delete(id); if (activation) this.emailRecoveries.set(activation.tokenLookup, activation); return true; }
-  async retryEmailRecoveryDelivery(id: string, owner: string, version: number, reason: string) { const job = this.emailJobs.get(id); if (job?.claimOwner !== owner || job.claimVersion !== version) return false; delete job.claimOwner; this.deliveryFailures.set(id, reason); return true; }
+  async claimEmailRecoveryDelivery(owner: string, _leaseUntil: string) { const job = [...this.emailJobs.values()].find((candidate) => !this.emailClaims.has(candidate.id)); if (!job) return undefined; const version = (this.emailClaimVersions.get(job.id) ?? 0) + 1; this.emailClaimVersions.set(job.id, version); const claim = { jobId: job.id, owner, version }; this.emailClaims.set(job.id, claim); return { job: { ...job }, claim }; }
+  async renewEmailRecoveryDelivery(claim: EmailRecoveryDeliveryClaim, _leaseUntil: string) { return this.matchesClaim(claim); }
+  async completeEmailRecoveryDelivery(claim: EmailRecoveryDeliveryClaim, activation?: EmailRecoveryRecord) { if (!this.matchesClaim(claim)) return false; this.emailJobs.delete(claim.jobId); this.emailClaims.delete(claim.jobId); this.deliveryFailures.delete(claim.jobId); if (activation) this.emailRecoveries.set(activation.tokenLookup, activation); return true; }
+  async retryEmailRecoveryDelivery(claim: EmailRecoveryDeliveryClaim, reason: string) { if (!this.matchesClaim(claim)) return false; this.emailClaims.delete(claim.jobId); this.deliveryFailures.set(claim.jobId, reason); return true; }
   async findEmailRecoveryAccount(lookup: string, now: string) { const record = this.emailRecoveries.get(lookup); return record && record.expiresAt > now ? record.accountId : undefined; }
   async consumeEmailRecoveryAndCreateSession(lookup: string, now: string, session: SessionRecord) { const record = this.emailRecoveries.get(lookup); if (!record || record.accountId !== session.accountId || record.expiresAt <= now) return false; return this.commitSession(session, () => { this.emailRecoveries.delete(lookup); }); }
   private async commitSession(session: SessionRecord, mutation: () => void) { if (this.sessionFailures > 0) { this.sessionFailures -= 1; throw new Error("session write failed"); } mutation(); this.sessions.set(session.id, session); return true; }
+  private matchesClaim(claim: EmailRecoveryDeliveryClaim) { const current = this.emailClaims.get(claim.jobId); return current?.owner === claim.owner && current.version === claim.version; }
 }
 
 describe("Member account recovery on a running Stash Instance", () => {
