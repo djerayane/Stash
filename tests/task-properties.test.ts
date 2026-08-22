@@ -11,6 +11,7 @@ const otherProjectId = "77777777-7777-4777-8777-777777777777";
 const taskId = "33333333-3333-4333-8333-333333333333";
 const statusId = "44444444-4444-4444-8444-444444444444";
 const inProgressStatusId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const doneStatusId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const assigneeId = "55555555-5555-4555-8555-555555555555";
 const linkedNoteId = "66666666-6666-4666-8666-666666666666";
 const dependencyTaskId = "99999999-9999-4999-8999-999999999999";
@@ -36,21 +37,24 @@ class TaskPlanningFake implements DatabaseProbe, TaskPlanningRepository {
     const task = [this.task, ...this.otherTasks].find((candidate) => candidate.key === key.toUpperCase());
     if (!this.canRead || !["ada", "grace"].includes(memberId) || requestedProjectId !== projectId || !task)
       return { status: "not_found" as const };
-    return { status: "found" as const, task: { ...structuredClone(task), dependencies: this.visibleDependencies(task.id) } };
+    return { status: "found" as const, task: { ...structuredClone(task), dependencies: this.visibleDependencies(task.id),
+      dependencyWarnings: this.dependencyWarnings(task.id) } };
   }
   async updateTaskByKey(memberId: string, requestedProjectId: string, key: string, update: TaskPlanningUpdate) {
     if (this.fail) throw new Error("postgres://secret");
     if (memberId !== "ada") return { status: "not_found" as const };
     const found = await this.findTaskByKey(memberId, requestedProjectId, key);
     if (found.status === "not_found") return found;
-    if (update.statusId !== undefined && update.statusId !== inProgressStatusId
+    if (update.statusId !== undefined && ![inProgressStatusId, doneStatusId].includes(update.statusId)
       || update.assigneeIds?.some((id) => id !== assigneeId)
       || update.linkedNoteIds?.some((id) => id !== linkedNoteId)
       || update.dependencies?.some(({ taskId: id }) => ![this.task, ...this.otherTasks].some((task) => task.id === id) || id === found.task.id))
       return { status: "invalid_reference" as const };
     const { statusId: nextStatusId, dueDate, estimate, dependencies: proposedDependencies, ...properties } = update;
     const next = { ...found.task, ...properties,
-      ...(nextStatusId ? { status: { id: nextStatusId, name: "In Progress", category: "started" as const } } : {}),
+      ...(nextStatusId ? { status: nextStatusId === doneStatusId
+        ? { id: nextStatusId, name: "Done", category: "completed" as const }
+        : { id: nextStatusId, name: "In Progress", category: "started" as const } } : {}),
       ...(dueDate ? { dueDate } : {}), ...(estimate === null || estimate === undefined ? {} : { estimate }) };
     let nextEdges = this.edges;
     if (proposedDependencies !== undefined) {
@@ -65,7 +69,7 @@ class TaskPlanningFake implements DatabaseProbe, TaskPlanningRepository {
     else this.otherTasks.splice(this.otherTasks.findIndex(({ id }) => id === next.id), 1, next);
     this.edges = nextEdges;
     next.dependencies = this.visibleDependencies(next.id);
-    return { status: "updated" as const, task: structuredClone(next) };
+    return { status: "updated" as const, task: { ...structuredClone(next), dependencyWarnings: this.dependencyWarnings(next.id) } };
   }
   private visibleDependencies(id: string): NonNullable<PortableTaskProjection["dependencies"]> {
     const result: NonNullable<PortableTaskProjection["dependencies"]> = [];
@@ -75,6 +79,14 @@ class TaskPlanningFake implements DatabaseProbe, TaskPlanningRepository {
       else if (prerequisite === id) result.push({ taskId: dependent, type: "required_by" });
     }
     return result;
+  }
+  private dependencyWarnings(id: string) {
+    return [...this.edges].flatMap((edge) => {
+      const [dependent, prerequisite] = edge.split("->") as [string, string];
+      if (dependent !== id) return [];
+      const task = [this.task, ...this.otherTasks].find((candidate) => candidate.id === prerequisite)!;
+      return task.status.category === "completed" ? [] : [{ code: "incomplete_dependency" as const, taskId: task.id }];
+    });
   }
 }
 
@@ -201,6 +213,33 @@ describe("planning Tasks through Project-scoped Task Keys", () => {
     ] }, projectId, "STASH-14");
     assert.equal(response.status, 422);
     assert.deepEqual(database.otherTasks[1], before);
+  });
+
+  it("warns about incomplete Dependencies without changing or preventing Task progress", async () => {
+    const { database, get, patch } = await run();
+    const originalStatus = structuredClone(database.task.status);
+    const linked = await patch({ dependencies: [{ taskId: dependencyTaskId, type: "depends_on" }] });
+    assert.equal(linked.status, 200);
+    const linkedBody = await linked.json() as { task: PortableTaskProjection & { dependencyWarnings: unknown[] } };
+    assert.deepEqual(linkedBody.task.status, originalStatus);
+    assert.deepEqual(linkedBody.task.dependencyWarnings, [{ code: "incomplete_dependency", taskId: dependencyTaskId }]);
+
+    const progressed = await patch({ statusId: inProgressStatusId });
+    assert.equal(progressed.status, 200);
+    const progressedBody = await progressed.json() as { task: PortableTaskProjection & { dependencyWarnings: unknown[] } };
+    assert.equal(progressedBody.task.status.category, "started");
+    assert.equal(progressedBody.task.dependencyWarnings.length, 1);
+
+    const prerequisite = await (await get(projectId, "STASH-13")).json() as {
+      task: PortableTaskProjection & { dependencyWarnings: unknown[] }
+    };
+    assert.deepEqual(prerequisite.task.dependencies, [{ taskId, type: "required_by" }]);
+    assert.deepEqual(prerequisite.task.dependencyWarnings, []);
+
+    assert.equal((await patch({ statusId: doneStatusId }, projectId, "STASH-13")).status, 200);
+    const unblocked = await (await get()).json() as { task: PortableTaskProjection & { dependencyWarnings: unknown[] } };
+    assert.equal(unblocked.task.status.category, "started");
+    assert.deepEqual(unblocked.task.dependencyWarnings, []);
   });
 
   it("allows selected Project Guests to read but not mutate a Task", async () => {

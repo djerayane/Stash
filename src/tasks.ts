@@ -21,6 +21,13 @@ export interface TaskSourceBlockReadModel extends TaskSourceBlockReference {
   state: "linked" | "broken" | "ambiguous";
 }
 
+export interface TaskDependencyWarning {
+  code: "incomplete_dependency";
+  taskId: string;
+}
+
+export type TaskPlanningReadModel = PortableTaskProjection & { dependencyWarnings: TaskDependencyWarning[] };
+
 export type CreateTaskFromBlockOutcome =
   | { status: "created"; task: PortableTaskProjection; sourceBlock: TaskSourceBlockReference }
   | { status: "note_not_found" | "block_not_found" | "project_forbidden" | "ambiguous_block" };
@@ -47,10 +54,10 @@ export type TaskPlanningUpdate = Partial<Pick<PortableTaskProjection,
 
 export interface TaskPlanningRepository {
   findTaskByKey(memberId: string, projectId: string, taskKey: string): Promise<
-    { status: "found"; task: PortableTaskProjection } | { status: "not_found" }
+    { status: "found"; task: TaskPlanningReadModel } | { status: "not_found" }
   >;
   updateTaskByKey(memberId: string, projectId: string, taskKey: string, update: TaskPlanningUpdate): Promise<
-    { status: "updated"; task: PortableTaskProjection } | { status: "not_found" | "invalid_reference" }
+    { status: "updated"; task: TaskPlanningReadModel } | { status: "not_found" | "invalid_reference" }
   >;
 }
 
