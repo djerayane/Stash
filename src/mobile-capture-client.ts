@@ -93,9 +93,10 @@ export class MobileCaptureClient {
       if (previous?.instanceUrl === authenticated.instanceUrl && previous.workspaceId === authenticated.workspaceId
         && previous.memberToken === authenticated.memberToken) {
         for (const capture of await this.#store.listCaptures()) {
-          if (capture.origin && !capture.origin.memberId && capture.origin.instanceUrl === authenticated.instanceUrl
-            && capture.origin.workspaceId === authenticated.workspaceId) {
-            await this.#store.saveCapture({ ...capture, origin: { ...capture.origin, memberId: authenticated.memberId } });
+          if (!capture.origin || (!capture.origin.memberId && capture.origin.instanceUrl === authenticated.instanceUrl
+            && capture.origin.workspaceId === authenticated.workspaceId)) {
+            await this.#store.saveCapture({ ...capture, origin: { instanceUrl: authenticated.instanceUrl,
+              workspaceId: authenticated.workspaceId, memberId: authenticated.memberId } });
           }
         }
       }
@@ -283,9 +284,9 @@ export class MobileCaptureClient {
   }
 
   async #legacyCaptures(pairing: MobileCapturePairing): Promise<MobileCapture[]> {
-    return (await this.#store.listCaptures()).filter((capture) => capture.origin
-      && !capture.origin.memberId && capture.origin.instanceUrl === pairing.instanceUrl
-      && capture.origin.workspaceId === pairing.workspaceId);
+    return (await this.#store.listCaptures()).filter((capture) => !capture.origin
+      || (!capture.origin.memberId && capture.origin.instanceUrl === pairing.instanceUrl
+        && capture.origin.workspaceId === pairing.workspaceId));
   }
 }
 

@@ -249,8 +249,7 @@ describe("offline mobile capture synchronization", () => {
     const store = new MemoryEncryptedStore();
     await store.savePairing({ instanceUrl: baseUrl, memberToken: "member-ada", workspaceId });
     const legacy: MobileCapture = { id: "55555555-5555-4555-8555-555555555555", kind: "text",
-      content: "Legacy offline thought", createdAt: "2026-08-22T10:00:00.000Z", attempts: 0,
-      origin: { instanceUrl: baseUrl, workspaceId } };
+      content: "Legacy offline thought", createdAt: "2026-08-22T10:00:00.000Z", attempts: 0 };
     await store.saveCapture(legacy);
     const client = new MobileCaptureClient(store, fetch, { allowInsecureInstanceForTest: true });
 
@@ -268,8 +267,7 @@ describe("offline mobile capture synchronization", () => {
     const store = new MemoryEncryptedStore();
     await store.savePairing({ instanceUrl: baseUrl, memberToken: "expired-ada", workspaceId });
     await store.saveCapture({ id: "66666666-6666-4666-8666-666666666666", kind: "text",
-      content: "Recover this legacy thought", createdAt: "2026-08-22T10:00:00.000Z", attempts: 0,
-      origin: { instanceUrl: baseUrl, workspaceId } });
+      content: "Recover this legacy thought", createdAt: "2026-08-22T10:00:00.000Z", attempts: 0 });
     const client = new MobileCaptureClient(store, fetch, { allowInsecureInstanceForTest: true });
 
     await assert.rejects(() => client.pair({ instanceUrl: baseUrl, memberToken: "member-ada-unknown-rotation", workspaceId }),
@@ -284,8 +282,7 @@ describe("offline mobile capture synchronization", () => {
     const store = new MemoryEncryptedStore();
     await store.savePairing({ instanceUrl: baseUrl, memberToken: "expired-ada", workspaceId });
     const legacy: MobileCapture = { id: "77777777-7777-4777-8777-777777777777", kind: "text",
-      content: "Export before rotating", createdAt: "2026-08-22T10:00:00.000Z", attempts: 0,
-      origin: { instanceUrl: baseUrl, workspaceId } };
+      content: "Export before rotating", createdAt: "2026-08-22T10:00:00.000Z", attempts: 0 };
     await store.saveCapture(legacy);
     const client = new MobileCaptureClient(store, fetch, { allowInsecureInstanceForTest: true });
     const rotated = { instanceUrl: baseUrl, memberToken: "member-ada-rotated", workspaceId };
@@ -311,8 +308,7 @@ describe("offline mobile capture synchronization", () => {
     const store = new MemoryEncryptedStore();
     await store.savePairing({ instanceUrl: baseUrl, memberToken: "expired-ada", workspaceId });
     await store.saveCapture({ id: "88888888-8888-4888-8888-888888888888", kind: "text",
-      content: "Instance A recovery", createdAt: "2026-08-22T10:00:00.000Z", attempts: 0,
-      origin: { instanceUrl: baseUrl, workspaceId } });
+      content: "Instance A recovery", createdAt: "2026-08-22T10:00:00.000Z", attempts: 0 });
     const client = new MobileCaptureClient(store, async (input, init) => String(input).startsWith("https://instance-b.example/")
       ? new Response(JSON.stringify({ memberId: "member-b", projects: [], tags: [], reminders: [] }), { status: 200 })
       : fetch(input, init), { allowInsecureInstanceForTest: true });
