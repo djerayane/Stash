@@ -22,12 +22,6 @@ export const defaultMemberLocalizationPreferences: MemberLocalizationPreferences
   updatedAt: "1970-01-01T00:00:00.000Z",
 };
 
-const englishCatalog = {
-  "instance.running": "This Instance is running.",
-} as const;
-
-export type MessageKey = keyof typeof englishCatalog;
-
 export class InvalidLocalizationPreferences extends Error {}
 export class InvalidLocalizationRenderRequest extends Error {}
 
@@ -72,21 +66,19 @@ function parsePreferences(value: unknown, updatedAt: string): MemberLocalization
   };
 }
 
-function pseudoLocalize(message: string): string {
-  const accents: Record<string, string> = {
-    a: "à", e: "ë", i: "ï", o: "ô", u: "ü",
-    A: "À", E: "Ë", I: "Ï", O: "Ô", U: "Ü",
-  };
-  return `[${[...message].map((character) => accents[character] ?? character).join("")} !!!]`;
-}
-
 export class MemberLocalizationService {
   readonly #repository: MemberLocalizationRepository;
   readonly #now: () => Date;
+  readonly #messages: MessageCatalogs;
 
-  constructor(repository: MemberLocalizationRepository, now: () => Date = () => new Date()) {
+  constructor(
+    repository: MemberLocalizationRepository,
+    now: () => Date = () => new Date(),
+    catalogs: Readonly<Record<string, MessageCatalog>> = {},
+  ) {
     this.#repository = repository;
     this.#now = now;
+    this.#messages = new MessageCatalogs(catalogs);
   }
 
   async get(memberId: string): Promise<MemberLocalizationPreferences> {
@@ -99,8 +91,16 @@ export class MemberLocalizationService {
     return preferences;
   }
 
+  formatForLocale(locale: string, key: MessageKey, parameters: MessageParameters = {}): string {
+    return this.#messages.format(locale, key, parameters);
+  }
+
+  async formatForMember(memberId: string, key: MessageKey, parameters: MessageParameters = {}): Promise<string> {
+    return this.formatForLocale((await this.get(memberId)).locale, key, parameters);
+  }
+
   async render(memberId: string, message: string | null, timestamp: string | null) {
-    if (!(message && message in englishCatalog)
+    if (message !== "instance.running"
       || !timestamp
       || !/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/.test(timestamp)) {
       throw new InvalidLocalizationRenderRequest();
@@ -108,10 +108,9 @@ export class MemberLocalizationService {
     const instant = new Date(timestamp);
     if (Number.isNaN(instant.valueOf())) throw new InvalidLocalizationRenderRequest();
     const preferences = await this.get(memberId);
-    const english = englishCatalog[message as MessageKey];
     const localeForDates = preferences.locale.toLowerCase() === "en-xa" ? "en" : preferences.locale;
     return {
-      message: preferences.locale.toLowerCase() === "en-xa" ? pseudoLocalize(english) : english,
+      message: this.formatForLocale(preferences.locale, "instance.running"),
       date: new Intl.DateTimeFormat(localeForDates, {
         timeZone: preferences.timeZone,
         dateStyle: preferences.dateFormat,
@@ -121,3 +120,11 @@ export class MemberLocalizationService {
     };
   }
 }
+import {
+  MessageCatalogs,
+  type MessageCatalog,
+  type MessageKey,
+  type MessageParameters,
+} from "./localization-catalog.js";
+
+export type { MessageCatalog, MessageKey, MessageParameters } from "./localization-catalog.js";

@@ -4,6 +4,7 @@ import { afterEach, describe, it } from "node:test";
 import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
 import {
   MemberLocalizationService,
+  type MessageCatalog,
   type MemberLocalizationPreferences,
   type MemberLocalizationRepository,
 } from "../src/member-localization.js";
@@ -36,7 +37,10 @@ describe("Member localization through a running Stash Instance", () => {
     instance = undefined;
   });
 
-  async function run(repository = new ProtocolCompatibleLocalizationRepository()) {
+  async function run(
+    repository = new ProtocolCompatibleLocalizationRepository(),
+    catalogs: Readonly<Record<string, MessageCatalog>> = {},
+  ) {
     instance = await startInstance({
       database: new ProtocolCompatibleDatabaseProbe(),
       host: "127.0.0.1",
@@ -52,6 +56,7 @@ describe("Member localization through a running Stash Instance", () => {
       memberLocalization: new MemberLocalizationService(
         repository,
         () => new Date("2026-08-22T12:34:56.789Z"),
+        catalogs,
       ),
     });
     return { baseUrl: instance.url, repository };
@@ -78,6 +83,7 @@ describe("Member localization through a running Stash Instance", () => {
       dateFormat: "long",
       weekStartsOn: "monday",
       updatedAt: "2026-08-22T12:34:56.789Z",
+      message: "Localization preferences updated for en-GB.",
     });
 
     const rendered = await fetch(
@@ -91,6 +97,35 @@ describe("Member localization through a running Stash Instance", () => {
       timestamp: "2026-12-25T04:30:00.000Z",
       weekStartsOn: "monday",
     });
+  });
+
+  it("loads injected catalogs, falls back by key, interpolates, and pluralizes safely", async () => {
+    const frenchCatalog: MessageCatalog = {
+      "instance.running": "Cette Instance fonctionne.",
+      "localization.preferences.updated": "Préférences mises à jour pour {locale}.",
+      "localization.messages.available": { one: "{count} message disponible", other: "{count} messages disponibles" },
+      "error.localization.render_invalid": "Horodatage invalide.",
+    };
+    const { baseUrl } = await run(new ProtocolCompatibleLocalizationRepository(), { fr: frenchCatalog });
+    const headers = { authorization: "Bearer member-session", "content-type": "application/json" };
+    const update = await fetch(`${baseUrl}/api/member/localization`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ locale: "fr-FR", timeZone: "Europe/Paris", dateFormat: "long", weekStartsOn: "monday" }),
+    });
+    assert.equal((await update.json() as { message: string }).message, "Préférences mises à jour pour fr-FR.");
+
+    const invalid = await fetch(`${baseUrl}/api/member/localization/render?message=unknown&timestamp=nope`, { headers });
+    assert.equal(invalid.status, 422);
+    assert.equal((await invalid.json() as { message: string }).message, "Horodatage invalide.");
+
+    const preferences = await fetch(`${baseUrl}/api/member/localization`, { headers });
+    assert.equal(preferences.status, 200);
+    const service = new MemberLocalizationService(new ProtocolCompatibleLocalizationRepository(), undefined, { fr: frenchCatalog });
+    assert.equal(service.formatForLocale("fr", "localization.messages.available", { count: 1 }), "1 message disponible");
+    assert.equal(service.formatForLocale("fr", "localization.messages.available", { count: 3 }), "3 messages disponibles");
+    assert.equal(service.formatForLocale("fr", "error.localization.unavailable"), "Localization preferences are temporarily unavailable.");
+    assert.equal(service.formatForLocale("en-XA", "localization.preferences.updated", { locale: "en-XA" }), "[Lôcàlïzàtïôn prëfërëncës üpdàtëd fôr en-XA. !!!]");
   });
 
   it("ships safe defaults and pseudo-localizes catalog messages", async () => {
