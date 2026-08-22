@@ -25,7 +25,7 @@ import type {
 } from "./workspaces-projects.js";
 import type { MemberLocalizationPreferences, MemberLocalizationRepository } from "./member-localization.js";
 import type { PortableRepositoryConnectionProjection, RepositoryConnectionRecord, RepositoryConnectionRepository } from "./repository-connections.js";
-import type { CreateTaskFromBlockDraft, LinkedTaskReadModel, TaskFromBlockRepository, TaskPlanningReadModel, TaskPlanningRepository, TaskPlanningUpdate, TaskSourceBlockReference } from "./tasks.js";
+import type { CreateTaskFromBlockDraft, LinkedTaskReadModel, TaskFromBlockRepository, TaskMoveRepository, TaskPlanningReadModel, TaskPlanningRepository, TaskPlanningUpdate, TaskSourceBlockReference } from "./tasks.js";
 import type { AttachmentRecord, AttachmentRepository, PortableAttachmentProjection } from "./attachments.js";
 import type { MobileCaptureRepository } from "./mobile-captures.js";
 import type { DiscussionDraft, DiscussionMessage, DiscussionRecord, DiscussionRepository, DiscussionTarget, PortableDiscussionProjection, PortableDiscussionTarget } from "./discussions.js";
@@ -43,7 +43,9 @@ const taskPlanningSelect = `SELECT task.*, status.name AS status_name, status.ca
   creator.name AS created_by_name,
   ARRAY(SELECT source.note_id FROM stash_task_note_sources source WHERE source.task_id = task.id ORDER BY source.note_id) AS source_note_ids,
   COALESCE((SELECT jsonb_agg(jsonb_build_object('noteId', source.note_id, 'blockId', source.block_id) ORDER BY source.note_id, source.block_id)
-    FROM stash_task_block_sources source WHERE source.task_id = task.id), '[]'::jsonb) AS source_blocks
+    FROM stash_task_block_sources source WHERE source.task_id = task.id), '[]'::jsonb) AS source_blocks,
+  COALESCE((SELECT jsonb_agg(jsonb_build_object('projectId', alias.project_id, 'key', alias.task_key) ORDER BY alias.created_at)
+    FROM stash_task_key_aliases alias WHERE alias.task_id = task.id), '[]'::jsonb) AS key_aliases
   , COALESCE((SELECT jsonb_agg(relation ORDER BY relation->>'taskId', relation->>'type') FROM (
       SELECT jsonb_build_object('taskId', edge.prerequisite_task_id, 'type', 'depends_on') AS relation
       FROM stash_task_dependencies edge WHERE edge.dependent_task_id = task.id
@@ -61,19 +63,20 @@ const taskPlanningSelect = `SELECT task.*, status.name AS status_name, status.ca
   JOIN stash_workflow_statuses status ON status.id = task.workflow_status_id
   JOIN stash_accounts creator ON creator.id = task.created_by_account_id
   JOIN stash_workspaces workspace ON workspace.id = task.workspace_id
-  WHERE task.project_id = $1 AND task.task_key = $2
+  WHERE (task.project_id = $1 AND task.task_key = $2 OR EXISTS (SELECT 1 FROM stash_task_key_aliases alias
+      WHERE alias.task_id = task.id AND alias.project_id = $1 AND alias.task_key = $2))
     AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $3)
       OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
         WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $3))
       OR EXISTS (SELECT 1 FROM stash_project_guests guest WHERE guest.project_id = task.project_id AND guest.account_id = $3))`;
 const taskPlanningSelectById = taskPlanningSelect
-  .replace("task.project_id = $1 AND task.task_key = $2", "task.id = $1")
+  .replace("(task.project_id = $1 AND task.task_key = $2 OR EXISTS (SELECT 1 FROM stash_task_key_aliases alias\n      WHERE alias.task_id = task.id AND alias.project_id = $1 AND alias.task_key = $2))", "task.id = $1")
   .replaceAll("$3", "$2");
 
 function taskProjectionFromRow(row: any): PortableTaskProjection {
   return {
     schema: "stash.task.v1", id: row.id, workspaceId: row.workspace_id, projectId: row.project_id,
-    key: row.task_key, title: row.title,
+    key: row.task_key, ...(row.key_aliases?.length ? { keyAliases: row.key_aliases } : {}), title: row.title,
     status: { id: row.workflow_status_id, name: row.status_name, category: row.status_category },
     assigneeIds: row.assignee_ids ?? [], priority: row.priority ?? "none", labelNames: row.label_names ?? [],
     ...(row.due_date ? { dueDate: typeof row.due_date === "string" ? row.due_date : row.due_date.toISOString().slice(0, 10) } : {}),
@@ -103,6 +106,7 @@ export class PostgresDatabase implements
   RepositoryConnectionRepository,
   TaskFromBlockRepository,
   TaskPlanningRepository,
+  TaskMoveRepository,
   AttachmentRepository,
   MobileCaptureRepository,
   DiscussionRepository
@@ -876,6 +880,37 @@ export class PostgresDatabase implements
         }
       }
       return { status: "updated" as const, task };
+    });
+  }
+
+  async moveTask(memberId: string, projectId: string, taskKey: string, destinationProjectId: string) {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureNoteSchema(client);
+      await this.#ensureInvitationSchema(client);
+      const current = await client.query<any>(`${taskPlanningSelect} FOR UPDATE OF task`, [projectId, taskKey, memberId]);
+      const row = current.rows[0];
+      if (!row) return { status: "not_found" as const };
+      if (row.project_id === destinationProjectId) return { status: "same_project" as const };
+      const destination = await client.query<{ project_key: string; task_number: number }>(`UPDATE stash_projects project
+        SET next_task_number = next_task_number + 1 FROM stash_workspaces workspace
+        WHERE project.id = $1 AND workspace.id = project.workspace_id AND project.workspace_id = $2
+          AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $3)
+            OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+              WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $3)))
+        RETURNING project.project_key, project.next_task_number - 1 AS task_number`, [destinationProjectId, row.workspace_id, memberId]);
+      if (!destination.rowCount) return { status: "destination_forbidden" as const };
+      await this.#ensureDefaultWorkflow(client, destinationProjectId);
+      const backlog = await client.query<{ id: string }>(
+        "SELECT id FROM stash_workflow_statuses WHERE project_id = $1 AND name = 'Backlog' ORDER BY position LIMIT 1", [destinationProjectId]);
+      const nextKey = `${destination.rows[0]!.project_key}-${destination.rows[0]!.task_number}`;
+      await client.query(`INSERT INTO stash_task_key_aliases (project_id, task_key, task_id, created_at)
+        VALUES ($1,$2,$3,now())`, [row.project_id, row.task_key, row.id]);
+      await client.query("UPDATE stash_tasks SET project_id = $2, task_key = $3, workflow_status_id = $4 WHERE id = $1",
+        [row.id, destinationProjectId, nextKey, backlog.rows[0]!.id]);
+      const saved = await client.query<any>(taskPlanningSelect, [destinationProjectId, nextKey, memberId]);
+      const task = taskPlanningReadModelFromRow(saved.rows[0]);
+      await this.#recordPortableProjection(client, "Task", task.id, task.schema, taskProjectionFromRow(saved.rows[0]));
+      return { status: "moved" as const, task };
     });
   }
 
@@ -1973,6 +2008,14 @@ export class PostgresDatabase implements
         task_key TEXT NOT NULL, workflow_status_id UUID NOT NULL REFERENCES stash_workflow_statuses(id),
         title TEXT NOT NULL CHECK (length(title) > 0), created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id), created_at TIMESTAMPTZ NOT NULL,
         UNIQUE (project_id, task_key)
+      );
+      CREATE TABLE IF NOT EXISTS stash_task_key_aliases (
+        project_id UUID NOT NULL REFERENCES stash_projects(id),
+        task_key TEXT NOT NULL,
+        task_id UUID NOT NULL REFERENCES stash_tasks(id) ON DELETE CASCADE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (project_id, task_key),
+        UNIQUE (task_id, project_id, task_key)
       );
       ALTER TABLE stash_tasks ADD COLUMN IF NOT EXISTS assignee_ids JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(assignee_ids) = 'array');
       ALTER TABLE stash_tasks ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'none' CHECK (priority IN ('none','low','medium','high','urgent'));

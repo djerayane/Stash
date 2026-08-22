@@ -7,6 +7,7 @@ export function taskRoutes(service: TaskService, memberAccess: MemberAccessResol
     matches: (request, url) => (request.method === "POST" && /^\/api\/notes\/[^/]+\/blocks\/[^/]+\/tasks$/.test(url.pathname))
       || (request.method === "GET" && /^\/api\/notes\/[^/]+\/linked-tasks$/.test(url.pathname))
       || (["GET", "POST"].includes(request.method ?? "") && /^\/api\/tasks\/[^/]+\/source-blocks$/.test(url.pathname))
+      || (request.method === "POST" && /^\/api\/projects\/[^/]+\/tasks\/[^/]+\/move$/.test(url.pathname))
       || ((request.method === "GET" || request.method === "PATCH") && /^\/api\/projects\/[^/]+\/tasks\/[^/]+$/.test(url.pathname)),
     async handle(request, response, url) {
       const access = await memberAccess.authenticateBearer(request.headers.authorization);
@@ -34,9 +35,13 @@ export function taskRoutes(service: TaskService, memberAccess: MemberAccessResol
           let projectId: string; let taskKey: string;
           try { const segments = url.pathname.split("/"); projectId = decodeURIComponent(segments[3]!); taskKey = decodeURIComponent(segments[5]!); }
           catch { throw new InvalidTaskFromBlockInput(); }
-          const result = request.method === "GET" ? await service.findByKey(access.accountId, projectId!, taskKey!)
+          const result = url.pathname.endsWith("/move") ? await service.move(access.accountId, projectId!, taskKey!, await readJson(request))
+            : request.method === "GET" ? await service.findByKey(access.accountId, projectId!, taskKey!)
             : await service.updateByKey(access.accountId, projectId!, taskKey!, await readJson(request));
           if (result.status === "found" || result.status === "updated") json(response, 200, { task: result.task });
+          else if (result.status === "moved") json(response, 200, { task: result.task });
+          else if (result.status === "destination_forbidden") json(response, 403, { error: result.status, message: "This Member cannot move the Task to that Project." });
+          else if (result.status === "same_project") json(response, 409, { error: result.status, message: "The Task already belongs to that Project." });
           else if (result.status === "invalid_reference") json(response, 422, { error: result.status, message: "One or more Task properties refer to unavailable Project data." });
           else json(response, 404, { error: "task_not_found", message: "This Task is unavailable in that Project." });
           return true;
@@ -63,7 +68,8 @@ export function taskRoutes(service: TaskService, memberAccess: MemberAccessResol
           message: "That Block identity occurs more than once. Repair the Note before creating a Task." });
         else json(response, 404, { error: result.status, message: result.status === "note_not_found" ? "This Note is unavailable." : "That Block does not exist in this Note." });
       } catch (error) {
-        if (error instanceof InvalidTaskFromBlockInput) json(response, 422, { error: "invalid_input", message: "A Task requires a valid Project, Block, and title." });
+        if (error instanceof InvalidTaskFromBlockInput) json(response, 422, { error: "invalid_input",
+          message: url.pathname.endsWith("/move") ? "A Task move requires a valid destination Project." : "A Task requires a valid Project, Block, and title." });
         else if (error instanceof SyntaxError || error instanceof Error && error.message === "body_too_large")
           json(response, error instanceof SyntaxError ? 400 : 413, { error: error instanceof SyntaxError ? "invalid_json" : "body_too_large", message: "The request could not be read." });
         else json(response, 503, { error: "task_unavailable", message: "The Task change could not be saved. Try again." });
