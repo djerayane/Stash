@@ -1,5 +1,6 @@
 import { Link, useFocusEffect } from "expo-router";
 import * as Linking from "expo-linking";
+import { File } from "expo-file-system";
 import NetInfo from "@react-native-community/netinfo";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppState, Pressable, ScrollView, Text, TextInput, View, useColorScheme } from "react-native";
@@ -20,12 +21,15 @@ import {
   loadCachedOptionsOnFocus,
   reconcileCaptureSelections,
 } from "@/src/capture-options-focus";
-import { parseIncomingCapture } from "@/src/incoming-capture";
+import { IncomingCaptureDeliveryGate, parseIncomingCapture } from "@/src/incoming-capture";
+import { useIncomingSharePayloads } from "@/src/incoming-share";
 
 export default function CaptureScreen() {
   useColorScheme();
   const mounted = useRef(true);
-  const handledIncoming = useRef(new Set<string>());
+  const incomingGate = useRef(new IncomingCaptureDeliveryGate());
+  const processingShare = useRef(false);
+  const incomingShare = useIncomingSharePayloads();
   const client = useMemo(() => new MobileCaptureClient(new SecureMobileCaptureStore(), fetch), []);
   const [content, setContent] = useState("");
   const [checklist, setChecklist] = useState(false);
@@ -79,22 +83,46 @@ export default function CaptureScreen() {
     return () => { subscription.remove(); client.cancelRequests(); };
   }, [client]);
   useEffect(() => {
-    const handle = async (url: string | null) => {
-      if (!url || handledIncoming.current.has(url)) return;
+    const handle = async (url: string | null, delivery: "initial" | "event") => {
+      if (!url || !incomingGate.current.accept(url, delivery)) return;
       const incoming = parseIncomingCapture(url);
-      if (!incoming) return;
-      handledIncoming.current.add(url);
+      if (incoming.kind === "ignored") return;
+      if (incoming.kind === "error") { if (mounted.current) setStatus(incoming.message); return; }
       try {
-        await client.captureSharedContent(incoming.content, incoming.source);
-        if (mounted.current) setStatus(incoming.source === "widget" ? "Widget input saved securely on this device." : "Shared content saved securely on this device.");
+        await client.captureSharedContent(incoming.capture.content, incoming.capture.source);
+        if (mounted.current) setStatus(incoming.capture.source === "widget" ? "Widget input saved securely on this device." : "Shared content saved securely on this device.");
         const result = await client.sync();
         if (mounted.current) setStatus(presentMobileSyncResult(result, await client.outbox()));
       } catch (error) { if (mounted.current) setStatus(error instanceof Error ? error.message : "Shared content could not be saved."); }
     };
-    void Linking.getInitialURL().then(handle);
-    const subscription = Linking.addEventListener("url", ({ url }) => { void handle(url); });
+    void Linking.getInitialURL().then((url) => handle(url, "initial"));
+    const subscription = Linking.addEventListener("url", ({ url }) => { void handle(url, "event"); });
     return () => subscription.remove();
   }, [client]);
+  useEffect(() => {
+    if (incomingShare.error && mounted.current) setStatus("Shared content could not be read and was not saved.");
+    if (!incomingShare.sharedPayloads.length || processingShare.current) return;
+    processingShare.current = true;
+    void (async () => {
+      try {
+        for (const payload of incomingShare.sharedPayloads) {
+          if (payload.shareType === "text" || payload.shareType === "url") {
+            await client.captureSharedContent(payload.value, "share_sheet");
+          } else {
+            const filename = payload.value.split("/").pop() || `shared-${Date.now()}`;
+            const kind = payload.shareType === "image" ? "photo" : payload.shareType === "audio" ? "voice" : "file";
+            await client.captureMedia({ kind, filename, contentType: payload.mimeType ?? "application/octet-stream",
+              base64: await new File(payload.value).base64() });
+          }
+        }
+        incomingShare.clearSharedPayloads();
+        if (mounted.current) setStatus("Shared content saved securely on this device.");
+        const result = await client.sync();
+        if (mounted.current) setStatus(presentMobileSyncResult(result, await client.outbox()));
+      } catch (error) { if (mounted.current) setStatus(error instanceof Error ? error.message : "Shared content could not be saved."); }
+      finally { processingShare.current = false; }
+    })();
+  }, [client, incomingShare.error, incomingShare.sharedPayloads]);
 
   const save = async () => {
     try {

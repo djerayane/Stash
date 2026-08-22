@@ -298,7 +298,8 @@ export class MobileCaptureClient {
           const upload = await this.#fetch(`${pairing.instanceUrl}/api/workspaces/${pairing.workspaceId}/attachments`, {
             method: "POST",
             headers: { authorization: `Bearer ${pairing.memberToken}`, "content-type": currentCapture.attachment.contentType,
-              "x-stash-filename": encodePortableFilename(currentCapture.attachment.filename), "x-stash-source": "upload" },
+              "x-stash-filename": encodePortableFilename(currentCapture.attachment.filename), "x-stash-source": "upload",
+              "x-stash-operation-key": currentCapture.id },
             body: decodeBase64(currentCapture.attachment.base64), signal: controller.signal,
           });
           const uploaded = await upload.json().catch(() => ({})) as { id?: string; portableLink?: string; error?: string; message?: string };

@@ -24,7 +24,7 @@ import {
   loadCachedOptionsOnFocus,
   reconcileCaptureSelections,
 } from "../mobile/src/capture-options-focus.js";
-import { parseIncomingCapture } from "../mobile/src/incoming-capture.js";
+import { IncomingCaptureDeliveryGate, parseIncomingCapture } from "../mobile/src/incoming-capture.js";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const projectId = "22222222-2222-4222-8222-222222222222";
@@ -68,6 +68,7 @@ class MobileProtocolDatabase implements DatabaseProbe, MobileCaptureRepository, 
   readonly notes = new Map<string, NoteRecord>();
   readonly receipts = new Map<string, { noteId: string; payloadDigest: string }>();
   readonly attachments = new Map<string, AttachmentRecord>();
+  readonly attachmentReceipts = new Map<string, { digest: string; record: AttachmentRecord; projection: PortableAttachmentProjection }>();
   failure: Error | undefined;
   failingContent: string | undefined;
 
@@ -80,9 +81,19 @@ class MobileProtocolDatabase implements DatabaseProbe, MobileCaptureRepository, 
   async canCreateAttachment(memberId: string, requestedWorkspaceId: string) {
     return (memberId === "ada" || memberId === "grace") && requestedWorkspaceId === workspaceId;
   }
-  async createAttachment(memberId: string, record: AttachmentRecord, _projection: PortableAttachmentProjection) {
-    if (!await this.canCreateAttachment(memberId, record.workspaceId)) return "workspace_forbidden" as const;
-    this.attachments.set(record.id, record); return "created" as const;
+  async findAttachmentReceipt(memberId: string, requestedWorkspaceId: string, operationKey: string) {
+    return await this.canCreateAttachment(memberId, requestedWorkspaceId) ? this.attachmentReceipts.get(operationKey) : undefined;
+  }
+  async createAttachment(memberId: string, record: AttachmentRecord, projection: PortableAttachmentProjection,
+    operation?: { key: string; digest: string }) {
+    if (!await this.canCreateAttachment(memberId, record.workspaceId)) return { status: "workspace_forbidden" as const };
+    if (operation) {
+      const existing = this.attachmentReceipts.get(operation.key);
+      if (existing) return existing.digest === operation.digest ? { status: "duplicate" as const, ...existing } : { status: "conflict" as const };
+    }
+    this.attachments.set(record.id, record);
+    if (operation) this.attachmentReceipts.set(operation.key, { digest: operation.digest, record, projection });
+    return { status: "created" as const };
   }
   async findAttachmentForMember(memberId: string, attachmentId: string) {
     return memberId === "ada" || memberId === "grace" ? this.attachments.get(attachmentId) : undefined;
@@ -272,6 +283,31 @@ describe("offline mobile capture synchronization", () => {
     assert.equal(uploads, 1);
   });
 
+  it("recovers an Attachment after its committed upload response is lost", async () => {
+    const { database, attachmentStorage, baseUrl } = await run();
+    const store = new MemoryEncryptedStore();
+    let loseUploadResponse = true;
+    const client = new MobileCaptureClient(store, async (input, init) => {
+      const response = await fetch(input, init);
+      if (loseUploadResponse && String(input).endsWith("/attachments")) {
+        loseUploadResponse = false;
+        await response.arrayBuffer();
+        throw new TypeError("connection closed after commit");
+      }
+      return response;
+    }, { allowInsecureInstanceForTest: true });
+    await client.pair({ instanceUrl: baseUrl, memberToken: "member-ada", workspaceId });
+    await client.captureMedia({ kind: "photo", filename: "lost.jpg", contentType: "image/jpeg", base64: "b3JpZ2luYWw=" });
+
+    assert.deepEqual(await client.sync(), { status: "offline", count: 0 });
+    assert.equal(database.attachments.size, 1);
+    assert.equal(attachmentStorage.content.size, 1);
+    assert.deepEqual(await client.sync(), { status: "synced", count: 1 });
+    assert.equal(database.attachments.size, 1);
+    assert.equal(attachmentStorage.content.size, 1);
+    assert.equal((await client.outbox()).length, 0);
+  });
+
   it("queues shared text, URLs, and widget input through their observable source", async () => {
     const store = new MemoryEncryptedStore();
     await store.savePairing({ instanceUrl: "https://stash.example", memberToken: "member-ada", workspaceId, memberId: "ada" });
@@ -284,10 +320,24 @@ describe("offline mobile capture synchronization", () => {
       { content: "Call Grace", source: "widget" },
     ]);
     assert.deepEqual(parseIncomingCapture("stash://capture?source=share_sheet&content=https%3A%2F%2Fexample.com%2Freference"),
-      { content: "https://example.com/reference", source: "share_sheet" });
+      { kind: "capture", capture: { content: "https://example.com/reference", source: "share_sheet" } });
     assert.deepEqual(parseIncomingCapture("stash://capture?source=widget&content=Call%20Grace"),
-      { content: "Call Grace", source: "widget" });
-    assert.equal(parseIncomingCapture("https://evil.example/capture?source=widget&content=secret"), undefined);
+      { kind: "capture", capture: { content: "Call Grace", source: "widget" } });
+    assert.deepEqual(parseIncomingCapture("https://evil.example/capture?source=widget&content=secret"), { kind: "ignored" });
+    assert.deepEqual(parseIncomingCapture("stash://capture?source=widget"),
+      { kind: "error", message: "Shared and widget captures require content." });
+    assert.deepEqual(parseIncomingCapture(`stash://capture?source=widget&content=${"x".repeat(20_001)}`),
+      { kind: "error", message: "Shared and widget captures cannot exceed 20,000 characters." });
+  });
+
+  it("suppresses only the immediate initial-link duplicate and allows repeated user actions", () => {
+    const gate = new IncomingCaptureDeliveryGate();
+    const url = "stash://capture?source=widget&content=Repeat";
+    assert.equal(gate.accept(url, "initial", 1_000), true);
+    assert.equal(gate.accept(url, "event", 1_100), false);
+    assert.equal(gate.accept(url, "event", 1_200), true);
+    assert.equal(gate.accept(url, "initial", 10_000), true);
+    assert.equal(gate.accept(url, "event", 12_001), true);
   });
 
   it("rejects a reused capture ID when its creation timestamp changes", async () => {

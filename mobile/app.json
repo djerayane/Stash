@@ -5,11 +5,37 @@
     "scheme": "stash",
     "version": "0.1.0",
     "orientation": "portrait",
+    "ios": {
+      "bundleIdentifier": "app.stash.capture",
+      "entitlements": {
+        "com.apple.security.application-groups": ["group.app.stash.capture"]
+      }
+    },
+    "android": {
+      "package": "app.stash.capture"
+    },
     "plugins": [
       "expo-router",
       "expo-secure-store",
-      ["expo-audio", { "microphonePermission": "Allow Stash to record voice captures you explicitly start." }],
-      ["expo-image-picker", { "photosPermission": "Allow Stash to attach the original photos you choose." }]
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Allow Stash to record voice captures you explicitly start."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow Stash to attach the original photos you choose."
+        }
+      ],
+      ["expo-sharing", {
+        "ios": { "enabled": true, "activationRule": { "supportsText": true, "supportsWebUrlWithMaxCount": 1,
+          "supportsImageWithMaxCount": 1, "supportsFileWithMaxCount": 1 } },
+        "android": { "enabled": true, "singleShareMimeTypes": ["text/*", "image/*", "audio/*", "application/*"] }
+      }],
+      "@bacons/apple-targets",
+      "./plugins/with-android-capture-widget.js"
     ],
     "experiments": {
       "typedRoutes": true
