@@ -146,4 +146,71 @@ describe("optional Redis acceleration", () => {
     assert.equal(failures.length, 1);
     await runtime.close();
   });
+
+  it("bypasses a connecting Redis client instead of queueing the read", async () => {
+    let cacheReads = 0;
+    let closed = false;
+    const connectingClient = {
+      isOpen: true,
+      isReady: false,
+      on() {},
+      async connect(): Promise<never> {
+        return new Promise<never>(() => {});
+      },
+      async get(): Promise<string | null> {
+        cacheReads += 1;
+        return new Promise<string | null>(() => {});
+      },
+      async set(): Promise<void> {},
+      async close(): Promise<void> {
+        closed = true;
+      },
+    };
+    const runtime = startRedisAcceleration(
+      "redis://connecting.invalid:6379",
+      () => {},
+      () => connectingClient,
+    );
+
+    const value = await runtime.acceleration.readThrough({
+      key: "instance",
+      codec: json,
+      loadAuthoritative: async () => ({ name: "authoritative" }),
+    });
+
+    assert.deepEqual(value, { name: "authoritative" });
+    assert.equal(cacheReads, 0);
+    await runtime.close();
+    assert.equal(closed, true);
+  });
+
+  it("bounds an in-flight Redis command if readiness changes during a request", async () => {
+    const failures: string[] = [];
+    const stalledClient = {
+      isOpen: true,
+      isReady: true,
+      on() {},
+      async connect() {},
+      async get(): Promise<string | null> {
+        return new Promise<string | null>(() => {});
+      },
+      async set(): Promise<void> {},
+      async close() {},
+    };
+    const runtime = startRedisAcceleration(
+      "redis://stalled.invalid:6379",
+      ({ cause }) => failures.push(cause.message),
+      () => stalledClient,
+    );
+
+    const value = await runtime.acceleration.readThrough({
+      key: "instance",
+      codec: json,
+      loadAuthoritative: async () => ({ name: "authoritative" }),
+    });
+
+    assert.deepEqual(value, { name: "authoritative" });
+    assert.deepEqual(failures, ["Redis operation timed out"]);
+    await runtime.close();
+  });
 });

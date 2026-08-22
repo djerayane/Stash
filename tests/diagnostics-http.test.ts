@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 
-import { createDiagnostics, type DiagnosticPayload } from "../src/diagnostics.js";
+import {
+  createDiagnostics,
+  type DiagnosticPayload,
+  type DiagnosticTransport,
+} from "../src/diagnostics.js";
 import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
 
 class AvailableDatabase implements DatabaseProbe {
@@ -18,8 +22,16 @@ describe("diagnostics on a running Stash Instance", () => {
     instance = undefined;
   });
 
-  async function run(submit: (payload: DiagnosticPayload) => Promise<void>) {
-    const diagnostics = createDiagnostics({ instanceVersion: "0.1.0", transport: { submit } });
+  async function run(transport: DiagnosticTransport, crashReport = false) {
+    const diagnostics = createDiagnostics({ instanceVersion: "0.1.0", transport });
+    if (crashReport) {
+      diagnostics.recordCrashReport({
+        id: "crash-1",
+        occurredAt: "2026-08-22T10:05:00.000Z",
+        component: "database-probe",
+        errorCode: "connection_lost",
+      });
+    }
     instance = await startInstance({
       database: new AvailableDatabase(),
       diagnostics,
@@ -32,7 +44,7 @@ describe("diagnostics on a running Stash Instance", () => {
 
   it("publishes the content-free schema while protecting settings and pending payloads", async () => {
     const submitted: DiagnosticPayload[] = [];
-    const baseUrl = await run(async (payload) => { submitted.push(payload); });
+    const baseUrl = await run({ async submit(payload) { submitted.push(payload); } });
 
     const schema = await fetch(`${baseUrl}/api/diagnostics/schema`);
     assert.equal(schema.status, 200);
@@ -57,7 +69,7 @@ describe("diagnostics on a running Stash Instance", () => {
 
   it("requires explicit valid choices before submitting the inspected payload", async () => {
     const submitted: DiagnosticPayload[] = [];
-    const baseUrl = await run(async (payload) => { submitted.push(payload); });
+    const baseUrl = await run({ async submit(payload) { submitted.push(payload); } });
 
     const invalid = await fetch(`${baseUrl}/api/diagnostics/settings`, {
       method: "PUT",
@@ -87,7 +99,7 @@ describe("diagnostics on a running Stash Instance", () => {
   });
 
   it("reports transport failure and retains the pending payload", async () => {
-    const baseUrl = await run(async () => { throw new Error("offline"); });
+    const baseUrl = await run({ async submit() { throw new Error("offline"); } });
     await fetch(`${baseUrl}/api/diagnostics/settings`, {
       method: "PUT",
       headers: { ...authorization, "content-type": "application/json" },
@@ -111,5 +123,74 @@ describe("diagnostics on a running Stash Instance", () => {
 
     const state = await fetch(`${baseUrl}/api/diagnostics`, { headers: authorization });
     assert.equal((await state.json() as { pending: unknown[] }).pending.length, 1);
+  });
+
+  it("independently gates local crash reports and inspectable update checks", async () => {
+    const crashSubmissions: unknown[] = [];
+    const updateChecks: unknown[] = [];
+    const baseUrl = await run({
+      async submit() {},
+      async submitCrashReport(payload) { crashSubmissions.push(payload); },
+      async checkForUpdates(payload) {
+        updateChecks.push(payload);
+        return { latestVersion: "0.2.0" };
+      },
+    }, true);
+
+    const schemas = await fetch(`${baseUrl}/api/diagnostics/schemas`);
+    assert.equal(schemas.status, 200);
+    assert.deepEqual(
+      (await schemas.json() as { schemas: { id: string }[] }).schemas.map(({ id }) => id),
+      ["stash.instance-diagnostics.v1", "stash.crash-report.v1", "stash.update-check.v1"],
+    );
+
+    const state = await fetch(`${baseUrl}/api/diagnostics`, { headers: authorization });
+    const stateBody = await state.json() as {
+      pendingCrashReports: { id: string }[];
+      updateCheckPayload: { schema: string };
+    };
+    assert.equal(stateBody.pendingCrashReports[0]?.id, "crash-1");
+    assert.equal(stateBody.updateCheckPayload.schema, "stash.update-check.v1");
+
+    const download = await fetch(`${baseUrl}/api/diagnostics/crash-reports/crash-1`, {
+      headers: authorization,
+    });
+    assert.equal(download.status, 200);
+    assert.equal((await download.json() as { id: string }).id, "crash-1");
+
+    const disabledCrash = await fetch(`${baseUrl}/api/diagnostics/crash-reports/submit`, {
+      method: "POST",
+      headers: authorization,
+    });
+    assert.deepEqual(await disabledCrash.json(), { status: "disabled", submitted: 0 });
+    const disabledUpdate = await fetch(`${baseUrl}/api/diagnostics/update-check`, {
+      method: "POST",
+      headers: authorization,
+    });
+    assert.deepEqual(await disabledUpdate.json(), { status: "disabled" });
+    assert.deepEqual(crashSubmissions, []);
+    assert.deepEqual(updateChecks, []);
+
+    await fetch(`${baseUrl}/api/diagnostics/settings`, {
+      method: "PUT",
+      headers: { ...authorization, "content-type": "application/json" },
+      body: JSON.stringify({
+        diagnosticSubmissions: false,
+        crashReportSubmissions: true,
+        updateChecks: true,
+      }),
+    });
+    const submittedCrash = await fetch(`${baseUrl}/api/diagnostics/crash-reports/submit`, {
+      method: "POST",
+      headers: authorization,
+    });
+    assert.deepEqual(await submittedCrash.json(), { status: "submitted", submitted: 1 });
+    const checked = await fetch(`${baseUrl}/api/diagnostics/update-check`, {
+      method: "POST",
+      headers: authorization,
+    });
+    assert.deepEqual(await checked.json(), { status: "available", latestVersion: "0.2.0" });
+    assert.equal(crashSubmissions.length, 1);
+    assert.equal(updateChecks.length, 1);
   });
 });

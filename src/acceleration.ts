@@ -29,7 +29,7 @@ interface OptionalRedisAccelerationOptions {
   onFailure?(failure: AccelerationFailure): void;
 }
 
-function asError(cause: unknown): Error {
+export function toError(cause: unknown): Error {
   return cause instanceof Error ? cause : new Error(String(cause));
 }
 
@@ -44,14 +44,14 @@ export function createOptionalRedisAcceleration(
       try {
         cached = await options.redis.get(key);
       } catch (cause) {
-        options.onFailure?.({ operation: "read", key, cause: asError(cause) });
+        options.onFailure?.({ operation: "read", key, cause: toError(cause) });
       }
 
       if (cached !== null) {
         try {
           return codec.decode(cached);
         } catch (cause) {
-          options.onFailure?.({ operation: "decode", key, cause: asError(cause) });
+          options.onFailure?.({ operation: "decode", key, cause: toError(cause) });
         }
       }
 
@@ -59,7 +59,7 @@ export function createOptionalRedisAcceleration(
       try {
         await options.redis.set(key, codec.encode(authoritative));
       } catch (cause) {
-        options.onFailure?.({ operation: "write", key, cause: asError(cause) });
+        options.onFailure?.({ operation: "write", key, cause: toError(cause) });
       }
       return authoritative;
     },
