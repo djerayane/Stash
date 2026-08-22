@@ -42,7 +42,7 @@ export type MobileSyncResult =
   | { status: "synced"; count: number }
   | { status: "offline" | "retry_pending"; count: number }
   | { status: "cancelled"; count: number }
-  | { status: "attention_required"; count: number; error: string };
+  | { status: "attention_required"; count: number; error: string; retryPending?: boolean };
 
 export class LegacyRecoveryRequired extends Error {
   constructor() { super("Export the legacy captures before replacing this pairing."); this.name = "LegacyRecoveryRequired"; }
@@ -156,7 +156,7 @@ export class MobileCaptureClient {
         if (!online) return;
         if (result.status === "cancelled") return;
         onResult(result);
-        if (result.status === "retry_pending" && online) {
+        if ((result.status === "retry_pending" || (result.status === "attention_required" && result.retryPending)) && online) {
           const delay = Math.min(1_000 * 2 ** retryNumber, 60_000);
           retryNumber += 1;
           cancelRetry = schedule(synchronize, delay);
@@ -258,6 +258,7 @@ export class MobileCaptureClient {
         });
       } catch (error) {
         if (controller.signal.aborted) return { status: "cancelled", count };
+        if (attentionError) return { status: "attention_required", count, error: attentionError, retryPending: true };
         return { status: "offline", count };
       }
       const body = await response.json().catch(() => ({})) as { error?: string; message?: string };
@@ -273,8 +274,9 @@ export class MobileCaptureClient {
       await this.#store.saveCapture(failed);
       if (retriable) retryPending = true; else attentionError ??= body.error ?? "sync_rejected";
     }
-    return retryPending ? { status: "retry_pending", count }
-      : attentionError ? { status: "attention_required", count, error: attentionError } : { status: "synced", count };
+    return attentionError ? { status: "attention_required", count, error: attentionError,
+      ...(retryPending ? { retryPending: true } : {}) }
+      : retryPending ? { status: "retry_pending", count } : { status: "synced", count };
   }
 
   #controller(externalSignal?: AbortSignal): AbortController {

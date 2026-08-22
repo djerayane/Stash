@@ -430,6 +430,39 @@ describe("offline mobile capture synchronization", () => {
     assert.equal((await client.outbox()).length, 0);
   });
 
+  it("keeps permanent attention visible when a later capture is retriable", async () => {
+    const { database, baseUrl } = await run();
+    const store = new MemoryEncryptedStore();
+    const client = new MobileCaptureClient(store, fetch, { allowInsecureInstanceForTest: true });
+    await client.pair({ instanceUrl: baseUrl, memberToken: "member-ada", workspaceId });
+    await client.captureText("Permanent rejection", { projectId: "33333333-3333-4333-8333-333333333333" });
+    await client.captureText("Transient rejection");
+    database.failingContent = "Transient rejection";
+
+    assert.deepEqual(await client.sync(), { status: "attention_required", count: 0,
+      error: "workspace_forbidden", retryPending: true });
+    const outbox = await client.outbox();
+    assert.equal(outbox.length, 2);
+    assert.equal(outbox[1]?.attempts, 1);
+    assert.ok(outbox[1]?.nextRetryAt);
+  });
+
+  it("keeps permanent attention visible when a later request loses the network", async () => {
+    const { baseUrl } = await run();
+    const store = new MemoryEncryptedStore();
+    const client = new MobileCaptureClient(store, async (input, init) => {
+      if (init?.method === "POST" && String(init.body).includes("Network disappears")) throw new TypeError("Network request failed");
+      return fetch(input, init);
+    }, { allowInsecureInstanceForTest: true });
+    await client.pair({ instanceUrl: baseUrl, memberToken: "member-ada", workspaceId });
+    await client.captureText("Permanent rejection", { projectId: "33333333-3333-4333-8333-333333333333" });
+    await client.captureText("Network disappears");
+
+    assert.deepEqual(await client.sync(), { status: "attention_required", count: 0,
+      error: "workspace_forbidden", retryPending: true });
+    assert.equal((await client.outbox()).length, 2);
+  });
+
   it("aborts an in-flight synchronization and suppresses callbacks after cleanup", async () => {
     const store = new MemoryEncryptedStore();
     const pairing = { instanceUrl: "https://stash.example", memberToken: "member-ada", workspaceId, memberId: "ada" };
