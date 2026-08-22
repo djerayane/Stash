@@ -27,8 +27,22 @@ The application fails at startup with a clear error when required configuration 
 | `INSTANCE_ADMIN_TOKEN` | yes | Bearer token for Instance Administrator surfaces; keep it outside Workspace content |
 | `HOST` | no | Bind address, defaults to `0.0.0.0` |
 | `PORT` | no | TCP port, defaults to `3000` |
+| `REDIS_URL` | no | Redis connection URL for best-effort acceleration; PostgreSQL remains authoritative |
 
 Never commit production secrets or include them in a Portable Workspace Export.
+
+### Optional Redis acceleration
+
+Redis is never required for correctness or for an application feature. When `REDIS_URL` is absent, Stash reads authoritative data directly. When it is configured, cache hits may accelerate reads; cache misses, invalid cached values, and Redis outages fall back to PostgreSQL and are reported in the Instance logs.
+
+Compose includes an opt-in, non-persistent Redis profile:
+
+```sh
+export REDIS_URL=redis://redis:6379
+docker compose --profile redis up --build -d
+```
+
+Stopping or deleting Redis does not remove durable Stash data. Do not include Redis in Instance backups; continue backing up PostgreSQL and Attachment storage as documented.
 
 ## Health and error semantics
 

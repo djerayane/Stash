@@ -1,4 +1,15 @@
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer } from "node:http";
+
+import {
+  createOptionalRedisAcceleration,
+  type OptionalRedisAcceleration,
+} from "./acceleration.js";
+import { ownerBootstrapRoute } from "./bootstrap-route.js";
+import { diagnosticsAdminRoute, diagnosticsSchemaRoute } from "./diagnostics-routes.js";
+import { createDiagnostics, type Diagnostics } from "./diagnostics.js";
+import { json, requireInstanceAdministrator } from "./http-routing.js";
+import { instanceAdminRoute } from "./instance-route.js";
+import type { OwnerBootstrapService } from "./owner-bootstrap.js";
 
 export interface DatabaseProbe {
   verifyConnection(): Promise<void>;
@@ -15,6 +26,9 @@ interface InstanceOptions {
   host: string;
   port: number;
   instanceAdminToken: string;
+  ownerBootstrap?: OwnerBootstrapService;
+  diagnostics?: Diagnostics;
+  acceleration?: OptionalRedisAcceleration;
 }
 
 const browserSurface = `<!doctype html>
@@ -32,34 +46,30 @@ const browserSurface = `<!doctype html>
   <body><main><h1>Stash</h1><p>This Instance is running.</p></main></body>
 </html>`;
 
-function json(response: ServerResponse, status: number, body: object): void {
-  response.writeHead(status, {
-    "content-type": "application/json; charset=utf-8",
-    "cache-control": "no-store",
-  });
-  response.end(JSON.stringify(body));
-}
-
-function isAuthorized(request: IncomingMessage, token: string): boolean {
-  return request.headers.authorization === `Bearer ${token}`;
-}
-
-async function readJson(request: IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of request) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    size += buffer.length;
-    if (size > 64 * 1024) throw new Error("body_too_large");
-    chunks.push(buffer);
-  }
-  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
-}
-
 export async function startInstance(options: InstanceOptions): Promise<RunningInstance> {
   if (!options.instanceAdminToken) {
     throw new Error("INSTANCE_ADMIN_TOKEN must not be empty");
   }
+
+  const diagnostics = options.diagnostics ?? createDiagnostics({
+    instanceVersion: "0.1.0",
+    transport: {
+      async submit() {
+        throw new Error("No diagnostic transport is configured");
+      },
+    },
+  });
+  diagnostics.record({ kind: "instance_started", occurredAt: new Date().toISOString() });
+  const acceleration = options.acceleration ?? createOptionalRedisAcceleration();
+  const routes = [
+    diagnosticsSchemaRoute(diagnostics),
+    requireInstanceAdministrator(options.instanceAdminToken, diagnosticsAdminRoute(diagnostics)),
+    requireInstanceAdministrator(options.instanceAdminToken, instanceAdminRoute(acceleration)),
+    requireInstanceAdministrator(
+      options.instanceAdminToken,
+      ownerBootstrapRoute(options.ownerBootstrap),
+    ),
+  ];
 
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://stash.invalid");
@@ -85,38 +95,8 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
       return;
     }
 
-    if (url.pathname === "/api/instance") {
-      if (!isAuthorized(request, options.instanceAdminToken)) {
-        json(response, 401, {
-          error: "unauthorized",
-          message: "A valid Instance Administrator bearer token is required.",
-        });
-        return;
-      }
-
-      if (request.method === "GET") {
-        json(response, 200, { name: "Stash", status: "running" });
-        return;
-      }
-
-      if (request.method === "POST") {
-        try {
-          await readJson(request);
-          json(response, 405, {
-            error: "method_not_allowed",
-            message: "This Instance surface is read-only.",
-          });
-        } catch (error) {
-          const tooLarge = error instanceof Error && error.message === "body_too_large";
-          json(response, tooLarge ? 413 : 400, {
-            error: tooLarge ? "body_too_large" : "invalid_json",
-            message: tooLarge
-              ? "Request body exceeds the 64 KiB limit."
-              : "Request body must be valid JSON.",
-          });
-        }
-        return;
-      }
+    for (const route of routes) {
+      if (route.matches(request, url) && await route.handle(request, response, url)) return;
     }
 
     json(response, 404, {

@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 
+import {
+  createOptionalRedisAcceleration,
+  type AccelerationFailure,
+  type RedisCache,
+} from "../src/acceleration.js";
 import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
 
 class ProtocolCompatibleDatabaseProbe implements DatabaseProbe {
@@ -11,6 +16,24 @@ class ProtocolCompatibleDatabaseProbe implements DatabaseProbe {
   }
 
   async close(): Promise<void> {}
+}
+
+class ProtocolCompatibleRedisFake implements RedisCache {
+  readonly values = new Map<string, string>();
+  readonly operations: string[] = [];
+  failure: Error | undefined;
+
+  async get(key: string): Promise<string | null> {
+    this.operations.push(`get:${key}`);
+    if (this.failure) throw this.failure;
+    return this.values.get(key) ?? null;
+  }
+
+  async set(key: string, value: string): Promise<void> {
+    this.operations.push(`set:${key}`);
+    if (this.failure) throw this.failure;
+    this.values.set(key, value);
+  }
 }
 
 describe("running Stash Instance", () => {
@@ -102,5 +125,40 @@ describe("running Stash Instance", () => {
     });
     assert.equal(allowed.status, 200);
     assert.deepEqual(await allowed.json(), { name: "Stash", status: "running" });
+  });
+
+  it("keeps the Instance API identical on Redis hits, misses, and outages", async () => {
+    const expected = { name: "Stash", status: "running" };
+    const authorization = { authorization: "Bearer test-instance-admin-token" };
+
+    for (const state of ["hit", "miss", "outage"] as const) {
+      const redis = new ProtocolCompatibleRedisFake();
+      const failures: AccelerationFailure[] = [];
+      if (state === "hit") {
+        redis.values.set("stash:instance:summary:v1", JSON.stringify(expected));
+      }
+      if (state === "outage") redis.failure = new Error("connection refused");
+
+      instance = await startInstance({
+        database: new ProtocolCompatibleDatabaseProbe(),
+        host: "127.0.0.1",
+        port: 0,
+        instanceAdminToken: "test-instance-admin-token",
+        acceleration: createOptionalRedisAcceleration({
+          redis,
+          onFailure: (failure) => failures.push(failure),
+        }),
+      });
+
+      const response = await fetch(`${instance.url}/api/instance`, { headers: authorization });
+      assert.equal(response.status, 200, state);
+      assert.deepEqual(await response.json(), expected, state);
+      assert.equal(redis.operations[0], "get:stash:instance:summary:v1", state);
+      assert.equal(redis.operations.some((operation) => operation.startsWith("set:")), state !== "hit");
+      assert.equal(failures.length > 0, state === "outage");
+
+      await instance.close();
+      instance = undefined;
+    }
   });
 });

@@ -1,22 +1,7 @@
-import { Pool } from "pg";
-
-import { startInstance, type DatabaseProbe } from "./instance.js";
-
-class PostgresDatabaseProbe implements DatabaseProbe {
-  readonly #pool: Pool;
-
-  constructor(connectionString: string) {
-    this.#pool = new Pool({ connectionString, connectionTimeoutMillis: 2_000 });
-  }
-
-  async verifyConnection(): Promise<void> {
-    await this.#pool.query("SELECT 1");
-  }
-
-  async close(): Promise<void> {
-    await this.#pool.end();
-  }
-}
+import { startInstance } from "./instance.js";
+import { OwnerBootstrapService } from "./owner-bootstrap.js";
+import { PostgresDatabase } from "./postgres-database.js";
+import { startRedisAcceleration, type RunningRedisAcceleration } from "./redis-acceleration.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -25,7 +10,14 @@ function requiredEnvironment(name: string): string {
 }
 
 async function main(): Promise<void> {
-  const database = new PostgresDatabaseProbe(requiredEnvironment("DATABASE_URL"));
+  const database = new PostgresDatabase(requiredEnvironment("DATABASE_URL"));
+  const redisUrl = process.env.REDIS_URL?.trim();
+  let redis: RunningRedisAcceleration | undefined;
+  if (redisUrl) {
+    redis = startRedisAcceleration(redisUrl, ({ operation, key, cause }) => {
+      console.warn(`Redis acceleration degraded (${operation} ${key}): ${cause.message}`);
+    });
+  }
   const port = Number.parseInt(process.env.PORT ?? "3000", 10);
   if (!Number.isInteger(port) || port < 1 || port > 65_535) {
     throw new Error("PORT must be an integer between 1 and 65535");
@@ -36,12 +28,15 @@ async function main(): Promise<void> {
     host: process.env.HOST ?? "0.0.0.0",
     port,
     instanceAdminToken: requiredEnvironment("INSTANCE_ADMIN_TOKEN"),
+    ownerBootstrap: new OwnerBootstrapService(database),
+    ...(redis ? { acceleration: redis.acceleration } : {}),
   });
   console.log(`Stash Instance listening on ${instance.url}`);
 
   const shutdown = async () => {
     console.log("Stopping Stash Instance");
     await instance.close();
+    await redis?.close();
     process.exit(0);
   };
   process.once("SIGINT", shutdown);
