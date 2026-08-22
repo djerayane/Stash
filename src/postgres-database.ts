@@ -1,7 +1,7 @@
 import { Pool, type PoolClient } from "pg";
 
 import type { DatabaseProbe } from "./instance.js";
-import type { NoteRecord, NoteRepository } from "./notes.js";
+import type { NoteRecord, NoteRepository, PortableNoteProjection } from "./notes.js";
 import type { BootstrapRecord, OwnerBootstrapRepository } from "./owner-bootstrap.js";
 import type { AccountAuthenticationRecord, PasswordAuthRepository, SessionRecord } from "./password-auth.js";
 import type { OidcAuthRepository, OidcIdentityKey, OidcIdentityRecord, OidcOrganizationConfiguration } from "./oidc-auth.js";
@@ -204,6 +204,7 @@ export class PostgresDatabase implements
   async createNote(
     memberId: string,
     note: NoteRecord,
+    projection: PortableNoteProjection,
   ): Promise<"created" | "workspace_forbidden" | "project_forbidden"> {
     return this.#withTransaction(async (client) => {
       await this.#ensureNoteSchema(client);
@@ -229,8 +230,8 @@ export class PostgresDatabase implements
       }
       await client.query(
         `INSERT INTO stash_notes
-          (id, workspace_id, project_id, content, tags, reminder_at, created_by_account_id)
-         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)`,
+          (id, workspace_id, project_id, content, tags, reminder_at, created_by_account_id, created_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)`,
         [
           note.id,
           note.workspaceId,
@@ -239,8 +240,10 @@ export class PostgresDatabase implements
           JSON.stringify(note.tags),
           note.reminder?.at ?? null,
           note.createdByMemberId,
+          note.createdAt,
         ],
       );
+      await this.#recordPortableProjection(client, "Note", note.id, "stash.note.v1", projection);
       return "created";
     });
   }
@@ -752,7 +755,7 @@ export class PostgresDatabase implements
         UNIQUE (workspace_id, project_key)
       );
       CREATE TABLE IF NOT EXISTS stash_portable_projection_outbox (
-        object_kind TEXT NOT NULL CHECK (object_kind IN ('Workspace', 'Project')),
+        object_kind TEXT NOT NULL CHECK (object_kind IN ('Workspace', 'Project', 'Note')),
         object_id UUID NOT NULL,
         revision INTEGER NOT NULL CHECK (revision > 0),
         projection_schema TEXT NOT NULL,
@@ -774,17 +777,37 @@ export class PostgresDatabase implements
         content TEXT NOT NULL CHECK (length(content) > 0),
         tags JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(tags) = 'array'),
         reminder_at TIMESTAMPTZ,
-        created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id)
+        created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id),
+        created_at TIMESTAMPTZ NOT NULL
       )
+    `);
+    await client.query("SELECT pg_advisory_xact_lock(1094218495)");
+    await client.query(`
+      DO $migration$
+      BEGIN
+        IF EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conrelid = 'stash_portable_projection_outbox'::regclass
+            AND conname = 'stash_portable_projection_outbox_object_kind_check'
+            AND pg_get_constraintdef(oid) NOT LIKE '%Note%'
+        ) THEN
+          ALTER TABLE stash_portable_projection_outbox
+            DROP CONSTRAINT stash_portable_projection_outbox_object_kind_check;
+          ALTER TABLE stash_portable_projection_outbox
+            ADD CONSTRAINT stash_portable_projection_outbox_object_kind_check
+            CHECK (object_kind IN ('Workspace', 'Project', 'Note'));
+        END IF;
+      END
+      $migration$
     `);
   }
 
   async #recordPortableProjection(
     client: PoolClient,
-    objectKind: "Workspace" | "Project",
+    objectKind: "Workspace" | "Project" | "Note",
     objectId: string,
-    projectionSchema: "stash.workspace.v1" | "stash.project.v1",
-    payload: PortableWorkspaceProjection | PortableProjectProjection,
+    projectionSchema: "stash.workspace.v1" | "stash.project.v1" | "stash.note.v1",
+    payload: PortableWorkspaceProjection | PortableProjectProjection | PortableNoteProjection,
   ): Promise<void> {
     await client.query(
       `INSERT INTO stash_portable_projection_outbox

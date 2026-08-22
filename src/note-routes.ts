@@ -21,7 +21,14 @@ export function noteRoutes(service: NoteService, memberAccess: MemberAccessResol
         }
         const result = await service.capture(access.accountId, workspaceId, await readJson(request));
         if (result.status === "created") {
-          json(response, 201, result.note);
+          const { createdByMemberId: _, ...note } = result.note;
+          json(response, 201, {
+            ...note,
+            portableProjection: {
+              format: result.projection.schema,
+              state: "recorded",
+            },
+          });
         } else {
           json(response, 403, {
             error: "workspace_forbidden",

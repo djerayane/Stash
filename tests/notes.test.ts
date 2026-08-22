@@ -6,6 +6,7 @@ import {
   NoteService,
   type NoteRecord,
   type NoteRepository,
+  type PortableNoteProjection,
 } from "../src/notes.js";
 import type { MemberAccessResolver } from "../src/workspaces-projects.js";
 
@@ -14,15 +15,25 @@ const projectId = "22222222-2222-4222-8222-222222222222";
 
 class ProtocolCompatibleNoteDatabase implements DatabaseProbe, NoteRepository {
   readonly notes = new Map<string, NoteRecord>();
+  readonly portableProjectionOutbox: PortableNoteProjection[] = [];
   failure: Error | undefined;
+  projectionFailure: Error | undefined;
 
   async verifyConnection(): Promise<void> {}
   async close(): Promise<void> {}
 
-  async createNote(memberId: string, note: NoteRecord) {
+  async findPortableMemberIdentity(memberId: string) {
+    return memberId === "ada"
+      ? { localAccountId: "ada", displayName: "Ada Lovelace" }
+      : undefined;
+  }
+
+  async createNote(memberId: string, note: NoteRecord, projection: PortableNoteProjection) {
     if (this.failure) throw this.failure;
     if (memberId !== "ada" || note.workspaceId !== workspaceId) return "workspace_forbidden" as const;
     if (note.projectId && note.projectId !== projectId) return "project_forbidden" as const;
+    if (this.projectionFailure) throw this.projectionFailure;
+    this.portableProjectionOutbox.push(projection);
     this.notes.set(note.id, note);
     return "created" as const;
   }
@@ -76,11 +87,25 @@ describe("capturing Notes", () => {
     const note = await response.json() as Record<string, unknown>;
     assert.equal(note.workspaceId, workspaceId);
     assert.equal(note.content, "Follow up on the release retrospective.");
-    assert.equal(note.createdByMemberId, "ada");
+    assert.equal(note.createdByMemberId, undefined);
+    assert.equal(typeof note.createdAt, "string");
     assert.equal(note.projectId, undefined);
     assert.deepEqual(note.tags, []);
     assert.equal(note.reminder, undefined);
+    assert.deepEqual(note.portableProjection, {
+      format: "stash.note.v1",
+      state: "recorded",
+    });
     assert.equal(database.notes.size, 1);
+    assert.deepEqual(database.portableProjectionOutbox, [{
+      schema: "stash.note.v1",
+      id: note.id,
+      workspaceId,
+      content: "Follow up on the release retrospective.",
+      tags: [],
+      createdAt: note.createdAt,
+      createdBy: { localAccountId: "ada", displayName: "Ada Lovelace" },
+    }]);
   });
 
   it("captures optional Project, tags, and reminder structure", async () => {
@@ -94,11 +119,25 @@ describe("capturing Notes", () => {
     });
 
     assert.equal(response.status, 201);
-    const note = await response.json() as NoteRecord;
+    const note = await response.json() as Omit<NoteRecord, "createdByMemberId"> & {
+      portableProjection: { format: string; state: string };
+    };
     assert.equal(note.projectId, projectId);
     assert.deepEqual(note.tags, ["launch", "follow-up"]);
     assert.deepEqual(note.reminder, { at: "2026-09-02T08:30:00.000Z" });
-    assert.deepEqual(database.notes.get(note.id), note);
+    const { portableProjection: _, ...publicNote } = note;
+    assert.deepEqual(database.notes.get(note.id), { ...publicNote, createdByMemberId: "ada" });
+    assert.deepEqual(database.portableProjectionOutbox[0], {
+      schema: "stash.note.v1",
+      id: note.id,
+      workspaceId,
+      projectId,
+      content: "Prepare the launch checklist.",
+      tags: ["launch", "follow-up"],
+      reminder: { at: "2026-09-02T08:30:00.000Z" },
+      createdAt: note.createdAt,
+      createdBy: { localAccountId: "ada", displayName: "Ada Lovelace" },
+    });
   });
 
   it("makes permission, input, and recoverable persistence failures visible without saving data", async () => {
@@ -136,5 +175,14 @@ describe("capturing Notes", () => {
     const body = await unavailable.text();
     assert.doesNotMatch(body, /postgres|secret/i);
     assert.equal(database.notes.size, 0);
+
+    database.failure = undefined;
+    database.projectionFailure = new Error("projection unavailable");
+    const projectionUnavailable = await capture(baseUrl, "member-ada", {
+      content: "Must stay atomic",
+    });
+    assert.equal(projectionUnavailable.status, 503);
+    assert.equal(database.notes.size, 0);
+    assert.equal(database.portableProjectionOutbox.length, 0);
   });
 });

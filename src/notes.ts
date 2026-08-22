@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { PortableIdentity } from "./workspaces-projects.js";
 
 export interface NoteReminder {
   at: string;
@@ -10,14 +11,29 @@ export interface NoteRecord {
   content: string;
   tags: string[];
   createdByMemberId: string;
+  createdAt: string;
+  projectId?: string;
+  reminder?: NoteReminder;
+}
+
+export interface PortableNoteProjection {
+  schema: "stash.note.v1";
+  id: string;
+  workspaceId: string;
+  content: string;
+  tags: string[];
+  createdAt: string;
+  createdBy: PortableIdentity;
   projectId?: string;
   reminder?: NoteReminder;
 }
 
 export interface NoteRepository {
+  findPortableMemberIdentity(memberId: string): Promise<PortableIdentity | undefined>;
   createNote(
     memberId: string,
     note: NoteRecord,
+    projection: PortableNoteProjection,
   ): Promise<"created" | "workspace_forbidden" | "project_forbidden">;
 }
 
@@ -68,10 +84,12 @@ export class NoteService {
   }
 
   async capture(memberId: string, workspaceId: string, value: unknown): Promise<
-    | { status: "created"; note: NoteRecord }
+    | { status: "created"; note: NoteRecord; projection: PortableNoteProjection }
     | { status: "workspace_forbidden" | "project_forbidden" }
   > {
     if (!isUuid(workspaceId) || !isNoteInput(value)) throw new InvalidNoteInput();
+    const createdBy = await this.#repository.findPortableMemberIdentity(memberId);
+    if (!createdBy) throw new Error("member_identity_unavailable");
     const tags = [...new Set((value.tags ?? []).map((tag) => tag.trim()))];
     const note: NoteRecord = {
       id: randomUUID(),
@@ -79,10 +97,22 @@ export class NoteService {
       content: value.content,
       tags,
       createdByMemberId: memberId,
+      createdAt: new Date().toISOString(),
       ...(value.projectId ? { projectId: value.projectId } : {}),
       ...(value.reminder ? { reminder: { at: new Date(value.reminder.at).toISOString() } } : {}),
     };
-    const status = await this.#repository.createNote(memberId, note);
-    return status === "created" ? { status, note } : { status };
+    const projection: PortableNoteProjection = {
+      schema: "stash.note.v1",
+      id: note.id,
+      workspaceId: note.workspaceId,
+      content: note.content,
+      tags: note.tags,
+      createdAt: note.createdAt,
+      createdBy,
+      ...(note.projectId ? { projectId: note.projectId } : {}),
+      ...(note.reminder ? { reminder: note.reminder } : {}),
+    };
+    const status = await this.#repository.createNote(memberId, note, projection);
+    return status === "created" ? { status, note, projection } : { status };
   }
 }

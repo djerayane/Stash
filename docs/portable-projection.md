@@ -56,3 +56,36 @@ to Identity Stubs rather than being matched by name automatically.
 The outbox envelope stores `object_kind`, `object_id`, `revision`, `projection_schema`, the JSON
 `payload`, creation time, and processing `state`. Consumers select the format using
 `projection_schema`; they must not infer a payload version from the database table layout.
+
+## `stash.note.v1`
+
+A captured Note records a Markdown-compatible content string and its durable metadata. Content is
+preserved exactly as authored; tags are trimmed and deduplicated, reminder timestamps and
+`createdAt` are normalized to UTC, and `projectId` and `reminder` are omitted when absent.
+
+```json
+{
+  "schema": "stash.note.v1",
+  "id": "d7289ce8-b0bb-4f44-971d-9b373fc34962",
+  "workspaceId": "89fa5772-0439-4cc1-b67a-bdeb12ae0ed5",
+  "projectId": "2a940fff-b3d9-4ef5-b55f-cc150b16b83e",
+  "content": "Prepare the launch checklist.",
+  "tags": ["launch", "follow-up"],
+  "reminder": { "at": "2026-09-02T08:30:00.000Z" },
+  "createdAt": "2026-08-22T18:42:03.193Z",
+  "createdBy": {
+    "localAccountId": "dd24a52e-f591-42a8-90af-a981e1449877",
+    "displayName": "Ada Lovelace"
+  }
+}
+```
+
+`id` is the stable Note identity. `workspaceId` and optional `projectId` preserve its relationships;
+the content field becomes the Note Markdown file body when projected. Creator identity is resolved
+from the authenticated Instance account, never accepted from the client. On import, the same
+explicit-mapping rules apply as for Workspace and Project creators: an unavailable local identity
+degrades to an Identity Stub preserving `displayName`, without automatic name matching.
+
+The Note row and its `stash.note.v1` outbox event commit in one transaction. A capture response
+reports the projection as `recorded` only after both writes succeed; it does not claim that a full
+Portable Workspace Export has already been generated.
