@@ -172,6 +172,33 @@ describe("offline mobile capture synchronization", () => {
     assert.equal(database.notes.size, 1);
   });
 
+  it("retains an offline capture for its originating Instance when pairing changes", async () => {
+    const { database, baseUrl } = await run();
+    const store = new MemoryEncryptedStore();
+    const requestedUrls: string[] = [];
+    const client = new MobileCaptureClient(store, async (input, init) => {
+      requestedUrls.push(String(input));
+      return fetch(input, init);
+    }, { allowInsecureInstanceForTest: true });
+    await client.pair({ instanceUrl: baseUrl, memberToken: "member-ada", workspaceId });
+    const queued = await client.captureText("Belongs only to Instance A");
+
+    const otherWorkspaceId = "99999999-9999-4999-8999-999999999999";
+    await client.pair({ instanceUrl: "https://instance-b.example", memberToken: "member-b", workspaceId: otherWorkspaceId });
+    const retained = await client.sync();
+
+    assert.deepEqual(retained, { status: "attention_required", count: 0, error: "capture_pairing_mismatch" });
+    assert.deepEqual(requestedUrls, []);
+    assert.equal(database.notes.size, 0);
+    assert.equal((await client.outbox())[0]?.id, queued.id);
+    assert.match((await client.outbox())[0]?.lastError ?? "", /originating Instance/i);
+
+    await client.pair({ instanceUrl: baseUrl, memberToken: "member-ada", workspaceId });
+    assert.deepEqual(await client.sync(), { status: "synced", count: 1 });
+    assert.equal(database.notes.size, 1);
+    assert.equal((await client.outbox()).length, 0);
+  });
+
   it("returns a visible conflict and retains a reused capture ID with different content", async () => {
     const { baseUrl } = await run();
     const store = new MemoryEncryptedStore();
@@ -273,7 +300,7 @@ describe("offline mobile capture synchronization", () => {
     const store = new MemoryEncryptedStore();
     await store.savePairing({ instanceUrl: "https://stash.example", memberToken: "member-ada", workspaceId });
     await store.saveCapture({ id: "44444444-4444-4444-8444-444444444444", kind: "text", content: "Wait",
-      createdAt: new Date().toISOString(), attempts: 0 });
+      createdAt: new Date().toISOString(), attempts: 0, origin: { instanceUrl: "https://stash.example", workspaceId } });
     let requestSignal: AbortSignal | undefined;
     const client = new MobileCaptureClient(store, async (_input, init) => {
       requestSignal = init?.signal ?? undefined;
@@ -300,7 +327,7 @@ describe("offline mobile capture synchronization", () => {
     const store = new MemoryEncryptedStore();
     await store.savePairing({ instanceUrl: "https://stash.example", memberToken: "member-ada", workspaceId });
     await store.saveCapture({ id: "44444444-4444-4444-8444-444444444444", kind: "text", content: "Wait",
-      createdAt: "2026-08-22T10:00:00.000Z", attempts: 0 });
+      createdAt: "2026-08-22T10:00:00.000Z", attempts: 0, origin: { instanceUrl: "https://stash.example", workspaceId } });
     let refreshSignal: AbortSignal | undefined;
     let syncRequests = 0;
     let resolveRefresh!: (response: Response) => void;

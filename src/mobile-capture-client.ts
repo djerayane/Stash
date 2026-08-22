@@ -19,6 +19,7 @@ export interface MobileCapture {
   tags?: string[];
   reminder?: { at: string };
   createdAt: string;
+  origin?: { instanceUrl: string; workspaceId: string };
   attempts: number;
   nextRetryAt?: string;
   lastError?: string;
@@ -141,8 +142,11 @@ export class MobileCaptureClient {
 
   async #enqueue(kind: MobileCapture["kind"], content: string, checklist: MobileCapture["checklist"], structure: Pick<MobileCapture, "projectId" | "tags" | "reminder">) {
     if (!content.trim()) throw new Error("A capture requires content.");
+    const pairing = await this.#store.loadPairing();
+    if (!pairing) throw new Error("Pair the app before saving a capture.");
     const capture: MobileCapture = {
       id: crypto.randomUUID(), kind, content: content.trim(), createdAt: new Date().toISOString(), attempts: 0,
+      origin: { instanceUrl: pairing.instanceUrl, workspaceId: pairing.workspaceId },
       ...(checklist ? { checklist } : {}), ...(structure.projectId ? { projectId: structure.projectId } : {}),
       ...(structure.tags ? { tags: structure.tags } : {}), ...(structure.reminder ? { reminder: structure.reminder } : {}),
     };
@@ -169,13 +173,24 @@ export class MobileCaptureClient {
     let attentionError: string | undefined;
     let retryPending = false;
     for (const capture of await this.#store.listCaptures()) {
+      if (!capture.origin) {
+        await this.#store.saveCapture({ ...capture, lastError: "This legacy capture has no originating Instance and cannot be synchronized automatically." });
+        attentionError ??= "capture_origin_unknown";
+        continue;
+      }
+      if (capture.origin.instanceUrl !== pairing.instanceUrl || capture.origin.workspaceId !== pairing.workspaceId) {
+        await this.#store.saveCapture({ ...capture, lastError: "This capture is retained for its originating Instance and Workspace. Pair with them to synchronize it." });
+        attentionError ??= "capture_pairing_mismatch";
+        continue;
+      }
       if (capture.nextRetryAt && Date.parse(capture.nextRetryAt) > this.#now()) { retryPending = true; continue; }
       let response: Response;
       try {
         response = await this.#fetch(`${pairing.instanceUrl}/api/mobile/v1/workspaces/${pairing.workspaceId}/captures`, {
           method: "POST",
           headers: { authorization: `Bearer ${pairing.memberToken}`, "content-type": "application/json" },
-          body: JSON.stringify({ protocol: "stash.mobile-capture.v1", ...capture, lastError: undefined, attempts: undefined, nextRetryAt: undefined }),
+          body: JSON.stringify({ protocol: "stash.mobile-capture.v1", ...capture, origin: undefined,
+            lastError: undefined, attempts: undefined, nextRetryAt: undefined }),
           signal: controller.signal,
         });
       } catch (error) {
