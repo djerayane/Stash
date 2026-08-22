@@ -33,6 +33,11 @@ export interface MobileCapture {
   };
 }
 
+export interface IncomingShareDelivery {
+  id: string;
+  payload: { value: string; shareType: string; mimeType?: string };
+}
+
 export interface EncryptedMobileCaptureStore {
   loadPairing(): Promise<MobileCapturePairing | undefined>;
   savePairing(pairing: MobileCapturePairing): Promise<void>;
@@ -41,6 +46,10 @@ export interface EncryptedMobileCaptureStore {
   removeCapture(id: string): Promise<void>;
   loadOptions(scope: string): Promise<MobileCaptureOptions>;
   saveOptions(scope: string, options: MobileCaptureOptions): Promise<void>;
+  stageIncomingShares(fingerprint: string, deliveries: IncomingShareDelivery[]): Promise<IncomingShareDelivery[]>;
+  acknowledgeNativeShares(fingerprint?: string): Promise<void>;
+  listIncomingShares(): Promise<IncomingShareDelivery[]>;
+  removeIncomingShare(id: string): Promise<void>;
 }
 
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;

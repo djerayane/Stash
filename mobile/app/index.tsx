@@ -24,14 +24,15 @@ import {
 import { IncomingCaptureDeliveryGate, parseIncomingCapture } from "@/src/incoming-capture";
 import { useIncomingSharePayloads } from "@/src/incoming-share";
 import { readBoundedOriginal } from "@/src/media-input";
+import { SerializedIncomingShareDrain } from "@/src/incoming-share-deliveries";
 
 export default function CaptureScreen() {
   useColorScheme();
   const mounted = useRef(true);
   const incomingGate = useRef(new IncomingCaptureDeliveryGate());
-  const processingShare = useRef(false);
-  const incomingShare = useIncomingSharePayloads();
-  const client = useMemo(() => new MobileCaptureClient(new SecureMobileCaptureStore(), fetch), []);
+  const store = useMemo(() => new SecureMobileCaptureStore(), []);
+  const incomingShare = useIncomingSharePayloads(store);
+  const client = useMemo(() => new MobileCaptureClient(store, fetch), [store]);
   const [content, setContent] = useState("");
   const [checklist, setChecklist] = useState(false);
   const [status, setStatus] = useState("Saved captures synchronize when your Instance is reachable.");
@@ -100,13 +101,8 @@ export default function CaptureScreen() {
     const subscription = Linking.addEventListener("url", ({ url }) => { void handle(url, "event"); });
     return () => subscription.remove();
   }, [client]);
-  useEffect(() => {
-    if (incomingShare.error && mounted.current) setStatus("Shared content could not be read and was not saved.");
-    if (!incomingShare.deliveries.length || processingShare.current) return;
-    processingShare.current = true;
-    void (async () => {
-      try {
-        for (const { id, payload } of incomingShare.deliveries) {
+  const shareDrain = useMemo(() => new SerializedIncomingShareDrain(async () => {
+        for (const { id, payload } of await store.listIncomingShares()) {
           if (payload.shareType === "text" || payload.shareType === "url") {
             await client.captureSharedContent(payload.value, "share_sheet", {}, id);
           } else {
@@ -115,15 +111,16 @@ export default function CaptureScreen() {
             await client.captureMedia({ kind, filename, contentType: payload.mimeType ?? "application/octet-stream",
               base64: await readBoundedOriginal(new File(payload.value)) }, "", {}, id);
           }
-          incomingShare.acknowledge(id);
+          await store.removeIncomingShare(id);
         }
         if (mounted.current) setStatus("Shared content saved securely on this device.");
         const result = await client.sync();
         if (mounted.current) setStatus(presentMobileSyncResult(result, await client.outbox()));
-      } catch (error) { if (mounted.current) setStatus(error instanceof Error ? error.message : "Shared content could not be saved."); }
-      finally { processingShare.current = false; }
-    })();
-  }, [client, incomingShare.error, incomingShare.deliveries, incomingShare.acknowledge]);
+  }, (error) => { if (mounted.current) setStatus(error instanceof Error ? error.message : "Shared content could not be saved."); }), [client, store]);
+  useEffect(() => {
+    if (incomingShare.error && mounted.current) setStatus("Shared content could not be read and was not saved.");
+    shareDrain.request();
+  }, [incomingShare.error, incomingShare.revision, shareDrain]);
 
   const save = async () => {
     try {

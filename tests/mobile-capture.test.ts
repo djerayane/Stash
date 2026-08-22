@@ -25,7 +25,7 @@ import {
   reconcileCaptureSelections,
 } from "../mobile/src/capture-options-focus.js";
 import { IncomingCaptureDeliveryGate, parseIncomingCapture } from "../mobile/src/incoming-capture.js";
-import { IncomingShareDeliveryBatch } from "../mobile/src/incoming-share-deliveries.js";
+import { IncomingShareDeliveryBatch, SerializedIncomingShareDrain, incomingShareFingerprint } from "../mobile/src/incoming-share-deliveries.js";
 import { MAX_ATTACHMENT_BYTES, readBoundedOriginal } from "../mobile/src/media-input.js";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
@@ -47,6 +47,17 @@ class MemoryEncryptedStore implements EncryptedMobileCaptureStore {
   async loadOptions(scope: string) { return structuredClone(this.options.get(scope) ?? { projects: [], tags: [], reminders: [] }); }
   async saveOptions(scope: string, options: { projects: { id: string; name: string }[]; tags: string[];
     reminders: { id: string; label: string; offsetMinutes: number }[] }) { this.options.set(scope, structuredClone(options)); }
+  incomingShares: import("../src/mobile-capture-client.js").IncomingShareDelivery[] = [];
+  nativeShare: { fingerprint: string; ids: string[] } | undefined;
+  async stageIncomingShares(fingerprint: string, deliveries: import("../src/mobile-capture-client.js").IncomingShareDelivery[]) {
+    if (this.nativeShare?.fingerprint !== fingerprint) {
+      this.incomingShares.push(...structuredClone(deliveries)); this.nativeShare = { fingerprint, ids: deliveries.map(({ id }) => id) };
+    }
+    return structuredClone(this.incomingShares.filter(({ id }) => this.nativeShare!.ids.includes(id)));
+  }
+  async acknowledgeNativeShares(fingerprint?: string) { if (!fingerprint || this.nativeShare?.fingerprint === fingerprint) this.nativeShare = undefined; }
+  async listIncomingShares() { return structuredClone(this.incomingShares); }
+  async removeIncomingShare(id: string) { this.incomingShares = this.incomingShares.filter((item) => item.id !== id); }
 }
 
 class RecordingCiphertextRepository implements CiphertextStateRepository {
@@ -170,6 +181,44 @@ describe("offline mobile capture synchronization", () => {
     assert.equal(batch.acknowledge(failedA!.id), true);
     assert.deepEqual(batch.pending(), []);
     assert.deepEqual(store.captures.map(({ id }) => id), [savedA!.id, invocationB.id, failedA!.id]);
+  });
+
+  it("encrypts a native share inbox before acknowledgement and resumes it after restart", async () => {
+    const repository = new RecordingCiphertextRepository();
+    const firstStore = new EncryptedStateMobileCaptureStore(repository, testCipher);
+    const payload = { shareType: "text", value: "survive restart" };
+    const fingerprint = incomingShareFingerprint([payload]);
+    const original = [{ id: "11111111-1111-4111-8111-111111111111", payload }];
+    await firstStore.stageIncomingShares(fingerprint, original);
+    assert.doesNotMatch([...repository.ciphertext.values()].join(" "), /survive restart/);
+    const restartedStore = new EncryptedStateMobileCaptureStore(repository, testCipher);
+    assert.deepEqual(await restartedStore.listIncomingShares(), original);
+    const replay = await restartedStore.stageIncomingShares(fingerprint,
+      [{ id: "22222222-2222-4222-8222-222222222222", payload }]);
+    assert.deepEqual(replay, original, "restart reuses the durable delivery identity before native acknowledgement");
+    await restartedStore.acknowledgeNativeShares(fingerprint);
+  });
+
+  it("reruns a serialized drain when B is staged while A is awaiting a failed write", async () => {
+    const pending = ["A"];
+    const captured: string[] = [];
+    let release!: () => void;
+    const paused = new Promise<void>((resolve) => { release = resolve; });
+    let attempts = 0;
+    const errors: unknown[] = [];
+    const drain = new SerializedIncomingShareDrain(async () => {
+      attempts += 1;
+      if (attempts === 1) { await paused; throw new Error("temporary encrypted write failure"); }
+      while (pending.length) captured.push(pending.shift()!);
+    }, (error) => errors.push(error));
+    const running = drain.request();
+    pending.push("B");
+    const joined = drain.request();
+    release();
+    await Promise.all([running, joined]);
+    assert.deepEqual(captured, ["A", "B"]);
+    assert.equal(errors.length, 1);
+    assert.equal(attempts, 2);
   });
   let instance: RunningInstance | undefined;
   afterEach(async () => { await instance?.close(); instance = undefined; });

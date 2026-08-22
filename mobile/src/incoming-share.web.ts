@@ -1,4 +1,3 @@
-export function useIncomingSharePayloads() {
-  return { deliveries: [] as { id: string; payload: { value: string; shareType: string; mimeType?: string } }[],
-    acknowledge: (_id: string) => undefined, error: null as Error | null };
+export function useIncomingSharePayloads(_store: unknown) {
+  return { revision: 0, refresh: () => undefined, error: null as Error | null };
 }

@@ -1,34 +1,36 @@
 import { clearSharedPayloads, getSharedPayloads, type SharePayload } from "expo-sharing";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { AppState } from "react-native";
-import { IncomingShareDeliveryBatch, type IncomingShareDelivery } from "./incoming-share-deliveries";
+import type { EncryptedMobileCaptureStore } from "../../src/mobile-capture-client";
+import { incomingShareFingerprint } from "./incoming-share-deliveries";
 
-export function useIncomingSharePayloads() {
-  const batch = useRef(new IncomingShareDeliveryBatch<SharePayload>());
-  const stageNativeInvocation = useCallback(() => {
-    const payloads = getSharedPayloads();
-    if (payloads.length) {
-      batch.current.receiveInvocation(payloads);
-      // Native storage is a single replaceable slot. Clear it once the invocation
-      // is staged, never later when doing so could erase a newer invocation.
-      clearSharedPayloads();
-    }
-    return batch.current.pending();
-  }, []);
-  const [deliveries, setDeliveries] = useState<IncomingShareDelivery<SharePayload>[]>([]);
+export function useIncomingSharePayloads(store: EncryptedMobileCaptureStore) {
+  const [revision, setRevision] = useState(0);
   const [error, setError] = useState<Error | null>(null);
+  const stageNativeInvocation = useCallback(async () => {
+    let payloads = getSharedPayloads();
+    while (payloads.length) {
+      const fingerprint = incomingShareFingerprint(payloads);
+      await store.stageIncomingShares(fingerprint, payloads.map((payload) => ({ id: crypto.randomUUID(), payload })));
+      const current = getSharedPayloads();
+      if (incomingShareFingerprint(current) === fingerprint) {
+        clearSharedPayloads();
+        await store.acknowledgeNativeShares(fingerprint);
+        break;
+      }
+      payloads = current;
+    }
+    if (!payloads.length) await store.acknowledgeNativeShares();
+    setRevision((value) => value + 1);
+  }, [store]);
   const refresh = useCallback(() => {
-    try { setDeliveries(stageNativeInvocation()); setError(null); }
-    catch (cause) { setError(cause instanceof Error ? cause : new Error("Shared content could not be read.")); }
+    void stageNativeInvocation().then(() => setError(null),
+      (cause) => setError(cause instanceof Error ? cause : new Error("Shared content could not be read.")));
   }, [stageNativeInvocation]);
   useEffect(() => {
     refresh();
     const subscription = AppState.addEventListener("change", (state) => { if (state === "active") refresh(); });
     return () => subscription.remove();
   }, [refresh]);
-  const acknowledge = useCallback((id: string) => {
-    batch.current.acknowledge(id);
-    setDeliveries(batch.current.pending());
-  }, []);
-  return { deliveries, acknowledge, error };
+  return { revision, refresh, error };
 }
