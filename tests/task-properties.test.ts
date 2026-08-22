@@ -161,7 +161,9 @@ describe("planning Tasks through Project-scoped Task Keys", () => {
   });
 
   it("derives one inverse Dependency view and lets either endpoint replace it", async () => {
-    const { get, patch } = await run();
+    const { database, get, patch } = await run();
+    database.otherTasks[0]!.dependencies = [{ taskId: thirdTaskId, type: "depends_on" }];
+    assert.deepEqual((await (await get(projectId, "STASH-13")).json() as { task: PortableTaskProjection }).task.dependencies, []);
     assert.equal((await patch({ dependencies: [{ taskId: dependencyTaskId, type: "depends_on" }] })).status, 200);
     const prerequisite = await (await get(projectId, "STASH-13")).json() as { task: PortableTaskProjection };
     assert.deepEqual(prerequisite.task.dependencies, [{ taskId, type: "required_by" }]);

@@ -164,6 +164,9 @@ replace its complete visible relationship set without creating a second copy of 
 replacements lock and validate the complete Workspace Task graph in one transaction. Any direct or
 indirect cycle rejects the whole update before canonical state changes. Successful changes append
 portable projection revisions for every endpoint whose derived view changed.
+Instances that briefly used the earlier per-Task dependency JSON upgrade it once into canonical
+edges (deduplicating equivalent inverse forms), then remove that operational column. It is never a
+second read or write source.
 
 The operational Note body is a versioned rich-text document rendered by Stash's WYSIWYG editor.
 Every successful edit atomically increments the Note revision and records another `stash.note.v1`

@@ -696,11 +696,11 @@ export class PostgresDatabase implements
       }
       delete next.statusId;
       await client.query(`UPDATE stash_tasks SET title = $2, workflow_status_id = $3, assignee_ids = $4::jsonb, priority = $5,
-        label_names = $6::jsonb, due_date = $7, estimate = $8, linked_note_ids = $9::jsonb, dependencies = $10::jsonb,
-        development_links = $11::jsonb WHERE id = $1`, [row.id, next.title.trim(), next.status.id,
+        label_names = $6::jsonb, due_date = $7, estimate = $8, linked_note_ids = $9::jsonb,
+        development_links = $10::jsonb WHERE id = $1`, [row.id, next.title.trim(), next.status.id,
         JSON.stringify([...new Set(next.assigneeIds ?? [])]), next.priority ?? "none",
         JSON.stringify([...new Set((next.labelNames ?? []).map((label) => label.trim()))]), next.dueDate ?? null, next.estimate ?? null,
-        JSON.stringify([...new Set(next.linkedNoteIds ?? [])]), JSON.stringify(next.dependencies ?? []), JSON.stringify(next.developmentLinks ?? [])]);
+        JSON.stringify([...new Set(next.linkedNoteIds ?? [])]), JSON.stringify(next.developmentLinks ?? [])]);
       const saved = await client.query<any>(taskPlanningSelect, [projectId, taskKey, memberId]);
       const task = taskProjectionFromRow(saved.rows[0]);
       await this.#recordPortableProjection(client, "Task", task.id, task.schema, task);
@@ -1816,7 +1816,6 @@ export class PostgresDatabase implements
       ALTER TABLE stash_tasks ADD COLUMN IF NOT EXISTS due_date DATE;
       ALTER TABLE stash_tasks ADD COLUMN IF NOT EXISTS estimate DOUBLE PRECISION CHECK (estimate >= 0);
       ALTER TABLE stash_tasks ADD COLUMN IF NOT EXISTS linked_note_ids JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(linked_note_ids) = 'array');
-      ALTER TABLE stash_tasks ADD COLUMN IF NOT EXISTS dependencies JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(dependencies) = 'array');
       ALTER TABLE stash_tasks ADD COLUMN IF NOT EXISTS development_links JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(development_links) = 'array');
       CREATE TABLE IF NOT EXISTS stash_task_note_sources (
         task_id UUID NOT NULL REFERENCES stash_tasks(id), note_id UUID NOT NULL REFERENCES stash_notes(id), PRIMARY KEY (task_id, note_id)
@@ -1832,6 +1831,21 @@ export class PostgresDatabase implements
         CHECK (dependent_task_id <> prerequisite_task_id)
       )
     `);
+    const legacyDependencies = await client.query<{ present: boolean }>(`SELECT EXISTS (
+      SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema()
+      AND table_name = 'stash_tasks' AND column_name = 'dependencies') AS present`);
+    if (legacyDependencies.rows[0]?.present) {
+      await client.query(`INSERT INTO stash_task_dependencies (dependent_task_id, prerequisite_task_id)
+        SELECT CASE relation->>'type' WHEN 'depends_on' THEN task.id ELSE related.id END,
+          CASE relation->>'type' WHEN 'depends_on' THEN related.id ELSE task.id END
+        FROM stash_tasks task CROSS JOIN LATERAL jsonb_array_elements(task.dependencies) relation
+        JOIN stash_tasks related ON related.id = CASE WHEN relation->>'taskId' ~
+          '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
+          THEN (relation->>'taskId')::uuid END AND related.workspace_id = task.workspace_id
+        WHERE relation->>'type' IN ('depends_on', 'required_by') AND task.id <> related.id
+        ON CONFLICT DO NOTHING`);
+      await client.query("ALTER TABLE stash_tasks DROP COLUMN dependencies");
+    }
     await client.query("ALTER TABLE stash_notes ADD COLUMN IF NOT EXISTS document JSONB");
     await client.query("ALTER TABLE stash_notes ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0)");
     await client.query("UPDATE stash_notes SET document = jsonb_build_object('type', 'doc', 'blocks', jsonb_build_array(jsonb_build_object('type', 'paragraph', 'content', jsonb_build_array(jsonb_build_object('text', content))))) WHERE document IS NULL");
