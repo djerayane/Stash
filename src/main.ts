@@ -22,6 +22,7 @@ import { AttachmentService, LocalAttachmentStorage } from "./attachments.js";
 import { MobileCaptureService } from "./mobile-captures.js";
 import { DiscussionService } from "./discussions.js";
 import { ProjectWorkflowService } from "./project-workflows.js";
+import { PortableWorkspaceExportService } from "./portable-workspace-export.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -46,6 +47,7 @@ async function main(): Promise<void> {
   }
 
   const passwordAuth = new PasswordAuthService(database);
+  const attachmentStorage = new LocalAttachmentStorage(process.env.ATTACHMENT_STORAGE_PATH?.trim() || "/var/lib/stash/attachments");
   const githubAppId = process.env.GITHUB_APP_ID?.trim();
   const githubAppPrivateKey = process.env.GITHUB_APP_PRIVATE_KEY?.replace(/\\n/g, "\n").trim();
   if (Boolean(githubAppId) !== Boolean(githubAppPrivateKey)) throw new Error("GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY must be configured together");
@@ -72,7 +74,8 @@ async function main(): Promise<void> {
     notes: new NoteService(database),
     tasks: new TaskService(database, database),
     projectWorkflows: new ProjectWorkflowService(database),
-    attachments: new AttachmentService(database, new LocalAttachmentStorage(process.env.ATTACHMENT_STORAGE_PATH?.trim() || "/var/lib/stash/attachments")),
+    attachments: new AttachmentService(database, attachmentStorage),
+    portableWorkspaceExports: new PortableWorkspaceExportService(database, attachmentStorage),
     mobileCaptures: new MobileCaptureService(database),
     discussions: new DiscussionService(database),
     memberLocalization: new MemberLocalizationService(database),

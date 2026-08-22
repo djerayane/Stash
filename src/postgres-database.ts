@@ -30,6 +30,7 @@ import type { AttachmentRecord, AttachmentRepository, PortableAttachmentProjecti
 import type { MobileCaptureRepository } from "./mobile-captures.js";
 import type { CreateDiscussionWorkDraft, DiscussionDraft, DiscussionMessage, DiscussionRecord, DiscussionRepository, DiscussionTarget, DiscussionWorkActivity, DiscussionWorkOutcome, PortableDiscussionProjection, PortableDiscussionTarget, PortableDiscussionWorkLinkProjection } from "./discussions.js";
 import { initialWorkflowStatus, type ProjectWorkflow, type ProjectWorkflowRepository, type WorkflowStatus } from "./project-workflows.js";
+import type { PortableWorkspaceExportRepository, PortableWorkspaceExportSnapshot } from "./portable-workspace-export.js";
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
@@ -122,7 +123,8 @@ export class PostgresDatabase implements
   AttachmentRepository,
   MobileCaptureRepository,
   DiscussionRepository,
-  ProjectWorkflowRepository
+  ProjectWorkflowRepository,
+  PortableWorkspaceExportRepository
 {
   readonly #pool: Pool;
   readonly #authenticationSecrets: AuthenticationSecretCodec;
@@ -2801,6 +2803,89 @@ export class PostgresDatabase implements
        VALUES ('RepositoryConnection', $1, $2, 'stash.repository-connection.v1', $3::jsonb)`,
       [record.id, revision, JSON.stringify(projection)],
     );
+  }
+
+  async readExportSnapshot(memberId: string, workspaceId: string): Promise<
+    { status: "found"; snapshot: PortableWorkspaceExportSnapshot }
+    | { status: "workspace_forbidden" | "workspace_not_found" }
+  > {
+    // Schema preparation is deliberately outside the read-only snapshot transaction.
+    const setup = await this.#pool.connect();
+    try {
+      await this.#ensureNoteSchema(setup);
+      await this.#ensureAttachmentSchema(setup);
+      await this.#ensureInvitationSchema(setup);
+    } finally { setup.release(); }
+
+    const client = await this.#pool.connect();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const access = await client.query<{ member: boolean; guest_project_ids: string[]; workspace_projection: PortableWorkspaceProjection | null }>(
+        `SELECT
+          ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2)
+            OR (workspace.owner_type = 'organization' AND EXISTS (
+              SELECT 1 FROM stash_organization_memberships membership
+              WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2))) AS member,
+          ARRAY(SELECT project.id FROM stash_projects project JOIN stash_project_guests guest ON guest.project_id = project.id
+            WHERE project.workspace_id = workspace.id AND guest.account_id = $2 ORDER BY project.id) AS guest_project_ids,
+          projection.payload AS workspace_projection
+        FROM stash_workspaces workspace
+        LEFT JOIN LATERAL (SELECT payload FROM stash_portable_projection_outbox
+          WHERE object_kind = 'Workspace' AND object_id = workspace.id ORDER BY revision DESC LIMIT 1) projection ON TRUE
+        WHERE workspace.id = $1`, [workspaceId, memberId]);
+      const permission = access.rows[0];
+      if (!permission) { await client.query("COMMIT"); return { status: "workspace_not_found" }; }
+      const guestProjectIds = permission.guest_project_ids ?? [];
+      if (!permission.member && guestProjectIds.length === 0) { await client.query("COMMIT"); return { status: "workspace_forbidden" }; }
+      if (!permission.workspace_projection) throw new Error("workspace_projection_unavailable");
+
+      const notes = await client.query<{ id: string; payload: PortableNoteProjection | null }>(
+        `SELECT note.id, projection.payload FROM stash_notes note
+         LEFT JOIN LATERAL (SELECT payload FROM stash_portable_projection_outbox
+           WHERE object_kind = 'Note' AND object_id = note.id ORDER BY revision DESC LIMIT 1) projection ON TRUE
+         WHERE note.workspace_id = $1 AND ($2::boolean OR note.project_id = ANY($3::uuid[]))
+         ORDER BY note.id`, [workspaceId, permission.member, guestProjectIds]);
+      const tasks = await client.query<{ id: string; payload: PortableTaskProjection | null }>(
+        `SELECT task.id, projection.payload FROM stash_tasks task
+         LEFT JOIN LATERAL (SELECT payload FROM stash_portable_projection_outbox
+           WHERE object_kind = 'Task' AND object_id = task.id ORDER BY revision DESC LIMIT 1) projection ON TRUE
+         WHERE task.workspace_id = $1 AND ($2::boolean OR task.project_id = ANY($3::uuid[]))
+         ORDER BY task.id`, [workspaceId, permission.member, guestProjectIds]);
+      const attachments = await client.query<{ id: string; storage_key: string; payload: PortableAttachmentProjection | null }>(
+        `SELECT attachment.id, attachment.storage_key, projection.payload FROM stash_attachments attachment
+         LEFT JOIN LATERAL (SELECT payload FROM stash_portable_projection_outbox
+           WHERE object_kind = 'Attachment' AND object_id = attachment.id ORDER BY revision DESC LIMIT 1) projection ON TRUE
+         WHERE attachment.workspace_id = $1 AND ($2::boolean OR EXISTS (
+           SELECT 1 FROM stash_notes note WHERE note.workspace_id = attachment.workspace_id
+             AND note.project_id = ANY($3::uuid[])
+             AND (strpos(note.content, attachment.relative_path) > 0
+               OR strpos(note.content, replace(attachment.relative_path, '%', '%25')) > 0)))
+         ORDER BY attachment.id`, [workspaceId, permission.member, guestProjectIds]);
+      if (notes.rows.some(({ payload }) => !payload) || tasks.rows.some(({ payload }) => !payload)
+        || attachments.rows.some(({ payload }) => !payload)) throw new Error("portable_projection_unavailable");
+      await client.query("COMMIT");
+      const noteProjections = notes.rows.map(({ payload }) => payload!); const taskProjections = tasks.rows.map(({ payload }) => payload!);
+      const visibleNoteIds = new Set(noteProjections.map(({ id }) => id));
+      const visibleTaskIds = new Set(taskProjections.map(({ id }) => id));
+      const visibleProjectIds = new Set(guestProjectIds);
+      const visibleTasks = permission.member ? taskProjections : taskProjections.map((payload) => ({
+        ...payload,
+        sourceNoteIds: payload.sourceNoteIds.filter((id) => visibleNoteIds.has(id)),
+        ...(payload.sourceBlocks ? { sourceBlocks: payload.sourceBlocks.filter(({ noteId }) => visibleNoteIds.has(noteId)) } : {}),
+        ...(payload.linkedNoteIds ? { linkedNoteIds: payload.linkedNoteIds.filter((id) => visibleNoteIds.has(id)) } : {}),
+        ...(payload.dependencies ? { dependencies: payload.dependencies.filter(({ taskId }) => visibleTaskIds.has(taskId)) } : {}),
+        ...(payload.keyAliases ? { keyAliases: payload.keyAliases.filter(({ projectId }) => visibleProjectIds.has(projectId)) } : {}),
+      }));
+      return { status: "found", snapshot: {
+        workspace: permission.workspace_projection,
+        notes: noteProjections,
+        tasks: visibleTasks,
+        attachments: attachments.rows.map(({ storage_key, payload }) => ({ storageKey: storage_key, projection: payload! })),
+      } };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally { client.release(); }
   }
 
   async #withTransaction<Result>(operation: (client: PoolClient) => Promise<Result>): Promise<Result> {

@@ -19,6 +19,7 @@ export interface AttachmentRepository {
 export interface AttachmentStorage {
   put(key: string, content: Buffer): Promise<void>;
   get(key: string): Promise<Buffer>;
+  getBounded?(key: string, maxBytes: number): Promise<Buffer>;
   delete(key: string): Promise<void>;
 }
 export class LocalAttachmentStorage implements AttachmentStorage {
@@ -26,6 +27,22 @@ export class LocalAttachmentStorage implements AttachmentStorage {
   private path(key: string) { if (!/^[0-9a-f-]+\/[0-9a-f-]+$/i.test(key)) throw new Error("invalid_storage_key"); return join(this.root, ...key.split("/")); }
   async put(key: string, content: Buffer) { const target = this.path(key); await mkdir(dirname(target), { recursive: true }); const temporary = `${target}.${randomUUID()}.tmp`; try { const file = await open(temporary, "wx", 0o600); try { await file.writeFile(content); await file.sync(); } finally { await file.close(); } await rename(temporary, target); } catch (error) { await rm(temporary, { force: true }).catch(() => undefined); throw error; } }
   get(key: string) { return readFile(this.path(key)); }
+  async getBounded(key: string, maxBytes: number): Promise<Buffer> {
+    const file = await open(this.path(key), "r");
+    try {
+      const { size } = await file.stat();
+      if (!Number.isSafeInteger(size) || size < 0 || size > maxBytes) throw new Error("attachment_size_limit");
+      const content = Buffer.alloc(size); let offset = 0;
+      while (offset < size) {
+        const { bytesRead } = await file.read(content, offset, size - offset, offset);
+        if (bytesRead === 0) throw new Error("attachment_truncated");
+        offset += bytesRead;
+      }
+      const probe = Buffer.alloc(1); const { bytesRead } = await file.read(probe, 0, 1, size);
+      if (bytesRead !== 0) throw new Error("attachment_size_changed");
+      return content;
+    } finally { await file.close(); }
+  }
   async delete(key: string) { await rm(this.path(key), { force: true }); }
 }
 export class InvalidAttachment extends Error { constructor(readonly kind: "filename" | "content_type" | "size") { super(kind); } }
