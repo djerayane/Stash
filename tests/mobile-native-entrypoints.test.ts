@@ -21,9 +21,9 @@ describe("native mobile capture entry points", () => {
     assert.match(swift, /AppIntentConfiguration/);
     assert.match(swift, /URLQueryItem\(name: "source", value: "widget"\)/);
     assert.match(plugin, /AppWidgetProvider/);
-    const androidUrl = plugin.match(/stash:\/\/capture\?source=widget&content=[^\\"]+/)?.[0];
-    assert.ok(androidUrl);
-    assert.deepEqual(parseIncomingCapture(androidUrl),
+    assert.match(plugin, /StashCaptureWidgetConfigureActivity/);
+    assert.match(plugin, /appendQueryParameter\(\\"content\\", content\)/);
+    assert.deepEqual(parseIncomingCapture("stash://capture?source=widget&content=New%20widget%20capture"),
       { kind: "capture", capture: { source: "widget", content: "New widget capture" } });
   });
 });
