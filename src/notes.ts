@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { normalizeExplicitOffsetTimestamp } from "./explicit-offset-timestamp.js";
 import type { PortableIdentity } from "./workspaces-projects.js";
 
 export interface NoteReminder {
@@ -54,38 +55,6 @@ function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
-function normalizeReminderAt(value: string): string | undefined {
-  const match = value.match(
-    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?(Z|([+-])(\d{2}):(\d{2}))$/,
-  );
-  if (!match) return undefined;
-  const [, yearText, monthText, dayText, hourText, minuteText, secondText, fraction = "", zone, sign, offsetHourText, offsetMinuteText] = match;
-  const year = Number(yearText);
-  const month = Number(monthText);
-  const day = Number(dayText);
-  const hour = Number(hourText);
-  const minute = Number(minuteText);
-  const second = Number(secondText);
-  const millisecond = Number(fraction.padEnd(3, "0"));
-  const offsetHour = zone === "Z" ? 0 : Number(offsetHourText);
-  const offsetMinute = zone === "Z" ? 0 : Number(offsetMinuteText);
-  if (offsetHour > 14 || offsetMinute > 59 || (offsetHour === 14 && offsetMinute !== 0)) {
-    return undefined;
-  }
-  const offset = (sign === "-" ? -1 : 1) * (offsetHour * 60 + offsetMinute);
-  const instant = Date.parse(value);
-  if (!Number.isFinite(instant)) return undefined;
-  const reconstructedLocal = new Date(instant + offset * 60_000);
-  if (reconstructedLocal.getUTCFullYear() !== year
-    || reconstructedLocal.getUTCMonth() + 1 !== month
-    || reconstructedLocal.getUTCDate() !== day
-    || reconstructedLocal.getUTCHours() !== hour
-    || reconstructedLocal.getUTCMinutes() !== minute
-    || reconstructedLocal.getUTCSeconds() !== second
-    || reconstructedLocal.getUTCMilliseconds() !== millisecond) return undefined;
-  return new Date(instant).toISOString();
-}
-
 function isNoteInput(value: unknown): value is NoteInput {
   if (!isPlainObject(value) || typeof value.content !== "string" || value.content.trim().length === 0) {
     return false;
@@ -102,7 +71,7 @@ function isNoteInput(value: unknown): value is NoteInput {
     if (!isPlainObject(value.reminder)
       || Object.keys(value.reminder).length !== 1
       || typeof value.reminder.at !== "string"
-      || normalizeReminderAt(value.reminder.at) === undefined) return false;
+      || normalizeExplicitOffsetTimestamp(value.reminder.at) === undefined) return false;
   }
   return Object.keys(value).every((key) => ["content", "projectId", "tags", "reminder"].includes(key));
 }
@@ -130,7 +99,7 @@ export class NoteService {
       createdByMemberId: memberId,
       createdAt: new Date().toISOString(),
       ...(value.projectId ? { projectId: value.projectId } : {}),
-      ...(value.reminder ? { reminder: { at: normalizeReminderAt(value.reminder.at)! } } : {}),
+      ...(value.reminder ? { reminder: { at: normalizeExplicitOffsetTimestamp(value.reminder.at)! } } : {}),
     };
     const projection: PortableNoteProjection = {
       schema: "stash.note.v1",

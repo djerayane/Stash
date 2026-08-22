@@ -20,6 +20,7 @@ import type {
   WorkspaceProjectRepository,
   WorkspaceRecord,
 } from "./workspaces-projects.js";
+import type { MemberLocalizationPreferences, MemberLocalizationRepository } from "./member-localization.js";
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
@@ -33,7 +34,8 @@ export class PostgresDatabase implements
   NoteRepository,
   OidcAuthRepository,
   AccountRecoveryRepository,
-  OrganizationRoleRepository
+  OrganizationRoleRepository,
+  MemberLocalizationRepository
 {
   readonly #pool: Pool;
   readonly #authenticationSecrets: AuthenticationSecretCodec;
@@ -98,6 +100,39 @@ export class PostgresDatabase implements
     } finally {
       client.release();
     }
+  }
+
+  async findMemberLocalizationPreferences(memberId: string): Promise<MemberLocalizationPreferences | undefined> {
+    await this.#ensureMemberLocalizationSchema();
+    const result = await this.#pool.query<MemberLocalizationRow>(
+      `SELECT locale, time_zone, date_format, week_starts_on, updated_at
+       FROM stash_member_localization_preferences WHERE account_id = $1`,
+      [memberId],
+    );
+    const row = result.rows[0];
+    return row ? {
+      locale: row.locale,
+      timeZone: row.time_zone,
+      dateFormat: row.date_format,
+      weekStartsOn: row.week_starts_on,
+      updatedAt: new Date(row.updated_at).toISOString(),
+    } : undefined;
+  }
+
+  async saveMemberLocalizationPreferences(memberId: string, preferences: MemberLocalizationPreferences): Promise<void> {
+    await this.#ensureMemberLocalizationSchema();
+    await this.#pool.query(
+      `INSERT INTO stash_member_localization_preferences
+         (account_id, locale, time_zone, date_format, week_starts_on, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (account_id) DO UPDATE SET
+         locale = EXCLUDED.locale,
+         time_zone = EXCLUDED.time_zone,
+         date_format = EXCLUDED.date_format,
+         week_starts_on = EXCLUDED.week_starts_on,
+         updated_at = EXCLUDED.updated_at`,
+      [memberId, preferences.locale, preferences.timeZone, preferences.dateFormat, preferences.weekStartsOn, preferences.updatedAt],
+    );
   }
 
   async createWorkspace(
@@ -802,6 +837,25 @@ export class PostgresDatabase implements
     `);
   }
 
+  async #ensureMemberLocalizationSchema(): Promise<void> {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureBootstrapSchema(client);
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS stash_member_localization_preferences (
+          account_id UUID PRIMARY KEY REFERENCES stash_accounts(id) ON DELETE CASCADE,
+          locale TEXT NOT NULL,
+          time_zone TEXT NOT NULL,
+          date_format TEXT NOT NULL CHECK (date_format IN ('short', 'medium', 'long')),
+          week_starts_on TEXT NOT NULL CHECK (week_starts_on IN ('sunday', 'monday', 'saturday')),
+          updated_at TIMESTAMPTZ NOT NULL
+        )
+      `);
+    } finally {
+      client.release();
+    }
+  }
+
   async #recordPortableProjection(
     client: PoolClient,
     objectKind: "Workspace" | "Project" | "Note",
@@ -837,3 +891,10 @@ interface AccountRow { id: string; name: string; email: string; password_hash: s
 interface SessionRow { id: string; account_id: string; token_hash: string; created_at: Date | string; last_seen_at: Date | string; user_agent: string | null }
 interface OidcIdentityRow { id: string; name: string; email: string; subject_secret: string }
 interface OidcConfigurationRow { organization_id: string; issuer: string; client_id: string; client_secret: string }
+interface MemberLocalizationRow {
+  locale: string;
+  time_zone: string;
+  date_format: MemberLocalizationPreferences["dateFormat"];
+  week_starts_on: MemberLocalizationPreferences["weekStartsOn"];
+  updated_at: Date | string;
+}

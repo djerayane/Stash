@@ -23,6 +23,8 @@ import { workspaceProjectRoutes } from "./workspace-project-routes.js";
 import type { MemberAccessResolver, WorkspaceProjectService } from "./workspaces-projects.js";
 import { accountRecoveryRoute } from "./account-recovery-routes.js";
 import type { AccountRecoveryService } from "./account-recovery.js";
+import { memberLocalizationRoutes } from "./member-localization-routes.js";
+import type { MemberLocalizationService } from "./member-localization.js";
 
 export interface DatabaseProbe {
   verifyConnection(): Promise<void>;
@@ -45,6 +47,7 @@ interface InstanceOptions {
   notes?: NoteService;
   memberAccess?: MemberAccessResolver;
   organizationRoles?: OrganizationRoleService;
+  memberLocalization?: MemberLocalizationService;
   oidcAuth?: OidcAuthService;
   oidcManagement?: OidcManagementService;
   oidcCallbackOrigin?: string;
@@ -96,6 +99,9 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
   diagnostics.record({ kind: "instance_started", occurredAt: new Date().toISOString() });
   const acceleration = options.acceleration ?? createOptionalRedisAcceleration();
   const routes = [
+    ...(options.memberLocalization && (options.memberAccess ?? options.passwordAuth)
+      ? [memberLocalizationRoutes(options.memberLocalization, (options.memberAccess ?? options.passwordAuth)!)]
+      : []),
     ...(options.oidcManagement && options.passwordAuth ? [oidcManagementRoute(options.oidcManagement, options.passwordAuth)] : []),
     ...(options.oidcAuth && oidcCallbackOrigin ? [oidcAuthRoute(options.oidcAuth, oidcCallbackOrigin)] : []),
     ...(options.accountRecovery && options.passwordAuth ? [accountRecoveryRoute(options.accountRecovery, {
