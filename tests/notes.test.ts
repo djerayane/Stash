@@ -37,6 +37,9 @@ class ProtocolCompatibleNoteDatabase implements DatabaseProbe, NoteRepository {
     this.notes.set(note.id, note);
     return "created" as const;
   }
+
+  async listInboxNotes() { return { status: "found" as const, notes: [] }; }
+  async triageNote() { return { status: "note_not_found" as const }; }
 }
 
 const access: MemberAccessResolver = {

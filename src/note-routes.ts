@@ -1,11 +1,12 @@
 import { json, readJson, type HttpRoute } from "./http-routing.js";
-import { InvalidNoteInput, type NoteService } from "./notes.js";
+import { InvalidNoteInput, InvalidNoteTriageInput, presentNoteTriageResult, type NoteService } from "./notes.js";
 import type { MemberAccessResolver } from "./workspaces-projects.js";
 
 export function noteRoutes(service: NoteService, memberAccess: MemberAccessResolver): HttpRoute {
   return {
-    matches: (request, url) => request.method === "POST"
-      && /^\/api\/workspaces\/[^/]+\/notes$/.test(url.pathname),
+    matches: (request, url) => (request.method === "POST" && /^\/api\/workspaces\/[^/]+\/notes$/.test(url.pathname))
+      || (request.method === "GET" && /^\/api\/workspaces\/[^/]+\/inbox$/.test(url.pathname))
+      || (request.method === "POST" && /^\/api\/workspaces\/[^/]+\/inbox\/[^/]+\/triage$/.test(url.pathname)),
     async handle(request, response, url) {
       const access = await memberAccess.authenticateBearer(request.headers.authorization);
       if (!access) {
@@ -18,6 +19,24 @@ export function noteRoutes(service: NoteService, memberAccess: MemberAccessResol
           workspaceId = decodeURIComponent(url.pathname.split("/")[3]!);
         } catch {
           throw new InvalidNoteInput();
+        }
+        if (request.method === "GET") {
+          const result = await service.listInbox(access.accountId, workspaceId);
+          if (result.status === "workspace_forbidden") json(response, 403, { error: "workspace_forbidden", message: "This Member cannot read that Workspace Inbox." });
+          else json(response, 200, { notes: result.notes.map(({ createdByMemberId: _, ...note }) => note) });
+          return true;
+        }
+        if (url.pathname.includes("/inbox/")) {
+          let noteId: string;
+          try { noteId = decodeURIComponent(url.pathname.split("/")[5]!); } catch { throw new InvalidNoteTriageInput(); }
+          const outcome = await service.triage(access.accountId, workspaceId, noteId, await readJson(request));
+          if (outcome.status === "updated") {
+            json(response, 200, presentNoteTriageResult(outcome.result)); return true;
+          }
+          if (outcome.status === "note_not_found" || outcome.status === "target_note_not_found") {
+            json(response, 404, { error: outcome.status, message: "The requested Note could not be found." }); return true;
+          }
+          json(response, 403, { error: "workspace_forbidden", message: "This Member cannot triage that Note or Project." }); return true;
         }
         const result = await service.capture(access.accountId, workspaceId, await readJson(request));
         if (result.status === "created") {
@@ -36,7 +55,7 @@ export function noteRoutes(service: NoteService, memberAccess: MemberAccessResol
           });
         }
       } catch (error) {
-        if (error instanceof InvalidNoteInput) {
+        if (error instanceof InvalidNoteInput || error instanceof InvalidNoteTriageInput) {
           json(response, 422, {
             error: "invalid_input",
             message: "A Note requires content and valid optional Project, tags, and reminder fields.",

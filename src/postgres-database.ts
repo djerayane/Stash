@@ -1,8 +1,8 @@
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { Pool, type PoolClient } from "pg";
 
 import type { DatabaseProbe } from "./instance.js";
-import type { NoteRecord, NoteRepository, PortableNoteProjection } from "./notes.js";
+import type { NoteRecord, NoteRepository, NoteTriageChange, NoteTriageResult, PortableNoteProjection, PortableTaskProjection, TaskCreation } from "./notes.js";
 import type { BootstrapRecord, OwnerBootstrapRepository } from "./owner-bootstrap.js";
 import type { AccountAuthenticationRecord, PasswordAuthRepository, SessionRecord } from "./password-auth.js";
 import type { OidcAuthRepository, OidcIdentityKey, OidcIdentityRecord, OidcOrganizationConfiguration } from "./oidc-auth.js";
@@ -28,7 +28,7 @@ import type { PortableRepositoryConnectionProjection, RepositoryConnectionRecord
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
 const authenticationKeyCheckLockId = 795_541_992;
-const portableProjectionObjectKinds = ["Workspace", "Project", "Note", "GuestProjectAccess", "RepositoryConnection"] as const;
+const portableProjectionObjectKinds = ["Workspace", "Project", "Note", "NoteLink", "Task", "GuestProjectAccess", "RepositoryConnection"] as const;
 const portableProjectionObjectKindSql = portableProjectionObjectKinds.map((kind) => `'${kind}'`).join(", ");
 const repositoryConnectionSelect = `SELECT connection.id, connection.organization_id, connection.provider, connection.installation_id,
   connection.repository_id, connection.repository_url, connection.created_by_account_id, connection.created_by_attribution,
@@ -292,6 +292,116 @@ export class PostgresDatabase implements
       await this.#recordPortableProjection(client, "Note", note.id, "stash.note.v1", projection);
       return "created";
     });
+  }
+
+  async listInboxNotes(memberId: string, workspaceId: string) {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureNoteSchema(client);
+      const access = await client.query(`SELECT 1 FROM stash_workspaces workspace WHERE workspace.id = $1 AND (
+        (workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR
+        (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)))`, [workspaceId, memberId]);
+      if (!access.rowCount) return { status: "workspace_forbidden" as const };
+      const result = await client.query<any>(`SELECT id, workspace_id, project_id, content, tags, reminder_at,
+        created_by_account_id, created_at, archived_at FROM stash_notes
+        WHERE workspace_id = $1 AND project_id IS NULL AND archived_at IS NULL ORDER BY created_at, id`, [workspaceId]);
+      return { status: "found" as const, notes: result.rows.map((row: any) => ({ id: row.id, workspaceId: row.workspace_id,
+        content: row.content, tags: row.tags, createdByMemberId: row.created_by_account_id,
+        createdAt: new Date(row.created_at).toISOString(), ...(row.project_id ? { projectId: row.project_id } : {}),
+        ...(row.reminder_at ? { reminder: { at: new Date(row.reminder_at).toISOString() } } : {}),
+        ...(row.archived_at ? { archivedAt: new Date(row.archived_at).toISOString() } : {}) })) };
+    } finally { client.release(); }
+  }
+
+  async triageNote(memberId: string, workspaceId: string, noteId: string, change: NoteTriageChange) {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureNoteSchema(client);
+      const source = await client.query(`SELECT 1 FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id = note.workspace_id
+        WHERE note.id = $1 AND note.workspace_id = $2 AND note.project_id IS NULL AND note.archived_at IS NULL
+        AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $3)
+        OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $3))) FOR UPDATE`, [noteId, workspaceId, memberId]);
+      if (!source.rowCount) return { status: "note_not_found" as const };
+      const applied = await this.#applyTriageChange(client, memberId, workspaceId, noteId, change);
+      if ("status" in applied) return applied;
+      const result = applied.result;
+      for (const projection of result.projections) await this.#recordPortableProjection(client,
+        triageObjectKind(result), triageObjectId(result, noteId),
+        projection.schema, projection);
+      return { status: "updated" as const, result };
+    });
+  }
+
+  async #applyTriageChange(client: PoolClient, memberId: string, workspaceId: string, noteId: string, change: NoteTriageChange): Promise<
+    { result: NoteTriageResult } | { status: "project_forbidden" | "target_note_not_found" }
+  > {
+    switch (change.kind) {
+      case "organized": return this.#organizeInboxNote(client, workspaceId, noteId, change);
+      case "archived": return this.#archiveInboxNote(client, noteId, change);
+      case "linked": return this.#linkInboxNote(client, workspaceId, noteId, change);
+      case "task_created": return this.#createTaskFromInbox(client, memberId, workspaceId, noteId, change);
+    }
+  }
+
+  async #organizeInboxNote(client: PoolClient, workspaceId: string, noteId: string, change: Extract<NoteTriageChange, { kind: "organized" }>) {
+    const project = await client.query("SELECT 1 FROM stash_projects WHERE id = $1 AND workspace_id = $2", [change.note.projectId, workspaceId]);
+    if (!project.rowCount) return { status: "project_forbidden" as const };
+    await client.query("UPDATE stash_notes SET project_id = $2, tags = $3::jsonb WHERE id = $1", [noteId, change.note.projectId, JSON.stringify(change.note.tags)]);
+    return { result: change };
+  }
+
+  async #archiveInboxNote(client: PoolClient, noteId: string, change: Extract<NoteTriageChange, { kind: "archived" }>) {
+    await client.query("UPDATE stash_notes SET archived_at = $2 WHERE id = $1", [noteId, change.note.archivedAt]);
+    return { result: change };
+  }
+
+  async #linkInboxNote(client: PoolClient, workspaceId: string, noteId: string, change: Extract<NoteTriageChange, { kind: "linked" }>) {
+    const target = await client.query("SELECT 1 FROM stash_notes WHERE id = $1 AND workspace_id = $2", [change.link.targetNoteId, workspaceId]);
+    if (!target.rowCount) return { status: "target_note_not_found" as const };
+    await client.query("INSERT INTO stash_note_links (id, workspace_id, source_note_id, target_note_id) VALUES ($1, $2, $3, $4)",
+      [change.link.id, workspaceId, noteId, change.link.targetNoteId]);
+    return { result: change };
+  }
+
+  async #createTaskFromInbox(client: PoolClient, memberId: string, workspaceId: string, noteId: string, change: Extract<NoteTriageChange, { kind: "task_created" }>) {
+    const project = await client.query("SELECT 1 FROM stash_projects WHERE id = $1 AND workspace_id = $2", [change.task.projectId, workspaceId]);
+    if (!project.rowCount) return { status: "project_forbidden" as const };
+    const task = await this.#createTask(client, change.task);
+    await client.query("INSERT INTO stash_tasks (id, workspace_id, project_id, task_key, workflow_status_id, title, created_by_account_id, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+      [task.id, workspaceId, task.projectId, task.key, task.status.id, task.title, memberId, task.createdAt]);
+    await client.query("INSERT INTO stash_task_note_sources (task_id, note_id) VALUES ($1,$2)", [change.task.id, noteId]);
+    return { result: { kind: "task_created" as const, task, projections: [task] as [PortableTaskProjection] } };
+  }
+
+  async #createTask(client: PoolClient, draft: TaskCreation): Promise<PortableTaskProjection> {
+    await client.query("SELECT id FROM stash_projects WHERE id = $1 FOR UPDATE", [draft.projectId]);
+    await this.#ensureDefaultWorkflow(client, draft.projectId);
+    const status = await client.query<{ id: string; name: string; category: "unstarted" }>(
+      "SELECT id, name, category FROM stash_workflow_statuses WHERE project_id = $1 AND name = 'Backlog'",
+      [draft.projectId],
+    );
+    const allocation = await client.query<{ project_key: string; task_number: number }>(
+      `UPDATE stash_projects SET next_task_number = next_task_number + 1 WHERE id = $1
+       RETURNING project_key, next_task_number - 1 AS task_number`, [draft.projectId],
+    );
+    const workflowStatus = status.rows[0];
+    const key = allocation.rows[0];
+    if (!workflowStatus || !key) throw new Error("task_project_unavailable");
+    return { schema: "stash.task.v1", ...draft, key: `${key.project_key}-${key.task_number}`, status: workflowStatus };
+  }
+
+  async #ensureDefaultWorkflow(client: PoolClient, projectId: string): Promise<void> {
+    const statuses = [
+      [randomUUID(), projectId, "Backlog", "unstarted", 0],
+      [randomUUID(), projectId, "Ready", "unstarted", 1],
+      [randomUUID(), projectId, "In Progress", "started", 2],
+      [randomUUID(), projectId, "In Review", "started", 3],
+      [randomUUID(), projectId, "Done", "completed", 4],
+    ] as const;
+    await client.query(`INSERT INTO stash_workflow_statuses (id, project_id, name, category, position)
+      VALUES ${statuses.map((_, index) => `($${index * 5 + 1}, $${index * 5 + 2}, $${index * 5 + 3}, $${index * 5 + 4}, $${index * 5 + 5})`).join(", ")}
+      ON CONFLICT DO NOTHING`, statuses.flat());
   }
 
   async close(): Promise<void> {
@@ -1071,8 +1181,10 @@ export class PostgresDatabase implements
         name TEXT NOT NULL,
         project_key TEXT NOT NULL,
         created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id),
+        next_task_number INTEGER NOT NULL DEFAULT 1 CHECK (next_task_number > 0),
         UNIQUE (workspace_id, project_key)
       );
+      ALTER TABLE stash_projects ADD COLUMN IF NOT EXISTS next_task_number INTEGER NOT NULL DEFAULT 1 CHECK (next_task_number > 0);
     `);
     await this.#ensurePortableProjectionSchema(client);
   }
@@ -1088,7 +1200,28 @@ export class PostgresDatabase implements
         tags JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(tags) = 'array'),
         reminder_at TIMESTAMPTZ,
         created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id),
-        created_at TIMESTAMPTZ NOT NULL
+        created_at TIMESTAMPTZ NOT NULL,
+        archived_at TIMESTAMPTZ
+      );
+      ALTER TABLE stash_notes ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
+      CREATE TABLE IF NOT EXISTS stash_note_links (
+        id UUID PRIMARY KEY, workspace_id UUID NOT NULL REFERENCES stash_workspaces(id),
+        source_note_id UUID NOT NULL REFERENCES stash_notes(id), target_note_id UUID NOT NULL REFERENCES stash_notes(id),
+        UNIQUE (source_note_id, target_note_id)
+      );
+      CREATE TABLE IF NOT EXISTS stash_workflow_statuses (
+        id UUID PRIMARY KEY, project_id UUID NOT NULL REFERENCES stash_projects(id), name TEXT NOT NULL,
+        category TEXT NOT NULL CHECK (category IN ('unstarted', 'started', 'completed')), position INTEGER NOT NULL,
+        UNIQUE (project_id, name), UNIQUE (project_id, position)
+      );
+      CREATE TABLE IF NOT EXISTS stash_tasks (
+        id UUID PRIMARY KEY, workspace_id UUID NOT NULL REFERENCES stash_workspaces(id), project_id UUID NOT NULL REFERENCES stash_projects(id),
+        task_key TEXT NOT NULL, workflow_status_id UUID NOT NULL REFERENCES stash_workflow_statuses(id),
+        title TEXT NOT NULL CHECK (length(title) > 0), created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id), created_at TIMESTAMPTZ NOT NULL,
+        UNIQUE (project_id, task_key)
+      );
+      CREATE TABLE IF NOT EXISTS stash_task_note_sources (
+        task_id UUID NOT NULL REFERENCES stash_tasks(id), note_id UUID NOT NULL REFERENCES stash_notes(id), PRIMARY KEY (task_id, note_id)
       )
     `);
   }
@@ -1191,15 +1324,16 @@ export class PostgresDatabase implements
 
   async #recordPortableProjection(
     client: PoolClient,
-    objectKind: "Workspace" | "Project" | "Note" | "GuestProjectAccess",
+    objectKind: "Workspace" | "Project" | "Note" | "NoteLink" | "Task" | "GuestProjectAccess" | "RepositoryConnection",
     objectId: string,
-    projectionSchema: "stash.workspace.v1" | "stash.project.v1" | "stash.note.v1" | "stash.guest-project-access.v1",
-    payload: PortableWorkspaceProjection | PortableProjectProjection | PortableNoteProjection | Record<string, unknown>,
+    projectionSchema: "stash.workspace.v1" | "stash.project.v1" | "stash.note.v1" | "stash.note.v2" | "stash.note-link.v1" | "stash.task.v1" | "stash.guest-project-access.v1" | "stash.repository-connection.v1",
+    payload: object,
   ): Promise<void> {
     await client.query(
       `INSERT INTO stash_portable_projection_outbox
         (object_kind, object_id, revision, projection_schema, payload)
-       VALUES ($1, $2, 1, $3, $4::jsonb)`,
+       SELECT $1, $2, COALESCE(MAX(revision), 0) + 1, $3, $4::jsonb
+       FROM stash_portable_projection_outbox WHERE object_kind = $1 AND object_id = $2`,
       [objectKind, objectId, projectionSchema, JSON.stringify(payload)],
     );
   }
@@ -1259,4 +1393,16 @@ interface MemberLocalizationRow {
 interface RepositoryConnectionRow { id: string; organization_id: string; provider: "github"; installation_id: string | number; repository_id: string; repository_url: string; created_by_account_id: string; created_by_attribution: "recorded" | "inferred-during-upgrade"; project_ids: string[] }
 function repositoryConnectionRecord(row: RepositoryConnectionRow): RepositoryConnectionRecord {
   return { id: row.id, organizationId: row.organization_id, provider: row.provider, installationId: Number(row.installation_id), repositoryId: row.repository_id, repositoryUrl: row.repository_url, createdByMemberId: row.created_by_account_id, createdByAttribution: row.created_by_attribution, projectIds: row.project_ids };
+}
+
+function triageObjectKind(result: NoteTriageResult): "Task" | "NoteLink" | "Note" {
+  if (result.kind === "task_created") return "Task";
+  if (result.kind === "linked") return "NoteLink";
+  return "Note";
+}
+
+function triageObjectId(result: NoteTriageResult, noteId: string): string {
+  if (result.kind === "task_created") return result.task.id;
+  if (result.kind === "linked") return result.link.id;
+  return noteId;
 }

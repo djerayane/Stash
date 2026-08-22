@@ -91,6 +91,26 @@ The Note row and its `stash.note.v1` outbox event commit in one transaction. A c
 reports the projection as `recorded` only after both writes succeed; it does not claim that a full
 Portable Workspace Export has already been generated.
 
+## Inbox triage projections
+
+Triage appends a new projection revision in the same transaction as the canonical change. Organizing
+or archiving a Note records `stash.note.v2`, containing the complete current Note state and portable
+creator identity. Archive is a retained `archivedAt` timestamp; it does not delete content or
+relationships.
+
+Linking Notes records `stash.note-link.v1` with a stable link identity, `workspaceId`, and stable
+source and target Note identities. The portable Markdown projector may render a readable relative
+path, but these identities remain authoritative for safe repair after a move.
+
+Creating actionable work records `stash.task.v1` with a stable Task identity, its Project and
+Workspace, Project-scoped Task Key, canonical Workflow status (including its stable status
+category), title, creator, creation time, and `sourceNoteIds`. The first Task creation atomically
+initializes the canonical Project Workflow—Backlog and Ready (`unstarted`), In Progress and In
+Review (`started`), then Done (`completed`)—and assigns Backlog. Task Key sequence allocation is serialized
+inside the same transaction so keys are never duplicated or reused. The source Note remains unchanged.
+All referenced Notes and Projects must exist in the same authorized Workspace; a failed validation
+or outbox write rolls back the whole triage operation.
+
 ## `stash.guest-project-access.v1`
 
 Accepting a Guest invitation records the selected Project relationships and their containing
