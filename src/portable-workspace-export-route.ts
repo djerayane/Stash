@@ -1,5 +1,5 @@
 import type { MemberAccessResolver } from "./workspaces-projects.js";
-import { InvalidPortableWorkspaceExport, type PortableWorkspaceExportService } from "./portable-workspace-export.js";
+import { InvalidPortableWorkspaceExport, PortableWorkspaceExportTooLarge, type PortableWorkspaceExportService } from "./portable-workspace-export.js";
 import { json, type HttpRoute } from "./http-routing.js";
 
 export function portableWorkspaceExportRoute(service: PortableWorkspaceExportService, access: MemberAccessResolver): HttpRoute {
@@ -20,6 +20,7 @@ export function portableWorkspaceExportRoute(service: PortableWorkspaceExportSer
         }
       } catch (error) {
         if (error instanceof InvalidPortableWorkspaceExport) json(response, 422, { error: "invalid_export_request", message: "A valid Workspace identifier is required." });
+        else if (error instanceof PortableWorkspaceExportTooLarge) json(response, 413, { error: "export_too_large", message: "This Workspace exceeds the safe archive size limit." });
         else json(response, 503, { error: "export_unavailable", message: "The Workspace export could not be completed. No partial export was produced." });
       }
       return true;

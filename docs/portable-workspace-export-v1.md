@@ -27,4 +27,6 @@ produces identical bytes. `manifest.json` is omitted from its own checksum list.
 The repository boundary must read all included records and Attachment bytes as
 one consistent, authorization-filtered snapshot. Stash buffers and validates the
 complete archive before writing an HTTP response; failures return JSON and never
-produce a partial archive.
+produce a partial archive. Attachment reads are sequential, and exports above the
+configured safe archive bound are rejected before bytes are loaded rather than
+allowing unbounded memory consumption.

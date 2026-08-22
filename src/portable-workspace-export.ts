@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
 
-import type { PortableAttachmentProjection } from "./attachments.js";
+import type { AttachmentStorage, PortableAttachmentProjection } from "./attachments.js";
 import type { PortableNoteProjection, PortableTaskProjection } from "./notes.js";
 import type { PortableWorkspaceProjection } from "./workspaces-projects.js";
 
 export interface PortableExportAttachment {
   projection: PortableAttachmentProjection;
-  content: Buffer;
+  storageKey?: string;
+  content?: Buffer;
 }
 
 /** A repository must produce this as one permission-filtered, consistent read. */
@@ -31,6 +32,7 @@ export type PortableWorkspaceExportOutcome =
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 export class InvalidPortableWorkspaceExport extends Error {}
+export class PortableWorkspaceExportTooLarge extends Error {}
 
 function stable(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stable);
@@ -103,7 +105,8 @@ function isSafeArchivePath(path: string): boolean {
 }
 
 export class PortableWorkspaceExportService {
-  constructor(private readonly repository: PortableWorkspaceExportRepository) {}
+  constructor(private readonly repository: PortableWorkspaceExportRepository, private readonly storage?: AttachmentStorage,
+    private readonly limits = { maxArchiveBytes: 256 * 1024 * 1024 }) {}
 
   async export(memberId: string, workspaceId: string): Promise<PortableWorkspaceExportOutcome> {
     if (!uuid.test(workspaceId)) throw new InvalidPortableWorkspaceExport();
@@ -112,12 +115,21 @@ export class PortableWorkspaceExportService {
     const { snapshot } = result;
     if (snapshot.workspace.id !== workspaceId || snapshot.notes.some((note) => note.workspaceId !== workspaceId)
       || snapshot.tasks.some((task) => task.workspaceId !== workspaceId)
-      || snapshot.attachments.some(({ projection, content }) => projection.workspaceId !== workspaceId || projection.size !== content.length)) {
+      || snapshot.attachments.some(({ projection }) => projection.workspaceId !== workspaceId)) {
       throw new Error("inconsistent_export_snapshot");
+    }
+    const declaredAttachmentBytes = snapshot.attachments.reduce((total, { projection }) => total + projection.size, 0);
+    if (!Number.isSafeInteger(declaredAttachmentBytes) || declaredAttachmentBytes > this.limits.maxArchiveBytes)
+      throw new PortableWorkspaceExportTooLarge();
+    const attachments: Array<{ projection: PortableAttachmentProjection; content: Buffer }> = [];
+    for (const attachment of snapshot.attachments) {
+      const content = attachment.content ?? (attachment.storageKey && this.storage ? await this.storage.get(attachment.storageKey) : undefined);
+      if (!content || attachment.projection.size !== content.length) throw new Error("inconsistent_attachment_content");
+      attachments.push({ projection: attachment.projection, content });
     }
     const files: ArchiveEntry[] = [
       { path: "README.md", content: Buffer.from("# Stash Portable Workspace Export\n\nFormat: `stash.portable-workspace-export.v1`\n\nNotes and Tasks are readable Markdown. `manifest.json` contains the Workspace identity, file checksums, and the schemas needed by importers. Attachment paths and bytes are preserved exactly.\n") },
-      ...snapshot.attachments.map(({ projection, content }) => ({ path: attachmentPath(projection), content })),
+      ...attachments.map(({ projection, content }) => ({ path: attachmentPath(projection), content })),
       ...snapshot.notes.map((note) => ({ path: `notes/${note.id}.md`, content: noteMarkdown(note) })),
       ...snapshot.tasks.map((task) => ({ path: `tasks/${task.key}--${task.id}.md`, content: taskMarkdown(task) })),
     ].sort(comparePaths);
@@ -126,6 +138,8 @@ export class PortableWorkspaceExportService {
     const manifestFiles: ManifestEntry[] = files.map(({ path, content }) => ({ path, bytes: content.length, sha256: createHash("sha256").update(content).digest("hex") }));
     files.push({ path: "manifest.json", content: Buffer.from(stableJson({ schema: "stash.portable-workspace-export.v1", workspace: snapshot.workspace, files: manifestFiles })) });
     files.sort(comparePaths);
-    return { status: "exported", archive: zip(files), filename: `stash-workspace-${workspaceId.slice(0, 8)}.zip` };
+    const archive = zip(files);
+    if (archive.length > this.limits.maxArchiveBytes) throw new PortableWorkspaceExportTooLarge();
+    return { status: "exported", archive, filename: `stash-workspace-${workspaceId.slice(0, 8)}.zip` };
   }
 }

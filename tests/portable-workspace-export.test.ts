@@ -1,14 +1,24 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
+import { Pool } from "pg";
 
+import { createAuthenticationSecretCodec } from "../src/authentication-secrets.js";
+import { AttachmentService, LocalAttachmentStorage, portableAttachmentHref } from "../src/attachments.js";
 import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
+import { NoteService } from "../src/notes.js";
+import { PostgresDatabase } from "../src/postgres-database.js";
 import {
   PortableWorkspaceExportService,
   type PortableWorkspaceExportRepository,
   type PortableWorkspaceExportSnapshot,
 } from "../src/portable-workspace-export.js";
 import type { MemberAccessResolver } from "../src/workspaces-projects.js";
+import { WorkspaceProjectService } from "../src/workspaces-projects.js";
+import { TaskService } from "../src/tasks.js";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const secretWorkspaceId = "99999999-9999-4999-8999-999999999999";
@@ -92,5 +102,70 @@ describe("readable Portable Workspace Export", () => {
     assert.equal((await fetch(`${baseUrl}/api/workspaces/eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee/export`, { headers: { authorization: "Bearer member-ada" } })).status, 404);
     database.fail = true; const failed = await fetch(`${baseUrl}${path}`, { headers: { authorization: "Bearer member-ada" } });
     assert.equal(failed.status, 503); assert.equal(failed.headers.get("content-type"), "application/json; charset=utf-8"); assert.deepEqual(await failed.json(), { error: "export_unavailable", message: "The Workspace export could not be completed. No partial export was produced." });
+  });
+});
+
+const postgresUrl = process.env.STASH_TEST_DATABASE_URL;
+describe("PostgreSQL readable export wiring", { skip: postgresUrl ? false : "STASH_TEST_DATABASE_URL is not configured" }, () => {
+  it("serves a real permission-filtered snapshot with filesystem Attachment bytes", async () => {
+    const connectionString = postgresUrl!;
+    const administration = new Pool({ connectionString }); const schema = `export_${randomUUID().replaceAll("-", "")}`;
+    await administration.query(`CREATE SCHEMA ${schema}`);
+    const separator = connectionString.includes("?") ? "&" : "?";
+    const database = new PostgresDatabase(`${connectionString}${separator}options=-csearch_path%3D${schema}`,
+      createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
+    const storage = new LocalAttachmentStorage(await mkdtemp(join(tmpdir(), "stash-export-integration-")));
+    let running: RunningInstance | undefined;
+    try {
+      const ownerId = "10101010-1010-4010-8010-101010101010"; const guestId = "20202020-2020-4020-8020-202020202020";
+      const organizationId = "30303030-3030-4030-8030-303030303030";
+      await database.createFirstOrganizationOwner({ organizationId, organizationName: "Lab", ownerId, ownerName: "Ada",
+        ownerEmail: "ada@example.test", passwordHash: "test-only", role: "Owner" });
+      const workspaces = new WorkspaceProjectService(database);
+      const createdWorkspace = await workspaces.createWorkspace(ownerId, { name: "Portable", owner: { type: "organization", organizationId } });
+      assert.equal(createdWorkspace.status, "created"); if (createdWorkspace.status !== "created") return;
+      const firstProject = await workspaces.createProject(ownerId, createdWorkspace.workspace.id, { name: "Visible", key: "VIS" });
+      const secondProject = await workspaces.createProject(ownerId, createdWorkspace.workspace.id, { name: "Private", key: "SEC" });
+      assert.equal(firstProject.status, "created"); assert.equal(secondProject.status, "created");
+      if (firstProject.status !== "created" || secondProject.status !== "created") return;
+      const attachments = new AttachmentService(database, storage);
+      const uploaded = await attachments.create(ownerId, createdWorkspace.workspace.id,
+        { filename: "proof.bin", contentType: "application/octet-stream", source: "upload", content: Buffer.from([9, 8, 7, 6]) });
+      assert.equal(uploaded.status, "created"); if (uploaded.status !== "created") return;
+      const notes = new NoteService(database);
+      const visibleNote = await notes.capture(ownerId, createdWorkspace.workspace.id, { projectId: firstProject.project.id,
+        content: `[proof.bin](<${portableAttachmentHref(uploaded.record.relativePath)}>)` });
+      const privateNote = await notes.capture(ownerId, createdWorkspace.workspace.id, { projectId: secondProject.project.id, content: "Private roadmap" });
+      assert.equal(visibleNote.status, "created"); assert.equal(privateNote.status, "created");
+      if (visibleNote.status !== "created" || privateNote.status !== "created") return;
+      const tasks = new TaskService(database, database);
+      const visibleBlockKey = visibleNote.note.document.blocks[0]?.blockKey; const privateBlockKey = privateNote.note.document.blocks[0]?.blockKey;
+      assert.ok(visibleBlockKey); assert.ok(privateBlockKey);
+      await tasks.createFromBlock(ownerId, visibleNote.note.id, visibleBlockKey,
+        { projectId: firstProject.project.id, title: "Visible Task" });
+      await tasks.createFromBlock(ownerId, privateNote.note.id, privateBlockKey,
+        { projectId: secondProject.project.id, title: "Private Task" });
+      const setup = new Pool({ connectionString: `${connectionString}${separator}options=-csearch_path%3D${schema}` });
+      await setup.query("INSERT INTO stash_accounts (id,name,email,password_hash) VALUES ($1,'Grace','grace@example.test','test')", [guestId]);
+      await setup.query("INSERT INTO stash_project_guests (project_id,account_id) VALUES ($1,$2)", [firstProject.project.id, guestId]);
+      await setup.end();
+      const memberAccess: MemberAccessResolver = { async authenticateBearer(value) { return value === "Bearer owner" ? { accountId: ownerId, sessionId: "owner" }
+        : value === "Bearer guest" ? { accountId: guestId, sessionId: "guest" } : undefined; } };
+      running = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin", memberAccess,
+        portableWorkspaceExports: new PortableWorkspaceExportService(database, storage) });
+      const ownerFiles = unzipStored(Buffer.from(await (await fetch(`${running.url}/api/workspaces/${createdWorkspace.workspace.id}/export`,
+        { headers: { authorization: "Bearer owner" } })).arrayBuffer()));
+      assert.equal([...ownerFiles.keys()].filter((path) => path.startsWith("notes/")).length, 2);
+      assert.equal([...ownerFiles.keys()].filter((path) => path.startsWith("tasks/")).length, 2);
+      const guestFiles = unzipStored(Buffer.from(await (await fetch(`${running.url}/api/workspaces/${createdWorkspace.workspace.id}/export`,
+        { headers: { authorization: "Bearer guest" } })).arrayBuffer()));
+      assert.equal([...guestFiles.keys()].filter((path) => path.startsWith("notes/")).length, 1);
+      assert.equal([...guestFiles.keys()].filter((path) => path.startsWith("tasks/")).length, 1);
+      assert.equal([...guestFiles.values()].some((value) => value.includes("Private roadmap")), false);
+      assert.deepEqual(guestFiles.get(uploaded.record.relativePath.slice(2)), Buffer.from([9, 8, 7, 6]));
+    } finally {
+      await running?.close().catch(() => undefined); if (!running) await database.close().catch(() => undefined);
+      await administration.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined); await administration.end();
+    }
   });
 });
