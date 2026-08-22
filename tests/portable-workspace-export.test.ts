@@ -13,6 +13,7 @@ import { NoteService } from "../src/notes.js";
 import { PostgresDatabase } from "../src/postgres-database.js";
 import {
   PortableWorkspaceExportService,
+  PortableWorkspaceExportTooLarge,
   type PortableWorkspaceExportRepository,
   type PortableWorkspaceExportSnapshot,
 } from "../src/portable-workspace-export.js";
@@ -85,6 +86,10 @@ describe("readable Portable Workspace Export", () => {
     assert.match(note, /schema: "stash.note.v1"/); assert.match(note, /projectId: "33333333/); assert.match(note, /\[drawing\]\(<\.\.\/attachments\//); assert.match(note, /\[\[stable-note-id\]\]/);
     const task = files.get("tasks/LAB-7--55555555-5555-4555-8555-555555555555.md")!.toString();
     assert.match(task, /# LAB-7 — Verify tolerances/); assert.match(task, /keyAliases:/); assert.match(task, /OLD-2/); assert.match(task, /sourceBlocks:/); assert.match(task, /depends_on/);
+    const taskMetadata = Object.fromEntries(task.slice(4, task.indexOf("\n---", 4)).split("\n").map((line) => {
+      const separator = line.indexOf(": "); return [line.slice(0, separator), JSON.parse(line.slice(separator + 2)) as unknown];
+    }));
+    assert.deepEqual(taskMetadata, snapshot.tasks[0]);
     const manifest = JSON.parse(files.get("manifest.json")!.toString()) as { schema: string; workspace: object; files: Array<{ path: string; sha256: string; bytes: number }> };
     assert.equal(manifest.schema, "stash.portable-workspace-export.v1"); assert.deepEqual(manifest.workspace, snapshot.workspace);
     assert.equal(manifest.files.some(({ path }) => path === "manifest.json"), false);
@@ -102,6 +107,22 @@ describe("readable Portable Workspace Export", () => {
     assert.equal((await fetch(`${baseUrl}/api/workspaces/eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee/export`, { headers: { authorization: "Bearer member-ada" } })).status, 404);
     database.fail = true; const failed = await fetch(`${baseUrl}${path}`, { headers: { authorization: "Bearer member-ada" } });
     assert.equal(failed.status, 503); assert.equal(failed.headers.get("content-type"), "application/json; charset=utf-8"); assert.deepEqual(await failed.json(), { error: "export_unavailable", message: "The Workspace export could not be completed. No partial export was produced." });
+  });
+
+  it("rejects text-heavy archives before buffering entries and bounds actual filesystem reads", async () => {
+    const textHeavy: PortableWorkspaceExportSnapshot = { ...snapshot, attachments: [], tasks: [],
+      notes: [{ ...snapshot.notes[0]!, content: "x".repeat(2_000) }] };
+    const repository: PortableWorkspaceExportRepository = { async readExportSnapshot() { return { status: "found", snapshot: textHeavy }; } };
+    await assert.rejects(() => new PortableWorkspaceExportService(repository, undefined, { maxArchiveBytes: 1_024 }).export("ada", workspaceId),
+      PortableWorkspaceExportTooLarge);
+
+    const directory = await mkdtemp(join(tmpdir(), "stash-export-bounded-")); const storage = new LocalAttachmentStorage(directory);
+    const attachment = snapshot.attachments[0]!.projection; const storageKey = `${workspaceId}/${attachment.id}`;
+    await storage.put(storageKey, Buffer.from("actual bytes exceed declared size"));
+    const mismatched: PortableWorkspaceExportSnapshot = { ...snapshot, notes: [], tasks: [],
+      attachments: [{ projection: { ...attachment, size: 4 }, storageKey }] };
+    const mismatchRepository: PortableWorkspaceExportRepository = { async readExportSnapshot() { return { status: "found", snapshot: mismatched }; } };
+    await assert.rejects(() => new PortableWorkspaceExportService(mismatchRepository, storage).export("ada", workspaceId), /attachment_size_limit/);
   });
 });
 
