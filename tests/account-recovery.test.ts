@@ -12,6 +12,9 @@ class AuthDatabase implements DatabaseProbe, PasswordAuthRepository, AccountReco
   passkeys = new Map<string, PasskeyRecord>();
   codes: RecoveryCodeRecord[] = [];
   emailRecoveries = new Map<string, EmailRecoveryRecord>();
+  recoveryRequestWork = 0;
+  recoverySignInWork = 0;
+  sessionFailures = 0;
   async verifyConnection() {}
   async close() {}
   async findAccountByEmail(email: string) { return this.account?.email === email ? { ...this.account } : undefined; }
@@ -23,11 +26,13 @@ class AuthDatabase implements DatabaseProbe, PasswordAuthRepository, AccountReco
   async changePasswordAndDeleteOtherSessions() {}
   async savePasskey(record: PasskeyRecord) { this.passkeys.set(record.credentialId, record); }
   async findPasskey(id: string) { return this.passkeys.get(id); }
-  async updatePasskeyCounter(id: string, previous: number, next: number) { const passkey = this.passkeys.get(id); if (!passkey || passkey.counter !== previous) return false; passkey.counter = next; return true; }
+  async updatePasskeyCounterAndCreateSession(id: string, previous: number, next: number, session: SessionRecord) { const passkey = this.passkeys.get(id); if (!passkey || passkey.counter !== previous) return false; return this.commitSession(session, () => { passkey.counter = next; }); }
   async replaceRecoveryCodes(accountId: string, records: RecoveryCodeRecord[]) { this.codes = records.filter((r) => r.accountId === accountId); }
-  async consumeRecoveryCode(accountId: string, lookup: string) { const index = this.codes.findIndex((r) => r.accountId === accountId && r.lookup === lookup); if (index < 0) return false; this.codes.splice(index, 1); return true; }
-  async saveEmailRecovery(record: EmailRecoveryRecord) { this.emailRecoveries.set(record.tokenLookup, record); }
-  async consumeEmailRecovery(lookup: string, now: string) { const record = this.emailRecoveries.get(lookup); if (!record || record.expiresAt <= now) return undefined; this.emailRecoveries.delete(lookup); return record.accountId; }
+  async consumeRecoveryCodeAndCreateSession(accountId: string, lookup: string, session?: SessionRecord) { this.recoverySignInWork += 1; const index = this.codes.findIndex((r) => r.accountId === accountId && r.lookup === lookup); if (index < 0 || !session) return false; return this.commitSession(session, () => { this.codes.splice(index, 1); }); }
+  async prepareEmailRecovery(record?: EmailRecoveryRecord) { this.recoveryRequestWork += 1; if (record) this.emailRecoveries.set(record.tokenLookup, record); }
+  async findEmailRecoveryAccount(lookup: string, now: string) { const record = this.emailRecoveries.get(lookup); return record && record.expiresAt > now ? record.accountId : undefined; }
+  async consumeEmailRecoveryAndCreateSession(lookup: string, now: string, session: SessionRecord) { const record = this.emailRecoveries.get(lookup); if (!record || record.accountId !== session.accountId || record.expiresAt <= now) return false; return this.commitSession(session, () => { this.emailRecoveries.delete(lookup); }); }
+  private async commitSession(session: SessionRecord, mutation: () => void) { if (this.sessionFailures > 0) { this.sessionFailures -= 1; throw new Error("session write failed"); } mutation(); this.sessions.set(session.id, session); return true; }
 }
 
 describe("Member account recovery on a running Stash Instance", () => {
@@ -48,7 +53,7 @@ describe("Member account recovery on a running Stash Instance", () => {
         async authenticate(challenge, input, passkey) { const data = clientData(input); if (data.challenge !== challenge || data.origin !== "https://stash.test" || data.type !== "webauthn.get" || input.proof !== "valid" || passkey.publicKey !== "verified-cose-key") throw new Error(); return { newCounter: passkey.counter + 1 }; },
       },
       secrets,
-      ...(emailConfigured ? { email: { async sendRecovery(_address, token) { delivered.push(token); } } } : {}),
+      ...(emailConfigured ? { email: { async enqueueRecovery(delivery?: { address: string; token: string }) { if (delivery) delivered.push(delivery.token); } } } : {}),
     });
     instance = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin", passwordAuth: passwords, accountRecovery: recovery });
     const signedIn = await fetch(`${instance.url}/api/auth/sessions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "ada@example.com", password: "correct horse battery staple" }) });
@@ -86,6 +91,20 @@ describe("Member account recovery on a running Stash Instance", () => {
     void challenge;
   });
 
+  it("keeps a passkey usable when atomic counter and session creation fails", async () => {
+    const { baseUrl, token, database } = await run();
+    const registrationOptions = await (await fetch(`${baseUrl}/api/auth/passkeys/options`, { method: "POST", headers: { authorization: `Bearer ${token}` } })).json() as { challenge: string };
+    await fetch(`${baseUrl}/api/auth/passkeys`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(browserCredential("phone-key", registrationOptions.challenge, "webauthn.create")) });
+    database.sessionFailures = 1;
+    const authenticate = async () => {
+      const options = await (await fetch(`${baseUrl}/api/auth/passkey-sessions/options`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "ada@example.com" }) })).json() as { challenge: string };
+      return fetch(`${baseUrl}/api/auth/passkey-sessions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...browserCredential("phone-key", options.challenge, "webauthn.get"), proof: "valid" }) });
+    };
+    assert.equal((await authenticate()).status, 503);
+    assert.equal(database.passkeys.get("phone-key")?.counter, 0);
+    assert.equal((await authenticate()).status, 201);
+  });
+
   it("issues recovery codes once, consumes one, and rejects reuse", async () => {
     const { baseUrl, token, database } = await run();
     const generated = await fetch(`${baseUrl}/api/auth/recovery-codes`, { method: "POST", headers: { authorization: `Bearer ${token}` } });
@@ -97,6 +116,15 @@ describe("Member account recovery on a running Stash Instance", () => {
     assert.equal((await recover()).status, 401);
   });
 
+  it("keeps a recovery code usable when atomic session creation fails", async () => {
+    const { baseUrl, token, database } = await run();
+    const { codes } = await (await fetch(`${baseUrl}/api/auth/recovery-codes`, { method: "POST", headers: { authorization: `Bearer ${token}` } })).json() as { codes: string[] };
+    database.sessionFailures = 1;
+    const recover = () => fetch(`${baseUrl}/api/auth/recovery-code-sessions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "ada@example.com", code: codes[0] }) });
+    assert.equal((await recover()).status, 503);
+    assert.equal((await recover()).status, 201);
+  });
+
   it("uses configured email recovery without revealing account existence", async () => {
     const { baseUrl, delivered, database } = await run();
     for (const email of ["ada@example.com", "missing@example.com"]) {
@@ -104,9 +132,19 @@ describe("Member account recovery on a running Stash Instance", () => {
       assert.equal(response.status, 202);
     }
     assert.equal(delivered.length, 1);
+    assert.equal(database.recoveryRequestWork, 2);
     assert.ok([...database.emailRecoveries.values()].every((record) => record.protectedSecret !== delivered[0] && !record.tokenLookup.includes(delivered[0]!)));
     const recovered = await fetch(`${baseUrl}/api/auth/email-recovery-sessions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token: delivered[0] }) });
     assert.equal(recovered.status, 201);
+  });
+
+  it("keeps an email token usable when atomic session creation fails", async () => {
+    const { baseUrl, delivered, database } = await run();
+    await fetch(`${baseUrl}/api/auth/email-recovery`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "ada@example.com" }) });
+    database.sessionFailures = 1;
+    const recover = () => fetch(`${baseUrl}/api/auth/email-recovery-sessions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token: delivered[0] }) });
+    assert.equal((await recover()).status, 503);
+    assert.equal((await recover()).status, 201);
   });
 
   it("makes disabled email recovery and invalid recovery attempts visible", async () => {
@@ -115,6 +153,16 @@ describe("Member account recovery on a running Stash Instance", () => {
     assert.equal(unavailable.status, 503);
     const invalid = await fetch(`${baseUrl}/api/auth/recovery-code-sessions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "ada@example.com", code: "invalid-code" }) });
     assert.equal(invalid.status, 401);
+  });
+
+  it("performs the same recovery-code repository work for known and unknown accounts", async () => {
+    const { baseUrl, database } = await run();
+    const attempt = (email: string) => fetch(`${baseUrl}/api/auth/recovery-code-sessions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email, code: "invalid-recovery-code" }) });
+    const known = await attempt("ada@example.com");
+    const missing = await attempt("missing@example.com");
+    assert.equal(known.status, 401);
+    assert.deepEqual(await known.json(), await missing.json());
+    assert.equal(database.recoverySignInWork, 2);
   });
 });
 

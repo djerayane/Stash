@@ -92,7 +92,9 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
   const routes = [
     ...(options.oidcManagement && options.passwordAuth ? [oidcManagementRoute(options.oidcManagement, options.passwordAuth)] : []),
     ...(options.oidcAuth && oidcCallbackOrigin ? [oidcAuthRoute(options.oidcAuth, oidcCallbackOrigin)] : []),
-    ...(options.accountRecovery ? [accountRecoveryRoute(options.accountRecovery)] : []),
+    ...(options.accountRecovery && options.passwordAuth ? [accountRecoveryRoute(options.accountRecovery, {
+      resolve: (authorization) => options.passwordAuth!.authenticateBearer(authorization),
+    })] : []),
     ...(options.passwordAuth ? [passwordAuthRoute(options.passwordAuth)] : []),
     diagnosticsSchemaRoute(diagnostics),
     requireInstanceAdministrator(options.instanceAdminToken, diagnosticsAdminRoute(diagnostics)),

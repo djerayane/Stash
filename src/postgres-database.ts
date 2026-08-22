@@ -349,9 +349,16 @@ export class PostgresDatabase implements
     return row ? { credentialId: row.credential_id, accountId: row.account_id, publicKey: this.#authenticationSecrets.decrypt(row.public_key), counter: row.signature_counter, ...(row.transports ? { transports: row.transports } : {}), createdAt: new Date(row.created_at).toISOString() } : undefined;
   }
 
-  async updatePasskeyCounter(credentialId: string, previousCounter: number, newCounter: number): Promise<boolean> {
-    const result = await this.#pool.query("UPDATE stash_passkeys SET signature_counter = $3 WHERE credential_id = $1 AND signature_counter = $2", [credentialId, previousCounter, newCounter]);
-    return result.rowCount === 1;
+  async updatePasskeyCounterAndCreateSession(credentialId: string, previousCounter: number, newCounter: number, session: SessionRecord): Promise<boolean> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await client.query("UPDATE stash_passkeys SET signature_counter = $3 WHERE credential_id = $1 AND signature_counter = $2", [credentialId, previousCounter, newCounter]);
+      if (result.rowCount !== 1) { await client.query("ROLLBACK"); return false; }
+      await this.#insertSession(client, session);
+      await client.query("COMMIT");
+      return true;
+    } catch (error) { await client.query("ROLLBACK").catch(() => undefined); throw error; } finally { client.release(); }
   }
 
   async replaceRecoveryCodes(accountId: string, records: RecoveryCodeRecord[]): Promise<void> {
@@ -365,21 +372,48 @@ export class PostgresDatabase implements
     } catch (error) { await client.query("ROLLBACK").catch(() => undefined); throw error; } finally { client.release(); }
   }
 
-  async consumeRecoveryCode(accountId: string, lookup: string): Promise<boolean> {
+  async consumeRecoveryCodeAndCreateSession(accountId: string, lookup: string, session?: SessionRecord): Promise<boolean> {
     await this.#ensureRecoverySchema();
-    const result = await this.#pool.query("DELETE FROM stash_recovery_codes WHERE account_id = $1 AND code_lookup = $2", [accountId, this.#authenticationSecrets.blindIndex(lookup)]);
-    return result.rowCount === 1;
+    const client = await this.#pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await client.query("DELETE FROM stash_recovery_codes WHERE account_id = $1 AND code_lookup = $2", [accountId, this.#authenticationSecrets.blindIndex(lookup)]);
+      if (result.rowCount !== 1 || !session) { await client.query("ROLLBACK"); return false; }
+      await this.#insertSession(client, session);
+      await client.query("COMMIT");
+      return true;
+    } catch (error) { await client.query("ROLLBACK").catch(() => undefined); throw error; } finally { client.release(); }
   }
 
-  async saveEmailRecovery(record: EmailRecoveryRecord): Promise<void> {
+  async prepareEmailRecovery(record?: EmailRecoveryRecord): Promise<void> {
     await this.#ensureRecoverySchema();
-    await this.#pool.query("INSERT INTO stash_email_recoveries (token_lookup, account_id, protected_secret, expires_at) VALUES ($1, $2, $3, $4)", [this.#authenticationSecrets.blindIndex(record.tokenLookup), record.accountId, record.protectedSecret, record.expiresAt]);
+    if (record) await this.#pool.query("INSERT INTO stash_email_recoveries (token_lookup, account_id, protected_secret, expires_at) VALUES ($1, $2, $3, $4)", [this.#authenticationSecrets.blindIndex(record.tokenLookup), record.accountId, record.protectedSecret, record.expiresAt]);
+    else await this.#pool.query("SELECT 1 FROM stash_email_recoveries WHERE token_lookup = $1", [this.#authenticationSecrets.blindIndex("missing-account-email-recovery-work")]);
   }
 
-  async consumeEmailRecovery(lookup: string, now: string): Promise<string | undefined> {
+  async findEmailRecoveryAccount(lookup: string, now: string): Promise<string | undefined> {
     await this.#ensureRecoverySchema();
-    const result = await this.#pool.query<{ account_id: string }>("DELETE FROM stash_email_recoveries WHERE token_lookup = $1 AND expires_at > $2 RETURNING account_id", [this.#authenticationSecrets.blindIndex(lookup), now]);
+    const result = await this.#pool.query<{ account_id: string }>("SELECT account_id FROM stash_email_recoveries WHERE token_lookup = $1 AND expires_at > $2", [this.#authenticationSecrets.blindIndex(lookup), now]);
     return result.rows[0]?.account_id;
+  }
+
+  async consumeEmailRecoveryAndCreateSession(lookup: string, now: string, session: SessionRecord): Promise<boolean> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await client.query("DELETE FROM stash_email_recoveries WHERE token_lookup = $1 AND account_id = $2 AND expires_at > $3", [this.#authenticationSecrets.blindIndex(lookup), session.accountId, now]);
+      if (result.rowCount !== 1) { await client.query("ROLLBACK"); return false; }
+      await this.#insertSession(client, session);
+      await client.query("COMMIT");
+      return true;
+    } catch (error) { await client.query("ROLLBACK").catch(() => undefined); throw error; } finally { client.release(); }
+  }
+
+  async #insertSession(client: PoolClient, session: SessionRecord): Promise<void> {
+    await client.query(
+      "INSERT INTO stash_sessions (id, account_id, token_lookup, token_hash, created_at, last_seen_at, user_agent) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+      [session.id, session.accountId, this.#authenticationSecrets.blindIndex(session.tokenHash), this.#authenticationSecrets.encrypt(session.tokenHash), session.createdAt, session.lastSeenAt, session.userAgent ?? null],
+    );
   }
 
   async #ensureAuthSchema(): Promise<void> {
