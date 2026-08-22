@@ -19,10 +19,12 @@ export interface OidcAuthRepository {
   findOidcConfiguration(organizationId: string): Promise<OidcOrganizationConfiguration | undefined>;
   findOidcIdentity(organizationId: string, issuer: string, subject: string): Promise<OidcIdentityRecord | undefined>;
   createSession(session: SessionRecord): Promise<void>;
-  organizationRole(organizationId: string, accountId: string): Promise<string | undefined>;
+  organizationRole(organizationId: string, accountId: string): Promise<BuiltInRole | undefined>;
   saveOidcConfiguration(configuration: OidcOrganizationConfiguration): Promise<void>;
   linkOidcIdentity(organizationId: string, accountId: string, issuer: string, subject: string): Promise<boolean>;
 }
+
+export type BuiltInRole = "Owner" | "Admin" | "Member";
 
 export interface OidcOrganizationConfiguration {
   organizationId: string;
@@ -61,8 +63,13 @@ function configuredIssuer(value: string): string {
   return url.href.replace(/\/$/, "");
 }
 
-function object(value: unknown): Record<string, unknown> {
+function providerObject(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new OidcProviderRejected();
+  return value as Record<string, unknown>;
+}
+
+function managementInput(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new InvalidOidcRequest();
   return value as Record<string, unknown>;
 }
 
@@ -86,7 +93,7 @@ export class OidcAuthService {
 
   async configure(accountId: string, organizationId: string, value: unknown): Promise<void> {
     await this.#requireAdministrator(accountId, organizationId);
-    const input = object(value);
+    const input = managementInput(value);
     if (typeof input.issuer !== "string" || typeof input.clientId !== "string" || !input.clientId
       || typeof input.clientSecret !== "string" || !input.clientSecret) throw new InvalidOidcRequest();
     let issuer: string;
@@ -96,7 +103,7 @@ export class OidcAuthService {
 
   async linkIdentity(accountId: string, organizationId: string, value: unknown): Promise<void> {
     await this.#requireAdministrator(accountId, organizationId);
-    const input = object(value);
+    const input = managementInput(value);
     if (typeof input.accountId !== "string" || !input.accountId || typeof input.subject !== "string" || !input.subject) {
       throw new InvalidOidcRequest();
     }
@@ -157,7 +164,7 @@ export class OidcAuthService {
       }),
     });
     if (!response.ok) throw new OidcProviderRejected();
-    const tokens = object(await response.json());
+    const tokens = providerObject(await response.json());
     const claims = await this.#verifyIdToken(requiredString(tokens.id_token), configuration, metadata, pending.nonce);
     const identity = await this.#repository.findOidcIdentity(organizationId, configuration.issuer, claims.subject);
     if (!identity) throw new OidcIdentityNotAuthorized();
@@ -181,7 +188,7 @@ export class OidcAuthService {
       headers: { accept: "application/json" },
     });
     if (!response.ok) throw new OidcProviderRejected();
-    const document = object(await response.json());
+    const document = providerObject(await response.json());
     const metadata = {
       issuer: requiredString(document.issuer),
       authorization_endpoint: requiredString(document.authorization_endpoint),
@@ -199,17 +206,17 @@ export class OidcAuthService {
     let header: Record<string, unknown>;
     let claims: Record<string, unknown>;
     try {
-      header = object(JSON.parse(Buffer.from(encodedHeader, "base64url").toString("utf8")));
-      claims = object(JSON.parse(Buffer.from(encodedClaims, "base64url").toString("utf8")));
+      header = providerObject(JSON.parse(Buffer.from(encodedHeader, "base64url").toString("utf8")));
+      claims = providerObject(JSON.parse(Buffer.from(encodedClaims, "base64url").toString("utf8")));
     } catch {
       throw new OidcProviderRejected();
     }
     if (header.alg !== "RS256" || typeof header.kid !== "string") throw new OidcProviderRejected();
     const jwksResponse = await this.#fetch(metadata.jwks_uri, { headers: { accept: "application/json" } });
     if (!jwksResponse.ok) throw new OidcProviderRejected();
-    const keys = object(await jwksResponse.json()).keys;
+    const keys = providerObject(await jwksResponse.json()).keys;
     if (!Array.isArray(keys)) throw new OidcProviderRejected();
-    const jwk = keys.find((candidate) => object(candidate).kid === header.kid) as JsonWebKey | undefined;
+    const jwk = keys.find((candidate) => providerObject(candidate).kid === header.kid) as JsonWebKey | undefined;
     if (!jwk || !verify("RSA-SHA256", Buffer.from(`${encodedHeader}.${encodedClaims}`), createPublicKey({ key: jwk, format: "jwk" }), Buffer.from(encodedSignature, "base64url"))) {
       throw new OidcProviderRejected();
     }

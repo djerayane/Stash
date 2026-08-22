@@ -25,7 +25,7 @@ class ProtocolCompatibleOidcDatabase implements DatabaseProbe, OidcAuthRepositor
     return this.identities.get(`${organizationId}:${issuer}:${subject}`);
   }
   async findOidcConfiguration(organizationId: string) { return this.configurations.get(organizationId); }
-  async organizationRole(_organizationId: string, accountId: string) { return accountId === "account-1" ? "Owner" : undefined; }
+  async organizationRole(_organizationId: string, accountId: string) { return accountId === "account-1" ? "Owner" as const : undefined; }
   async saveOidcConfiguration(configuration: import("../src/oidc-auth.js").OidcOrganizationConfiguration) { this.configurations.set(configuration.organizationId, configuration); }
   async linkOidcIdentity(organizationId: string, accountId: string, issuer: string, subject: string) {
     if (accountId !== "account-1") return false;
@@ -139,6 +139,10 @@ describe("optional OpenID Connect authentication on a running Stash Instance", (
       method: "PUT", headers: { "content-type": "application/json" }, body: "{}",
     });
     assert.equal(unauthorized.status, 401);
+    const invalid = await fetch(`${baseUrl}/api/organizations/organization-1/auth/oidc`, {
+      method: "PUT", headers: { authorization: `Bearer ${adminToken}`, "content-type": "application/json" }, body: "[]",
+    });
+    assert.equal(invalid.status, 422);
 
     const configured = await fetch(`${baseUrl}/api/organizations/organization-1/auth/oidc`, {
       method: "PUT",
