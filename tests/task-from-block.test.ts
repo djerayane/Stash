@@ -15,6 +15,8 @@ class TaskFromBlockFake implements DatabaseProbe, TaskFromBlockRepository {
   readonly source = { content: "Plan the release", revision: 1, blockId: undefined as string | undefined };
   readonly tasks: PortableTaskProjection[] = [];
   failure = false;
+  revokeAtBoundRead = false;
+  private canRead = true;
   private serial = Promise.resolve();
   async verifyConnection() {}
   async close() {}
@@ -39,7 +41,8 @@ class TaskFromBlockFake implements DatabaseProbe, TaskFromBlockRepository {
     } finally { release(); }
   }
   async listLinkedTasks(memberId: string, sourceNoteId: string) {
-    if (memberId !== "ada" || sourceNoteId !== noteId) return { status: "note_not_found" as const };
+    if (this.revokeAtBoundRead) this.canRead = false;
+    if (!this.canRead || memberId !== "ada" || sourceNoteId !== noteId) return { status: "note_not_found" as const };
     return { status: "found" as const, tasks: this.tasks.map((task) => ({ id: task.id, key: task.key, title: task.title,
       status: task.status, sourceBlock: task.sourceBlocks![0]! })) };
   }
@@ -113,6 +116,17 @@ describe("creating a Task from a stable Note Block", () => {
     assert.equal(body.tasks[0]?.status.name, "In Progress");
     assert.equal(body.tasks[0]?.sourceBlock.blockId, blockId);
     assert.equal((await linked("unknown")).status, 401);
+  });
+
+  it("returns no linked Task data when access is revoked at the authorization-bound read seam", async () => {
+    const { database, create, linked } = await run();
+    await create(blockKey, { projectId, title: "Secret release title" });
+    database.revokeAtBoundRead = true;
+    const response = await linked();
+    assert.equal(response.status, 404);
+    const body = await response.text();
+    assert.doesNotMatch(body, /Secret release title|STASH-1|Backlog/);
+    assert.match(body, /note_not_found/);
   });
 
   it("surfaces authorization, invalid references, input, and failures without partial state", async () => {
