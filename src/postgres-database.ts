@@ -3,6 +3,7 @@ import { Pool, type PoolClient } from "pg";
 import type { DatabaseProbe } from "./instance.js";
 import type { BootstrapRecord, OwnerBootstrapRepository } from "./owner-bootstrap.js";
 import type { AccountAuthenticationRecord, PasswordAuthRepository, SessionRecord } from "./password-auth.js";
+import type { OidcAuthRepository, OidcIdentityRecord } from "./oidc-auth.js";
 import {
   createAuthenticationKeyCheck,
   verifyAuthenticationKeyCheck,
@@ -25,7 +26,8 @@ export class PostgresDatabase implements
   DatabaseProbe,
   OwnerBootstrapRepository,
   PasswordAuthRepository,
-  WorkspaceProjectRepository
+  WorkspaceProjectRepository,
+  OidcAuthRepository
 {
   readonly #pool: Pool;
   readonly #authenticationSecrets: AuthenticationSecretCodec;
@@ -229,6 +231,23 @@ export class PostgresDatabase implements
     );
   }
 
+  createOidcSession(session: SessionRecord): Promise<void> {
+    return this.createSession(session);
+  }
+
+  async findOidcIdentity(organizationId: string, issuer: string, subject: string): Promise<OidcIdentityRecord | undefined> {
+    await this.#ensureOidcSchema();
+    const result = await this.#pool.query<OidcIdentityRow>(`
+      SELECT a.id, a.name, a.email
+      FROM stash_oidc_identities i
+      JOIN stash_accounts a ON a.id = i.account_id
+      JOIN stash_organization_memberships m ON m.account_id = a.id AND m.organization_id = i.organization_id
+      WHERE i.organization_id = $1 AND i.issuer = $2 AND i.subject = $3
+    `, [organizationId, issuer, subject]);
+    const row = result.rows[0];
+    return row ? { accountId: row.id, name: row.name, email: row.email } : undefined;
+  }
+
   async findSessionByTokenHash(hash: string): Promise<SessionRecord | undefined> {
     await this.#ensureAuthSchema();
     const result = await this.#pool.query<SessionRow>(
@@ -280,6 +299,19 @@ export class PostgresDatabase implements
         created_at TIMESTAMPTZ NOT NULL,
         last_seen_at TIMESTAMPTZ NOT NULL,
         user_agent TEXT
+      )
+    `);
+  }
+
+  async #ensureOidcSchema(): Promise<void> {
+    await this.#pool.query(`
+      CREATE TABLE IF NOT EXISTS stash_oidc_identities (
+        organization_id UUID NOT NULL REFERENCES stash_organizations(id) ON DELETE CASCADE,
+        issuer TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        account_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
+        PRIMARY KEY (organization_id, issuer, subject),
+        UNIQUE (organization_id, issuer, account_id)
       )
     `);
   }
@@ -430,3 +462,4 @@ export class PostgresDatabase implements
 
 interface AccountRow { id: string; name: string; email: string; password_hash: string }
 interface SessionRow { id: string; account_id: string; token_hash: string; created_at: Date | string; last_seen_at: Date | string; user_agent: string | null }
+interface OidcIdentityRow { id: string; name: string; email: string }

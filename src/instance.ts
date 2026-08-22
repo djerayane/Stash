@@ -10,6 +10,8 @@ import { createDiagnostics, type Diagnostics } from "./diagnostics.js";
 import { json, requireInstanceAdministrator } from "./http-routing.js";
 import { instanceAdminRoute } from "./instance-route.js";
 import type { OwnerBootstrapService } from "./owner-bootstrap.js";
+import { oidcAuthRoute } from "./oidc-auth-routes.js";
+import type { OidcAuthService } from "./oidc-auth.js";
 import { passwordAuthRoute } from "./password-auth-routes.js";
 import type { PasswordAuthService } from "./password-auth.js";
 import { workspaceProjectRoutes } from "./workspace-project-routes.js";
@@ -34,6 +36,7 @@ interface InstanceOptions {
   passwordAuth?: PasswordAuthService;
   workspaceProjects?: WorkspaceProjectService;
   memberAccess?: MemberAccessResolver;
+  oidcAuth?: OidcAuthService;
   diagnostics?: Diagnostics;
   acceleration?: OptionalRedisAcceleration;
 }
@@ -69,6 +72,7 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
   diagnostics.record({ kind: "instance_started", occurredAt: new Date().toISOString() });
   const acceleration = options.acceleration ?? createOptionalRedisAcceleration();
   const routes = [
+    ...(options.oidcAuth ? [oidcAuthRoute(options.oidcAuth)] : []),
     ...(options.passwordAuth ? [passwordAuthRoute(options.passwordAuth)] : []),
     diagnosticsSchemaRoute(diagnostics),
     requireInstanceAdministrator(options.instanceAdminToken, diagnosticsAdminRoute(diagnostics)),

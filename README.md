@@ -30,8 +30,19 @@ The application fails at startup with a clear error when required configuration 
 | `HOST` | no | Bind address, defaults to `0.0.0.0` |
 | `PORT` | no | TCP port, defaults to `3000` |
 | `REDIS_URL` | no | Redis connection URL for best-effort acceleration; PostgreSQL remains authoritative |
+| `OIDC_CONFIG` | no | JSON array of Organization OIDC configurations; omit it to keep OIDC disabled |
 
 Never commit production secrets or include them in a Portable Workspace Export.
+
+### Optional OpenID Connect
+
+Built-in password authentication remains available when OIDC is enabled. Configure an OIDC provider for an Organization with a JSON array containing `organizationId`, `issuer`, `clientId`, and `clientSecret`:
+
+```sh
+export OIDC_CONFIG='[{"organizationId":"00000000-0000-0000-0000-000000000001","issuer":"https://login.example.com","clientId":"stash","clientSecret":"replace-me"}]'
+```
+
+Provider identities must be explicitly linked to an existing Organization Member in `stash_oidc_identities`; matching an email address never creates or links an account implicitly. Begin authentication at `GET /api/auth/oidc/<organizationId>`. The returned authorization URL uses Authorization Code flow with PKCE, state, and nonce, and its callback issues the same kind of Stash session used by built-in authentication. Keep client secrets outside Portable Workspace Exports and supply them through protected Instance configuration.
 
 `INSTANCE_MASTER_KEY` is part of the Instance's restore contract even though it is stored outside
 PostgreSQL. Instance backup procedures must preserve this exact key separately and operators must

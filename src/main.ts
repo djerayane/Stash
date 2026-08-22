@@ -2,6 +2,7 @@ import { startInstance } from "./instance.js";
 import { OwnerBootstrapService } from "./owner-bootstrap.js";
 import { PostgresDatabase } from "./postgres-database.js";
 import { PasswordAuthService } from "./password-auth.js";
+import { OidcAuthService, type OidcOrganizationConfiguration } from "./oidc-auth.js";
 import { createAuthenticationSecretCodec } from "./authentication-secrets.js";
 import { startRedisAcceleration, type RunningRedisAcceleration } from "./redis-acceleration.js";
 import { WorkspaceProjectService } from "./workspaces-projects.js";
@@ -10,6 +11,15 @@ function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`${name} must be configured`);
   return value;
+}
+
+function oidcConfigurations(): OidcOrganizationConfiguration[] {
+  const configured = process.env.OIDC_CONFIG?.trim();
+  if (!configured) return [];
+  let value: unknown;
+  try { value = JSON.parse(configured); } catch { throw new Error("OIDC_CONFIG must be valid JSON"); }
+  if (!Array.isArray(value)) throw new Error("OIDC_CONFIG must be a JSON array");
+  return value as OidcOrganizationConfiguration[];
 }
 
 async function main(): Promise<void> {
@@ -29,6 +39,7 @@ async function main(): Promise<void> {
   }
 
   const passwordAuth = new PasswordAuthService(database);
+  const oidc = oidcConfigurations();
   const instance = await startInstance({
     database,
     host: process.env.HOST ?? "0.0.0.0",
@@ -37,6 +48,7 @@ async function main(): Promise<void> {
     ownerBootstrap: new OwnerBootstrapService(database),
     passwordAuth,
     workspaceProjects: new WorkspaceProjectService(database),
+    ...(oidc.length ? { oidcAuth: new OidcAuthService(database, oidc) } : {}),
     ...(redis ? { acceleration: redis.acceleration } : {}),
   });
   console.log(`Stash Instance listening on ${instance.url}`);
