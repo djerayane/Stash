@@ -88,6 +88,8 @@ describe("Task board views", () => {
     await run(); const response = await fetch(`${instance!.url}/boards`); const surface = await response.text();
     assert.equal(response.status, 200); assert.match(surface, /aria-live="polite"/); assert.match(surface, /Move .* to status/);
     assert.match(surface, /prefers-reduced-motion/); assert.match(surface, /gsap\.from/);
+    assert.match(surface, /message\.textContent=body\.board\.name\+' loaded\.'/);
+    assert.doesNotMatch(surface, /if\(!message\.textContent\)/);
   });
 
   it("moves the canonical Task through a status board and exposes the result in every view", async () => {
