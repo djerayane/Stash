@@ -57,11 +57,14 @@ class MobileProtocolDatabase implements DatabaseProbe, MobileCaptureRepository {
   async verifyConnection() {}
   async close() {}
   async findPortableMemberIdentity(memberId: string) {
-    return memberId === "ada" ? { localAccountId: "ada", displayName: "Ada Lovelace" } : undefined;
+    return memberId === "ada" ? { localAccountId: "ada", displayName: "Ada Lovelace" }
+      : memberId === "grace" ? { localAccountId: "grace", displayName: "Grace Hopper" } : undefined;
   }
   async listMobileCaptureOptions(memberId: string, requestedWorkspaceId: string) {
     return memberId === "ada" && requestedWorkspaceId === workspaceId
       ? { status: "found" as const, projects: [{ id: projectId, name: "Launch" }], tags: ["mobile"] }
+      : memberId === "grace" && requestedWorkspaceId === workspaceId
+        ? { status: "found" as const, projects: [], tags: [] }
       : { status: "workspace_forbidden" as const };
   }
   async createMobileCapture(memberId: string, clientCaptureId: string, payloadDigest: string, note: NoteRecord, projection: PortableNoteProjection) {
@@ -71,7 +74,7 @@ class MobileProtocolDatabase implements DatabaseProbe, MobileCaptureRepository {
     if (existing) return existing.payloadDigest === payloadDigest
       ? { status: "duplicate" as const, noteId: existing.noteId }
       : { status: "conflict" as const };
-    if (memberId !== "ada" || note.workspaceId !== workspaceId) return { status: "workspace_forbidden" as const };
+    if ((memberId !== "ada" && memberId !== "grace") || note.workspaceId !== workspaceId) return { status: "workspace_forbidden" as const };
     if (note.projectId && note.projectId !== projectId) return { status: "project_forbidden" as const };
     this.notes.set(note.id, note);
     this.receipts.set(clientCaptureId, { noteId: note.id, payloadDigest });
@@ -81,7 +84,8 @@ class MobileProtocolDatabase implements DatabaseProbe, MobileCaptureRepository {
 
 const access: MemberAccessResolver = {
   async authenticateBearer(value) {
-    return value === "Bearer member-ada" ? { accountId: "ada", sessionId: "session-ada" } : undefined;
+    if (value === "Bearer member-ada" || value === "Bearer member-ada-rotated") return { accountId: "ada", sessionId: "session-ada" };
+    return value === "Bearer member-grace" ? { accountId: "grace", sessionId: "session-grace" } : undefined;
   },
 };
 
@@ -108,8 +112,8 @@ describe("offline mobile capture synchronization", () => {
       if (!online) throw new TypeError("Network request failed");
       return fetch(input, init);
     }, { allowInsecureInstanceForTest: true, now: () => now });
-    await client.pair({ instanceUrl: baseUrl, memberToken: "member-ada", workspaceId });
     online = true;
+    await client.pair({ instanceUrl: baseUrl, memberToken: "member-ada", workspaceId });
     assert.deepEqual(await client.refreshOptions(), {
       projects: [{ id: projectId, name: "Launch" }], tags: ["mobile"],
       reminders: [{ id: "hour", label: "In one hour", offsetMinutes: 60 },
@@ -183,9 +187,11 @@ describe("offline mobile capture synchronization", () => {
     }, { allowInsecureInstanceForTest: true });
     await client.pair({ instanceUrl: baseUrl, memberToken: "member-ada", workspaceId });
     const queued = await client.captureText("Belongs only to Instance A");
+    requestedUrls.length = 0;
 
     const otherWorkspaceId = "99999999-9999-4999-8999-999999999999";
-    await client.pair({ instanceUrl: "https://instance-b.example", memberToken: "member-b", workspaceId: otherWorkspaceId });
+    await store.savePairing({ instanceUrl: "https://instance-b.example", memberToken: "member-b",
+      workspaceId: otherWorkspaceId, memberId: "member-b" });
     const retained = await client.sync();
 
     assert.deepEqual(retained, { status: "attention_required", count: 0, error: "capture_pairing_mismatch" });
@@ -211,15 +217,24 @@ describe("offline mobile capture synchronization", () => {
     await client.captureText("Ada private capture");
 
     await client.pair({ instanceUrl: baseUrl, memberToken: "member-grace", workspaceId });
-    assert.deepEqual(await client.options(), { projects: [], tags: [], reminders: [] });
+    const graceOptions = { projects: [], tags: [], reminders: [
+      { id: "hour", label: "In one hour", offsetMinutes: 60 },
+      { id: "tomorrow", label: "Tomorrow", offsetMinutes: 1_440 },
+      { id: "week", label: "In one week", offsetMinutes: 10_080 },
+    ] };
+    assert.deepEqual(await client.options(), graceOptions);
+    const gracePairing = await store.loadPairing();
+    await store.savePairing({ ...gracePairing!, memberToken: "revoked-grace" });
     await assert.rejects(() => client.refreshOptions(), /valid Member session/i);
-    assert.deepEqual(await client.options(), { projects: [], tags: [], reminders: [] });
+    assert.deepEqual(await client.options(), graceOptions);
     assert.deepEqual(await client.sync(), { status: "attention_required", count: 0, error: "capture_pairing_mismatch" });
-    assert.equal(requests, 1);
     assert.equal(database.notes.size, 0);
 
-    await client.pair({ instanceUrl: baseUrl, memberToken: "member-ada", workspaceId });
-    assert.deepEqual(await client.options(), { projects: [{ id: projectId, name: "Ada private" }], tags: ["ada"], reminders: [] });
+    await client.pair({ instanceUrl: baseUrl, memberToken: "member-ada-rotated", workspaceId });
+    assert.deepEqual(await client.options(), { projects: [{ id: projectId, name: "Launch" }], tags: ["mobile"],
+      reminders: [{ id: "hour", label: "In one hour", offsetMinutes: 60 },
+        { id: "tomorrow", label: "Tomorrow", offsetMinutes: 1_440 },
+        { id: "week", label: "In one week", offsetMinutes: 10_080 }] });
     assert.deepEqual(await client.sync(), { status: "synced", count: 1 });
   });
 
@@ -245,12 +260,14 @@ describe("offline mobile capture synchronization", () => {
     const store = new MemoryEncryptedStore();
     const client = new MobileCaptureClient(store, fetch, { allowInsecureInstanceForTest: true });
     await assert.rejects(() => client.pair({ instanceUrl: "http://stash.example", memberToken: "secret", workspaceId }), /HTTPS/);
-    await client.pair({ instanceUrl: baseUrl, memberToken: "wrong", workspaceId });
+    await client.pair({ instanceUrl: baseUrl, memberToken: "member-ada", workspaceId });
     const cachedOptions = { projects: [{ id: projectId, name: "Launch" }], tags: ["mobile"],
       reminders: [{ id: "tomorrow", label: "Tomorrow", offsetMinutes: 1_440 }] };
     await client.cacheOptions(cachedOptions);
     assert.deepEqual(await client.options(), cachedOptions);
     await client.captureChecklist("Launch steps", ["Invite testers", "Publish notes"], { projectId, tags: ["mobile"] });
+    const authenticatedPairing = await store.loadPairing();
+    await store.savePairing({ ...authenticatedPairing!, memberToken: "wrong" });
 
     const result = await client.sync();
     assert.equal(result.status, "attention_required");
@@ -324,11 +341,11 @@ describe("offline mobile capture synchronization", () => {
 
   it("aborts an in-flight synchronization and suppresses callbacks after cleanup", async () => {
     const store = new MemoryEncryptedStore();
-    const pairing = { instanceUrl: "https://stash.example", memberToken: "member-ada", workspaceId, pairingId: "pairing-ada" };
+    const pairing = { instanceUrl: "https://stash.example", memberToken: "member-ada", workspaceId, memberId: "ada" };
     await store.savePairing(pairing);
     await store.saveCapture({ id: "44444444-4444-4444-8444-444444444444", kind: "text", content: "Wait",
       createdAt: new Date().toISOString(), attempts: 0,
-      origin: { instanceUrl: "https://stash.example", workspaceId, pairingId: pairing.pairingId } });
+      origin: { instanceUrl: "https://stash.example", workspaceId, memberId: pairing.memberId } });
     let requestSignal: AbortSignal | undefined;
     const client = new MobileCaptureClient(store, async (_input, init) => {
       requestSignal = init?.signal ?? undefined;
@@ -353,11 +370,11 @@ describe("offline mobile capture synchronization", () => {
 
   it("joins concurrent sync triggers without cancelling an options refresh", async () => {
     const store = new MemoryEncryptedStore();
-    const pairing = { instanceUrl: "https://stash.example", memberToken: "member-ada", workspaceId, pairingId: "pairing-ada" };
+    const pairing = { instanceUrl: "https://stash.example", memberToken: "member-ada", workspaceId, memberId: "ada" };
     await store.savePairing(pairing);
     await store.saveCapture({ id: "44444444-4444-4444-8444-444444444444", kind: "text", content: "Wait",
       createdAt: "2026-08-22T10:00:00.000Z", attempts: 0,
-      origin: { instanceUrl: "https://stash.example", workspaceId, pairingId: pairing.pairingId } });
+      origin: { instanceUrl: "https://stash.example", workspaceId, memberId: pairing.memberId } });
     let refreshSignal: AbortSignal | undefined;
     let syncRequests = 0;
     let resolveRefresh!: (response: Response) => void;
@@ -379,7 +396,7 @@ describe("offline mobile capture synchronization", () => {
     assert.equal(first, joined);
     assert.equal(syncRequests, 1);
     assert.equal(refreshSignal?.aborted, false);
-    resolveRefresh(new Response(JSON.stringify({ projects: [], tags: [], reminders: [] }), { status: 200 }));
+    resolveRefresh(new Response(JSON.stringify({ memberId: "ada", projects: [], tags: [], reminders: [] }), { status: 200 }));
     resolveSync(new Response(JSON.stringify({ status: "created" }), { status: 201 }));
     await refresh;
     assert.deepEqual(await first, { status: "synced", count: 1 });

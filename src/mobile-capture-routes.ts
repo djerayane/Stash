@@ -14,7 +14,7 @@ export function mobileCaptureRoutes(service: MobileCaptureService, accessResolve
         try { workspaceId = decodeURIComponent(url.pathname.split("/")[5]!); } catch { throw new InvalidMobileCapture(); }
         if (request.method === "GET") {
           const result = await service.options(access.accountId, workspaceId);
-          if (result.status === "found") json(response, 200, result.options);
+          if (result.status === "found") json(response, 200, { memberId: access.accountId, ...result.options });
           else json(response, 403, { error: "workspace_forbidden", message: "This Member cannot read capture options in that Workspace." });
           return true;
         }

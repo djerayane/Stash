@@ -19,8 +19,7 @@ export default function PairingScreen() {
   const [error, setError] = useState("");
   const pair = async () => {
     try {
-      await client.pair({ instanceUrl: instanceUrl.trim(), memberToken: memberToken.trim(), workspaceId: workspaceId.trim() });
-      await client.refreshOptions(controller.signal);
+      await client.pair({ instanceUrl: instanceUrl.trim(), memberToken: memberToken.trim(), workspaceId: workspaceId.trim() }, controller.signal);
       if (!mounted.current) return;
       router.back();
     } catch (cause) { if (mounted.current && !controller.signal.aborted) setError(cause instanceof Error ? cause.message : "Pairing failed."); }

@@ -2,7 +2,7 @@ export interface MobileCapturePairing {
   instanceUrl: string;
   memberToken: string;
   workspaceId: string;
-  pairingId?: string;
+  memberId?: string;
 }
 
 export interface MobileCaptureOptions {
@@ -20,7 +20,7 @@ export interface MobileCapture {
   tags?: string[];
   reminder?: { at: string };
   createdAt: string;
-  origin?: { instanceUrl: string; workspaceId: string; pairingId?: string };
+  origin?: { instanceUrl: string; workspaceId: string; memberId?: string };
   attempts: number;
   nextRetryAt?: string;
   lastError?: string;
@@ -60,7 +60,7 @@ export class MobileCaptureClient {
     this.#now = options.now ?? Date.now;
   }
 
-  async pair(pairing: MobileCapturePairing): Promise<void> {
+  async pair(pairing: MobileCapturePairing, signal?: AbortSignal): Promise<void> {
     let url: URL;
     try { url = new URL(pairing.instanceUrl); } catch { throw new Error("Instance URL must be a valid HTTPS origin."); }
     const testLoopback = this.#allowInsecureInstanceForTest && url.protocol === "http:"
@@ -70,20 +70,30 @@ export class MobileCaptureClient {
       throw new Error("Instance URL must be a valid HTTPS origin.");
     }
     if (!pairing.memberToken.trim() || !isUuid(pairing.workspaceId)) throw new Error("Pairing requires a Member token and Workspace.");
-    await this.#store.savePairing({ ...pairing, instanceUrl: url.origin,
-      pairingId: pairing.memberToken });
+    const controller = this.#controller(signal);
+    this.#refreshControllers.add(controller);
+    try {
+      const response = await this.#fetch(`${url.origin}/api/mobile/v1/workspaces/${pairing.workspaceId}/capture-options`, {
+        headers: { authorization: `Bearer ${pairing.memberToken}` }, signal: controller.signal,
+      });
+      const body = await response.json().catch(() => ({})) as MobileCaptureOptions & { memberId?: string; message?: string };
+      if (!response.ok || !body.memberId) throw new Error(body.message ?? "The Member pairing could not be authenticated.");
+      const authenticated = { ...pairing, instanceUrl: url.origin, memberId: body.memberId };
+      await this.#store.savePairing(authenticated);
+      await this.#store.saveOptions(pairingScope(authenticated), { projects: body.projects, tags: body.tags, reminders: body.reminders });
+    } finally { this.#refreshControllers.delete(controller); }
   }
 
   outbox() { return this.#store.listCaptures(); }
   async options() {
     const pairing = await this.#store.loadPairing();
-    return pairing?.pairingId ? this.#store.loadOptions(pairing.pairingId) : emptyOptions();
+    return pairing?.memberId ? this.#store.loadOptions(pairingScope(pairing)) : emptyOptions();
   }
   async cacheOptions(options: MobileCaptureOptions) {
     const pairing = await this.#store.loadPairing();
     if (!pairing) throw new Error("Pair the app before caching capture options.");
-    if (!pairing.pairingId) throw new Error("Pair the app again before caching capture options.");
-    return this.#store.saveOptions(pairing.pairingId, options);
+    if (!pairing.memberId) throw new Error("Pair the app again before caching capture options.");
+    return this.#store.saveOptions(pairingScope(pairing), options);
   }
 
   watchConnectivity(
@@ -134,11 +144,11 @@ export class MobileCaptureClient {
       const response = await this.#fetch(`${pairing.instanceUrl}/api/mobile/v1/workspaces/${pairing.workspaceId}/capture-options`, {
         headers: { authorization: `Bearer ${pairing.memberToken}` }, signal: controller.signal,
       });
-      const body = await response.json().catch(() => ({})) as MobileCaptureOptions & { message?: string };
+      const body = await response.json().catch(() => ({})) as MobileCaptureOptions & { memberId?: string; message?: string };
       if (!response.ok) throw new Error(body.message ?? "Capture options could not be refreshed.");
       const options = { projects: body.projects, tags: body.tags, reminders: body.reminders };
-      if (!pairing.pairingId) throw new Error("Pair the app again before refreshing capture options.");
-      await this.#store.saveOptions(pairing.pairingId, options); return options;
+      if (!body.memberId || body.memberId !== pairing.memberId) throw new Error("The Member token belongs to a different pairing.");
+      await this.#store.saveOptions(pairingScope(pairing), options); return options;
     } finally { this.#refreshControllers.delete(controller); }
   }
 
@@ -155,11 +165,10 @@ export class MobileCaptureClient {
     if (!content.trim()) throw new Error("A capture requires content.");
     const pairing = await this.#store.loadPairing();
     if (!pairing) throw new Error("Pair the app before saving a capture.");
-    if (!pairing.pairingId) throw new Error("Pair the app again before saving a capture.");
+    if (!pairing.memberId) throw new Error("Pair the app again before saving a capture.");
     const capture: MobileCapture = {
       id: crypto.randomUUID(), kind, content: content.trim(), createdAt: new Date().toISOString(), attempts: 0,
-      origin: { instanceUrl: pairing.instanceUrl, workspaceId: pairing.workspaceId,
-        pairingId: pairing.pairingId },
+      origin: { instanceUrl: pairing.instanceUrl, workspaceId: pairing.workspaceId, memberId: pairing.memberId },
       ...(checklist ? { checklist } : {}), ...(structure.projectId ? { projectId: structure.projectId } : {}),
       ...(structure.tags ? { tags: structure.tags } : {}), ...(structure.reminder ? { reminder: structure.reminder } : {}),
     };
@@ -182,13 +191,13 @@ export class MobileCaptureClient {
   async #performSync(controller: AbortController): Promise<MobileSyncResult> {
     const pairing = await this.#store.loadPairing();
     if (!pairing) return { status: "attention_required", count: 0, error: "not_paired" };
-    if (!pairing.pairingId) return { status: "attention_required", count: 0, error: "pairing_identity_unknown" };
+    if (!pairing.memberId) return { status: "attention_required", count: 0, error: "pairing_identity_unknown" };
     let count = 0;
     let attentionError: string | undefined;
     let retryPending = false;
-    const activePairingId = pairing.pairingId;
+    const activeMemberId = pairing.memberId;
     for (const capture of await this.#store.listCaptures()) {
-      if (!capture.origin?.pairingId) {
+      if (!capture.origin?.memberId) {
         await this.#store.saveCapture({ ...capture, lastError: "This legacy capture has no authenticated pairing identity and cannot be synchronized automatically." });
         attentionError ??= "capture_origin_unknown";
         continue;
@@ -198,7 +207,7 @@ export class MobileCaptureClient {
         attentionError ??= "capture_pairing_mismatch";
         continue;
       }
-      if (capture.origin.pairingId !== activePairingId) {
+      if (capture.origin.memberId !== activeMemberId) {
         await this.#store.saveCapture({ ...capture, lastError: "This capture is retained for its originating Member pairing. Restore that pairing to synchronize it." });
         attentionError ??= "capture_pairing_mismatch";
         continue;
@@ -243,6 +252,7 @@ export class MobileCaptureClient {
 }
 
 function emptyOptions(): MobileCaptureOptions { return { projects: [], tags: [], reminders: [] }; }
+function pairingScope(pairing: MobileCapturePairing): string { return `${pairing.instanceUrl}\n${pairing.workspaceId}\n${pairing.memberId}`; }
 
 function retryDelay(retryAfter: string | null, attempts: number, now: number): number {
   if (retryAfter) {
