@@ -16,6 +16,15 @@ function callbackUri(request: Parameters<HttpRoute["handle"]>[0], organizationId
   return `${protocol}://${host}/api/auth/oidc/${encodeURIComponent(organizationId)}/callback`;
 }
 
+function organizationId(encoded: string): string {
+  let decoded: string;
+  try { decoded = decodeURIComponent(encoded); } catch { throw new InvalidOidcRequest(); }
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(decoded)) {
+    throw new InvalidOidcRequest();
+  }
+  return decoded;
+}
+
 export function oidcAuthRoute(service: OidcAuthService): HttpRoute {
   return {
     matches: (_request, url) => url.pathname.startsWith("/api/auth/oidc/"),
@@ -24,9 +33,9 @@ export function oidcAuthRoute(service: OidcAuthService): HttpRoute {
       const start = url.pathname.match(/^\/api\/auth\/oidc\/([^/]+)$/);
       try {
         if (request.method === "GET" && callback) {
-          const organizationId = decodeURIComponent(callback[1]!);
+          const parsedOrganizationId = organizationId(callback[1]!);
           const result = await service.complete(
-            organizationId,
+            parsedOrganizationId,
             url.searchParams.get("code"),
             url.searchParams.get("state"),
             request.headers["user-agent"],
@@ -35,8 +44,8 @@ export function oidcAuthRoute(service: OidcAuthService): HttpRoute {
           return true;
         }
         if (request.method === "GET" && start) {
-          const organizationId = decodeURIComponent(start[1]!);
-          json(response, 200, await service.begin(organizationId, callbackUri(request, organizationId)));
+          const parsedOrganizationId = organizationId(start[1]!);
+          json(response, 200, await service.begin(parsedOrganizationId, callbackUri(request, parsedOrganizationId)));
           return true;
         }
         return false;
@@ -61,20 +70,20 @@ export function oidcManagementRoute(service: OidcManagementService, sessions: Pa
     matches: (_request, url) => /^\/api\/organizations\/[^/]+\/auth\/oidc(?:\/identities)?$/.test(url.pathname),
     async handle(request, response, url) {
       try {
+        const match = url.pathname.match(/^\/api\/organizations\/([^/]+)\/auth\/oidc(\/identities)?$/)!;
+        const parsedOrganizationId = organizationId(match[1]!);
         const member = await sessions.authenticateBearer(request.headers.authorization);
         if (!member) {
           json(response, 401, { error: "unauthorized", message: "A valid Member session is required." });
           return true;
         }
-        const match = url.pathname.match(/^\/api\/organizations\/([^/]+)\/auth\/oidc(\/identities)?$/)!;
-        const organizationId = decodeURIComponent(match[1]!);
         if (request.method === "PUT" && !match[2]) {
-          await service.configure(member.accountId, organizationId, await readJson(request));
+          await service.configure(member.accountId, parsedOrganizationId, await readJson(request));
           response.writeHead(204).end();
           return true;
         }
         if (request.method === "POST" && match[2]) {
-          await service.linkIdentity(member.accountId, organizationId, await readJson(request));
+          await service.linkIdentity(member.accountId, parsedOrganizationId, await readJson(request));
           response.writeHead(204).end();
           return true;
         }

@@ -3,6 +3,7 @@ import {
   OidcIdentityNotAuthorized,
   type OidcAuthRepository,
 } from "./oidc-auth.js";
+import { createOidcHttpClient, type OidcHttpClient } from "./oidc-http-client.js";
 
 export class OidcManagementNotAuthorized extends Error {}
 
@@ -19,9 +20,11 @@ function configuredIssuer(value: string): string {
 
 export class OidcManagementService {
   readonly #repository: OidcAuthRepository;
+  readonly #http: OidcHttpClient;
 
-  constructor(repository: OidcAuthRepository) {
+  constructor(repository: OidcAuthRepository, http: OidcHttpClient = createOidcHttpClient()) {
     this.#repository = repository;
+    this.#http = http;
   }
 
   async configure(accountId: string, organizationId: string, value: unknown): Promise<void> {
@@ -31,6 +34,7 @@ export class OidcManagementService {
       || typeof input.clientSecret !== "string" || !input.clientSecret) throw new InvalidOidcRequest();
     let issuer: string;
     try { issuer = configuredIssuer(input.issuer); } catch { throw new InvalidOidcRequest(); }
+    try { await this.#http.validateUrl(issuer); } catch { throw new InvalidOidcRequest(); }
     await this.#repository.saveOidcConfiguration({ organizationId, issuer, clientId: input.clientId, clientSecret: input.clientSecret });
   }
 
@@ -42,7 +46,10 @@ export class OidcManagementService {
     }
     const configuration = await this.#repository.findOidcConfiguration(organizationId);
     if (!configuration) throw new InvalidOidcRequest();
-    if (!(await this.#repository.linkOidcIdentity(organizationId, input.accountId, configuration.issuer, input.subject))) {
+    if (!(await this.#repository.linkOidcIdentity(
+      { organizationId, issuer: configuration.issuer, subject: input.subject },
+      input.accountId,
+    ))) {
       throw new OidcIdentityNotAuthorized();
     }
   }

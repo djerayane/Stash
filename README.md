@@ -45,6 +45,8 @@ curl -X PUT http://localhost:3000/api/organizations/<organizationId>/auth/oidc \
 
 Provider identities are explicitly linked to an existing Organization Member with `POST /api/organizations/<organizationId>/auth/oidc/identities` and a JSON body containing `accountId` and provider `subject`; matching an email address never creates or links an account implicitly. Begin authentication at `GET /api/auth/oidc/<organizationId>`. The returned authorization URL uses Authorization Code flow with PKCE, state, and nonce, and its callback issues the same kind of Stash session used by built-in authentication. Provider client secrets are encrypted under `INSTANCE_MASTER_KEY` and excluded from Portable Workspace Exports.
 
+OIDC issuer, discovery, token, and JWKS endpoints must use HTTPS and resolve only to public addresses. Stash pins each validated DNS result to the outbound connection, revalidates controlled discovery/JWKS redirects, rejects token-endpoint redirects, and bounds response time and size. The plain-HTTP/private-address exception exists only as an explicitly injected test adapter and is not available through Instance configuration.
+
 `INSTANCE_MASTER_KEY` is part of the Instance's restore contract even though it is stored outside
 PostgreSQL. Instance backup procedures must preserve this exact key separately and operators must
 resupply the same key when restoring the Instance. If the key is missing or wrong, encrypted

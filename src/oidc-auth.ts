@@ -8,6 +8,7 @@ import {
 
 import type { SessionRecord } from "./password-auth.js";
 import { issueSession } from "./auth-session.js";
+import { createOidcHttpClient, type OidcHttpClient } from "./oidc-http-client.js";
 
 export interface OidcIdentityRecord {
   accountId: string;
@@ -15,13 +16,19 @@ export interface OidcIdentityRecord {
   email: string;
 }
 
+export interface OidcIdentityKey {
+  organizationId: string;
+  issuer: string;
+  subject: string;
+}
+
 export interface OidcAuthRepository {
   findOidcConfiguration(organizationId: string): Promise<OidcOrganizationConfiguration | undefined>;
-  findOidcIdentity(organizationId: string, issuer: string, subject: string): Promise<OidcIdentityRecord | undefined>;
+  findOidcIdentity(key: OidcIdentityKey): Promise<OidcIdentityRecord | undefined>;
   createSession(session: SessionRecord): Promise<void>;
   organizationRole(organizationId: string, accountId: string): Promise<BuiltInRole | undefined>;
   saveOidcConfiguration(configuration: OidcOrganizationConfiguration): Promise<void>;
-  linkOidcIdentity(organizationId: string, accountId: string, issuer: string, subject: string): Promise<boolean>;
+  linkOidcIdentity(key: OidcIdentityKey, accountId: string): Promise<boolean>;
 }
 
 export type BuiltInRole = "Owner" | "Admin" | "Member";
@@ -69,14 +76,14 @@ function requiredString(value: unknown): string {
 export class OidcAuthService {
   readonly #repository: OidcAuthRepository;
   readonly #pending = new Map<string, PendingAuthorization>();
-  readonly #fetch: typeof fetch;
+  readonly #http: OidcHttpClient;
 
   constructor(
     repository: OidcAuthRepository,
-    fetcher: typeof fetch = fetch,
+    http: OidcHttpClient = createOidcHttpClient(),
   ) {
     this.#repository = repository;
-    this.#fetch = fetcher;
+    this.#http = http;
   }
 
   async begin(organizationId: string, redirectUri: string): Promise<{ authorizationUrl: string }> {
@@ -117,10 +124,9 @@ export class OidcAuthService {
 
     const configuration = await this.#configuration(organizationId);
     const metadata = await this.#metadata(configuration);
-    const response = await this.#fetch(metadata.token_endpoint, {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
-      body: new URLSearchParams({
+    const tokens = providerObject(await this.#providerRequest(() => this.#http.postForm(
+      metadata.token_endpoint,
+      new URLSearchParams({
         grant_type: "authorization_code",
         code,
         redirect_uri: pending.redirectUri,
@@ -128,11 +134,10 @@ export class OidcAuthService {
         client_secret: configuration.clientSecret,
         code_verifier: pending.verifier,
       }),
-    });
-    if (!response.ok) throw new OidcProviderRejected();
-    const tokens = providerObject(await response.json());
+    )));
     const claims = await this.#verifyIdToken(requiredString(tokens.id_token), configuration, metadata, pending.nonce);
-    const identity = await this.#repository.findOidcIdentity(organizationId, configuration.issuer, claims.subject);
+    const identityKey: OidcIdentityKey = { organizationId, issuer: configuration.issuer, subject: claims.subject };
+    const identity = await this.#repository.findOidcIdentity(identityKey);
     if (!identity) throw new OidcIdentityNotAuthorized();
 
     return issueSession(this.#repository, { id: identity.accountId, name: identity.name, email: identity.email }, userAgent);
@@ -145,11 +150,9 @@ export class OidcAuthService {
   }
 
   async #metadata(configuration: OidcOrganizationConfiguration): Promise<ProviderMetadata> {
-    const response = await this.#fetch(`${configuration.issuer}/.well-known/openid-configuration`, {
-      headers: { accept: "application/json" },
-    });
-    if (!response.ok) throw new OidcProviderRejected();
-    const document = providerObject(await response.json());
+    const document = providerObject(await this.#providerRequest(
+      () => this.#http.getJson(`${configuration.issuer}/.well-known/openid-configuration`),
+    ));
     const metadata = {
       issuer: requiredString(document.issuer),
       authorization_endpoint: requiredString(document.authorization_endpoint),
@@ -157,6 +160,13 @@ export class OidcAuthService {
       jwks_uri: requiredString(document.jwks_uri),
     };
     if (metadata.issuer !== configuration.issuer) throw new OidcProviderRejected();
+    await this.#providerRequest(async () => {
+      await Promise.all([
+        this.#http.validateUrl(metadata.authorization_endpoint),
+        this.#http.validateUrl(metadata.token_endpoint),
+        this.#http.validateUrl(metadata.jwks_uri),
+      ]);
+    });
     return metadata;
   }
 
@@ -173,9 +183,7 @@ export class OidcAuthService {
       throw new OidcProviderRejected();
     }
     if (header.alg !== "RS256" || typeof header.kid !== "string") throw new OidcProviderRejected();
-    const jwksResponse = await this.#fetch(metadata.jwks_uri, { headers: { accept: "application/json" } });
-    if (!jwksResponse.ok) throw new OidcProviderRejected();
-    const keys = providerObject(await jwksResponse.json()).keys;
+    const keys = providerObject(await this.#providerRequest(() => this.#http.getJson(metadata.jwks_uri))).keys;
     if (!Array.isArray(keys)) throw new OidcProviderRejected();
     const jwk = keys.find((candidate) => providerObject(candidate).kid === header.kid) as JsonWebKey | undefined;
     if (!jwk || !verify("RSA-SHA256", Buffer.from(`${encodedHeader}.${encodedClaims}`), createPublicKey({ key: jwk, format: "jwk" }), Buffer.from(encodedSignature, "base64url"))) {
@@ -184,13 +192,19 @@ export class OidcAuthService {
     const audience = claims.aud;
     const audienceMatches = audience === configuration.clientId
       || (Array.isArray(audience) && audience.includes(configuration.clientId));
+    const authorizedPartyMatches = !Array.isArray(audience) || audience.length <= 1
+      || claims.azp === configuration.clientId;
     const now = Math.floor(Date.now() / 1000);
-    if (claims.iss !== configuration.issuer || !audienceMatches || claims.nonce !== nonce
+    if (claims.iss !== configuration.issuer || !audienceMatches || !authorizedPartyMatches || claims.nonce !== nonce
       || typeof claims.exp !== "number" || claims.exp <= now || typeof claims.iat !== "number" || claims.iat > now + 60
       || typeof claims.sub !== "string" || !claims.sub) {
       throw new OidcProviderRejected();
     }
     return { subject: claims.sub };
+  }
+
+  async #providerRequest<T>(request: () => Promise<T>): Promise<T> {
+    try { return await request(); } catch { throw new OidcProviderRejected(); }
   }
 
   #discardExpired(): void {

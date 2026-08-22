@@ -3,7 +3,7 @@ import { Pool, type PoolClient } from "pg";
 import type { DatabaseProbe } from "./instance.js";
 import type { BootstrapRecord, OwnerBootstrapRepository } from "./owner-bootstrap.js";
 import type { AccountAuthenticationRecord, PasswordAuthRepository, SessionRecord } from "./password-auth.js";
-import type { BuiltInRole, OidcAuthRepository, OidcIdentityRecord, OidcOrganizationConfiguration } from "./oidc-auth.js";
+import type { BuiltInRole, OidcAuthRepository, OidcIdentityKey, OidcIdentityRecord, OidcOrganizationConfiguration } from "./oidc-auth.js";
 import {
   createAuthenticationKeyCheck,
   verifyAuthenticationKeyCheck,
@@ -231,17 +231,18 @@ export class PostgresDatabase implements
     );
   }
 
-  async findOidcIdentity(organizationId: string, issuer: string, subject: string): Promise<OidcIdentityRecord | undefined> {
+  async findOidcIdentity(key: OidcIdentityKey): Promise<OidcIdentityRecord | undefined> {
     await this.#ensureOidcSchema();
     const result = await this.#pool.query<OidcIdentityRow>(`
-      SELECT a.id, a.name, a.email
+      SELECT a.id, a.name, a.email, i.subject_secret
       FROM stash_oidc_identities i
       JOIN stash_accounts a ON a.id = i.account_id
       JOIN stash_organization_memberships m ON m.account_id = a.id AND m.organization_id = i.organization_id
-      WHERE i.organization_id = $1 AND i.issuer = $2 AND i.subject = $3
-    `, [organizationId, issuer, subject]);
+      WHERE i.organization_id = $1 AND i.issuer = $2 AND i.subject_lookup = $3
+    `, [key.organizationId, key.issuer, this.#oidcIdentityLookup(key)]);
     const row = result.rows[0];
-    return row ? { accountId: row.id, name: row.name, email: row.email } : undefined;
+    if (!row || this.#authenticationSecrets.decrypt(row.subject_secret) !== key.subject) return undefined;
+    return { accountId: row.id, name: row.name, email: row.email };
   }
 
   async findOidcConfiguration(organizationId: string): Promise<OidcOrganizationConfiguration | undefined> {
@@ -276,14 +277,15 @@ export class PostgresDatabase implements
     `, [configuration.organizationId, configuration.issuer, configuration.clientId, this.#authenticationSecrets.encrypt(configuration.clientSecret)]);
   }
 
-  async linkOidcIdentity(organizationId: string, accountId: string, issuer: string, subject: string): Promise<boolean> {
+  async linkOidcIdentity(key: OidcIdentityKey, accountId: string): Promise<boolean> {
     await this.#ensureOidcSchema();
     const result = await this.#pool.query(`
-      INSERT INTO stash_oidc_identities (organization_id, issuer, subject, account_id)
-      SELECT $1, $3, $4, account_id FROM stash_organization_memberships
+      INSERT INTO stash_oidc_identities (organization_id, issuer, subject_lookup, subject_secret, account_id)
+      SELECT $1, $3, $4, $5, account_id FROM stash_organization_memberships
       WHERE organization_id = $1 AND account_id = $2
-      ON CONFLICT (organization_id, issuer, account_id) DO UPDATE SET subject = EXCLUDED.subject
-    `, [organizationId, accountId, issuer, subject]);
+      ON CONFLICT (organization_id, issuer, account_id) DO UPDATE
+      SET subject_lookup = EXCLUDED.subject_lookup, subject_secret = EXCLUDED.subject_secret
+    `, [key.organizationId, accountId, key.issuer, this.#oidcIdentityLookup(key), this.#authenticationSecrets.encrypt(key.subject)]);
     return result.rowCount === 1;
   }
 
@@ -353,12 +355,19 @@ export class PostgresDatabase implements
       CREATE TABLE IF NOT EXISTS stash_oidc_identities (
         organization_id UUID NOT NULL REFERENCES stash_organizations(id) ON DELETE CASCADE,
         issuer TEXT NOT NULL,
-        subject TEXT NOT NULL,
+        subject_lookup TEXT NOT NULL,
+        subject_secret TEXT NOT NULL,
         account_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
-        PRIMARY KEY (organization_id, issuer, subject),
+        PRIMARY KEY (organization_id, issuer, subject_lookup),
         UNIQUE (organization_id, issuer, account_id)
       )
     `);
+  }
+
+  #oidcIdentityLookup(key: OidcIdentityKey): string {
+    return this.#authenticationSecrets.blindIndex(
+      `oidc-identity-v1:${JSON.stringify([key.organizationId, key.issuer, key.subject])}`,
+    );
   }
 
   async #verifyAuthenticationKey(): Promise<void> {
@@ -507,5 +516,5 @@ export class PostgresDatabase implements
 
 interface AccountRow { id: string; name: string; email: string; password_hash: string }
 interface SessionRow { id: string; account_id: string; token_hash: string; created_at: Date | string; last_seen_at: Date | string; user_agent: string | null }
-interface OidcIdentityRow { id: string; name: string; email: string }
+interface OidcIdentityRow { id: string; name: string; email: string; subject_secret: string }
 interface OidcConfigurationRow { organization_id: string; issuer: string; client_id: string; client_secret: string }
