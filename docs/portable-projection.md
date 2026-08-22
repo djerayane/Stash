@@ -111,6 +111,28 @@ inside the same transaction so keys are never duplicated or reused. The source N
 All referenced Notes and Projects must exist in the same authorized Workspace; a failed validation
 or outbox write rolls back the whole triage operation.
 
+The operational Note body is a versioned rich-text document rendered by Stash's WYSIWYG editor.
+Every successful edit atomically increments the Note revision and records another `stash.note.v1`
+outbox revision whose `content` is the complete Markdown rendering. Ordinary Blocks have no
+identifier. Once another durable object references a Block, its UUID is preserved in the rich-text
+document and projected immediately after that Block as an HTML comment:
+
+```markdown
+Decide how release candidates are signed.
+<!-- stash-block:44444444-4444-4444-8444-444444444444 -->
+```
+
+The comment is stable, readable by ordinary Markdown tools, and does not include live Task status.
+Importers preserve valid identifiers exactly and report malformed or ambiguous references instead
+of guessing. Rich formatting uses ordinary Markdown headings, emphasis, links, quotes, lists,
+checklists, and fenced code so the WYSIWYG and portable surfaces round-trip intelligibly.
+
+Editor updates may preserve the exact set of already-linked Block identifiers but cannot mint or
+discard identifiers; linking capabilities own that sparse identity lifecycle. Updates carry the
+revision the Member began from. When that revision is stale, Stash retains the submitted rich-text
+document and Markdown in `stash_note_edit_conflicts` for focused resolution and returns a visible
+conflict response instead of overwriting either contribution or exposing raw conflict markers.
+
 ## `stash.guest-project-access.v1`
 
 Accepting a Guest invitation records the selected Project relationships and their containing

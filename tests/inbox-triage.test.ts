@@ -20,6 +20,8 @@ const targetNoteId = "44444444-4444-4444-8444-444444444444";
 class ProtocolCompatibleInboxDatabase implements DatabaseProbe, NoteRepository {
   readonly note: NoteRecord = {
     id: noteId, workspaceId, content: "Turn the release idea into work.", tags: [],
+    document: { type: "doc", blocks: [{ type: "paragraph", content: [{ text: "Turn the release idea into work." }] }] },
+    revision: 1,
     createdByMemberId: "grace", createdAt: "2026-08-22T10:00:00.000Z",
   };
   readonly projections: object[] = [];
@@ -96,6 +98,8 @@ describe("Inbox triage", () => {
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { notes: [{
       id: noteId, workspaceId, content: "Turn the release idea into work.", tags: [],
+      document: { type: "doc", blocks: [{ type: "paragraph", content: [{ text: "Turn the release idea into work." }] }] },
+      revision: 1,
       createdAt: "2026-08-22T10:00:00.000Z",
     }] });
   });

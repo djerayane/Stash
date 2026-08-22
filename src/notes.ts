@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { normalizeExplicitOffsetTimestamp } from "./explicit-offset-timestamp.js";
 import type { PortableIdentity } from "./workspaces-projects.js";
+import { isRichTextDocument, paragraphDocument, richTextToMarkdown, type RichTextDocument } from "./rich-text.js";
 
 export interface NoteReminder {
   at: string;
@@ -10,6 +11,8 @@ export interface NoteRecord {
   id: string;
   workspaceId: string;
   content: string;
+  document: RichTextDocument;
+  revision: number;
   tags: string[];
   createdByMemberId: string;
   createdAt: string;
@@ -71,9 +74,12 @@ export interface NoteRepository {
     { status: "updated"; result: NoteTriageResult }
     | { status: "workspace_forbidden" | "project_forbidden" | "note_not_found" | "target_note_not_found" }
   >;
+  findNoteForMember?(memberId: string, noteId: string): Promise<NoteRecord | undefined>;
+  updateNote?(memberId: string, note: NoteRecord, expectedRevision: number, projection: PortableNoteProjection): Promise<"updated" | "not_found" | "revision_conflict_preserved">;
 }
 
 export class InvalidNoteInput extends Error {}
+export class InvalidNoteEdit extends Error {}
 export class InvalidNoteTriageInput extends Error {}
 
 interface NoteInput {
@@ -119,6 +125,12 @@ export class NoteService {
     this.#repository = repository;
   }
 
+  async get(memberId: string, noteId: string): Promise<NoteRecord | undefined> {
+    if (!isUuid(noteId)) throw new InvalidNoteEdit();
+    if (!this.#repository.findNoteForMember) throw new Error("rich_text_repository_unavailable");
+    return this.#repository.findNoteForMember(memberId, noteId);
+  }
+
   async capture(memberId: string, workspaceId: string, value: unknown): Promise<
     | { status: "created"; note: NoteRecord; projection: PortableNoteProjection }
     | { status: "workspace_forbidden" | "project_forbidden" }
@@ -131,6 +143,8 @@ export class NoteService {
       id: randomUUID(),
       workspaceId,
       content: value.content,
+      document: paragraphDocument(value.content),
+      revision: 1,
       tags,
       createdByMemberId: memberId,
       createdAt: new Date().toISOString(),
@@ -171,6 +185,36 @@ export class NoteService {
     if ("status" in prepared) return prepared;
     const change = prepared.change;
     return this.#repository.triageNote(memberId, workspaceId, noteId, change);
+  }
+
+  async edit(memberId: string, noteId: string, value: unknown): Promise<{ status: "updated"; note: NoteRecord; projection: PortableNoteProjection } | { status: "not_found" | "revision_conflict_preserved" }> {
+    if (!isUuid(noteId) || !isPlainObject(value) || !Number.isSafeInteger(value.revision)
+      || (value.revision as number) < 1 || !isRichTextDocument(value.document)
+      || !Object.keys(value).every((key) => ["revision", "document"].includes(key))) throw new InvalidNoteEdit();
+    if (!this.#repository.findNoteForMember || !this.#repository.updateNote) throw new Error("rich_text_repository_unavailable");
+    const current = await this.#repository.findNoteForMember(memberId, noteId);
+    if (!current) return { status: "not_found" };
+    const content = richTextToMarkdown(value.document);
+    if (!content.trim()) throw new InvalidNoteEdit();
+    const note: NoteRecord = { ...current, content, document: value.document, revision: (value.revision as number) + 1 };
+    const createdBy = await this.#repository.findPortableMemberIdentity(current.createdByMemberId);
+    if (!createdBy) throw new Error("member_identity_unavailable");
+    const projection: PortableNoteProjection = {
+      schema: "stash.note.v1", id: note.id, workspaceId: note.workspaceId, content, tags: note.tags,
+      createdAt: note.createdAt, createdBy,
+      ...(note.projectId ? { projectId: note.projectId } : {}), ...(note.reminder ? { reminder: note.reminder } : {}),
+    };
+    if (current.revision !== value.revision) {
+      const status = await this.#repository.updateNote(memberId, note, value.revision as number, projection);
+      return status === "updated" ? { status, note, projection } : { status };
+    }
+    const currentIds = current.document.blocks.flatMap((block) => block.id ? [block.id] : []).sort();
+    const editedIds = value.document.blocks.flatMap((block) => block.id ? [block.id] : []).sort();
+    if (currentIds.length !== editedIds.length || currentIds.some((id, index) => id !== editedIds[index])) {
+      throw new InvalidNoteEdit();
+    }
+    const status = await this.#repository.updateNote(memberId, note, value.revision as number, projection);
+    return status === "updated" ? { status, note, projection } : { status };
   }
 }
 

@@ -12,12 +12,15 @@ import type { MemberAccessResolver } from "../src/workspaces-projects.js";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const projectId = "22222222-2222-4222-8222-222222222222";
+const blockId = "44444444-4444-4444-8444-444444444444";
 
 class ProtocolCompatibleNoteDatabase implements DatabaseProbe, NoteRepository {
   readonly notes = new Map<string, NoteRecord>();
   readonly portableProjectionOutbox: PortableNoteProjection[] = [];
+  readonly conflicts: NoteRecord[] = [];
   failure: Error | undefined;
   projectionFailure: Error | undefined;
+  updateFailure: Error | undefined;
 
   async verifyConnection(): Promise<void> {}
   async close(): Promise<void> {}
@@ -40,6 +43,24 @@ class ProtocolCompatibleNoteDatabase implements DatabaseProbe, NoteRepository {
 
   async listInboxNotes() { return { status: "found" as const, notes: [] }; }
   async triageNote() { return { status: "note_not_found" as const }; }
+
+  async findNoteForMember(memberId: string, noteId: string) {
+    if (memberId !== "ada") return undefined;
+    return this.notes.get(noteId);
+  }
+
+  async updateNote(memberId: string, note: NoteRecord, expectedRevision: number, projection: PortableNoteProjection) {
+    if (this.updateFailure) throw this.updateFailure;
+    const current = this.notes.get(note.id);
+    if (memberId !== "ada" || !current) return "not_found" as const;
+    if (current.revision !== expectedRevision) {
+      this.conflicts.push(note);
+      return "revision_conflict_preserved" as const;
+    }
+    this.notes.set(note.id, note);
+    this.portableProjectionOutbox.push(projection);
+    return "updated" as const;
+  }
 }
 
 const access: MemberAccessResolver = {
@@ -210,5 +231,95 @@ describe("capturing Notes", () => {
     assert.equal(projectionUnavailable.status, 503);
     assert.equal(database.notes.size, 0);
     assert.equal(database.portableProjectionOutbox.length, 0);
+  });
+});
+
+describe("editing Notes", () => {
+  let instance: RunningInstance | undefined;
+
+  afterEach(async () => instance?.close());
+
+  async function run() {
+    const database = new ProtocolCompatibleNoteDatabase();
+    instance = await startInstance({
+      database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin",
+      notes: new NoteService(database), memberAccess: access,
+    });
+    const capture = await fetch(`${instance.url}/api/workspaces/${workspaceId}/notes`, {
+      method: "POST",
+      headers: { authorization: "Bearer member-ada", "content-type": "application/json" },
+      body: JSON.stringify({ content: "Release notes" }),
+    });
+    return { database, baseUrl: instance.url, note: await capture.json() as NoteRecord };
+  }
+
+  it("loads a WYSIWYG-primary editor and saves rich content with portable Markdown", async () => {
+    const { baseUrl, database, note } = await run();
+    database.notes.get(note.id)!.document.blocks[0]!.id = blockId;
+    const loaded = await fetch(`${baseUrl}/api/notes/${note.id}`, { headers: { authorization: "Bearer member-ada" } });
+    assert.equal(loaded.status, 200);
+    assert.equal((await loaded.json() as NoteRecord).document.blocks[0]?.type, "paragraph");
+    const editor = await fetch(`${baseUrl}/notes/${note.id}/edit`);
+    assert.equal(editor.status, 200);
+    const html = await editor.text();
+    assert.match(html, /contenteditable="false"/);
+    assert.match(html, /Loading Note/);
+    assert.match(html, /button\.disabled=false/);
+    assert.match(html, /aria-label="Note editor"/);
+    assert.match(html, />Bold</);
+    assert.match(html, />Undo</);
+    assert.match(html, />Checklist</);
+    assert.match(html, />Code block</);
+    assert.match(html, /dataset\.blockId/);
+    assert.match(html, /Your changes remain in the editor/);
+    assert.doesNotMatch(html, /Markdown source/i);
+
+    const response = await fetch(`${baseUrl}/api/notes/${note.id}`, {
+      method: "PUT",
+      headers: { authorization: "Bearer member-ada", "content-type": "application/json" },
+      body: JSON.stringify({
+        revision: 1,
+        document: {
+          type: "doc",
+          blocks: [
+            { type: "heading", level: 2, content: [{ text: "Release notes" }] },
+            { type: "paragraph", id: blockId, content: [{ text: "Ship safely", marks: ["bold"] }] },
+            { type: "paragraph", content: [{ text: "use `safe`", marks: ["bold", "code"] }] },
+            { type: "code", language: "typescript", text: "const fence = '```';" },
+          ],
+        },
+      }),
+    });
+    assert.equal(response.status, 200);
+    const edited = await response.json() as NoteRecord;
+    assert.equal(edited.revision, 2);
+    assert.equal(edited.content, `## Release notes\n\n**Ship safely**\n<!-- stash-block:${blockId} -->\n\n**\`\` use \`safe\` \`\`**\n\n\`\`\`\`typescript\nconst fence = '\`\`\`';\n\`\`\`\``);
+    assert.deepEqual(database.notes.get(note.id)?.document, edited.document);
+    assert.equal(database.portableProjectionOutbox.at(-1)?.content, edited.content);
+  });
+
+  it("surfaces invalid edits, stale revisions, permission failures, and recoverable failures", async () => {
+    const { baseUrl, database, note } = await run();
+    const update = (body: unknown, token = "member-ada") => fetch(`${baseUrl}/api/notes/${note.id}`, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    assert.equal((await update({ revision: 1, document: { type: "doc", blocks: [] } })).status, 422);
+    assert.equal((await update({ revision: 1, document: { type: "doc", blocks: [{ type: "paragraph", id: "not-uuid", content: [{ text: "x" }] }] } })).status, 422);
+    assert.equal((await update({ revision: 1, document: { type: "doc", blocks: [{ type: "paragraph", content: [{ text: "link", href: "https://example.test/x)\n# injected" }] }] } })).status, 422);
+    assert.equal((await update({ revision: 1, document: { type: "doc", blocks: [{ type: "code", language: "ts\n# injected", text: "code" }] } })).status, 422);
+    assert.equal((await update({ revision: 1, document: { type: "doc", blocks: [
+      { type: "paragraph", id: blockId, content: [{ text: "first" }] },
+      { type: "paragraph", id: blockId, content: [{ text: "duplicate" }] },
+    ] } })).status, 422);
+    assert.equal((await update({ revision: 2, document: { type: "doc", blocks: [{ type: "paragraph", id: blockId, content: [{ text: "stale contribution" }] }] } })).status, 409);
+    assert.equal((await update({ revision: 1, document: { type: "doc", blocks: [{ type: "paragraph", content: [{ text: "private" }] }] } }, "unknown")).status, 401);
+    database.updateFailure = new Error("database secret");
+    const unavailable = await update({ revision: 1, document: { type: "doc", blocks: [{ type: "paragraph", content: [{ text: "retry" }] }] } });
+    assert.equal(unavailable.status, 503);
+    assert.doesNotMatch(await unavailable.text(), /secret/i);
+    assert.equal(database.notes.get(note.id)?.content, "Release notes");
+    assert.equal(database.conflicts.length, 1);
   });
 });
