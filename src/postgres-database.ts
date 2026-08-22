@@ -43,6 +43,13 @@ const taskPlanningSelect = `SELECT task.*, status.name AS status_name, status.ca
   ARRAY(SELECT source.note_id FROM stash_task_note_sources source WHERE source.task_id = task.id ORDER BY source.note_id) AS source_note_ids,
   COALESCE((SELECT jsonb_agg(jsonb_build_object('noteId', source.note_id, 'blockId', source.block_id) ORDER BY source.note_id, source.block_id)
     FROM stash_task_block_sources source WHERE source.task_id = task.id), '[]'::jsonb) AS source_blocks
+  , COALESCE((SELECT jsonb_agg(relation ORDER BY relation->>'taskId', relation->>'type') FROM (
+      SELECT jsonb_build_object('taskId', edge.prerequisite_task_id, 'type', 'depends_on') AS relation
+      FROM stash_task_dependencies edge WHERE edge.dependent_task_id = task.id
+      UNION ALL
+      SELECT jsonb_build_object('taskId', edge.dependent_task_id, 'type', 'required_by') AS relation
+      FROM stash_task_dependencies edge WHERE edge.prerequisite_task_id = task.id
+    ) visible_dependencies), '[]'::jsonb) AS dependencies
   FROM stash_tasks task
   JOIN stash_workflow_statuses status ON status.id = task.workflow_status_id
   JOIN stash_accounts creator ON creator.id = task.created_by_account_id
@@ -52,6 +59,9 @@ const taskPlanningSelect = `SELECT task.*, status.name AS status_name, status.ca
       OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
         WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $3))
       OR EXISTS (SELECT 1 FROM stash_project_guests guest WHERE guest.project_id = task.project_id AND guest.account_id = $3))`;
+const taskPlanningSelectById = taskPlanningSelect
+  .replace("task.project_id = $1 AND task.task_key = $2", "task.id = $1")
+  .replaceAll("$3", "$2");
 
 function taskProjectionFromRow(row: any): PortableTaskProjection {
   return {
@@ -656,13 +666,28 @@ export class PostgresDatabase implements
         if (!note.rowCount) return { status: "invalid_reference" as const };
       }
       if (update.dependencies !== undefined) {
-        const graphRows = await client.query<{ id: string; dependencies: PortableTaskProjection["dependencies"] }>(
-          "SELECT id, dependencies FROM stash_tasks WHERE workspace_id = $1 ORDER BY id FOR UPDATE", [row.workspace_id]);
-        const graph = new Map(graphRows.rows.map((task) => [task.id, task.dependencies ?? []]));
-        if (update.dependencies.some((dependency) => dependency.taskId === row.id || !graph.has(dependency.taskId)))
+        const graphRows = await client.query<{ id: string }>(
+          "SELECT id FROM stash_tasks WHERE workspace_id = $1 ORDER BY id FOR UPDATE", [row.workspace_id]);
+        const taskIds = new Set(graphRows.rows.map((task) => task.id));
+        if (update.dependencies.some((dependency) => dependency.taskId === row.id || !taskIds.has(dependency.taskId)))
           return { status: "invalid_reference" as const };
-        graph.set(row.id, update.dependencies);
-        if (hasDependencyCycle(graph)) return { status: "invalid_reference" as const };
+        const stored = await client.query<{ dependent_task_id: string; prerequisite_task_id: string }>(
+          `SELECT edge.dependent_task_id, edge.prerequisite_task_id FROM stash_task_dependencies edge
+           JOIN stash_tasks dependent ON dependent.id = edge.dependent_task_id
+           WHERE dependent.workspace_id = $1`, [row.workspace_id]);
+        const previousIncident = stored.rows.filter((edge) => edge.dependent_task_id === row.id || edge.prerequisite_task_id === row.id);
+        const retained = stored.rows.filter((edge) => edge.dependent_task_id !== row.id && edge.prerequisite_task_id !== row.id);
+        const proposed = update.dependencies.map((dependency) => dependency.type === "depends_on"
+          ? { dependent_task_id: row.id, prerequisite_task_id: dependency.taskId }
+          : { dependent_task_id: dependency.taskId, prerequisite_task_id: row.id });
+        const uniqueProposed = [...new Map(proposed.map((edge) => [`${edge.dependent_task_id}:${edge.prerequisite_task_id}`, edge])).values()];
+        if (hasDependencyCycle(taskIds, [...retained, ...uniqueProposed])) return { status: "invalid_reference" as const };
+        await client.query("DELETE FROM stash_task_dependencies WHERE dependent_task_id = $1 OR prerequisite_task_id = $1", [row.id]);
+        for (const edge of uniqueProposed) await client.query(
+          "INSERT INTO stash_task_dependencies (dependent_task_id, prerequisite_task_id) VALUES ($1,$2)",
+          [edge.dependent_task_id, edge.prerequisite_task_id]);
+        row.affected_dependency_task_ids = [...new Set([...previousIncident, ...uniqueProposed]
+          .flatMap((edge) => [edge.dependent_task_id, edge.prerequisite_task_id]))];
       }
       const next = { ...taskProjectionFromRow(row), ...update } as PortableTaskProjection & { statusId?: string };
       if (update.statusId) {
@@ -679,6 +704,13 @@ export class PostgresDatabase implements
       const saved = await client.query<any>(taskPlanningSelect, [projectId, taskKey, memberId]);
       const task = taskProjectionFromRow(saved.rows[0]);
       await this.#recordPortableProjection(client, "Task", task.id, task.schema, task);
+      for (const affectedId of (row.affected_dependency_task_ids ?? []).filter((id: string) => id !== task.id)) {
+        const affected = await client.query<any>(taskPlanningSelectById, [affectedId, memberId]);
+        if (affected.rows[0]) {
+          const projection = taskProjectionFromRow(affected.rows[0]);
+          await this.#recordPortableProjection(client, "Task", projection.id, projection.schema, projection);
+        }
+      }
       return { status: "updated" as const, task };
     });
   }
@@ -1792,6 +1824,12 @@ export class PostgresDatabase implements
       CREATE TABLE IF NOT EXISTS stash_task_block_sources (
         task_id UUID NOT NULL REFERENCES stash_tasks(id), note_id UUID NOT NULL REFERENCES stash_notes(id), block_id UUID NOT NULL,
         PRIMARY KEY (task_id, note_id, block_id)
+      );
+      CREATE TABLE IF NOT EXISTS stash_task_dependencies (
+        dependent_task_id UUID NOT NULL REFERENCES stash_tasks(id),
+        prerequisite_task_id UUID NOT NULL REFERENCES stash_tasks(id),
+        PRIMARY KEY (dependent_task_id, prerequisite_task_id),
+        CHECK (dependent_task_id <> prerequisite_task_id)
       )
     `);
     await client.query("ALTER TABLE stash_notes ADD COLUMN IF NOT EXISTS document JSONB");
@@ -2009,13 +2047,9 @@ export class PostgresDatabase implements
   }
 }
 
-function hasDependencyCycle(graph: ReadonlyMap<string, NonNullable<PortableTaskProjection["dependencies"]>>): boolean {
-  const outgoing = new Map<string, Set<string>>([...graph.keys()].map((id) => [id, new Set()]));
-  for (const [taskId, dependencies] of graph) for (const dependency of dependencies) {
-    const source = dependency.type === "depends_on" ? taskId : dependency.taskId;
-    const target = dependency.type === "depends_on" ? dependency.taskId : taskId;
-    outgoing.get(source)?.add(target);
-  }
+function hasDependencyCycle(taskIds: ReadonlySet<string>, edges: ReadonlyArray<{ dependent_task_id: string; prerequisite_task_id: string }>): boolean {
+  const outgoing = new Map<string, Set<string>>([...taskIds].map((id) => [id, new Set()]));
+  for (const edge of edges) outgoing.get(edge.dependent_task_id)?.add(edge.prerequisite_task_id);
   const visiting = new Set<string>(); const visited = new Set<string>();
   const visit = (id: string): boolean => {
     if (visiting.has(id)) return true;

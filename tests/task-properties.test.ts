@@ -27,6 +27,7 @@ class TaskPlanningFake implements DatabaseProbe, TaskPlanningRepository {
     { ...structuredClone(this.task), id: dependencyTaskId, key: "STASH-13", title: "Publish release" },
     { ...structuredClone(this.task), id: thirdTaskId, key: "STASH-14", title: "Announce release" },
   ];
+  edges = new Set<string>();
   canRead = true;
   fail = false;
   async verifyConnection() {}
@@ -35,7 +36,7 @@ class TaskPlanningFake implements DatabaseProbe, TaskPlanningRepository {
     const task = [this.task, ...this.otherTasks].find((candidate) => candidate.key === key.toUpperCase());
     if (!this.canRead || !["ada", "grace"].includes(memberId) || requestedProjectId !== projectId || !task)
       return { status: "not_found" as const };
-    return { status: "found" as const, task: structuredClone(task) };
+    return { status: "found" as const, task: { ...structuredClone(task), dependencies: this.visibleDependencies(task.id) } };
   }
   async updateTaskByKey(memberId: string, requestedProjectId: string, key: string, update: TaskPlanningUpdate) {
     if (this.fail) throw new Error("postgres://secret");
@@ -47,29 +48,39 @@ class TaskPlanningFake implements DatabaseProbe, TaskPlanningRepository {
       || update.linkedNoteIds?.some((id) => id !== linkedNoteId)
       || update.dependencies?.some(({ taskId: id }) => ![this.task, ...this.otherTasks].some((task) => task.id === id) || id === found.task.id))
       return { status: "invalid_reference" as const };
-    const { statusId: nextStatusId, dueDate, estimate, ...properties } = update;
+    const { statusId: nextStatusId, dueDate, estimate, dependencies: proposedDependencies, ...properties } = update;
     const next = { ...found.task, ...properties,
       ...(nextStatusId ? { status: { id: nextStatusId, name: "In Progress", category: "started" as const } } : {}),
       ...(dueDate ? { dueDate } : {}), ...(estimate === null || estimate === undefined ? {} : { estimate }) };
-    if (update.dependencies !== undefined) {
-      const graph = new Map([this.task, ...this.otherTasks].map((task) => [task.id, task.id === next.id ? update.dependencies! : task.dependencies ?? []]));
-      if (fakeHasCycle(graph)) return { status: "invalid_reference" as const };
+    let nextEdges = this.edges;
+    if (proposedDependencies !== undefined) {
+      nextEdges = new Set([...this.edges].filter((edge) => !edge.startsWith(`${next.id}->`) && !edge.endsWith(`->${next.id}`)));
+      for (const dependency of proposedDependencies) nextEdges.add(dependency.type === "depends_on"
+        ? `${next.id}->${dependency.taskId}` : `${dependency.taskId}->${next.id}`);
+      if (fakeHasCycle(new Set([this.task, ...this.otherTasks].map(({ id }) => id)), nextEdges)) return { status: "invalid_reference" as const };
     }
     if (update.dueDate === null) delete next.dueDate;
     if (update.estimate === null) delete next.estimate;
     if (next.id === this.task.id) this.task = next;
     else this.otherTasks.splice(this.otherTasks.findIndex(({ id }) => id === next.id), 1, next);
+    this.edges = nextEdges;
+    next.dependencies = this.visibleDependencies(next.id);
     return { status: "updated" as const, task: structuredClone(next) };
+  }
+  private visibleDependencies(id: string): NonNullable<PortableTaskProjection["dependencies"]> {
+    const result: NonNullable<PortableTaskProjection["dependencies"]> = [];
+    for (const edge of this.edges) {
+      const [dependent, prerequisite] = edge.split("->") as [string, string];
+      if (dependent === id) result.push({ taskId: prerequisite, type: "depends_on" });
+      else if (prerequisite === id) result.push({ taskId: dependent, type: "required_by" });
+    }
+    return result;
   }
 }
 
-function fakeHasCycle(graph: ReadonlyMap<string, NonNullable<PortableTaskProjection["dependencies"]>>): boolean {
-  const outgoing = new Map<string, string[]>([...graph.keys()].map((id) => [id, []]));
-  for (const [id, dependencies] of graph) for (const dependency of dependencies) {
-    const source = dependency.type === "depends_on" ? id : dependency.taskId;
-    const target = dependency.type === "depends_on" ? dependency.taskId : id;
-    outgoing.get(source)!.push(target);
-  }
+function fakeHasCycle(taskIds: ReadonlySet<string>, edges: ReadonlySet<string>): boolean {
+  const outgoing = new Map<string, string[]>([...taskIds].map((id) => [id, []]));
+  for (const edge of edges) { const [source, target] = edge.split("->") as [string, string]; outgoing.get(source)!.push(target); }
   const active = new Set<string>(); const done = new Set<string>();
   const visit = (id: string): boolean => {
     if (active.has(id)) return true; if (done.has(id)) return false;
@@ -149,11 +160,30 @@ describe("planning Tasks through Project-scoped Task Keys", () => {
     }
   });
 
+  it("derives one inverse Dependency view and lets either endpoint replace it", async () => {
+    const { get, patch } = await run();
+    assert.equal((await patch({ dependencies: [{ taskId: dependencyTaskId, type: "depends_on" }] })).status, 200);
+    const prerequisite = await (await get(projectId, "STASH-13")).json() as { task: PortableTaskProjection };
+    assert.deepEqual(prerequisite.task.dependencies, [{ taskId, type: "required_by" }]);
+
+    const sameEdge = await patch({ dependencies: [{ taskId, type: "required_by" }] }, projectId, "STASH-13");
+    assert.equal(sameEdge.status, 200);
+    assert.deepEqual((await sameEdge.json() as { task: PortableTaskProjection }).task.dependencies, [{ taskId, type: "required_by" }]);
+    assert.deepEqual((await (await get()).json() as { task: PortableTaskProjection }).task.dependencies,
+      [{ taskId: dependencyTaskId, type: "depends_on" }]);
+
+    assert.equal((await patch({ dependencies: [] }, projectId, "STASH-13")).status, 200);
+    assert.deepEqual((await (await get()).json() as { task: PortableTaskProjection }).task.dependencies, []);
+    assert.deepEqual((await (await get(projectId, "STASH-13")).json() as { task: PortableTaskProjection }).task.dependencies, []);
+  });
+
   it("rejects a two-Task Dependency cycle without applying the rest of the update", async () => {
     const { database, patch } = await run();
     assert.equal((await patch({ dependencies: [{ taskId: dependencyTaskId, type: "depends_on" }] })).status, 200);
     const before = structuredClone(database.otherTasks[0]);
-    const response = await patch({ title: "Must not persist", dependencies: [{ taskId, type: "depends_on" }] }, projectId, "STASH-13");
+    const response = await patch({ title: "Must not persist", dependencies: [
+      { taskId, type: "required_by" }, { taskId, type: "depends_on" },
+    ] }, projectId, "STASH-13");
     assert.equal(response.status, 422);
     assert.deepEqual(database.otherTasks[0], before);
     assert.equal(database.task.title, "Plan release");
