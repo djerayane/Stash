@@ -58,6 +58,8 @@ import type { GitHubArtifactService } from "./github-artifacts.js";
 import { publicDomainApiRoute } from "./public-domain-api.js";
 import { instanceBackupRoute } from "./instance-backup-routes.js";
 import type { InstanceBackupService } from "./instance-backup.js";
+import { notificationRoutes } from "./notification-routes.js";
+import type { NotificationService } from "./notifications.js";
 
 export interface DatabaseProbe {
   verifyConnection(): Promise<void>;
@@ -111,6 +113,7 @@ export interface InstanceOptions {
   webClientRoot?: string;
   instanceBackups?: InstanceBackupService;
   instanceBackupRoot?: string;
+  notifications?: NotificationService;
 }
 
 const browserSurface = `<!doctype html>
@@ -205,6 +208,7 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
     ...(options.discussions ? [discussionRoutes(options.discussions, memberAccess)] : []),
     ...(options.portableWorkspaceExports ? [portableWorkspaceExportRoute(options.portableWorkspaceExports, memberAccess)] : []),
     ...(options.activities ? [activityRoutes(options.activities, memberAccess)] : []),
+    ...(options.notifications ? [notificationRoutes(options.notifications, memberAccess)] : []),
     ...(options.repositoryConnections ? [repositoryConnectionRoutes(options.repositoryConnections, memberAccess)] : []),
     ...(options.githubArtifacts ? [githubArtifactRoutes(options.githubArtifacts, memberAccess)] : []),
   ] : [];

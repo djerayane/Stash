@@ -31,6 +31,7 @@ import { GitHubArtifactService } from "./github-artifacts.js";
 import { fileURLToPath } from "node:url";
 import { InstanceBackupService } from "./instance-backup.js";
 import { PostgresLocalInstanceBackupSource } from "./instance-backup-system.js";
+import { NotificationService } from "./notifications.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -98,6 +99,7 @@ async function main(): Promise<void> {
     activities: new ActivityService(database),
     instanceBackups,
     ...(process.env.INSTANCE_BACKUP_PATH?.trim() ? { instanceBackupRoot: process.env.INSTANCE_BACKUP_PATH.trim() } : {}),
+    notifications: new NotificationService(database),
     memberLocalization: new MemberLocalizationService(database),
     oidcAuth: new OidcAuthService(database),
     oidcManagement: new OidcManagementService(database),

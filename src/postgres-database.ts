@@ -36,6 +36,7 @@ import type { Board, BoardRepository, BoardTask } from "./boards.js";
 import type { NoteLinkRecord, NoteLocationRecord, PortableNoteLinkStateProjection, PortableNoteLocationProjection } from "./note-links.js";
 import type { ActivityCause, ActivityRecord, ActivityRepository, NoteHistoryRevision } from "./activity.js";
 import type { DevelopmentArtifact, GitHubArtifactRepository } from "./github-artifacts.js";
+import type { NotificationDelivery, NotificationPreferences, NotificationRepository } from "./notifications.js";
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
@@ -137,7 +138,8 @@ export class PostgresDatabase implements
   PortableWorkspaceExportRepository,
   PortableWorkspaceImportRepository,
   BoardRepository,
-  ActivityRepository
+  ActivityRepository,
+  NotificationRepository
 {
   readonly #pool: Pool;
   readonly #authenticationSecrets: AuthenticationSecretCodec;
@@ -1860,6 +1862,83 @@ export class PostgresDatabase implements
     });
   }
 
+  async saveNotification(delivery: NotificationDelivery) {
+    await this.#ensureNotificationSchema();
+    const result = await this.#pool.query<any>(`INSERT INTO stash_notifications
+      (id,member_id,workspace_id,project_id,trigger,summary,activity,created_at,delivery)
+      SELECT $1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9 FROM stash_projects project
+      JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
+      WHERE project.id=$4 AND workspace.id=$3 AND (
+        (workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
+        (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2)))
+      ON CONFLICT (member_id, activity_id, trigger) DO UPDATE SET summary=EXCLUDED.summary
+      RETURNING *`, [delivery.id, delivery.memberId, delivery.workspaceId, delivery.projectId, delivery.trigger,
+      delivery.summary, JSON.stringify(delivery.activity), delivery.createdAt, delivery.delivery]);
+    const row = result.rows[0];
+    if (!row) throw new Error("notification_recipient_forbidden");
+    return this.#notificationFromRow(row);
+  }
+
+  async listNotifications(memberId: string) {
+    await this.#ensureNotificationSchema();
+    const result = await this.#pool.query<any>(`SELECT notification.* FROM stash_notifications notification
+      JOIN stash_projects project ON project.id=notification.project_id
+      JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
+      WHERE notification.member_id=$1 AND (
+        (workspace.owner_type='personal' AND workspace.personal_owner_id=$1) OR
+        (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$1)))
+      ORDER BY notification.created_at DESC, notification.id DESC`, [memberId]);
+    return result.rows.map((row) => this.#notificationFromRow(row));
+  }
+
+  async markNotificationRead(memberId: string, id: string, readAt: string) {
+    await this.#ensureNotificationSchema();
+    const result = await this.#pool.query<any>(`UPDATE stash_notifications notification SET read_at=$3
+      FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
+      WHERE notification.id=$1 AND notification.member_id=$2 AND project.id=notification.project_id AND (
+        (workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
+        (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2))) RETURNING notification.*`, [id, memberId, readAt]);
+    return result.rows[0] ? this.#notificationFromRow(result.rows[0]) : undefined;
+  }
+
+  async getNotificationPreferences(memberId: string, projectId: string) {
+    await this.#ensureNotificationSchema();
+    const visibility = await this.#pool.query<any>(`SELECT settings.* FROM stash_projects project
+      JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
+      LEFT JOIN stash_notification_preferences settings ON settings.project_id=project.id AND settings.member_id=$1
+      WHERE project.id=$2 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$1) OR
+        (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$1)))`, [memberId, projectId]);
+    const row = visibility.rows[0];
+    if (!row) return undefined;
+    if (!row.member_id) return { activity: "followed", digest: "off" } as NotificationPreferences;
+    return { activity: row.activity, digest: row.digest, ...(row.quiet_start ? { quietHours: { start: row.quiet_start, end: row.quiet_end, timeZone: row.quiet_time_zone } } : {}) };
+  }
+
+  async saveNotificationPreferences(memberId: string, projectId: string, preferences: NotificationPreferences) {
+    await this.#ensureNotificationSchema();
+    const result = await this.#pool.query<any>(`INSERT INTO stash_notification_preferences
+      (member_id,project_id,activity,digest,quiet_start,quiet_end,quiet_time_zone)
+      SELECT $1,$2,$3,$4,$5,$6,$7 FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
+      WHERE project.id=$2 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$1) OR
+        (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$1)))
+      ON CONFLICT (member_id,project_id) DO UPDATE SET activity=EXCLUDED.activity,digest=EXCLUDED.digest,
+        quiet_start=EXCLUDED.quiet_start,quiet_end=EXCLUDED.quiet_end,quiet_time_zone=EXCLUDED.quiet_time_zone RETURNING *`,
+    [memberId, projectId, preferences.activity, preferences.digest, preferences.quietHours?.start ?? null,
+      preferences.quietHours?.end ?? null, preferences.quietHours?.timeZone ?? null]);
+    return result.rowCount ? preferences : undefined;
+  }
+
+  #notificationFromRow(row: any): NotificationDelivery {
+    return { schema: "stash.notification.v1", id: row.id, memberId: row.member_id, workspaceId: row.workspace_id,
+      projectId: row.project_id, trigger: row.trigger, summary: row.summary, activity: row.activity, delivery: row.delivery,
+      createdAt: new Date(row.created_at).toISOString(), ...(row.read_at ? { readAt: new Date(row.read_at).toISOString() } : {}) };
+  }
+
   async listWorkspaceActivity(memberId: string, workspaceId: string) {
     const client = await this.#pool.connect();
     try {
@@ -2825,6 +2904,38 @@ export class PostgresDatabase implements
       ALTER TABLE stash_projects ADD COLUMN IF NOT EXISTS workflow_revision INTEGER NOT NULL DEFAULT 0 CHECK (workflow_revision >= 0);
     `);
     await this.#ensurePortableProjectionSchema(client);
+  }
+
+  async #ensureNotificationSchema(): Promise<void> {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureWorkspaceProjectSchema(client);
+      await client.query(`CREATE TABLE IF NOT EXISTS stash_notification_preferences (
+        member_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
+        project_id UUID NOT NULL REFERENCES stash_projects(id) ON DELETE CASCADE,
+        activity TEXT NOT NULL CHECK (activity IN ('all','followed','muted')),
+        digest TEXT NOT NULL CHECK (digest IN ('off','daily','weekly')),
+        quiet_start TEXT, quiet_end TEXT, quiet_time_zone TEXT,
+        CHECK ((quiet_start IS NULL AND quiet_end IS NULL AND quiet_time_zone IS NULL) OR
+          (quiet_start IS NOT NULL AND quiet_end IS NOT NULL AND quiet_time_zone IS NOT NULL)),
+        PRIMARY KEY (member_id,project_id)
+      );
+      CREATE TABLE IF NOT EXISTS stash_notifications (
+        id UUID PRIMARY KEY,
+        member_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
+        workspace_id UUID NOT NULL REFERENCES stash_workspaces(id) ON DELETE CASCADE,
+        project_id UUID NOT NULL REFERENCES stash_projects(id) ON DELETE CASCADE,
+        trigger TEXT NOT NULL CHECK (trigger IN ('direct_mention','assignment','requested_review','automation_failure','followed_change')),
+        summary TEXT NOT NULL,
+        activity JSONB NOT NULL,
+        activity_id TEXT GENERATED ALWAYS AS (activity->>'id') STORED,
+        created_at TIMESTAMPTZ NOT NULL,
+        delivery TEXT NOT NULL CHECK (delivery IN ('immediate','quiet_hours')),
+        read_at TIMESTAMPTZ,
+        UNIQUE (member_id,activity_id,trigger)
+      );
+      CREATE INDEX IF NOT EXISTS stash_notifications_member_created_idx ON stash_notifications(member_id,created_at DESC)`);
+    } finally { client.release(); }
   }
 
   async #ensureNoteSchema(client: PoolClient): Promise<void> {
