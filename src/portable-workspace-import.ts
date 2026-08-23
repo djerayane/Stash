@@ -69,6 +69,7 @@ function exactIdentity(value: unknown, kind: string): asserts value is { localAc
 const exactSecretKeys=new Set(["auth","authorization","bearer","cookie","credentials","credential","password","passphrase",
   "secret","session","sessionid","token","privatekey","installationid"]);
 const credentialKeyFamily=/^(?:.*clientsecret|x?api(?:secret|key|token|credentials?)(?:id)?|.*oauth(?:secret|key|token|credentials?)|(?:auth|authentication)(?:secret|key|token|credentials?|authorization|cookie|session|header)(?:id)?|.*(?:access|refresh)token|(?:identity|id|bearer|session)(?:token|key|secret|cookie|id)|cookie(?:header|jar|value)|private(?:key|secret|credentials?|token)|secretkey|proxyauthorization|setcookie)$/;
+const benignPortableKeys=new Set(["tokenestimate","authenticationmethod","sessionduration","cookiepolicy","privateproject","apiversion"]);
 function rejectSensitiveKeys(value: unknown): void {
   if (Array.isArray(value)) { for (const child of value) rejectSensitiveKeys(child); return; }
   if (!object(value)) return;
@@ -77,7 +78,9 @@ function rejectSensitiveKeys(value: unknown): void {
     // portable-content boundary. Keep the patterns structural: ordinary keys
     // such as `sessionDuration`, `cookiePolicy`, and `tokenEstimate` are valid.
     const normalized=key.normalize("NFKC").replace(/[^a-z0-9]/gi,"").toLowerCase();
-    if (exactSecretKeys.has(normalized) || credentialKeyFamily.test(normalized))
+    const broadCredentialFamily=normalized.includes("password") || normalized.includes("passphrase") || normalized.includes("credential")
+      || /(?:secret|token)$/.test(normalized) || /(?:encryption|signing|private)key/.test(normalized);
+    if (!benignPortableKeys.has(normalized) && (broadCredentialFamily || exactSecretKeys.has(normalized) || credentialKeyFamily.test(normalized)))
       throw new InvalidPortableWorkspaceImport("non_portable_secret");
     rejectSensitiveKeys(child);
   }

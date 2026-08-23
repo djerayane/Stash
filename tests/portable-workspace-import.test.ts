@@ -18,6 +18,11 @@ import { markdownToRichText } from "../src/rich-text.js";
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const noteId = "22222222-2222-4222-8222-222222222222";
 const actor = { localAccountId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", displayName: "Ada Lovelace" };
+const credentialKeys = ["clientSecret","client_secret","CLIENT-SECRET","apiKey","api_token","Authorization",
+  "x_api_key","oidc-client-secret","auth-header","cookie_header","session_cookie","sessionId","private.key",
+  "privateCredential","oauthToken","githubAccessToken","refresh-token","dbPassword","database_password",
+  "smtpPassword","clientPassword","webhookSecret","githubToken","encryptionKey","signingKey","credentialValue"];
+const benignActivityState={sessionDuration:30,authenticationMethod:"member",cookiePolicy:"strict",privateProject:true,tokenEstimate:8,apiVersion:"v1"};
 const snapshot: PortableWorkspaceExportSnapshot = {
   workspace: { schema: "stash.workspace.v1", id: workspaceId, name: "Portable", owner: { type: "personal", identity: actor }, createdBy: actor },
   notes: [{ schema: "stash.note.v1", id: noteId, workspaceId, content: "# Durable", tags: ["knowledge"], createdAt: "2026-01-01T00:00:00.000Z", createdBy: actor }],
@@ -127,6 +132,24 @@ describe("Portable Workspace import", () => {
     } finally { await instance.close(); }
   });
 
+  it("returns 422 for adversarial credential keys before persistence and re-imports benign free-form state", async () => {
+    const repository=new ImportMemory(); const database={async verifyConnection(){},async close(){}};
+    const instance=await startInstance({database,host:"127.0.0.1",port:0,instanceAdminToken:"admin",
+      portableWorkspaceImports:new PortableWorkspaceImportService(repository,{async put(){},async get(){return Buffer.alloc(0);},async delete(){}})});
+    const activity={schema:"stash.activity.v1" as const,id:"99999999-9999-4999-8999-999999999999",workspaceId,
+      object:{kind:"Note" as const,id:noteId},action:"note_created",actor,cause:{kind:"member" as const},occurredAt:"2026-01-01T00:00:00.000Z",before:{},after:{}};
+    try {
+      for(const key of credentialKeys) { const unsafe={...snapshot,activities:[{...activity,before:{nested:{[key]:"must-not-cross"}}}]};
+        const response=await fetch(`${instance.url}/api/workspace-imports`,{method:"POST",headers:{authorization:"Bearer admin","idempotency-key":randomUUID(),
+          "x-stash-import-owner-account-id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"},body:new Uint8Array(await archiveFor(unsafe))});
+        assert.equal(response.status,422,key); assert.equal(repository.committed,undefined,`${key} must not persist`); }
+      const safe={...snapshot,activities:[{...activity,before:benignActivityState}]};
+      const response=await fetch(`${instance.url}/api/workspace-imports`,{method:"POST",headers:{authorization:"Bearer admin","idempotency-key":randomUUID(),
+        "x-stash-import-owner-account-id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"},body:new Uint8Array(await archiveFor(safe))});
+      assert.equal(response.status,201); assert.deepEqual(repository.committed?.state.activities[0]?.before,benignActivityState);
+    } finally { await instance.close(); }
+  });
+
   it("rejects validly checksummed canonical state with dangling relationships or Attachment aliasing before persistence", async () => {
     const repository = new ImportMemory(); const storage = { async put() { throw new Error("must_not_write"); }, async get() { return Buffer.alloc(0); }, async delete() {} };
     const service = new PortableWorkspaceImportService(repository, storage);
@@ -151,9 +174,6 @@ describe("Portable Workspace import", () => {
     const activity = { schema:"stash.activity.v1" as const,id:"99999999-9999-4999-8999-999999999999",workspaceId,
       object:{kind:"Note" as const,id:noteId},action:"note_created",actor,cause:{kind:"member" as const},
       occurredAt:"2026-01-01T00:00:00.000Z",before:{},after:{} };
-    const credentialKeys = ["clientSecret","client_secret","CLIENT-SECRET","apiKey","api_token","Authorization",
-      "x_api_key","oidc-client-secret","auth-header","cookie_header","session_cookie","sessionId","private.key",
-      "privateCredential","oauthToken","githubAccessToken","refresh-token"];
     for (const key of credentialKeys) {
       const repository=new ImportMemory(); const service=new PortableWorkspaceImportService(repository,{async put(){},async get(){return Buffer.alloc(0);},async delete(){}});
       const unsafe={...snapshot,activities:[{...activity,before:{metadata:{[key]:"must-not-cross"}}}]};
@@ -162,8 +182,7 @@ describe("Portable Workspace import", () => {
       assert.equal(repository.committed,undefined,`${key} must be rejected before persistence`);
     }
     const repository=new ImportMemory(); const service=new PortableWorkspaceImportService(repository,{async put(){},async get(){return Buffer.alloc(0);},async delete(){}});
-    const safe={...snapshot,activities:[{...activity,before:{sessionDuration:30,authenticationMethod:"member",cookiePolicy:"strict",
-      privateProject:true,tokenEstimate:8,apiVersion:"v1"}}]};
+    const safe={...snapshot,activities:[{...activity,before:benignActivityState}]};
     assert.equal((await service.import(randomUUID(),"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",await archiveFor(safe))).status,"imported");
     assert.deepEqual(repository.committed?.state.activities[0]?.before,safe.activities[0]!.before);
   });
