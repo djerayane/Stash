@@ -1,12 +1,25 @@
 :root {
   color-scheme: light;
   --stash-color-canvas: #f3f0e8;
+  --stash-color-canvas-deep: #e9e5da;
   --stash-color-surface: #fffdf7;
   --stash-color-ink: #18201d;
   --stash-color-muted: #66706a;
+  --stash-color-faint: #59615c;
   --stash-color-accent: #285f4f;
+  --stash-color-accent-hover: #1e4e41;
+  --stash-color-accent-soft: #92c8b2;
   --stash-color-accent-contrast: #ffffff;
   --stash-border-subtle: #d8d5cb;
+  --stash-border-strong: #aaa99f;
+  --stash-color-focus: #16745b;
+  --stash-color-error-soft: #d79c8f;
+  --stash-color-sidebar: #17201d;
+  --stash-color-sidebar-ink: #f6f3ea;
+  --stash-color-sidebar-muted: #aab4ae;
+  --stash-color-sidebar-border: #34403b;
+  --stash-color-sidebar-hover: #202c28;
+  --stash-color-sidebar-active: #293833;
   --stash-space-1: 0.25rem;
   --stash-space-2: 0.5rem;
   --stash-space-3: 0.75rem;
@@ -16,4 +29,5 @@
   --stash-radius-sm: 0.375rem;
   --stash-radius-md: 0.75rem;
   --stash-font-sans: Geist, ui-sans-serif, system-ui, sans-serif;
+  --stash-font-display: Geist, ui-sans-serif, system-ui, sans-serif;
 }

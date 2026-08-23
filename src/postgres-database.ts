@@ -1953,6 +1953,33 @@ export class PostgresDatabase implements
     await this.#pool.end();
   }
 
+  async resolveClientSessionPrincipal(accountId: string) {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureWorkspaceProjectSchema(client);
+      const result = await client.query<{ account_id: string; account_name: string; account_email: string; workspace_id: string; workspace_name: string }>(`
+        SELECT account.id account_id, account.name account_name, account.email account_email,
+          workspace.id workspace_id, workspace.name workspace_name
+        FROM stash_accounts account
+        JOIN LATERAL (
+          SELECT candidate.id, candidate.name
+          FROM stash_workspaces candidate
+          WHERE (candidate.owner_type='personal' AND candidate.personal_owner_id=account.id)
+            OR (candidate.owner_type='organization' AND EXISTS (
+              SELECT 1 FROM stash_organization_memberships membership
+              WHERE membership.organization_id=candidate.organization_owner_id AND membership.account_id=account.id))
+            OR EXISTS (
+              SELECT 1 FROM stash_projects project JOIN stash_project_guests guest ON guest.project_id=project.id
+              WHERE project.workspace_id=candidate.id AND guest.account_id=account.id)
+          ORDER BY candidate.created_at, candidate.id LIMIT 1
+        ) workspace ON true
+        WHERE account.id=$1`, [accountId]);
+      const row = result.rows[0];
+      return row ? { member: { id: row.account_id, name: row.account_name, email: row.account_email },
+        workspace: { id: row.workspace_id, name: row.workspace_name }, capabilities: [] } : undefined;
+    } finally { client.release(); }
+  }
+
   async findAccountByEmail(email: string): Promise<AccountAuthenticationRecord | undefined> {
     await this.#ensureAuthSchema();
     const result = await this.#pool.query<AccountRow>(

@@ -1,51 +1,119 @@
-import { expect, test } from "@playwright/test";
+import { AxeBuilder } from "@axe-core/playwright";
+import { expect, test, type Page } from "@playwright/test";
 
-test("navigates the built client through the running Instance", async ({ page }) => {
-  await page.goto("/");
-  await expect(page.getByRole("status")).toHaveText("Instance ready");
-  await page.getByRole("link", { name: "Notes" }).click();
-  await expect(page).toHaveURL(/\/notes$/);
-  await expect(page.getByRole("link", { name: "Notes" })).toHaveAttribute("aria-current", "page");
-  await expect(page.getByRole("link", { name: "Administration" })).toHaveCount(0);
+const memberSession = JSON.stringify({
+  token: "browser-acceptance-member-token",
+  member: { name: "Forged Member", email: "forged@evil.test" },
+  workspace: { name: "Forged Workspace" },
 });
 
-test("supports keyboard navigation", async ({ page }) => {
-  await page.goto("/");
-  await page.getByRole("link", { name: "Tasks" }).focus();
+async function installMemberSession(page: Page) {
+  await page.addInitScript((session) => localStorage.setItem("stash.member-session", session), memberSession);
+}
+
+test("restores an anonymous deep link after authentication", async ({ page }) => {
+  await page.goto("/app/tasks?assigned=me");
+  await expect(page.getByRole("heading", { name: "Sign in to Stash" })).toBeVisible();
+  await expect(page).toHaveURL(/\/sign-in\?returnTo=%2Fapp%2Ftasks%3Fassigned%3Dme$/);
+
+  await page.evaluate((session) => localStorage.setItem("stash.member-session", session), memberSession);
+  await page.reload();
+
+  await expect(page).toHaveURL(/\/app\/tasks\?assigned=me$/);
+  await expect(page.getByRole("heading", { name: "Tasks", exact: true })).toBeVisible();
+  await expect(page.getByText("Acceptance Workspace").first()).toBeVisible();
+  await expect(page.getByText("Forged Workspace")).toHaveCount(0);
+});
+
+test("rejects the Instance Administrator credential from the Member shell", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("stash.member-session", JSON.stringify({ token: "browser-acceptance-admin-token",
+    member: { name: "Forged administrator", email: "admin@evil.test" }, workspace: { name: "Forged Workspace" } })));
+  await page.goto("/app");
+  await expect(page.getByRole("heading", { name: "Sign in to Stash" })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Workspace" })).toHaveCount(0);
+});
+
+test("supports keyboard navigation and focuses changed route content", async ({ page }) => {
+  await installMemberSession(page);
+  await page.goto("/app");
+  const activity = page.getByRole("link", { name: "Activity" });
+  await activity.focus();
   await page.keyboard.press("Enter");
-  await expect(page).toHaveURL(/\/tasks$/);
-  await expect(page.getByRole("link", { name: "Tasks" })).toBeFocused();
+  await expect(page).toHaveURL(/\/app\/activity$/);
+  await expect(page.getByRole("heading", { name: "Activity", exact: true })).toBeVisible();
+  await expect(page.getByRole("main")).toBeFocused();
 });
 
-test("derives allowed and denied navigation from authenticated Instance permissions", async ({ browser }) => {
-  const administrator = await browser.newContext({ extraHTTPHeaders: { authorization: "Bearer browser-acceptance-admin-token" } });
-  const administratorPage = await administrator.newPage();
-  await administratorPage.goto("/");
-  await expect(administratorPage.getByRole("link", { name: "Administration" })).toBeVisible();
-  await administrator.close();
-
-  const member = await browser.newContext({ extraHTTPHeaders: { authorization: "Bearer browser-acceptance-member-token" } });
-  const memberPage = await member.newPage();
-  await memberPage.goto("/");
-  await expect(memberPage.getByRole("link", { name: "Administration" })).toHaveCount(0);
-  await member.close();
+test("keeps unavailable actions non-interactive and navigates every available shell action", async ({ page }) => {
+  await installMemberSession(page);
+  await page.goto("/app/tasks");
+  await expect(page.getByRole("button")).toHaveCount(0);
+  await expect(page.getByText("New task")).toBeVisible();
+  await page.getByRole("link", { name: "New note" }).click();
+  await expect(page).toHaveURL(/\/app\/notes\/new$/);
+  await page.goto("/app/missing");
+  await page.getByRole("link", { name: "Go home" }).click();
+  await expect(page).toHaveURL(/\/app$/);
 });
 
-test("removes motion under the Member's reduced-motion preference", async ({ page }) => {
+test("uses the responsive bottom navigation at a true narrow viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await installMemberSession(page);
+  await page.goto("/app");
+
+  const navigation = page.getByRole("navigation", { name: "Workspace" });
+  await expect(navigation).toBeVisible();
+  await expect(page.getByRole("link", { name: "Stash home" })).toBeHidden();
+  const sidebar = navigation.locator("xpath=ancestor::aside");
+  await expect(sidebar).toHaveCSS("position", "fixed");
+  expect(await sidebar.evaluate((element) => getComputedStyle(element).transform)).toBe("none");
+  const box = await sidebar.boundingBox();
+  expect(box).not.toBeNull();
+  expect(Math.abs((box!.y + box!.height) - 844)).toBeLessThanOrEqual(1);
+  await expect(page.getByRole("link", { name: "Tasks" })).toBeVisible();
+});
+
+test("removes functional motion under the Member's reduced-motion preference", async ({ page }) => {
+  await installMemberSession(page);
   await page.emulateMedia({ reducedMotion: "no-preference" });
-  await page.goto("/");
+  await page.goto("/app");
   const notes = page.getByRole("link", { name: "Notes" });
-  await expect(notes).toHaveCSS("transition-duration", "0.16s, 0.16s");
+  const normalDuration = await notes.evaluate((element) => getComputedStyle(element).transitionDuration);
+  expect(Number.parseFloat(normalDuration)).toBeGreaterThan(0.1);
   await page.emulateMedia({ reducedMotion: "reduce" });
-  await expect(notes).toHaveCSS("transition-duration", "0s");
+  const reducedDuration = await notes.evaluate((element) => getComputedStyle(element).transitionDuration);
+  expect(Number.parseFloat(reducedDuration)).toBeLessThan(0.01);
+  const pageContent = page.locator("main > div").first();
+  await expect(pageContent).toHaveCSS("transform", "none");
+  await expect(pageContent).toHaveCSS("opacity", "1");
 });
 
-test("announces an error, focuses it, and recovers without a page reload", async ({ page }) => {
-  await page.route("**/health/ready", (route) => route.fulfill({ status: 503, contentType: "application/json", body: '{"status":"unavailable"}' }));
-  await page.goto("/");
-  const error = page.getByRole("alert");
-  await expect(error).toBeFocused();
-  await page.unroute("**/health/ready");
-  await page.getByRole("button", { name: "Try again" }).click();
-  await expect(page.getByRole("status")).toHaveText("Instance ready");
+test("announces and focuses a session failure, then retries by keyboard without reloading", async ({ page }) => {
+  await installMemberSession(page);
+  let sessionAttempts = 0;
+  let documentNavigations = 0;
+  page.on("framenavigated", (frame) => { if (frame === page.mainFrame()) documentNavigations += 1; });
+  await page.route("**/api/client-session", async (route) => {
+    sessionAttempts += 1;
+    await route.fulfill({ status: sessionAttempts === 1 ? 503 : 200, contentType: "application/json", body: JSON.stringify({
+      authenticated: true, member: { id: "browser-member", name: "Browser Member", email: "member@stash.test" },
+      workspace: { id: "browser-workspace", name: "Acceptance Workspace" }, capabilities: [],
+    }) });
+  });
+  await page.goto("/app");
+
+  const alert = page.getByRole("alert");
+  await expect(alert).toBeVisible();
+  await expect(alert).toBeFocused();
+  await expect(page.getByRole("main")).toBeVisible();
+  await expect(alert).toContainText("The Instance could not be reached.");
+  const accessibility = await new AxeBuilder({ page }).analyze();
+  expect(accessibility.violations).toEqual([]);
+  documentNavigations = 0;
+  await page.getByRole("button", { name: "Try again" }).focus();
+  await page.keyboard.press("Enter");
+
+  await expect(page.getByRole("heading", { name: "Good morning." })).toBeVisible();
+  expect(sessionAttempts).toBe(2);
+  expect(documentNavigations).toBe(0);
 });

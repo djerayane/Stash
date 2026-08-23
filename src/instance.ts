@@ -62,6 +62,13 @@ import type { InstanceBackupService } from "./instance-backup.js";
 export interface DatabaseProbe {
   verifyConnection(): Promise<void>;
   close(): Promise<void>;
+  resolveClientSessionPrincipal?(accountId: string): Promise<ClientSessionPrincipal | undefined>;
+}
+
+export interface ClientSessionPrincipal {
+  member: { id: string; name: string; email: string };
+  workspace: { id: string; name: string };
+  capabilities: string[];
 }
 
 export interface RunningInstance {
@@ -255,12 +262,21 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
 
     if (request.method === "GET" && url.pathname === "/api/client-session") {
       if (request.headers.authorization === `Bearer ${options.instanceAdminToken}`) {
-        json(response, 200, { authenticated: true, permissions: ["instance:manage"] });
+        json(response, 401, { error: "unauthorized", message: "A valid Member session is required." });
         return;
       }
       const member = await memberAccess?.authenticateBearer(request.headers.authorization);
       if (member) {
-        json(response, 200, { authenticated: true, permissions: [] });
+        try {
+          const principal = await options.database.resolveClientSessionPrincipal?.(member.accountId);
+          if (!principal) {
+            json(response, 401, { error: "unauthorized", message: "A valid Member session is required." });
+            return;
+          }
+          json(response, 200, { authenticated: true, ...principal });
+        } catch {
+          json(response, 503, { error: "client_session_unavailable", message: "The Member session could not be loaded." });
+        }
         return;
       }
       json(response, 401, { error: "unauthorized", message: "Authentication is required." });
