@@ -88,6 +88,26 @@ test("removes functional motion under the Member's reduced-motion preference", a
   await expect(pageContent).toHaveCSS("opacity", "1");
 });
 
+test("marks a departed Task assignee until reassignment and keeps the flow accessible", async ({ page }) => {
+  await installMemberSession(page);
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/app/projects/22222222-2222-4222-8222-222222222222/tasks/STASH-32");
+
+  await expect(page.getByRole("heading", { name: "Restore release ownership" })).toBeVisible();
+  const marker = page.getByRole("status");
+  await expect(marker).toBeVisible();
+  await expect(marker).toContainText("Departed Member — assignment needs attention");
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+
+  await page.getByRole("button", { name: "Clear departed assignment" }).click();
+  await expect(page.getByText("Assignment cleared", { exact: true })).toBeVisible();
+  await expect(page.getByText("Departed Member — assignment needs attention", { exact: true })).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByText("Departed Member — assignment needs attention", { exact: true })).toHaveCount(0);
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+});
+
 test("announces and focuses a session failure, then retries by keyboard without reloading", async ({ page }) => {
   await installMemberSession(page);
   let sessionAttempts = 0;

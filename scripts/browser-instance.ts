@@ -5,6 +5,7 @@ import { NoteCollaborationService, type CollaborationSnapshot } from "../src/not
 import * as Y from "yjs";
 import { collaborativeDocumentFromRichText, richTextFromCollaborativeDocument } from "../src/postgres-database.js";
 import { richTextToMarkdown } from "../src/rich-text.js";
+import { TaskService, type TaskPlanningReadModel, type TaskPlanningUpdate } from "../src/tasks.js";
 
 const noteId = "99999999-9999-4999-8999-999999999999";
 const secondNoteId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -49,6 +50,30 @@ const collaborationRepository = {
   },
 };
 
+const projectId = "22222222-2222-4222-8222-222222222222";
+let task: TaskPlanningReadModel = {
+  schema: "stash.task.v1", id: "32323232-3232-4232-8232-323232323232", workspaceId: "browser-workspace", projectId,
+  key: "STASH-32", title: "Restore release ownership", status: { id: "ready", name: "Ready", category: "unstarted" },
+  assigneeIds: ["departed-member"], formerAssigneeIds: ["departed-member"], priority: "high", labelNames: [], linkedNoteIds: [],
+  dependencies: [], developmentLinks: [], sourceNoteIds: [], createdAt: "2026-08-23T00:00:00.000Z",
+  createdBy: { localAccountId: "browser-member", displayName: "Browser Member" }, revision: 1, dependencyWarnings: [],
+};
+const taskRepository = {
+  async findTaskByKey(memberId: string, requestedProjectId: string, taskKey: string) {
+    return memberId === "browser-member" && requestedProjectId === projectId && taskKey === task.key
+      ? { status: "found" as const, task } : { status: "not_found" as const };
+  },
+  async updateTaskByKey(memberId: string, requestedProjectId: string, taskKey: string, update: TaskPlanningUpdate) {
+    if (memberId !== "browser-member" || requestedProjectId !== projectId || taskKey !== task.key) return { status: "not_found" as const };
+    const { assigneeIds: requestedAssigneeIds } = update;
+    const assigneeIds = requestedAssigneeIds ?? task.assigneeIds ?? [];
+    const formerAssigneeIds = task.formerAssigneeIds?.filter((id) => assigneeIds.includes(id)) ?? [];
+    const { formerAssigneeIds: _previousFormerAssignees, ...currentTask } = task;
+    task = { ...currentTask, assigneeIds, ...(formerAssigneeIds.length ? { formerAssigneeIds } : {}), revision: task.revision + 1 };
+    return { status: "updated" as const, task };
+  },
+};
+
 const instance = await startInstance({
   database: { async verifyConnection() {}, async close() {}, async resolveClientSessionPrincipal(accountId: string) {
     return ["browser-member", "browser-second-member", "browser-guest"].includes(accountId) ? { member: { id: accountId, name: accountId === "browser-member" ? "Browser Member" : accountId === "browser-second-member" ? "Second Browser Member" : "Browser Guest", email: `${accountId}@stash.test` },
@@ -78,6 +103,7 @@ const instance = await startInstance({
     tags: [], createdByMemberId: memberId, createdAt: new Date(0).toISOString(),
   }; } } as any,
   noteCollaboration: new NoteCollaborationService(collaborationRepository),
+  tasks: new TaskService(taskRepository, { async findPortableMemberIdentity() { return undefined; } }),
   webClientRoot: fileURLToPath(new URL("../apps/web/dist", import.meta.url)),
 });
 

@@ -6,6 +6,7 @@ import { Link, Navigate, NavLink, Route, Routes, useLocation } from "react-route
 import styles from "./app-shell.module.css";
 import { DevelopmentSignalsRoute } from "./development-signals";
 import { NoteEditor } from "./note-editor";
+import { TaskDetailPage } from "./task-detail";
 
 export type SessionState =
   | { readonly status: "loading" }
@@ -133,7 +134,7 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
       <div className={styles.sidebarFooter}><span className={styles.avatar} aria-hidden="true">{initials(memberName, "M")}</span><span><strong>{memberName}</strong><small>{memberEmail}</small></span></div>
     </aside>
     <div className={styles.workspace}>
-      <header className={styles.topbar}><div className={styles.searchPreview}><Icon name="search" /><span>Search coming soon</span></div><Link className={styles.compactCreate} to="/app/notes/new"><Icon name="plus" /><span>New note</span></Link></header>
+      <header className={styles.topbar}><div className={styles.searchPreview}><Icon name="search" /><span>Search coming soon</span></div><Link aria-label="New note" className={styles.compactCreate} to="/app/notes/new"><Icon name="plus" /><span>New note</span></Link></header>
       {/^\/app\/notes\/[^/]+$/.test(location.pathname) && location.pathname !== "/app/notes/new"
         ? <NoteEditor noteId={decodeURIComponent(location.pathname.split("/")[3]!)} memberId={session.member.id} token={session.token ?? ""} />
         : <main id="workspace-content" className={styles.content} ref={mainRef} tabIndex={-1}>
@@ -143,6 +144,7 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
           <Route path="/app/notes/new" element={<PlaceholderPage workspaceName={workspaceName} title="New note" description="A focused editor will arrive in the rich-text migration slice." action="Save draft" />} />
           <Route path="/app/tasks" element={<PlaceholderPage workspaceName={workspaceName} title="Tasks" description="Actionable work connected to the thinking that shaped it." action="New task" />} />
           <Route path="/app/projects/:projectId/tasks/:taskKey/development" element={<DevelopmentSignalsRoute />} />
+          <Route path="/app/projects/:projectId/tasks/:taskKey" element={<TaskDetailPage token={session.token} />} />
           <Route path="/app/activity" element={<PlaceholderPage workspaceName={workspaceName} title="Activity" description="Meaningful changes, explained without unnecessary noise." action="Filter" />} />
           <Route path="*" element={<PlaceholderPage workspaceName={workspaceName} title="Not found" description="This Workspace route does not exist." action="Go home" actionTo="/app" />} />
         </Routes>
