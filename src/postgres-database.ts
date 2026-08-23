@@ -882,6 +882,31 @@ export class PostgresDatabase implements
     } finally { client.release(); }
   }
 
+  async listBlockDiscussions(memberId: string, noteId: string, blockKey: string) {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureDiscussionSchema(client);
+      const note = await client.query<any>(`SELECT note.document FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id = note.workspace_id
+        WHERE note.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR EXISTS (
+          SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id = workspace.organization_owner_id
+            AND membership.account_id = $2) OR (note.project_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM stash_project_guests guest WHERE guest.project_id = note.project_id AND guest.account_id = $2)))`, [noteId, memberId]);
+      if (!note.rowCount) return { status: "not_found" as const };
+      const blocks = Array.isArray(note.rows[0].document?.blocks) ? note.rows[0].document.blocks as Array<{ blockKey?: string; id?: string }> : [];
+      const matches = blocks.filter((block) => block.blockKey === blockKey);
+      if (matches.length !== 1 || typeof matches[0]!.id !== "string"
+        || blocks.filter((block) => block.id === matches[0]!.id).length !== 1) return { status: "not_found" as const };
+      const ids = await client.query<{ id: string }>(`SELECT id FROM stash_discussions
+        WHERE target_kind = 'block' AND note_id = $1 AND block_id = $2 ORDER BY created_at, id`, [noteId, matches[0]!.id]);
+      const discussions: DiscussionRecord[] = [];
+      for (const { id } of ids.rows) {
+        const discussion = await this.#readDiscussion(client, memberId, id, false);
+        if (discussion?.target.kind === "block") discussions.push(discussion);
+      }
+      return { status: "found" as const, discussions };
+    } finally { client.release(); }
+  }
+
   async addMessage(memberId: string, discussionId: string, message: DiscussionMessage) {
     return this.#withTransaction(async (client) => {
       await this.#ensureDiscussionSchema(client);

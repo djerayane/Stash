@@ -59,17 +59,32 @@ test("navigates Notes, Boards, Discussions, notifications, and Activity through 
   await move.selectOption("done"); await expect(page.getByText("STASH-32 moved.")).toBeAttached();
 
   await page.goto("/app/notes/99999999-9999-4999-8999-999999999999/discussions");
-  await expect(page.getByText("Keep this release context")).toBeVisible();
-  await page.getByRole("textbox", { name: "Reply" }).fill("Ship with the rollback note");
-  await page.getByRole("button", { name: "Reply", exact: true }).click();
-  await expect(page.getByText("Ship with the rollback note")).toBeVisible();
-  await page.getByRole("button", { name: "Resolve Discussion" }).click(); await expect(page.getByText("Resolved")).toBeVisible();
+  const releaseDiscussion = page.getByText("Keep this release context").locator("xpath=ancestor::article"); await expect(releaseDiscussion).toBeVisible();
+  await releaseDiscussion.getByRole("textbox", { name: "Reply" }).fill("Ship with the rollback note");
+  await releaseDiscussion.getByRole("button", { name: "Reply", exact: true }).click();
+  await expect(releaseDiscussion.getByText("Ship with the rollback note")).toBeVisible();
+  await releaseDiscussion.getByRole("button", { name: "Resolve Discussion" }).click(); await expect(releaseDiscussion.getByText("Resolved")).toBeVisible();
 
   await page.goto("/app/notifications"); await page.getByRole("button", { name: "Mark read" }).click(); await expect(page.getByText("Read", { exact: true })).toBeVisible();
   await page.goto("/app/activity"); await expect(page.getByText("Release plan updated")).toBeVisible();
   const search = page.getByRole("searchbox", { name: "Search Workspace" }); await search.fill("release"); await search.press("Enter");
   await expect(page).toHaveURL(/\/app\/search\?q=release/); await expect(page.getByRole("link", { name: /Release collaboration plan/ })).toBeVisible();
   await search.fill("discussion"); await search.press("Enter"); const discussionResult = page.getByRole("link", { name: /Keep this release context/ }); await expect(discussionResult).toHaveAttribute("href", `/app/notes/99999999-9999-4999-8999-999999999999/discussions`);
+});
+
+test("isolates selected messages and exact Block Discussion actions", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" }); await authenticate(page);
+  await page.goto("/app/notes/99999999-9999-4999-8999-999999999999/discussions");
+  const first = page.getByText("Keep this release context").locator("xpath=ancestor::article");
+  const second = page.getByText("Unrelated migration thread").locator("xpath=ancestor::article");
+  await first.getByRole("checkbox", { name: /Keep this release context/ }).check(); await second.getByRole("checkbox", { name: /Unrelated migration thread/ }).check();
+  const [workRequest] = await Promise.all([page.waitForRequest((request) => request.url().endsWith("/api/discussions/abababab-abab-4bab-8bab-abababababa2/work")), first.getByRole("button", { name: "Create Note from selection" }).click()]);
+  expect((workRequest.postDataJSON() as { messageIds: string[] }).messageIds).toEqual(["abababab-abab-4bab-8bab-abababababa3"]);
+  await page.goto("/app/notes/99999999-9999-4999-8999-999999999999/blocks/77777777-7777-4777-8777-777777777777/discussions");
+  await expect(page.getByText("Exact Block thread")).toBeVisible(); await expect(page.getByText("Keep this release context")).toHaveCount(0); await expect(page.getByText("Unrelated Block thread")).toHaveCount(0);
+  const blockDiscussion = page.getByText("Exact Block thread").locator("xpath=ancestor::article"); await blockDiscussion.getByRole("textbox", { name: "Reply" }).fill("Exact Block reply"); await blockDiscussion.getByRole("button", { name: "Reply", exact: true }).click(); await expect(blockDiscussion.getByText("Exact Block reply")).toBeVisible();
+  await blockDiscussion.getByRole("button", { name: "Resolve Discussion" }).click(); await expect(blockDiscussion.getByText("Resolved")).toBeVisible();
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 });
 
 test("@a11y keeps every migrated core route free of detectable accessibility violations", async ({ page }) => {

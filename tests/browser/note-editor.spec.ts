@@ -68,7 +68,9 @@ test("preserves every checklist item and callout paragraph with stable identitie
   const authoredItems = editor.locator("li[data-block-key]").filter({ hasText: /First acceptance item|Second acceptance item|Nested acceptance item/ });
   const itemKeys = await authoredItems.evaluateAll((items) => items.map((item) => item.getAttribute("data-block-key")));
   expect(itemKeys).toHaveLength(3); expect(new Set(itemKeys).size).toBe(3);
-  const calloutParagraphKeys = await editor.locator("[data-callout] p[data-block-key]").evaluateAll((items) => items.map((item) => item.getAttribute("data-block-key")));
+  const calloutParagraphs = editor.locator("[data-callout] p[data-block-key]");
+  await expect(calloutParagraphs).toHaveCount(2);
+  const calloutParagraphKeys = await calloutParagraphs.evaluateAll((items) => items.map((item) => item.getAttribute("data-block-key")));
   expect(calloutParagraphKeys).toHaveLength(2); expect(new Set(calloutParagraphKeys).size).toBe(2);
   await expect.poll(() => page.evaluate(async (id) => (await fetch(`/api/notes/${id}`, { headers: { authorization: "Bearer browser-acceptance-member-token" } })).json()
     .then((note: { content: string }) => note.content), richNoteId)).toContain("Second callout paragraph.");

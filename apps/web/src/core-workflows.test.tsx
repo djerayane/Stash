@@ -31,9 +31,11 @@ describe("core React workflows", () => {
   it("replies, resolves, and creates work from selected Discussion messages", async () => {
     const discussionId = "33333333-3333-4333-8333-333333333333";
     const messageId = "44444444-4444-4444-8444-444444444444";
+    const otherDiscussionId = "55555555-5555-4555-8555-555555555555";
+    const otherMessageId = "66666666-6666-4666-8666-666666666666";
     const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
-      if (path.endsWith("/api/notes/22222222-2222-4222-8222-222222222222/discussions")) return Response.json({ discussions: [{ id: discussionId, target: { kind: "note", noteId: "22222222-2222-4222-8222-222222222222" }, createdAt: "2026-08-23T00:00:00Z", messages: [{ id: messageId, content: "Preserve this decision", author: { displayName: "Ada" }, createdAt: "2026-08-23T00:00:00Z" }] }] });
+      if (path.endsWith("/api/notes/22222222-2222-4222-8222-222222222222/discussions")) return Response.json({ discussions: [{ id: discussionId, target: { kind: "note", noteId: "22222222-2222-4222-8222-222222222222" }, createdAt: "2026-08-23T00:00:00Z", messages: [{ id: messageId, content: "Preserve this decision", author: { displayName: "Ada" }, createdAt: "2026-08-23T00:00:00Z" }] }, { id: otherDiscussionId, target: { kind: "note", noteId: "22222222-2222-4222-8222-222222222222" }, createdAt: "2026-08-23T00:00:00Z", messages: [{ id: otherMessageId, content: "Unrelated thread", author: { displayName: "Grace" }, createdAt: "2026-08-23T00:00:00Z" }] }] });
       if (path.endsWith(`/api/discussions/${discussionId}/messages`)) return Response.json({ discussion: {} });
       if (path.endsWith(`/api/discussions/${discussionId}/resolution`)) return Response.json({ discussion: {} });
       if (path.endsWith(`/api/discussions/${discussionId}/work`)) return Response.json({ work: { kind: "note" } }, { status: 201 });
@@ -43,12 +45,16 @@ describe("core React workflows", () => {
     render(<QueryClientProvider client={client}><MemoryRouter initialEntries={["/app/notes/22222222-2222-4222-8222-222222222222/discussions"]}><Routes><Route path="/app/notes/:targetId/discussions" element={<DiscussionsPage targetKind="note" token="member" fetcher={fetcher as typeof fetch} />} /></Routes></MemoryRouter></QueryClientProvider>);
     expect(await screen.findByText("Preserve this decision")).toBeVisible();
     fireEvent.click(screen.getByRole("checkbox", { name: /Preserve this decision/ }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Create Note from selection" })).toBeEnabled());
-    fireEvent.click(screen.getByRole("button", { name: "Create Note from selection" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /Unrelated thread/ }));
+    const createButtons = screen.getAllByRole("button", { name: "Create Note from selection" });
+    await waitFor(() => expect(createButtons[0]).toBeEnabled());
+    fireEvent.click(createButtons[0]!);
     await waitFor(() => expect(fetcher).toHaveBeenCalledWith(expect.stringContaining(`/api/discussions/${discussionId}/work`), expect.objectContaining({ body: expect.stringContaining(messageId) })));
-    fireEvent.change(screen.getByRole("textbox", { name: "Reply" }), { target: { value: "Follow up" } });
-    fireEvent.click(screen.getByRole("button", { name: "Reply" }));
-    fireEvent.click(screen.getByRole("button", { name: "Resolve Discussion" }));
+    const workCall = fetcher.mock.calls.find(([path]) => String(path).endsWith(`/api/discussions/${discussionId}/work`))!;
+    expect(String(workCall[1]?.body)).not.toContain(otherMessageId);
+    fireEvent.change(screen.getAllByRole("textbox", { name: "Reply" })[0]!, { target: { value: "Follow up" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "Reply" })[0]!);
+    fireEvent.click(screen.getAllByRole("button", { name: "Resolve Discussion" })[0]!);
     await waitFor(() => expect(fetcher).toHaveBeenCalledWith(expect.stringContaining(`/api/discussions/${discussionId}/messages`), expect.anything()));
     await waitFor(() => expect(fetcher).toHaveBeenCalledWith(expect.stringContaining(`/api/discussions/${discussionId}/resolution`), expect.objectContaining({ method: "PUT" })));
   });
