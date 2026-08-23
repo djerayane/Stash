@@ -181,6 +181,7 @@ describe("Organization Repository Connections", () => {
     const connection = await created.json() as { id: string; ownership: string; state: string };
     assert.equal(connection.ownership, "personal"); assert.equal(connection.state, "active");
 
+    database.records[0]!.projectIds.push(projectOne);
     database.records[0]!.state = "degraded";
     const listed = await fetch(`${baseUrl}/api/organizations/${acme}/repository-connections`, { headers: { authorization: "Bearer admin-session" } });
     assert.deepEqual((await listed.json() as any).repositoryConnections[0].state, "degraded");
@@ -211,6 +212,10 @@ describe("Organization Repository Connections", () => {
     assert.equal(database.records[0]!.ownership, "organization"); assert.equal(database.records[0]!.state, "active");
     assert.equal(database.records[0]!.installationId, 84);
     assert.equal(database.records[0]!.repositoryUrl, "https://github.com/acme/personal-repo");
+    const replacementAuthority = await fetch(`${baseUrl}/api/organizations/${acme}/repository-connections/${connection.id}/projects/${projectOne}`, {
+      method: "POST", headers: { authorization: "Bearer admin-session" },
+    });
+    assert.equal(replacementAuthority.status, 204);
     assert.equal(github.calls, 3);
     assert.equal(github.minted, 4, "successful replacement is separately verified before activation");
   });

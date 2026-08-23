@@ -2374,7 +2374,8 @@ export class PostgresDatabase implements
         SELECT task.task_key AS matched_key WHERE task.task_key = ANY($3::text[])
         UNION SELECT alias.task_key FROM stash_task_key_aliases alias WHERE alias.task_id = task.id AND alias.task_key = ANY($3::text[])
       ) matched ON true
-      WHERE connection.provider='github' AND connection.installation_id=$1 AND connection.repository_id=$2
+      WHERE connection.provider='github' AND connection.state='active'
+        AND connection.installation_id=$1 AND connection.repository_id=$2
       `, [installationId, repositoryId, keys]);
     return result.rows.map((row) => ({ taskId: row.task_id, projectId: row.project_id, organizationId: row.organization_id,
       taskKey: row.task_key, title: row.title, matchedKey: row.matched_key }));
@@ -2632,7 +2633,8 @@ export class PostgresDatabase implements
         const existing = await client.query(
       `SELECT 1 FROM stash_repository_connection_projects link
        JOIN stash_repository_connections connection ON connection.id = link.connection_id
-       WHERE connection.organization_id = $1 AND link.connection_id = $2 AND link.project_id = $3`,
+       WHERE connection.organization_id = $1 AND connection.state = 'active'
+         AND link.connection_id = $2 AND link.project_id = $3`,
       [organizationId, connectionId, projectId],
     );
         if (!existing.rowCount) return "not_found" as const;
