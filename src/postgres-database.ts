@@ -1391,7 +1391,7 @@ export class PostgresDatabase implements
           await this.#recordPortableProjection(client, "Task", projection.id, projection.schema, projection);
           if (affectedBefore.rows[0]) await this.#recordTaskActivity(client, memberId, task.workspaceId, affectedId,
             "task_dependency_relationship_updated", taskPlanningReadModelFromRow(affectedBefore.rows[0]),
-            taskPlanningReadModelFromRow(affected.rows[0]));
+            taskPlanningReadModelFromRow(affected.rows[0]), cause);
         }
       }
       return { status: "updated" as const, task };

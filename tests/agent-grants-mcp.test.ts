@@ -33,7 +33,14 @@ describe("Agent Grants and MCP", () => {
       notes: { async get(memberId: string, noteId: string) { return memberId === "member" && noteId === "22222222-2222-4222-8222-222222222222" ? { id: noteId, workspaceId: "55555555-5555-4555-8555-555555555555", content: "Authorized context" } : undefined; },
         async capture(memberId: string, workspaceId: string, input: unknown, cause: unknown) { repository.directWrites.push({ memberId, workspaceId, input, cause });
           repository.activities.push({ actor: memberId, cause }); repository.operatorAudit.push({ action: "agent_note_created", actor: memberId, cause });
-          return { status: "created", note: { id: "33333333-3333-4333-8333-333333333333" } }; } } as any }); return repository; }
+          return { status: "created", note: { id: "33333333-3333-4333-8333-333333333333" } }; } } as any,
+      tasks: { async updateByKey(memberId: string, projectId: string, taskKey: string, input: unknown, cause: unknown) {
+        repository.directWrites.push({ memberId, projectId, taskKey, input, cause });
+        repository.activities.push({ action: "task_planning_updated", actor: memberId, cause },
+          { action: "task_dependency_relationship_updated", actor: memberId, cause });
+        repository.operatorAudit.push({ action: "agent_task_updated", actor: memberId, cause });
+        return { status: "updated", task: { id: "88888888-8888-4888-8888-888888888888", key: taskKey } };
+      } } as any }); return repository; }
   async function issue(scopes: Array<{ capability: string; mode: "direct" | "propose" | "deny" }>, session = "member-session", projectId?: string) {
     const response = await fetch(`${instance!.url}/api/v1/organizations/${organizationId}/agent-grants`, { method: "POST", headers: { authorization: `Bearer ${session}`, "content-type": "application/json" },
       body: JSON.stringify({ organizationId, ...(projectId ? { projectId } : {}), name: "Planning assistant", expiresAt: "2026-09-01T10:00:00.000Z", scopes,
@@ -101,6 +108,22 @@ describe("Agent Grants and MCP", () => {
     const accepted = await invoke({ projectId, workspaceId: "55555555-5555-4555-8555-555555555555", input: { content: "Review this" } });
     assert.equal((await accepted.json() as any).result.structuredContent.status, "pending"); assert.equal(repository.proposals.length, 1);
     assert.deepEqual(repository.proposals[0]?.input, { projectId, workspaceId: "55555555-5555-4555-8555-555555555555", input: { content: "Review this" } }); assert.equal(repository.directWrites.length, 0);
+  });
+
+  it("attributes every Activity from a Direct dependency update to the agent execution", async () => {
+    const repository = await run(); const projectId = "44444444-4444-4444-8444-444444444444";
+    const dependencyId = "99999999-9999-4999-8999-999999999999";
+    const { body } = await issue([{ capability: "task.write", mode: "direct" }], "member-session", projectId);
+    const sessionId = await initializeMcp(body.token);
+    const update = await mcp(body.token, sessionId, { jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "stash.task.write",
+      arguments: { projectId, taskKey: "STASH-12", input: { dependencies: [{ taskId: dependencyId, type: "depends_on" }] } } } });
+    assert.equal((await update.json() as any).result.structuredContent.result.status, "updated");
+    const cause = { kind: "agent", agentGrantId: body.grant.id, sponsoringMemberId: "member", agentName: "Planning assistant" };
+    assert.deepEqual(repository.activities, [
+      { action: "task_planning_updated", actor: "member", cause },
+      { action: "task_dependency_relationship_updated", actor: "member", cause },
+    ]);
+    assert.deepEqual(repository.operatorAudit, [{ action: "agent_task_updated", actor: "member", cause }]);
   });
 
   it("enforces sponsorship, validation, expiry, and immediate revocation without leaking credentials", async () => {
