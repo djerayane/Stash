@@ -63,6 +63,19 @@ test("renders authenticated navigation and deep-linkable route content", async (
   expect(screen.getByText("AL")).toBeInTheDocument();
 });
 
+test("keeps Organization administration out of ordinary Member navigation", () => {
+  renderShell("/app/settings");
+  expect(screen.getByRole("link", { name: "Settings" })).toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: "Organization" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: "Imported identities" })).not.toBeInTheDocument();
+});
+
+test("reveals Organization administration only from server-provided scope", () => {
+  renderShell("/app", { ...member, organizationAdministrations: [{ organizationId: "org-1", organizationName: "Acme", members: [] }] });
+  expect(screen.getByRole("link", { name: "Organization" })).toHaveAttribute("href", "/app/settings/organization");
+  expect(screen.getByRole("link", { name: "Imported identities" })).toBeInTheDocument();
+});
+
 test("derives identity labels and initials with explicit fallbacks", () => {
   expect(displayLabel("  Project Atlas  ", "Personal workspace")).toBe("Project Atlas");
   expect(displayLabel("   ", "Personal workspace")).toBe("Personal workspace");

@@ -19,6 +19,8 @@ describe("development Signals", () => {
     let confirmed = false;
     const fetcher = vi.fn<typeof fetch>(async (input, init) => {
       if (String(input).endsWith("/automations")) return Response.json({ automation: { recipes: [], transitions: [], availableStatuses: [] } });
+      if (String(input).endsWith("/repository-connections")) return Response.json({ repositoryConnections: [] });
+      if (String(input).endsWith("/development-artifacts")) return Response.json({ artifacts: [] });
       if (init?.method === "POST") { confirmed = true; return Response.json({ suggestion: { ...suggestion, status: "confirmed" } }); }
       return Response.json({ signals: [{ signal, suggestions: [{ ...suggestion, status: confirmed ? "confirmed" : "pending_confirmation" }] }] });
     });
@@ -36,6 +38,8 @@ describe("development Signals", () => {
     let attempts = 0;
     const fetcher = vi.fn<typeof fetch>(async (input) => {
       if (String(input).endsWith("/automations")) return Response.json({ automation: { recipes: [], transitions: [], availableStatuses: [] } });
+      if (String(input).endsWith("/repository-connections")) return Response.json({ repositoryConnections: [] });
+      if (String(input).endsWith("/development-artifacts")) return Response.json({ artifacts: [] });
       attempts += 1;
       return attempts === 1 ? Response.json({ message: "Signals are temporarily unavailable." }, { status: 503 }) : Response.json({ signals: [] });
     });
@@ -44,5 +48,22 @@ describe("development Signals", () => {
     expect(screen.getByRole("alert")).toHaveFocus();
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(await screen.findByText("No development activity yet")).toBeVisible();
+  });
+
+  it("creates a branch through a named Project Repository Connection", async () => {
+    const requests: Array<{ path: string; body?: string }> = [];
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const path = String(input); requests.push({ path, body: typeof init?.body === "string" ? init.body : undefined });
+      if (path.endsWith("/repository-connections")) return Response.json({ repositoryConnections: [{ id: "22222222-2222-4222-8222-222222222222", repositoryUrl: "https://github.com/acme/stash" }] });
+      if (path.endsWith("/development-artifacts") && init?.method === "POST") return Response.json({ artifact: { kind: "branch", providerId: "refs/heads/STASH-36-work", url: "https://github.com/acme/stash/tree/STASH-36-work", label: "STASH-36-work" } }, { status: 201 });
+      if (path.endsWith("/development-artifacts")) return Response.json({ artifacts: [] });
+      if (path.endsWith("/automations")) return Response.json({ automation: { recipes: [], transitions: [], availableStatuses: [] } });
+      return Response.json({ signals: [] });
+    });
+    renderPage(fetcher);
+    expect(await screen.findByRole("combobox", { name: "Repository" })).toHaveDisplayValue("acme/stash");
+    fireEvent.change(screen.getByRole("textbox", { name: "Branch name (optional)" }), { target: { value: "STASH-36-work" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create branch" }));
+    await waitFor(() => expect(requests.some(({ body }) => body?.includes('"action":"create_branch"') && body.includes('"connectionId":"22222222-2222-4222-8222-222222222222"'))).toBe(true));
   });
 });

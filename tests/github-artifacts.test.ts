@@ -14,6 +14,7 @@ class RepositoryFake implements GitHubArtifactRepository {
   allow = true;
   writeAllowed = true;
   failNextLink = false;
+  async listConnections(memberId: string, project: string) { return this.allow && memberId === "member" && project === projectId ? [{ id: connectionId, repositoryUrl: "https://github.com/acme/stash" }] : []; }
   async resolveTask(memberId: string, project: string, key: string) {
     return this.allow && memberId === "member" && project === projectId && ["STASH-35", "STASH-36"].includes(key)
       ? { id: key === "STASH-35" ? "task-35" : "task-36", key, title: key === "STASH-35" ? "Create and manually link GitHub artifacts" : "Another task" }
@@ -77,6 +78,13 @@ describe("GitHub development artifacts", () => {
     assert.equal(body.artifact.label, "stash-35-create-and-manually-link-github-artifacts");
     assert.deepEqual(github.created, [body.artifact.label]);
     assert.equal("status" in body, false);
+  });
+
+  it("discovers only the active Repository Connections attached to the Project", async () => {
+    const { baseUrl } = await run();
+    const response = await fetch(`${baseUrl}/api/projects/${projectId}/repository-connections`, { headers: { authorization: "Bearer member" } });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { repositoryConnections: [{ id: connectionId, repositoryUrl: "https://github.com/acme/stash" }] });
   });
 
   it("manually links branches, commits, and pull requests many-to-many without duplicates", async () => {

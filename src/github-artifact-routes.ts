@@ -2,11 +2,18 @@ import { json, readJson, type HttpRoute } from "./http-routing.js";
 import { GitHubArtifactNotFound, GitHubArtifactUnavailable, GitHubArtifactWriteForbidden, InvalidGitHubArtifactInput, type GitHubArtifactService } from "./github-artifacts.js";
 import type { MemberAccessResolver } from "./workspaces-projects.js";
 const path = /^\/api\/projects\/([^/]+)\/tasks\/([^/]+)\/development-artifacts$/;
+const connectionsPath = /^\/api\/projects\/([^/]+)\/repository-connections$/;
 export function githubArtifactRoutes(service: GitHubArtifactService, access: MemberAccessResolver): HttpRoute {
-  return { matches: (_request, url) => path.test(url.pathname), async handle(request, response, url) {
+  return { matches: (_request, url) => path.test(url.pathname) || connectionsPath.test(url.pathname), async handle(request, response, url) {
     const member = await access.authenticateBearer(request.headers.authorization);
     if (!member) { json(response, 401, { error: "unauthorized", message: "A valid Member session is required." }); return true; }
     try {
+      const connectionsMatch = url.pathname.match(connectionsPath);
+      if (connectionsMatch) {
+        if (request.method === "GET") json(response, 200, { repositoryConnections: await service.listConnections(member.accountId, decodeURIComponent(connectionsMatch[1]!)) });
+        else json(response, 405, { error: "method_not_allowed", message: "This Repository Connection operation is not supported." });
+        return true;
+      }
       const match = url.pathname.match(path)!; const projectId = decodeURIComponent(match[1]!); const taskKey = decodeURIComponent(match[2]!);
       if (request.method === "GET") json(response, 200, { artifacts: await service.list(member.accountId, projectId, taskKey) });
       else if (request.method === "POST") {

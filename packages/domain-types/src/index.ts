@@ -185,3 +185,11 @@ export type MobileSyncResult =
   | { status: "offline" | "retry_pending"; count: number }
   | { status: "cancelled"; count: number }
   | { status: "attention_required"; count: number; error: string; retryPending?: boolean };
+
+export interface MemberLocalizationSettings { locale: string; timeZone: string; dateFormat: "short" | "medium" | "long"; weekStartsOn: "sunday" | "monday" | "saturday"; updatedAt?: string }
+export interface OrganizationRepositoryConnection { id: string; repositoryUrl: string; projectIds: string[]; ownership: "organization" | "personal"; state: "active" | "degraded" }
+export interface OrganizationRoleSummary { name: string; description?: string }
+export interface RecoveryCodeResponse { codes: string[] }
+export interface OrganizationInvitationResponse { token: string }
+export interface InstanceDiagnosticSettings { diagnosticSubmissions: boolean; crashReportSubmissions: boolean; updateChecks: boolean }
+export interface InstanceDiagnosticsState { settings: InstanceDiagnosticSettings; pending: unknown[]; pendingCrashReports: Array<{ id?: string }>; updateCheckPayload?: unknown }
