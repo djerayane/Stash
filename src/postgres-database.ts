@@ -36,7 +36,7 @@ import type { Board, BoardRepository, BoardTask } from "./boards.js";
 import type { NoteLinkRecord, NoteLocationRecord, PortableNoteLinkStateProjection, PortableNoteLocationProjection } from "./note-links.js";
 import type { ActivityCause, ActivityRecord, ActivityRepository, NoteHistoryRevision } from "./activity.js";
 import type { DevelopmentArtifact, GitHubArtifactRepository } from "./github-artifacts.js";
-import { assignmentNotificationInputs, notificationDeliveryMode, type NotificationDelivery, type NotificationPreferences, type NotificationRepository } from "./notifications.js";
+import { assignmentNotificationInputs, notificationDeliveryMode, type NotificationDelivery, type NotificationPreferences, type NotificationRepository, type NotificationSourceInput } from "./notifications.js";
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
@@ -1892,6 +1892,53 @@ export class PostgresDatabase implements
     }
     if (!row) throw new Error("notification_recipient_forbidden");
     return this.#notificationFromRow(row);
+  }
+
+  async recordNotificationSource(actorId: string, input: NotificationSourceInput) {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureNotificationSchema(client);
+      await this.#ensureDiscussionSchema(client);
+      const access = await client.query<{ workspace_id: string; actor_name: string; activity: string | null; digest: string | null;
+        quiet_start: string | null; quiet_end: string | null; quiet_time_zone: string | null }>(`SELECT project.workspace_id, actor.name actor_name,
+          preference.activity,preference.digest,preference.quiet_start,preference.quiet_end,preference.quiet_time_zone
+        FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
+        JOIN stash_accounts actor ON actor.id=$2 JOIN stash_accounts recipient ON recipient.id=$3
+        LEFT JOIN stash_notification_preferences preference ON preference.project_id=project.id AND preference.member_id=$3
+        WHERE project.id=$1
+          AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR (workspace.owner_type='organization' AND EXISTS
+            (SELECT 1 FROM stash_organization_memberships m WHERE m.organization_id=workspace.organization_owner_id AND m.account_id=$2)))
+          AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$3) OR (workspace.owner_type='organization' AND EXISTS
+            (SELECT 1 FROM stash_organization_memberships m WHERE m.organization_id=workspace.organization_owner_id AND m.account_id=$3)))
+          AND (($4='Task' AND EXISTS (SELECT 1 FROM stash_tasks task WHERE task.id=$5 AND task.project_id=project.id))
+            OR ($4='Discussion' AND EXISTS (SELECT 1 FROM stash_discussions discussion
+              LEFT JOIN stash_tasks task ON task.id=discussion.task_id LEFT JOIN stash_notes note ON note.id=discussion.note_id
+              WHERE discussion.id=$5 AND discussion.workspace_id=project.workspace_id
+                AND (task.project_id=project.id OR note.project_id=project.id))))`,
+      [input.projectId, actorId, input.memberId, input.object.kind, input.object.id]);
+      const row = access.rows[0];
+      if (!row || actorId === input.memberId) return undefined;
+      const preferences: NotificationPreferences = row.activity ? { activity: row.activity as NotificationPreferences["activity"],
+        digest: row.digest as NotificationPreferences["digest"], ...(row.quiet_start ? { quietHours: { start: row.quiet_start,
+          end: row.quiet_end!, timeZone: row.quiet_time_zone! } } : {}) } : { activity: "followed", digest: "off" };
+      if (input.trigger === "followed_change" && (preferences.activity === "muted" || preferences.activity === "followed" && !input.followed)) return undefined;
+      const occurredAt = new Date().toISOString();
+      const activity: ActivityRecord = { schema: "stash.activity.v1", id: randomUUID(), workspaceId: row.workspace_id,
+        object: input.object, action: input.trigger, actor: { localAccountId: actorId, displayName: row.actor_name },
+        cause: input.trigger === "automation_failure" ? { kind: "automation", automationId: input.automationId! } : { kind: "member" },
+        occurredAt, before: {}, after: { recipientMemberId: input.memberId, summary: input.summary } };
+      await client.query(`INSERT INTO stash_workspace_activity
+        (id,workspace_id,object_kind,object_id,action,actor_account_id,cause,occurred_at,before_state,after_state)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb)`, [activity.id, activity.workspaceId, activity.object.kind,
+        activity.object.id, activity.action, actorId, JSON.stringify(activity.cause), occurredAt, JSON.stringify(activity.before), JSON.stringify(activity.after)]);
+      await this.#recordPortableProjection(client, "Activity", activity.id, activity.schema, activity);
+      const id = randomUUID();
+      const inserted = await client.query<any>(`INSERT INTO stash_notifications
+        (id,member_id,workspace_id,project_id,trigger,summary,activity,created_at,delivery)
+        VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9) ON CONFLICT (member_id,activity_id,trigger) DO NOTHING RETURNING *`,
+      [id, input.memberId, activity.workspaceId, input.projectId, input.trigger, input.summary, JSON.stringify(activity), occurredAt,
+        notificationDeliveryMode(new Date(occurredAt), preferences)]);
+      return this.#notificationFromRow(inserted.rows[0]);
+    });
   }
 
   async listNotifications(memberId: string) {
