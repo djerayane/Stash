@@ -1,14 +1,20 @@
 import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
 import test from "node:test";
+import type { RichTextBlock, RichTextMark, RichTextSpan } from "@stash/sync";
 
 const root = new URL("../", import.meta.url);
+
+const compatibilityMark: RichTextMark = "bold";
+const compatibilitySpan: RichTextSpan = { text: "Shared contract", marks: [compatibilityMark] };
+const compatibilityBlock: RichTextBlock = { type: "paragraph", content: [compatibilitySpan] };
 
 async function json(path: string) {
   return JSON.parse(await readFile(new URL(path, root), "utf8")) as Record<string, unknown>;
 }
 
 test("the approved clients and focused shared packages form a pnpm workspace", async () => {
+  assert.equal(compatibilityBlock.content[0]?.text, "Shared contract");
   const workspace = await readFile(new URL("pnpm-workspace.yaml", root), "utf8");
   assert.match(workspace, /apps\/\*/);
   assert.match(workspace, /packages\/\*/);

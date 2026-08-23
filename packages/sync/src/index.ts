@@ -7,7 +7,7 @@ import { canonicalUuid, isUuid, validMobilePairingOrigin, validPortableFilename 
 
 export type {
   IncomingShareDelivery, MobileCapture, MobileCaptureOptions, MobileCapturePairing, MobileSyncMutation,
-  MobileSyncResult, NoteEditOperation, TaskPlanningUpdate,
+  MobileSyncResult, NoteEditOperation, RichTextBlock, RichTextMark, RichTextSpan, TaskPlanningUpdate,
 } from "@stash/domain-types";
 
 export interface EncryptedMobileCaptureStore {
