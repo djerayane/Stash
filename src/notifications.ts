@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 
-import type { ActivityRecord } from "./activity.js";
+import type { ActivityRecord, NotificationDelivery, NotificationTrigger } from "@stash/domain-types";
+export type { NotificationDelivery, NotificationTrigger } from "@stash/domain-types";
 
-export type NotificationTrigger = "direct_mention" | "assignment" | "requested_review" | "automation_failure" | "followed_change";
 export type ProjectActivityPreference = "all" | "followed" | "muted";
 export type DigestCadence = "off" | "daily" | "weekly";
 
@@ -12,20 +12,6 @@ export interface NotificationPreferences {
   quietHours?: { start: string; end: string; timeZone: string };
 }
 
-export interface NotificationDelivery {
-  schema: "stash.notification.v1";
-  id: string;
-  memberId: string;
-  workspaceId: string;
-  projectId?: string;
-  trigger: NotificationTrigger;
-  summary: string;
-  activity: ActivityRecord;
-  createdAt: string;
-  delivery: "immediate" | "quiet_hours";
-  readAt?: string;
-  digestedAt?: string;
-}
 
 export interface NotificationRepository {
   saveNotification(delivery: NotificationDelivery): Promise<NotificationDelivery>;

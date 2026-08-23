@@ -65,11 +65,19 @@ test("navigates Notes, Boards, Discussions, notifications, and Activity through 
   await expect(releaseDiscussion.getByText("Ship with the rollback note")).toBeVisible();
   await releaseDiscussion.getByRole("button", { name: "Resolve Discussion" }).click(); await expect(releaseDiscussion.getByText("Resolved")).toBeVisible();
 
-  await page.goto("/app/notifications"); await page.getByRole("button", { name: "Mark read" }).click(); await expect(page.getByText("Read", { exact: true })).toBeVisible();
-  await page.goto("/app/activity"); await expect(page.getByText("Release plan updated")).toBeVisible();
+  await page.goto("/app/notifications"); await expect(page.getByRole("heading", { name: "Release plan updated" })).toBeVisible(); await expect(page.getByText("followed change · note updated")).toBeVisible(); await page.getByRole("button", { name: "Mark read" }).click(); await expect(page.getByText("Read", { exact: true })).toBeVisible();
+  await page.goto("/app/activity"); await expect(page.getByText("note updated")).toBeVisible(); await expect(page.getByText(/Before:.*Draft release plan.*After:.*Release plan/)).toBeVisible();
   const search = page.getByRole("searchbox", { name: "Search Workspace" }); await search.fill("release"); await search.press("Enter");
   await expect(page).toHaveURL(/\/app\/search\?q=release/); await expect(page.getByRole("link", { name: /Release collaboration plan/ })).toBeVisible();
   await search.fill("discussion"); await search.press("Enter"); const discussionResult = page.getByRole("link", { name: /Keep this release context/ }); await expect(discussionResult).toHaveAttribute("href", `/app/notes/99999999-9999-4999-8999-999999999999/discussions`);
+});
+
+test("reviews and restores authoritative Note history with keyboard error recovery", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" }); await authenticate(page); let restoreAttempts = 0;
+  await page.route("**/api/notes/99999999-9999-4999-8999-999999999999/history/1/restore", async (route) => { restoreAttempts += 1; if (restoreAttempts === 1) await route.fulfill({ status: 503, json: { message: "Restore temporarily unavailable" } }); else await route.continue(); });
+  await page.goto("/app/notes"); const historyLink = page.getByRole("link", { name: "View history" }).last(); await historyLink.focus(); await page.keyboard.press("Enter"); await expect(page).toHaveURL(/\/app\/notes\/99999999-9999-4999-8999-999999999999\/history$/);
+  await page.getByRole("button", { name: "Review revision" }).first().focus(); await page.keyboard.press("Enter"); const dialog = page.getByRole("dialog", { name: "Restore revision 1" }); await expect(dialog.getByText("Original release plan")).toBeVisible(); expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  await dialog.getByRole("button", { name: "Confirm restore" }).click(); const alert = dialog.getByRole("alert"); await expect(alert).toBeFocused(); await dialog.getByRole("button", { name: "Try restore again" }).focus(); await page.keyboard.press("Enter"); await expect(page.getByRole("status")).toHaveText("Revision 1 restored."); expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 });
 
 test("isolates selected messages and exact Block Discussion actions", async ({ page }) => {
@@ -89,7 +97,7 @@ test("isolates selected messages and exact Block Discussion actions", async ({ p
 
 test("@a11y keeps every migrated core route free of detectable accessibility violations", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" }); await authenticate(page);
-  for (const path of ["/app/inbox", "/app/notes", "/app/tasks", `/app/projects/22222222-2222-4222-8222-222222222222/boards/${"abababab-abab-4bab-8bab-abababababa1"}`, "/app/notes/99999999-9999-4999-8999-999999999999/discussions", "/app/search?q=release", "/app/notifications", "/app/activity"]) {
+  for (const path of ["/app/inbox", "/app/notes", "/app/notes/99999999-9999-4999-8999-999999999999/history", "/app/tasks", `/app/projects/22222222-2222-4222-8222-222222222222/boards/${"abababab-abab-4bab-8bab-abababababa1"}`, "/app/notes/99999999-9999-4999-8999-999999999999/discussions", "/app/search?q=release", "/app/notifications", "/app/activity"]) {
     await page.goto(path); await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
     expect((await new AxeBuilder({ page }).analyze()).violations, path).toEqual([]);
   }

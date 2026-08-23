@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { DiscussionsPage, InboxPage, NotificationsPage } from "./core-workflows";
+import { ActivityPage, DiscussionsPage, InboxPage, NoteHistoryPage, NotificationsPage } from "./core-workflows";
 
 function renderWorkflow(node: React.ReactNode) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
@@ -68,5 +68,20 @@ describe("core React workflows", () => {
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(await screen.findByText("You are caught up")).toBeVisible();
     expect(attempts).toBe(2);
+  });
+
+  it("renders canonical Activity and Notification meaning instead of invented DTO fields", async () => {
+    const activity = { schema: "stash.activity.v1", id: "activity-1", workspaceId: "workspace-1", object: { kind: "Note", id: "note-1" }, action: "note_restored", actor: { localAccountId: "member-1", displayName: "Ada" }, cause: { kind: "member", restorationOfRevision: 2 }, occurredAt: "2026-08-23T00:00:00Z", before: { title: "Draft" }, after: { title: "Final" } } as const;
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => Response.json(String(input).includes("notifications") ? { notifications: [{ schema: "stash.notification.v1", id: "notification-1", memberId: "member-1", workspaceId: "workspace-1", trigger: "followed_change", summary: "Release restored", activity, createdAt: activity.occurredAt, delivery: "immediate" }] } : { activities: [activity] }));
+    const { unmount } = renderWorkflow(<ActivityPage fetcher={fetcher as typeof fetch} token="member" workspaceId="workspace-1" />);
+    expect(await screen.findByText("note restored")).toBeVisible(); expect(screen.getByText(/Ada/)).toBeVisible(); expect(screen.getByText((_text, element) => element?.tagName === "P" && element.textContent?.includes("Before: title: Draft After: title: Final") === true)).toBeVisible(); unmount();
+    renderWorkflow(<NotificationsPage fetcher={fetcher as typeof fetch} token="member" />);
+    expect(await screen.findByRole("heading", { name: "Release restored" })).toBeVisible(); expect(screen.getByText(/followed change · note restored/)).toBeVisible(); expect(screen.getByText(/Member restoration of revision 2/)).toBeVisible();
+  });
+
+  it("reviews and recovers a failed Note history restoration with authoritative revision input", async () => {
+    let restores = 0; const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => { if (init?.method === "POST") { restores += 1; return restores === 1 ? new Response(JSON.stringify({ message: "Restore temporarily unavailable" }), { status: 503 }) : Response.json({ note: { revision: 3 } }); } return Response.json({ revisions: [{ noteId: "note-1", revision: 2, content: "Earlier durable text", recordedAt: "2026-08-23T00:00:00Z", actor: { localAccountId: "member-1", displayName: "Ada" }, cause: { kind: "member" } }] }); });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } }); render(<QueryClientProvider client={client}><MemoryRouter initialEntries={["/app/notes/note-1/history"]}><Routes><Route path="/app/notes/:noteId/history" element={<NoteHistoryPage token="member" fetcher={fetcher as typeof fetch} />} /></Routes></MemoryRouter></QueryClientProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: "Review revision" })); expect(screen.getByText("Earlier durable text")).toBeVisible(); fireEvent.click(screen.getByRole("button", { name: "Confirm restore" })); const alert = await screen.findByRole("alert"); await waitFor(() => expect(alert).toHaveFocus()); fireEvent.click(screen.getByRole("button", { name: "Try restore again" })); expect(await screen.findByRole("status")).toHaveTextContent("Revision 2 restored"); expect(JSON.parse(String(fetcher.mock.calls.find(([, init]) => init?.method === "POST")?.[1]?.body))).toMatchObject({ expectedRevision: 2 });
   });
 });

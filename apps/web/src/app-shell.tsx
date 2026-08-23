@@ -11,7 +11,7 @@ import { TaskDetailPage } from "./task-detail";
 import { MemberAdministrationPage, type OrganizationAdministration } from "./member-administration";
 import { ProjectNotificationsPage } from "./project-notifications";
 import { ImportedIdentitiesPage } from "./imported-identities";
-import { ActivityPage, BoardsPage, DiscussionsPage, InboxPage, NotesPage, NotificationsPage, ProjectGatewayPage, SearchPage } from "./core-workflows";
+import { ActivityPage, BoardsPage, DiscussionsPage, InboxPage, NoteHistoryPage, NotesPage, NotificationsPage, ProjectGatewayPage, SearchPage } from "./core-workflows";
 
 export type SessionState =
   | { readonly status: "loading" }
@@ -198,6 +198,7 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
           <Route path="/app/inbox" element={<InboxPage workspaceId={session.workspace.id ?? ""} token={session.token ?? ""} />} />
           <Route path="/app/notes" element={<NotesPage workspaceId={session.workspace.id ?? ""} token={session.token ?? ""} />} />
           <Route path="/app/notes/new" element={<Navigate replace to="/app/notes" />} />
+          <Route path="/app/notes/:noteId/history" element={<NoteHistoryPage token={session.token ?? ""} />} />
           <Route path="/app/tasks" element={<ProjectGatewayPage workspaceId={session.workspace.id ?? ""} token={session.token ?? ""} />} />
           <Route path="/app/projects/:projectId/boards" element={<BoardsPage token={session.token ?? ""} />} />
           <Route path="/app/projects/:projectId/boards/:boardId" element={<BoardsPage token={session.token ?? ""} />} />

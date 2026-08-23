@@ -1,25 +1,7 @@
 import type { RichTextDocument } from "./rich-text.js";
 import type { PortableIdentity } from "./workspaces-projects.js";
-
-export type ActivityCause =
-  | { kind: "member"; restorationOfRevision?: number; automationId?: string; signalId?: string }
-  | { kind: "automation"; automationId: string; signalId?: string }
-  | { kind: "signal"; signalId: string }
-  | { kind: "agent"; agentGrantId: string; sponsoringMemberId: string }
-  | { kind: "migration"; source: "existing_note" };
-
-export interface ActivityRecord {
-  schema: "stash.activity.v1";
-  id: string;
-  workspaceId: string;
-  object: { kind: "Note" | "Task" | "Discussion" | "NoteLocation" | "NoteLink"; id: string };
-  action: string;
-  actor: PortableIdentity;
-  cause: ActivityCause;
-  occurredAt: string;
-  before: Record<string, unknown>;
-  after: Record<string, unknown>;
-}
+import type { ActivityCause, ActivityRecord } from "@stash/domain-types";
+export type { ActivityCause, ActivityRecord } from "@stash/domain-types";
 
 export interface NoteHistoryRevision {
   noteId: string;
