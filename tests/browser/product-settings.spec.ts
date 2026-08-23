@@ -25,6 +25,7 @@ test("ordinary Members cannot discover or deep-link Organization administration"
 test("@a11y administrators discover every Organization control surface", async ({ page }) => {
   await authenticate(page);
   await page.route("**/api/organizations/*/roles", (route) => route.fulfill({ json: { roles: [{ name: "Owner" }, { name: "Admin" }, { name: "Member" }] } }));
+  await page.route("**/api/agent-grant-options", (route) => route.fulfill({ json: { organizations: [{ organizationId: "11111111-1111-4111-8111-111111111111", projects: [] }] } }));
   await page.route("**/api/organizations/*/repository-connections", (route) => route.fulfill({ json: { repositoryConnections: [] } }));
   await page.emulateMedia({ reducedMotion: "reduce" }); await page.goto("/app/settings/organization");
   for (const heading of ["Roles and Members", "Invite access", "GitHub Repository Connections", "OpenID Connect"]) await expect(page.getByRole("heading", { name: heading })).toBeVisible();

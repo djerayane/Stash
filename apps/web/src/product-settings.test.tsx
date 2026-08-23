@@ -34,7 +34,7 @@ describe("remaining product settings", () => {
     vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true, addEventListener() {}, removeEventListener() {} })));
     const requests: Array<{ path: string; init?: RequestInit }> = [];
     vi.stubGlobal("fetch", vi.fn(async (path: string, init?: RequestInit) => { requests.push({ path, init });
-      if (path === "/api/workspaces") return Response.json({ workspaces: [{ id: "workspace-1", name: "Engineering", projects: [{ id: "project-1", name: "Launch", key: "LAUNCH" }] }] });
+      if (path === "/api/agent-grant-options") return Response.json({ organizations: [{ organizationId: "org-1", organizationName: "Acme", projects: [{ id: "project-1", name: "Launch" }] }] });
       if (path.endsWith("/roles")) return Response.json({ roles: [{ name: "Owner" }, { name: "Admin" }, { name: "Member" }] });
       return Response.json({ repositoryConnections: [{ id: "connection-1", repositoryUrl: "https://github.com/acme/stash", projectIds: [], ownership: "organization", state: "active" }] }); }));
     view(<OrganizationSettingsPage token="admin-token" activeOrganizationId="org-1" administrations={[{ organizationId: "org-1", organizationName: "Acme", members: [{ id: "member-1", name: "Ada", email: "ada@example.com", role: "Owner" }] }]} />);

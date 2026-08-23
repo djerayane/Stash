@@ -2,20 +2,20 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useGSAP } from "@gsap/react";
 import gsap from "gsap";
+import { createProductSettingsApi } from "@stash/api-client";
+import type { InstanceDiagnosticSettings as Settings } from "@stash/domain-types";
 import { useRef, useState, type FormEvent } from "react";
-import { authenticatedJson as request } from "./http-client";
 import styles from "./product-settings.module.css";
 
-type Settings = { diagnosticSubmissions: boolean; crashReportSubmissions: boolean; updateChecks: boolean };
-type Diagnostics = { settings: Settings; pending: unknown[]; pendingCrashReports: Array<{ id?: string }>; updateCheckPayload?: unknown };
 const key = "stash.instance-admin-session";
 function storedToken() { try { const value = JSON.parse(localStorage.getItem(key) ?? "null") as { token?: unknown } | null; return typeof value?.token === "string" ? value.token : ""; } catch { return ""; } }
 export function InstanceDiagnosticsAdministration() {
   const [token, setToken] = useState(storedToken); const [draft, setDraft] = useState(""); const [consent, setConsent] = useState<Settings>(); const queryClient = useQueryClient();
+  const api = createProductSettingsApi({ baseUrl: "", memberToken: token });
   const pageRef = useRef<HTMLElement>(null);
-  const diagnostics = useQuery({ queryKey: ["instance-diagnostics", token], enabled: Boolean(token), retry: false, queryFn: () => request<Diagnostics>("/api/diagnostics", token) });
-  const save = useMutation({ mutationFn: (settings: Settings) => request("/api/diagnostics/settings", token, { method: "PUT", body: JSON.stringify(settings) }), onSuccess: () => { setConsent(undefined); void diagnostics.refetch(); } });
-  const operation = useMutation({ mutationFn: (path: string) => request<{ status: string }>(path, token, { method: "POST", body: "{}" }), onSuccess: () => diagnostics.refetch() });
+  const diagnostics = useQuery({ queryKey: ["instance-diagnostics", token], enabled: Boolean(token), retry: false, queryFn: () => api.diagnostics() });
+  const save = useMutation({ mutationFn: (settings: Settings) => api.saveDiagnosticSettings(settings), onSuccess: () => { setConsent(undefined); void diagnostics.refetch(); } });
+  const operation = useMutation({ mutationFn: (path: "/api/diagnostics/submit" | "/api/diagnostics/crash-reports/submit" | "/api/diagnostics/update-check") => api.runDiagnosticOperation(path), onSuccess: () => diagnostics.refetch() });
   useGSAP(() => { if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return; gsap.from(`.${styles.header}, .${styles.panel}`, { opacity: 0, y: 14, stagger: .08, duration: .42, ease: "power2.out", clearProps: "all" }); }, { scope: pageRef, dependencies: [Boolean(token), diagnostics.data?.pending.length ?? -1] });
   if (!token) return <main className={styles.page} ref={pageRef}><header className={styles.header}><div><p className={styles.kicker}>Instance operations</p><h1>Diagnostics require operator authority.</h1></div><p>This credential is separate from Workspace membership and remains only in this browser.</p></header><section className={styles.panel}><form className={styles.form} onSubmit={(event: FormEvent) => { event.preventDefault(); const next = draft.trim(); if (!next) return; localStorage.setItem(key, JSON.stringify({ token: next })); setToken(next); }}><label>Instance Administrator token<input type="password" value={draft} onChange={(event) => setDraft(event.target.value)} /></label><button className={styles.primary}>Unlock diagnostics</button></form></section></main>;
   const settings = diagnostics.data?.settings;
