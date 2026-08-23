@@ -11,12 +11,13 @@ class MemoryRepository implements NoteCollaborationRepository {
   snapshot?: CollaborationSnapshot;
   async loadNoteCollaboration(memberId: string, noteId: string) { return ["allowed", "reader"].includes(memberId) ? this.snapshot ?? {
     noteId, sequence: 0, update: Y.encodeStateAsUpdate(new Y.Doc()), updatedAt: new Date(0).toISOString(), updatedByMemberId: memberId,
+    access: memberId === "allowed" ? "edit" as const : "read" as const,
   } : undefined; }
   async appendNoteCollaboration(memberId: string, noteId: string, update: Uint8Array) {
     if (memberId !== "allowed") return undefined;
     const document = new Y.Doc(); if (this.snapshot) Y.applyUpdate(document, this.snapshot.update); Y.applyUpdate(document, update);
     return this.snapshot = { noteId, sequence: (this.snapshot?.sequence ?? 0) + 1, update: Y.encodeStateAsUpdate(document),
-      updatedAt: new Date().toISOString(), updatedByMemberId: memberId };
+      updatedAt: new Date().toISOString(), updatedByMemberId: memberId, access: "edit" };
   }
 }
 
@@ -116,8 +117,18 @@ describe("self-hosted Note collaboration", () => {
   it("allows permission-aware reads without granting collaboration edits", async () => {
     const service = new NoteCollaborationService(new MemoryRepository());
     const doc = new Y.Doc(); doc.getText("note").insert(0, "read-only");
-    assert.ok(await service.load("reader", "note"));
+    assert.equal((await service.load("reader", "note"))?.access, "read");
     assert.equal(await service.apply("reader", "note", Y.encodeStateAsUpdate(doc)), undefined);
+  });
+
+  it("rejects duplicate operational Block keys before canonicalizing a collaborative update", () => {
+    const duplicateKey = "11111111-1111-4111-8111-111111111111";
+    const unsafe = collaborativeDocumentFromRichText({ type: "doc", blocks: [
+      { type: "paragraph", blockKey: duplicateKey, content: [{ text: "First target" }] },
+      { type: "paragraph", blockKey: duplicateKey, content: [{ text: "Ambiguous target" }] },
+    ] });
+    assert.throws(() => validatedRichTextFromCollaborativeDocument(unsafe), InvalidCollaborationUpdate);
+    unsafe.destroy();
   });
 
   it("does not reveal or accept a document without Note authority", async () => {

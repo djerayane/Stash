@@ -19,7 +19,7 @@ import styles from "./note-editor.module.css";
 gsap.registerPlugin(useGSAP);
 
 interface Note { id: string; content: string; document: NoteDocument; revision: number }
-interface Snapshot { sequence: number; update: string; updatedAt: string; updatedByMemberId: string }
+interface Snapshot { sequence: number; update: string; updatedAt: string; updatedByMemberId: string; access: "edit" | "read" }
 interface NoteEditorProps { noteId: string; fetcher?: typeof fetch; token?: string }
 
 const blockIdentity = (document: Y.Doc) => Extension.create({
@@ -126,7 +126,7 @@ function NoteEditorDocument({ noteId, fetcher = globalThis.fetch, token = localS
     shouldSeedCanonicalDocument.current = ydoc.getXmlFragment("default").length === 0;
     try {
       const pending = readPendingUpdate(`stash.pending-note-update:${noteId}`);
-      if (pending) { Y.applyUpdate(ydoc, decode(pending)); restoredPendingUpdate.current = true; }
+      if (pending && collaboration.data.access === "edit") { Y.applyUpdate(ydoc, decode(pending)); restoredPendingUpdate.current = true; }
     } catch { /* Browser storage may be disabled; the live Y.Doc still retains this session's contribution. */ }
   }
 
@@ -135,6 +135,9 @@ function NoteEditorDocument({ noteId, fetcher = globalThis.fetch, token = localS
     StarterKit.configure({ undoRedo: false, link: false }), blockIdentity(ydoc), TaskList, TaskItem.configure({ nested: true }), Image, Link.configure({ openOnClick: false }),
     TableKit, Callout, WorkspaceAttachment, Collaboration.configure({ document: ydoc }),
   ], content: undefined, editorProps: { attributes: { "aria-label": "Note content", role: "textbox", "aria-multiline": "true" } } }, [ydoc]);
+  const canEdit = collaboration.data?.access === "edit";
+  const canEditRef = useRef(false);
+  canEditRef.current = canEdit;
 
   useGSAP(() => {
     if (!toolbarRef.current || !asideRef.current || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
@@ -150,10 +153,13 @@ function NoteEditorDocument({ noteId, fetcher = globalThis.fetch, token = localS
   useEffect(() => {
     if (!editor || !note.data || !collaboration.data) return;
     if (shouldSeedCanonicalDocument.current) { shouldSeedCanonicalDocument.current = false; editor.commands.setContent(toTiptap(note.data.document)); }
-    setStatus(restoredPendingUpdate.current ? "Restoring changes from this device" : "All changes saved"); setError("");
-  }, [editor, note.data, collaboration.data, ydoc]);
+    editor.setEditable(canEdit);
+    editor.view.dom.setAttribute("aria-readonly", String(!canEdit));
+    setStatus(canEdit ? restoredPendingUpdate.current ? "Restoring changes from this device" : "All changes saved" : "Read-only Note"); setError("");
+  }, [canEdit, editor, note.data, collaboration.data, ydoc]);
 
   const performSynchronization = useCallback(async () => {
+    if (!canEditRef.current) return;
     const update = Y.encodeStateAsUpdate(ydoc, persistedVector.current);
     if (update.byteLength <= 2) return;
     const key = `stash.pending-note-update:${noteId}`;
@@ -177,20 +183,20 @@ function NoteEditorDocument({ noteId, fetcher = globalThis.fetch, token = localS
     ydoc.on("update", changed); return () => { clearTimeout(timer); ydoc.off("update", changed); }; }, [editor, synchronize, ydoc]);
 
   useEffect(() => {
-    if (!editor || !collaboration.data || !restoredPendingUpdate.current) return;
+    if (!editor || !canEdit || !collaboration.data || !restoredPendingUpdate.current) return;
     restoredPendingUpdate.current = false;
     void synchronize();
-  }, [collaboration.data, editor, synchronize]);
+  }, [canEdit, collaboration.data, editor, synchronize]);
 
   useEffect(() => {
     if (!collaboration.data) return;
     const refresh = window.setInterval(() => { void fetcher(`/api/notes/${encodeURIComponent(noteId)}/collaboration`, { headers })
       .then(async (response) => { if (!response.ok) return; const snapshot = await response.json() as Snapshot;
         persistedVector.current = applyAcknowledgedUpdate(ydoc, decode(snapshot.update));
-        if (readPendingUpdate(`stash.pending-note-update:${noteId}`)) void synchronize(); })
+        if (canEdit && readPendingUpdate(`stash.pending-note-update:${noteId}`)) void synchronize(); })
       .catch(() => undefined); }, 2_000);
     return () => clearInterval(refresh);
-  }, [collaboration.data, fetcher, headers, noteId, synchronize, ydoc]);
+  }, [canEdit, collaboration.data, fetcher, headers, noteId, synchronize, ydoc]);
 
   const isUnavailable = note.isError || collaboration.isError;
   useEffect(() => {
@@ -208,20 +214,20 @@ function NoteEditorDocument({ noteId, fetcher = globalThis.fetch, token = localS
     <article className={styles.document}>
       <header className={styles.header}><p className={styles.kicker}>Collaborative Note</p><h1 className={styles.title}>{note.data?.content.split("\n")[0] || "Untitled Note"}</h1></header>
       <div ref={toolbarRef} className={styles.toolbar} role="toolbar" aria-label="Text formatting">
-        <button type="button" aria-label="Bold" aria-pressed={editor?.isActive("bold") ?? false} onClick={() => editor?.chain().focus().toggleBold().run()}>B</button>
-        <button type="button" aria-label="Italic" aria-pressed={editor?.isActive("italic") ?? false} onClick={() => editor?.chain().focus().toggleItalic().run()}>I</button>
-        <button type="button" aria-label="Heading" aria-pressed={editor?.isActive("heading", { level: 2 }) ?? false} onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()}>H2</button>
-        <button type="button" aria-label="Bullet list" aria-pressed={editor?.isActive("bulletList") ?? false} onClick={() => editor?.chain().focus().toggleBulletList().run()}>List</button>
-        <button type="button" aria-label="Checklist" aria-pressed={editor?.isActive("taskList") ?? false} onClick={() => editor?.chain().focus().toggleTaskList().run()}>Check</button>
-        <button type="button" aria-label="Code block" aria-pressed={editor?.isActive("codeBlock") ?? false} onClick={() => editor?.chain().focus().toggleCodeBlock().run()}>Code</button>
-        <button type="button" aria-label="Quote" aria-pressed={editor?.isActive("blockquote") ?? false} onClick={() => editor?.chain().focus().toggleBlockquote().run()}>Quote</button>
-        <button type="button" aria-label="Insert table" onClick={() => editor?.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()}>Table</button>
-        <button type="button" aria-label="Insert image" onClick={() => { const src = window.prompt("Image URL"); if (src) editor?.chain().focus().setImage({ src }).run(); }}>Image</button>
-        <button type="button" aria-label="Insert link" aria-pressed={editor?.isActive("link") ?? false} onClick={() => { const href = window.prompt("Link URL"); if (href) editor?.chain().focus().extendMarkRange("link").setLink({ href }).run(); }}>Link</button>
-        <button type="button" aria-label="Insert callout" onClick={() => editor?.chain().focus().insertContent({ type: "callout", attrs: { blockKey: crypto.randomUUID(), blockId: null, kind: "note" }, content: [{ type: "paragraph", content: [{ type: "text", text: "Callout" }] }] }).run()}>Callout</button>
-        <button type="button" aria-label="Insert Workspace Attachment" onClick={() => { const href = window.prompt("Workspace Attachment path"); if (!href?.startsWith("./attachments/")) return; const label = window.prompt("Attachment label")?.trim() || "Attachment"; editor?.chain().focus().insertContent({ type: "workspaceAttachment", attrs: { blockKey: crypto.randomUUID(), blockId: null, href, label } }).run(); }}>Attachment</button>
-        <button type="button" aria-label="Undo" onClick={() => editor?.chain().focus().undo().run()}>Undo</button>
-        <button type="button" aria-label="Redo" onClick={() => editor?.chain().focus().redo().run()}>Redo</button>
+        <button disabled={!canEdit} type="button" aria-label="Bold" aria-pressed={editor?.isActive("bold") ?? false} onClick={() => editor?.chain().focus().toggleBold().run()}>B</button>
+        <button disabled={!canEdit} type="button" aria-label="Italic" aria-pressed={editor?.isActive("italic") ?? false} onClick={() => editor?.chain().focus().toggleItalic().run()}>I</button>
+        <button disabled={!canEdit} type="button" aria-label="Heading" aria-pressed={editor?.isActive("heading", { level: 2 }) ?? false} onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()}>H2</button>
+        <button disabled={!canEdit} type="button" aria-label="Bullet list" aria-pressed={editor?.isActive("bulletList") ?? false} onClick={() => editor?.chain().focus().toggleBulletList().run()}>List</button>
+        <button disabled={!canEdit} type="button" aria-label="Checklist" aria-pressed={editor?.isActive("taskList") ?? false} onClick={() => editor?.chain().focus().toggleTaskList().run()}>Check</button>
+        <button disabled={!canEdit} type="button" aria-label="Code block" aria-pressed={editor?.isActive("codeBlock") ?? false} onClick={() => editor?.chain().focus().toggleCodeBlock().run()}>Code</button>
+        <button disabled={!canEdit} type="button" aria-label="Quote" aria-pressed={editor?.isActive("blockquote") ?? false} onClick={() => editor?.chain().focus().toggleBlockquote().run()}>Quote</button>
+        <button disabled={!canEdit} type="button" aria-label="Insert table" onClick={() => editor?.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()}>Table</button>
+        <button disabled={!canEdit} type="button" aria-label="Insert image" onClick={() => { const src = window.prompt("Image URL"); if (src) editor?.chain().focus().setImage({ src }).run(); }}>Image</button>
+        <button disabled={!canEdit} type="button" aria-label="Insert link" aria-pressed={editor?.isActive("link") ?? false} onClick={() => { const href = window.prompt("Link URL"); if (href) editor?.chain().focus().extendMarkRange("link").setLink({ href }).run(); }}>Link</button>
+        <button disabled={!canEdit} type="button" aria-label="Insert callout" onClick={() => editor?.chain().focus().insertContent({ type: "callout", attrs: { blockKey: crypto.randomUUID(), blockId: null, kind: "note" }, content: [{ type: "paragraph", content: [{ type: "text", text: "Callout" }] }] }).run()}>Callout</button>
+        <button disabled={!canEdit} type="button" aria-label="Insert Workspace Attachment" onClick={() => { const href = window.prompt("Workspace Attachment path"); if (!href?.startsWith("./attachments/")) return; const label = window.prompt("Attachment label")?.trim() || "Attachment"; editor?.chain().focus().insertContent({ type: "workspaceAttachment", attrs: { blockKey: crypto.randomUUID(), blockId: null, href, label } }).run(); }}>Attachment</button>
+        <button disabled={!canEdit} type="button" aria-label="Undo" onClick={() => editor?.chain().focus().undo().run()}>Undo</button>
+        <button disabled={!canEdit} type="button" aria-label="Redo" onClick={() => editor?.chain().focus().redo().run()}>Redo</button>
       </div>
       <div className={styles.editor}><EditorContent editor={editor} /></div>
     </article>

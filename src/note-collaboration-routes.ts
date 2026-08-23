@@ -20,7 +20,7 @@ export function noteCollaborationRoutes(service: NoteCollaborationService, membe
         if (!snapshot) json(response, 404, { error: "note_not_found", message: "This Note is unavailable." });
         else json(response, request.method === "GET" ? 200 : 202, {
           sequence: snapshot.sequence, update: encode(snapshot.update), updatedAt: snapshot.updatedAt,
-          updatedByMemberId: snapshot.updatedByMemberId,
+          updatedByMemberId: snapshot.updatedByMemberId, access: snapshot.access,
         });
       } catch (error) {
         if (error instanceof InvalidCollaborationUpdate) json(response, 422, { error: "invalid_collaboration_update", message: "The collaboration update is invalid." });

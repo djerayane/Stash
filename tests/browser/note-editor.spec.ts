@@ -93,6 +93,17 @@ test("the collaborative editor is keyboard operable and axe-clean @a11y", async 
   const results = await new AxeBuilder({ page }).analyze(); expect(results.violations).toEqual([]);
 });
 
+test("a read-only Guest gets an axe-clean non-editable Note without local retries @a11y", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.addInitScript(() => localStorage.setItem("stash.member-session", JSON.stringify({ token: "browser-acceptance-guest-token" })));
+  await page.goto(`/app/notes/${noteId}`);
+  const editor = page.getByRole("textbox", { name: "Note content" });
+  await expect(editor).toHaveAttribute("contenteditable", "false");
+  await expect(page.getByRole("status")).toHaveText("Read-only Note");
+  for (const control of await page.getByRole("toolbar", { name: "Text formatting" }).getByRole("button").all()) await expect(control).toBeDisabled();
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+});
+
 test("initial collaboration errors preserve landmarks and recover accessibly @a11y", async ({ page }) => {
   let unavailable = true;
   await page.route("**/api/notes/**/collaboration", async (route) => {

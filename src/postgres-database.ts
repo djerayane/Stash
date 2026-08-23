@@ -4320,12 +4320,13 @@ export class PostgresDatabase implements
   async loadNoteCollaboration(memberId: string, noteId: string): Promise<CollaborationSnapshot | undefined> {
     return this.#withTransaction(async (client) => {
       await this.#ensureCollaborationSchema(client);
-      if (await this.#authorizeNote(client, memberId, noteId) === "none") return undefined;
+      const access = await this.#authorizeNote(client, memberId, noteId);
+      if (access === "none") return undefined;
       let row = (await client.query<any>(`SELECT note_id,sequence,update,updated_at,updated_by_account_id
         FROM stash_note_collaboration WHERE note_id=$1`, [noteId])).rows[0];
       if (!row) row = await this.#seedNoteCollaboration(client, noteId);
       return { noteId: row.note_id, sequence: Number(row.sequence), update: new Uint8Array(row.update),
-        updatedAt: new Date(row.updated_at).toISOString(), updatedByMemberId: row.updated_by_account_id };
+        updatedAt: new Date(row.updated_at).toISOString(), updatedByMemberId: row.updated_by_account_id, access };
     });
   }
 
@@ -4349,7 +4350,7 @@ export class PostgresDatabase implements
       if (Buffer.from(beforeUpdate).equals(Buffer.from(merged))) {
         document.destroy();
         return { noteId: current.note_id, sequence: Number(current.sequence), update: new Uint8Array(current.update),
-          updatedAt: new Date(current.updated_at).toISOString(), updatedByMemberId: current.updated_by_account_id };
+          updatedAt: new Date(current.updated_at).toISOString(), updatedByMemberId: current.updated_by_account_id, access: "edit" };
       }
       let canonicalDocument: import("./rich-text.js").RichTextDocument;
       try { canonicalDocument = validatedRichTextFromCollaborativeDocument(document); }
@@ -4371,7 +4372,7 @@ export class PostgresDatabase implements
       await this.#recordPortableProjection(client, "Note", note.id, projection.schema, projection);
       await this.#recordNoteRevisionAndActivity(client, memberId, before, note, "note_edited", { kind: "member" });
       return { noteId: row.note_id, sequence: Number(row.sequence), update: new Uint8Array(row.update),
-        updatedAt: new Date(row.updated_at).toISOString(), updatedByMemberId: row.updated_by_account_id };
+        updatedAt: new Date(row.updated_at).toISOString(), updatedByMemberId: row.updated_by_account_id, access: "edit" };
     });
   }
 

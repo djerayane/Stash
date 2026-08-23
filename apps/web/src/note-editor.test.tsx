@@ -45,7 +45,7 @@ it("encodes updates up to the server limit without overflowing the browser call 
 it("loads an authorized collaborative Note and exposes keyboard-operable rich-text controls", async () => {
   const fetcher = vi.fn<typeof fetch>(async (input, init) => {
     const url = String(input);
-    if (url.endsWith("/collaboration")) return new Response(JSON.stringify({ sequence: 0, update: emptyUpdate(), updatedAt: new Date(0).toISOString(), updatedByMemberId: "ada" }));
+    if (url.endsWith("/collaboration")) return new Response(JSON.stringify({ sequence: 0, update: emptyUpdate(), updatedAt: new Date(0).toISOString(), updatedByMemberId: "ada", access: "edit" }));
     return new Response(JSON.stringify({ id: "note", revision: 1, content: "Release plan", document: { type: "doc", blocks: [
       { type: "paragraph", blockKey: "stable-key", id: "linked-block", content: [{ text: "Preserve this Block" }] },
       { type: "image", blockKey: "image-key", id: "linked-image", src: "/diagram.png", alt: "Diagram" },
@@ -66,6 +66,28 @@ it("loads an authorized collaborative Note and exposes keyboard-operable rich-te
   expect(fetcher).toHaveBeenCalledWith("/api/notes/note", expect.objectContaining({ headers: { authorization: "Bearer member-token" } }));
 });
 
+it("presents an authorized read-only Note without interactive editing or pending writes", async () => {
+  storage.set("stash.pending-note-update:note", collaborativeUpdate("Unsent edit", "11111111-1111-4111-8111-111111111111"));
+  const fetcher = vi.fn<typeof fetch>(async (input) => {
+    const url = String(input);
+    if (url.endsWith("/collaboration")) return new Response(JSON.stringify({ sequence: 0,
+      update: collaborativeUpdate("Published content", "22222222-2222-4222-8222-222222222222"),
+      updatedAt: new Date(0).toISOString(), updatedByMemberId: "ada", access: "read" }));
+    return new Response(JSON.stringify({ id: "note", revision: 1, content: "Published content",
+      document: { type: "doc", blocks: [{ type: "paragraph", blockKey: "22222222-2222-4222-8222-222222222222", content: [{ text: "Published content" }] }] } }));
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}><NoteEditor noteId="note" fetcher={fetcher} token="guest-token" /></QueryClientProvider>);
+  const editor = await screen.findByRole("textbox", { name: "Note content" });
+  await waitFor(() => expect(editor).toHaveTextContent("Published content"));
+  expect(editor).toHaveAttribute("contenteditable", "false");
+  expect(editor).toHaveAttribute("aria-readonly", "true");
+  expect(screen.getByRole("status")).toHaveTextContent("Read-only Note");
+  for (const control of screen.getAllByRole("button")) expect(control).toBeDisabled();
+  expect(storage.get("stash.pending-note-update:note")).toBeDefined();
+  expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(0);
+});
+
 it("loads the authoritative collaboration snapshot when navigating directly between Notes", async () => {
   const updates = {
     first: collaborativeUpdate("Authoritative first", "11111111-1111-4111-8111-111111111111"),
@@ -74,7 +96,7 @@ it("loads the authoritative collaboration snapshot when navigating directly betw
   const fetcher = vi.fn<typeof fetch>(async (input) => {
     const url = String(input); const noteId = url.includes("/second") ? "second" : "first";
     if (url.endsWith("/collaboration")) return new Response(JSON.stringify({ sequence: 1, update: updates[noteId],
-      updatedAt: new Date(0).toISOString(), updatedByMemberId: "ada" }));
+      updatedAt: new Date(0).toISOString(), updatedByMemberId: "ada", access: "edit" }));
     return new Response(JSON.stringify({ id: noteId, revision: 1, content: `Canonical ${noteId}`, document: { type: "doc", blocks: [
       { type: "paragraph", blockKey: noteId === "first" ? "11111111-1111-4111-8111-111111111111" : "22222222-2222-4222-8222-222222222222",
         content: [{ text: `Canonical ${noteId}` }] },
@@ -95,9 +117,9 @@ it("replays a restored offline update as soon as collaboration reconnects", asyn
     const url = String(input);
     if (init?.method === "POST") {
       const body = JSON.parse(String(init.body)) as { update: string };
-      return new Response(JSON.stringify({ sequence: 1, update: body.update, updatedAt: new Date(0).toISOString(), updatedByMemberId: "ada" }));
+      return new Response(JSON.stringify({ sequence: 1, update: body.update, updatedAt: new Date(0).toISOString(), updatedByMemberId: "ada", access: "edit" }));
     }
-    if (url.endsWith("/collaboration")) return new Response(JSON.stringify({ sequence: 0, update: emptyUpdate(), updatedAt: new Date(0).toISOString(), updatedByMemberId: "ada" }));
+    if (url.endsWith("/collaboration")) return new Response(JSON.stringify({ sequence: 0, update: emptyUpdate(), updatedAt: new Date(0).toISOString(), updatedByMemberId: "ada", access: "edit" }));
     return new Response(JSON.stringify({ id: "note", revision: 1, content: "Offline plan", document: { type: "doc", blocks: [{ type: "paragraph", blockKey: "key", content: [{ text: "Draft" }] }] } }));
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -111,7 +133,7 @@ it("keeps unsaved Yjs updates locally and offers recovery when the Instance is o
   const fetcher = vi.fn<typeof fetch>(async (input, init) => {
     const url = String(input);
     if (init?.method === "POST") throw new TypeError("offline");
-    if (url.endsWith("/collaboration")) return new Response(JSON.stringify({ sequence: 0, update: emptyUpdate(), updatedAt: new Date(0).toISOString(), updatedByMemberId: "ada" }));
+    if (url.endsWith("/collaboration")) return new Response(JSON.stringify({ sequence: 0, update: emptyUpdate(), updatedAt: new Date(0).toISOString(), updatedByMemberId: "ada", access: "edit" }));
     return new Response(JSON.stringify({ id: "note", revision: 1, content: "Offline plan", document: { type: "doc", blocks: [{ type: "paragraph", blockKey: "key", content: [{ text: "Draft" }] }] } }));
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -147,9 +169,9 @@ it("reports tab-only recovery and still sends changes when browser storage is un
     if (init?.method === "POST") {
       if (!online) throw new TypeError("offline");
       const body = JSON.parse(String(init.body)) as { update: string };
-      return new Response(JSON.stringify({ sequence: 1, update: body.update, updatedAt: new Date(0).toISOString(), updatedByMemberId: "ada" }));
+      return new Response(JSON.stringify({ sequence: 1, update: body.update, updatedAt: new Date(0).toISOString(), updatedByMemberId: "ada", access: "edit" }));
     }
-    if (url.endsWith("/collaboration")) return new Response(JSON.stringify({ sequence: 0, update: emptyUpdate(), updatedAt: new Date(0).toISOString(), updatedByMemberId: "ada" }));
+    if (url.endsWith("/collaboration")) return new Response(JSON.stringify({ sequence: 0, update: emptyUpdate(), updatedAt: new Date(0).toISOString(), updatedByMemberId: "ada", access: "edit" }));
     return new Response(JSON.stringify({ id: "note", revision: 1, content: "Online plan", document: { type: "doc", blocks: [{ type: "paragraph", blockKey: "key", content: [{ text: "Draft" }] }] } }));
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });

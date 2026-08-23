@@ -6,6 +6,7 @@ export interface CollaborationSnapshot {
   update: Uint8Array;
   updatedAt: string;
   updatedByMemberId: string;
+  access: "edit" | "read";
 }
 
 export interface NoteCollaborationRepository {

@@ -29,8 +29,12 @@ export function isRichTextDocument(value: unknown): value is RichTextDocument {
     || value.blocks.length === 0 || value.blocks.length > 10_000
     || !Object.keys(value).every((key) => ["type", "blocks"].includes(key))) return false;
   const identifiers = new Set<string>();
+  const blockKeys = new Set<string>();
   return value.blocks.every((block) => {
     if (!plainObject(block) || typeof block.type !== "string") return false;
+    if (block.blockKey !== undefined && (typeof block.blockKey !== "string" || !uuid.test(block.blockKey)
+      || blockKeys.has(block.blockKey))) return false;
+    if (typeof block.blockKey === "string") blockKeys.add(block.blockKey);
     if (block.id !== undefined && (typeof block.id !== "string" || !uuid.test(block.id)
       || identifiers.has(block.id))) return false;
     if (typeof block.id === "string") identifiers.add(block.id);
