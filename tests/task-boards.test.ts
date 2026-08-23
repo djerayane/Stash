@@ -19,6 +19,8 @@ class BoardFake implements DatabaseProbe, BoardRepository {
     { id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", key: "STASH-2", title: "Ship the board", status: { id: progressId, name: "In Progress", category: "started" }, assigneeIds: [], priority: "urgent", labelNames: [] },
   ];
   fail = false;
+  failNextBoardRead = false;
+  moveCalls = 0;
   async verifyConnection() {}
   async close() {}
   private canRead(memberId: string) { return ["ada", "grace"].includes(memberId); }
@@ -36,6 +38,7 @@ class BoardFake implements DatabaseProbe, BoardRepository {
   async readBoard(memberId: string, requestedProjectId: string, boardId: string) {
     if (!this.canRead(memberId) || requestedProjectId !== projectId) return { status: "not_found" as const };
     const board = this.boards.find(({ id }) => id === boardId); if (!board) return { status: "not_found" as const };
+    if (this.failNextBoardRead) { this.failNextBoardRead = false; throw new Error("postgres://secret"); }
     return { status: "found" as const, board: structuredClone(board), tasks: structuredClone(this.tasks), statuses: [
       { id: backlogId, name: "Backlog", category: "unstarted" as const, position: 0, archived: false },
       { id: progressId, name: "In Progress", category: "started" as const, position: 1, archived: false },
@@ -52,7 +55,7 @@ class BoardFake implements DatabaseProbe, BoardRepository {
     const status = [{ id: backlogId, name: "Backlog", category: "unstarted" as const }, { id: progressId, name: "In Progress", category: "started" as const }, { id: doneId, name: "Done", category: "completed" as const }].find(({ id }) => id === statusId);
     if (!status) return { status: "invalid_status" as const };
     if (this.fail) throw new Error("postgres://secret");
-    task.status = status; return { status: "moved" as const, task: structuredClone(task) };
+    this.moveCalls += 1; task.status = status; return { status: "moved" as const, task: structuredClone(task) };
   }
 }
 
@@ -106,7 +109,7 @@ describe("Task board views", () => {
     assert.match(surface, /prefers-reduced-motion/); assert.match(surface, /gsap\.from/);
     assert.match(surface, /message\.textContent=options\.announcement\|\|body\.board\.name\+' loaded\.'/);
     assert.doesNotMatch(surface, /if\(!message\.textContent\)/);
-    assert.match(surface, /boards\.replaceChildren\(\);current=undefined;columns\.replaceChildren\(\);message\.dataset\.error='false';/);
+    assert.match(surface, /boards\.replaceChildren\(\);current=undefined;columns\.replaceChildren\(\);pendingFocusTaskKey=undefined;message\.dataset\.error='false';/);
     assert.match(surface, /if\(!body\.boards\.length\)\{message\.textContent='No board views exist yet\.';return\}/);
     assert.match(surface, /body\.columns\.filter\(target=>!target\.archived\)/);
     assert.match(surface, /read only destination/);
@@ -149,6 +152,47 @@ describe("Task board views", () => {
     assert.equal(window.document.querySelector("#message")!.textContent, "The board could not be loaded or saved. Try again.");
     assert.equal(retrySelect.value, progressId); assert.equal(window.document.activeElement, retrySelect);
     assert.equal(database.tasks[0]!.status.id, progressId);
+    dom.window.close();
+  });
+
+  it("preserves a committed move when its board refresh fails and reconciles without moving twice", async () => {
+    const { database, request } = await run();
+    await request("", "POST", { name: "Delivery", groupBy: "status" });
+    const surface = await (await fetch(`${instance!.url}/boards`)).text();
+    const dom = new JSDOM(surface, { runScripts: "outside-only", url: `${instance!.url}/boards` });
+    const { window } = dom;
+    Object.defineProperties(window, {
+      fetch: { value: (input: string, init?: RequestInit) => fetch(new URL(input, window.location.href), init) },
+      matchMedia: { value: () => ({ matches: true }) },
+      gsap: { value: { from() {} } },
+    });
+    const moduleScript = [...window.document.scripts].find(({ type }) => type === "module")?.textContent;
+    assert.ok(moduleScript); window.eval(moduleScript);
+    window.document.querySelector<HTMLInputElement>("#token")!.value = "member";
+    window.document.querySelector<HTMLInputElement>("#project")!.value = projectId;
+    window.document.querySelector<HTMLFormElement>("#connect")!.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+    await eventually(() => assert.equal(window.document.querySelectorAll(".task").length, 2));
+
+    const task = [...window.document.querySelectorAll<HTMLElement>(".task")].find(({ dataset }) => dataset.taskKey === "STASH-1")!;
+    const form = task.querySelector<HTMLFormElement>("form")!;
+    const select = form.querySelector<HTMLSelectElement>("select")!;
+    const button = form.querySelector<HTMLButtonElement>("button")!;
+    select.value = progressId; database.failNextBoardRead = true;
+    form.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+    await eventually(() => assert.match(window.document.querySelector("#message")!.textContent!, /STASH-1 moved to In Progress.*could not be refreshed/i));
+    assert.equal(database.tasks[0]!.status.id, progressId); assert.equal(database.moveCalls, 1);
+    assert.equal(select.disabled, true); assert.equal(button.disabled, true); assert.equal(select.value, progressId);
+    const refresh = window.document.querySelector<HTMLButtonElement>("#refresh-board")!;
+    assert.equal(window.document.activeElement, refresh); assert.equal(refresh.disabled, false);
+    button.click();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(database.moveCalls, 1);
+
+    refresh.click();
+    await eventually(() => assert.equal(window.document.querySelector("#message")!.textContent, "Delivery loaded."));
+    assert.equal(database.moveCalls, 1); assert.equal((window.document.activeElement as HTMLElement).dataset.taskKey, "STASH-1");
+    const progressColumn = [...window.document.querySelectorAll<HTMLElement>(".column")].find((column) => column.querySelector("h2")?.textContent?.startsWith("In Progress"));
+    assert.equal(progressColumn?.querySelector<HTMLElement>(".task")?.dataset.taskKey, "STASH-1");
     dom.window.close();
   });
 
