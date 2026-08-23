@@ -4,6 +4,7 @@ import { AgentGrantService, type AgentGrant, type AgentGrantRepository, type Sto
 import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
 import type { MemberAccessResolver } from "../src/workspaces-projects.js";
 import { directAuthorityConfirmation } from "@stash/domain-types";
+import { McpSessionStore } from "../src/mcp-route.js";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
 class RepositoryFake implements AgentGrantRepository {
@@ -52,6 +53,14 @@ describe("Agent Grants and MCP", () => {
     const sessionId = initialized.headers.get("mcp-session-id")!; assert.ok(sessionId); assert.equal((await initialized.json() as any).result.protocolVersion, "2025-06-18");
     const notification = await mcp(token, sessionId, { jsonrpc: "2.0", method: "notifications/initialized" }); assert.equal(notification.status, 202); assert.equal(await notification.text(), ""); return sessionId; }
 
+  it("expires idle sessions and evicts the least recently used session at its bound", () => {
+    let now = 0; const sessions = new McpSessionStore(() => now, 100, 2);
+    const first = sessions.create("grant"); now = 10; const second = sessions.create("grant");
+    assert.equal(sessions.get(first, "different-grant"), undefined); assert.ok(sessions.get(first, "grant")); now = 20; const third = sessions.create("grant");
+    assert.equal(sessions.get(second, "grant"), undefined); assert.ok(sessions.get(first, "grant")); assert.ok(sessions.get(third, "grant"));
+    now = 121; assert.equal(sessions.get(first, "grant"), undefined); assert.equal(sessions.get(third, "grant"), undefined);
+  });
+
   it("is disabled by default and never accepts a Member session as an agent credential", async () => {
     await run(false);
     const disabled = await fetch(`${instance!.url}/mcp`, { method: "POST", headers: { authorization: "Bearer member-session", "content-type": "application/json" }, body: "{}" });
@@ -80,6 +89,15 @@ describe("Agent Grants and MCP", () => {
     assert.equal((await extra.json() as any).error.code, -32602);
     const denied = await mcp(body.token, sessionId, { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "stash.task.write" } });
     assert.equal((await denied.json() as any).error.code, -32003);
+  });
+
+  it("terminates an MCP session and rejects subsequent reuse", async () => {
+    await run(); const { body } = await issue([{ capability: "note.read", mode: "direct" }]);
+    const sessionId = await initializeMcp(body.token);
+    const terminated = await fetch(`${instance!.url}/mcp`, { method: "DELETE", headers: { authorization: `Bearer ${body.token}`, "mcp-session-id": sessionId } });
+    assert.equal(terminated.status, 204); assert.equal(await terminated.text(), "");
+    const reused = await mcp(body.token, sessionId, { jsonrpc: "2.0", id: 12, method: "tools/list" });
+    assert.equal((await reused.json() as any).error.code, -32002);
   });
 
   it("applies Direct writes through the sponsoring Member domain service and enforces Project scope before effects", async () => {
@@ -132,6 +150,15 @@ describe("Agent Grants and MCP", () => {
       const repository = await run();
       const { body } = await issue([{ capability: "note.write", mode }, { capability: "task.write", mode }], "member-session", projectId);
       const sessionId = await initializeMcp(body.token);
+      const discovery = await mcp(body.token, sessionId, { jsonrpc: "2.0", id: 13, method: "tools/list" });
+      const schemas = Object.fromEntries((await discovery.json() as any).result.tools.map((tool: any) => [tool.name, tool.inputSchema]));
+      assert.deepEqual(schemas["stash.note.write"].properties.input.anyOf, [{ required: ["content"] }, { required: ["templateId"] }]);
+      assert.deepEqual(schemas["stash.note.write"].properties.input.properties.templateId.enum, ["decision"]);
+      assert.match(schemas["stash.note.write"].properties.input.properties.reminder.properties.at.pattern, /\\d\{4\}/);
+      assert.equal(schemas["stash.task.write"].properties.input.properties.title.maxLength, 500);
+      assert.equal(schemas["stash.task.write"].properties.input.properties.dependencies.maxItems, 100);
+      assert.equal(schemas["stash.task.write"].properties.input.properties.estimate.maximum, 1_000_000);
+      assert.equal(schemas["stash.task.write"].properties.input.properties.developmentLinks.items.properties.url.pattern, "^https?://");
       const note = await mcp(body.token, sessionId, { jsonrpc: "2.0", id: 10, method: "tools/call", params: { name: "stash.note.write",
         arguments: { projectId, workspaceId: "55555555-5555-4555-8555-555555555555", input: {} } } });
       assert.equal((await note.json() as any).error.code, -32602);
