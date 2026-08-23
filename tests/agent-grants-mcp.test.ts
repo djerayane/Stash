@@ -14,6 +14,10 @@ class RepositoryFake implements AgentGrantRepository {
   activities: unknown[] = [];
   operatorAudit: unknown[] = [];
   failNextProposalWrite = false;
+  failNextProposalFinish = false;
+  noteOperationResults = new Map<string, unknown>();
+  taskResolutionResults = new Map<string, unknown>();
+  taskOperationResults = new Map<string, unknown>();
   taskRevision = 1;
   async createAgentGrant(actorId: string, grant: StoredAgentGrant) { if (actorId !== "member" || grant.organizationId !== organizationId) return "forbidden" as const; this.grants.push(grant); return "created" as const; }
   async listAgentGrants(actorId: string, organization: string) { return actorId === "member" && organization === organizationId ? this.grants.map(({ tokenLookup: _, tokenHash: __, ...grant }) => grant) : undefined; }
@@ -26,7 +30,7 @@ class RepositoryFake implements AgentGrantRepository {
   async claimAgentProposal(actorId: string, requestedOrganizationId: string, proposalId: string, operationId: string) { const proposal = await this.findAgentProposal(actorId, requestedOrganizationId, proposalId); if (proposal === "forbidden") return { status: "forbidden" as const }; if (!proposal) return { status: "not_found" as const };
     if (proposal.status !== "pending" && proposal.status !== "conflict") return { status: proposal.operationId === operationId ? "duplicate" as const : "already_reviewed" as const, proposal };
     Object.assign(proposal, { status: "applying", operationId }); return { status: "claimed" as const, proposal }; }
-  async finishAgentProposal(actorId: string, proposalId: string, operationId: string, update: any) { const proposal = this.proposals.find(({ id }) => id === proposalId)!; Object.assign(proposal, update, { operationId }); return proposal; }
+  async finishAgentProposal(actorId: string, proposalId: string, operationId: string, update: any) { if (this.failNextProposalFinish) { this.failNextProposalFinish = false; throw new Error("temporary proposal finalization failure"); } const proposal = this.proposals.find(({ id }) => id === proposalId)!; Object.assign(proposal, update, { operationId }); return proposal; }
   async releaseAgentProposal(_actorId: string, proposalId: string, operationId: string) { const proposal = this.proposals.find(({ id }) => id === proposalId); if (proposal?.operationId === operationId) Object.assign(proposal, { status: proposal.conflict ? "conflict" : "pending", operationId: undefined }); }
   async agentGrantTargetAllowed(grant: AgentGrant, target: { workspaceId?: string; projectId?: string }) { return grant.organizationId === organizationId
     && (!grant.projectId || target.projectId === grant.projectId) && target.workspaceId !== "77777777-7777-4777-8777-777777777777"; }
@@ -40,10 +44,11 @@ describe("Agent Grants and MCP", () => {
   async function run(enabled = true) { const repository = new RepositoryFake(); const service = new AgentGrantService(repository, () => new Date("2026-08-23T10:00:00.000Z"));
     instance = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin", memberAccess: access, agentGrants: service, mcpEnabled: enabled,
       notes: { async get(memberId: string, noteId: string) { return memberId === "member" && noteId === "22222222-2222-4222-8222-222222222222" ? { id: noteId, workspaceId: "55555555-5555-4555-8555-555555555555", content: "Authorized context" } : undefined; },
-        async capture(memberId: string, workspaceId: string, input: unknown, cause: unknown) { repository.directWrites.push({ memberId, workspaceId, input, cause });
+        async capture(memberId: string, workspaceId: string, input: unknown, cause: unknown, operationId?: string) { if (operationId && repository.noteOperationResults.has(operationId)) return repository.noteOperationResults.get(operationId);
+          repository.directWrites.push({ memberId, workspaceId, input, cause, ...(operationId ? { operationId } : {}) });
           if (repository.failNextProposalWrite) { repository.failNextProposalWrite = false; repository.directWrites.pop(); throw new Error("temporary write failure"); }
           repository.activities.push({ actor: memberId, cause }); repository.operatorAudit.push({ action: "agent_note_created", actor: memberId, cause });
-          return { status: "created", note: { id: "33333333-3333-4333-8333-333333333333" } }; } } as any,
+          const result = { status: "created", note: { id: "33333333-3333-4333-8333-333333333333" } }; if (operationId) repository.noteOperationResults.set(operationId, result); return result; } } as any,
       tasks: { async findByKey() { return { status: "found", task: { revision: repository.taskRevision } }; },
         async updateByKey(memberId: string, projectId: string, taskKey: string, input: unknown, cause: unknown) {
         repository.directWrites.push({ memberId, projectId, taskKey, input, cause });
@@ -52,10 +57,14 @@ describe("Agent Grants and MCP", () => {
         repository.operatorAudit.push({ action: "agent_task_updated", actor: memberId, cause });
         return { status: "updated", task: { id: "88888888-8888-4888-8888-888888888888", key: taskKey } };
       }, async applyProposedEdit(memberId: string, projectId: string, taskKey: string, operationId: string, baseRevision: number, input: unknown, cause: unknown) {
+        if (repository.taskOperationResults.has(operationId)) return repository.taskOperationResults.get(operationId);
         if (repository.taskRevision > baseRevision) return { status: "conflict_preserved", conflict: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", fields: ["title"], currentRevision: repository.taskRevision } };
-        repository.directWrites.push({ memberId, projectId, taskKey, operationId, input, cause }); return { status: "applied", revision: ++repository.taskRevision };
-      }, async resolveStructuredConflict(memberId: string, projectId: string, taskKey: string, conflictId: string, value: unknown) {
-        repository.directWrites.push({ memberId, projectId, taskKey, conflictId, value }); return { status: "resolved", revision: ++repository.taskRevision };
+        repository.directWrites.push({ memberId, projectId, taskKey, operationId, input, cause }); const result = { status: "applied", revision: ++repository.taskRevision };
+        repository.taskOperationResults.set(operationId, result); return result;
+      }, async resolveStructuredConflict(memberId: string, projectId: string, taskKey: string, conflictId: string, value: any) {
+        if (value.operationId && repository.taskResolutionResults.has(value.operationId)) return repository.taskResolutionResults.get(value.operationId);
+        repository.directWrites.push({ memberId, projectId, taskKey, conflictId, value }); const result = { status: "resolved", revision: ++repository.taskRevision };
+        if (value.operationId) repository.taskResolutionResults.set(value.operationId, result); return result;
       } } as any }); return repository; }
   async function issue(scopes: Array<{ capability: string; mode: "direct" | "propose" | "deny" }>, session = "member-session", projectId?: string) {
     const response = await fetch(`${instance!.url}/api/v1/organizations/${organizationId}/agent-grants`, { method: "POST", headers: { authorization: `Bearer ${session}`, "content-type": "application/json" },
@@ -170,6 +179,19 @@ describe("Agent Grants and MCP", () => {
     assert.equal(repository.directWrites.length, 1);
   });
 
+  it("recovers finalization failure without applying a Note Proposal twice", async () => {
+    const repository = await run(); const projectId = "44444444-4444-4444-8444-444444444444";
+    const { body } = await issue([{ capability: "note.write", mode: "propose" }], "member-session", projectId);
+    const sessionId = await initializeMcp(body.token); const created = await mcp(body.token, sessionId, { jsonrpc: "2.0", id: 19, method: "tools/call", params: { name: "stash.note.write",
+      arguments: { projectId, workspaceId: "55555555-5555-4555-8555-555555555555", input: { content: "Exactly once" } } } });
+    const proposalId = (await created.json() as any).result.structuredContent.proposalId; const operationId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    const review = () => fetch(`${instance!.url}/api/organizations/${organizationId}/agent-grants/proposals/${proposalId}/review`, { method: "POST",
+      headers: { authorization: "Bearer member-session", "content-type": "application/json" }, body: JSON.stringify({ operationId, decision: "apply", confirmed: true }) });
+    repository.failNextProposalFinish = true; const lost = await review(); assert.equal(lost.status, 503); assert.equal(repository.proposals[0]?.status, "pending");
+    const recovered = await review(); assert.equal(recovered.status, 200); assert.equal((await recovered.json() as any).status, "applied");
+    assert.equal(repository.directWrites.length, 1); assert.equal(repository.activities.length, 1); assert.equal(repository.operatorAudit.length, 1);
+  });
+
   it("preserves stale Task overlaps for explicit Member resolution", async () => {
     const repository = await run(); const projectId = "44444444-4444-4444-8444-444444444444";
     const { body } = await issue([{ capability: "task.write", mode: "propose" }], "member-session", projectId); const sessionId = await initializeMcp(body.token);
@@ -179,6 +201,7 @@ describe("Agent Grants and MCP", () => {
       method: "POST", headers: { authorization: "Bearer member-session", "content-type": "application/json" }, body: JSON.stringify({ operationId, decision, confirmed: true }) });
     const conflicted = await review("cccccccc-cccc-4ccc-8ccc-cccccccccccc", "apply"); const conflictBody = await conflicted.json() as any;
     assert.equal(conflictBody.status, "conflict"); assert.deepEqual(conflictBody.proposal.conflict.fields, ["title"]); assert.equal(repository.directWrites.length, 0);
+    repository.failNextProposalFinish = true; const lostResolution = await review("dddddddd-dddd-4ddd-8ddd-dddddddddddd", "keep_current"); assert.equal(lostResolution.status, 503);
     const resolved = await review("dddddddd-dddd-4ddd-8ddd-dddddddddddd", "keep_current"); assert.equal((await resolved.json() as any).status, "applied");
     assert.equal(repository.directWrites.length, 1);
   });

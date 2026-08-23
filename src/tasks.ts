@@ -97,7 +97,7 @@ export interface StructuredTaskEditRepository {
   listStructuredTaskConflicts(memberId: string, projectId: string, taskKey: string): Promise<
     { status: "found"; revision: number; conflicts: TaskEditConflict[] } | { status: "not_found" }>;
   resolveStructuredTaskConflict(memberId: string, projectId: string, taskKey: string, conflictId: string,
-    resolution: "keep_current" | "apply_contribution", expectedRevision: number): Promise<
+    resolution: "keep_current" | "apply_contribution", expectedRevision: number, operationId?: string): Promise<
       | { status: "resolved"; task: TaskPlanningReadModel; revision: number; activity: unknown }
       | { status: "conflict_changed"; conflict: TaskEditConflict }
       | { status: "not_found" | "conflict_not_found" | "already_resolved" | "invalid_reference" }>;
@@ -201,9 +201,10 @@ export class TaskService {
     if (!uuid.test(projectId) || !isTaskKey(taskKey) || !uuid.test(conflictId) || !this.tasks.resolveStructuredTaskConflict
       || !isPlainObject(value) || !["keep_current", "apply_contribution"].includes(value.resolution as string)
       || !Number.isSafeInteger(value.expectedRevision) || (value.expectedRevision as number) < 0
-      || Object.keys(value).some((key) => !["resolution", "expectedRevision"].includes(key))) throw new InvalidTaskFromBlockInput();
+      || value.operationId !== undefined && (typeof value.operationId !== "string" || !uuid.test(value.operationId))
+      || Object.keys(value).some((key) => !["resolution", "expectedRevision", "operationId"].includes(key))) throw new InvalidTaskFromBlockInput();
     return this.tasks.resolveStructuredTaskConflict(memberId, projectId, taskKey.toUpperCase(), conflictId,
-      value.resolution as "keep_current" | "apply_contribution", value.expectedRevision as number);
+      value.resolution as "keep_current" | "apply_contribution", value.expectedRevision as number, value.operationId as string | undefined);
   }
 }
 

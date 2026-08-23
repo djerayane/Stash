@@ -78,13 +78,14 @@ export class AgentGrantService {
       if (request.decision === "keep_current" || request.decision === "apply_contribution") {
         if (proposal.status !== "applying" || proposal.capability !== "task.write" || !proposal.conflict || !domain.tasks) throw new InvalidAgentGrantInput();
         const resolved = await domain.tasks.resolveStructuredConflict(actorId, args.projectId, args.taskKey, proposal.conflict.id,
-          { resolution: request.decision === "keep_current" ? "keep_current" : "apply_contribution", expectedRevision: proposal.conflict.currentRevision });
+          { resolution: request.decision === "keep_current" ? "keep_current" : "apply_contribution", expectedRevision: proposal.conflict.currentRevision,
+            operationId: request.operationId });
         if (resolved.status !== "resolved") throw new Error("proposal_conflict_changed");
         return { status: "applied", proposal: await this.repository.finishAgentProposal(actorId, proposal.id, request.operationId,
           { status: "applied", reviewedAt, reviewedByMemberId: actorId, result: resolved }) };
       }
       if (proposal.capability === "note.write" && domain.notes) {
-        const result = await domain.notes.capture(actorId, args.workspaceId, { ...args.input, ...(args.projectId ? { projectId: args.projectId } : {}) }, cause);
+        const result = await domain.notes.capture(actorId, args.workspaceId, { ...args.input, ...(args.projectId ? { projectId: args.projectId } : {}) }, cause, request.operationId);
         if (result.status !== "created") throw new Error("proposal_target_forbidden");
         return { status: "applied", proposal: await this.repository.finishAgentProposal(actorId, proposal.id, request.operationId,
           { status: "applied", reviewedAt, reviewedByMemberId: actorId, result }) };

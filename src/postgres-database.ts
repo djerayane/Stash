@@ -453,9 +453,11 @@ export class PostgresDatabase implements
     note: NoteRecord,
     projection: PortableNoteProjection,
     cause: ActivityCause = { kind: "member" },
-  ): Promise<"created" | "workspace_forbidden" | "project_forbidden"> {
+    operation?: { id: string; digest: string },
+  ): Promise<"created" | "workspace_forbidden" | "project_forbidden" | { status: "duplicate"; note: NoteRecord }> {
     return this.#withTransaction(async (client) => {
       await this.#ensureNoteSchema(client);
+      if (operation) await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [memberId, operation.id]);
       const access = await client.query<{ allowed: boolean }>(
         `SELECT (
            (owner_type = 'personal' AND personal_owner_id = $2)
@@ -469,6 +471,15 @@ export class PostgresDatabase implements
         [note.workspaceId, memberId],
       );
       if (!access.rows[0]?.allowed) return "workspace_forbidden";
+      if (operation) {
+        const receipt = await client.query<any>(`SELECT receipt.payload_digest,note.* FROM stash_note_capture_operation_receipts receipt
+          JOIN stash_notes note ON note.id=receipt.note_id WHERE receipt.account_id=$1 AND receipt.operation_id=$2 AND receipt.workspace_id=$3`,
+        [memberId, operation.id, note.workspaceId]);
+        if (receipt.rows[0]) {
+          if (receipt.rows[0].payload_digest !== operation.digest) throw new Error("note_capture_operation_conflict");
+          return { status: "duplicate" as const, note: this.#noteFromRow(receipt.rows[0]) };
+        }
+      }
       if (note.projectId) {
         const project = await client.query(
           "SELECT 1 FROM stash_projects WHERE id = $1 AND workspace_id = $2",
@@ -497,6 +508,9 @@ export class PostgresDatabase implements
       await this.#recordPortableProjection(client, "Note", note.id, "stash.note.v1", projection);
       await this.#recordNoteRevisionAndActivity(client, memberId, undefined, note, "note_created", cause);
       if (cause.kind === "agent") await this.#recordAgentExecutionAudit(client, memberId, note.workspaceId, "agent_note_created", note.id, cause);
+      if (operation) await client.query(`INSERT INTO stash_note_capture_operation_receipts
+        (account_id,operation_id,workspace_id,payload_digest,note_id) VALUES ($1,$2,$3,$4,$5)`,
+      [memberId, operation.id, note.workspaceId, operation.digest, note.id]);
       return "created";
     });
   }
@@ -1498,7 +1512,7 @@ export class PostgresDatabase implements
   }
 
   async resolveStructuredTaskConflict(memberId: string, projectId: string, taskKey: string, conflictId: string,
-    resolution: "keep_current" | "apply_contribution", expectedRevision: number) {
+    resolution: "keep_current" | "apply_contribution", expectedRevision: number, operationId?: string) {
     return this.#withTransaction(async (client) => {
       await this.#ensureNoteSchema(client); await this.#ensureInvitationSchema(client);
       const writable = await client.query<{ workspace_id: string }>(`SELECT workspace.id AS workspace_id FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
@@ -1512,7 +1526,11 @@ export class PostgresDatabase implements
       const found = await client.query<any>(`SELECT conflict.* FROM stash_task_edit_conflicts conflict
         WHERE conflict.id = $1 AND conflict.task_id = $2 FOR UPDATE OF conflict`, [conflictId, row.id]);
       const conflictRow = found.rows[0]; if (!conflictRow) return { status: "conflict_not_found" as const };
-      if (conflictRow.resolved_at) return { status: "already_resolved" as const };
+      if (conflictRow.resolved_at) {
+        if (operationId && conflictRow.resolution_operation_id === operationId && conflictRow.resolution === resolution)
+          return { status: "resolved" as const, task: taskPlanningReadModelFromRow(row), revision: row.revision, activity: undefined };
+        return { status: "already_resolved" as const };
+      }
       if (row.revision !== expectedRevision) return { status: "conflict_changed" as const, conflict: { ...taskConflictFromRow(conflictRow), currentRevision: row.revision } };
       const before = taskProjectionFromRow(row);
       if (resolution === "apply_contribution") {
@@ -1523,7 +1541,7 @@ export class PostgresDatabase implements
           [row.id, row.revision, JSON.stringify(row.field_revisions)]);
       }
       const occurredAt = new Date().toISOString();
-      await client.query("UPDATE stash_task_edit_conflicts SET resolved_at = $2, resolution = $3 WHERE id = $1", [conflictId, occurredAt, resolution]);
+      await client.query("UPDATE stash_task_edit_conflicts SET resolved_at = $2, resolution = $3, resolution_operation_id = $4 WHERE id = $1", [conflictId, occurredAt, resolution, operationId ?? null]);
       const saved = await client.query<any>(taskPlanningSelect, [projectId, taskKey, memberId]); const task = taskPlanningReadModelFromRow(saved.rows[0]);
       const actor = await client.query<{ name: string }>("SELECT name FROM stash_accounts WHERE id = $1", [memberId]);
       const activity = { schema: "stash.activity.v1" as const, id: randomUUID(), workspaceId: task.workspaceId,
@@ -3667,6 +3685,11 @@ export class PostgresDatabase implements
         payload_digest TEXT,
         PRIMARY KEY (account_id, client_capture_id)
       );
+      CREATE TABLE IF NOT EXISTS stash_note_capture_operation_receipts (
+        account_id UUID NOT NULL REFERENCES stash_accounts(id), operation_id UUID NOT NULL,
+        workspace_id UUID NOT NULL REFERENCES stash_workspaces(id), payload_digest TEXT NOT NULL,
+        note_id UUID NOT NULL REFERENCES stash_notes(id), PRIMARY KEY (account_id, operation_id)
+      );
       ALTER TABLE stash_mobile_capture_receipts ADD COLUMN IF NOT EXISTS payload_digest TEXT;
       ALTER TABLE stash_notes ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
       ALTER TABLE stash_notes ADD COLUMN IF NOT EXISTS portable_path TEXT;
@@ -3757,8 +3780,9 @@ export class PostgresDatabase implements
         base_revision INTEGER NOT NULL, current_revision INTEGER NOT NULL, fields JSONB NOT NULL,
         contribution JSONB NOT NULL, created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id), created_by_display_name TEXT NOT NULL,
         created_at TIMESTAMPTZ NOT NULL,
-        resolved_at TIMESTAMPTZ, resolution TEXT CHECK (resolution IN ('keep_current','apply_contribution'))
+        resolved_at TIMESTAMPTZ, resolution TEXT CHECK (resolution IN ('keep_current','apply_contribution')), resolution_operation_id UUID
       );
+      ALTER TABLE stash_task_edit_conflicts ADD COLUMN IF NOT EXISTS resolution_operation_id UUID;
       ALTER TABLE stash_task_edit_conflicts ADD COLUMN IF NOT EXISTS created_by_display_name TEXT;
       UPDATE stash_task_edit_conflicts conflict SET created_by_display_name = account.name FROM stash_accounts account
         WHERE conflict.created_by_account_id = account.id AND conflict.created_by_display_name IS NULL;
