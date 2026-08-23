@@ -1,8 +1,9 @@
 import * as NavigationMenu from "@radix-ui/react-navigation-menu";
 import { useGSAP } from "@gsap/react";
+import { useMutation } from "@tanstack/react-query";
 import gsap from "gsap";
-import { useEffect, useRef, type ReactNode } from "react";
-import { Link, Navigate, NavLink, Route, Routes, useLocation } from "react-router";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router";
 import styles from "./app-shell.module.css";
 import { DevelopmentSignalsRoute } from "./development-signals";
 import { NoteEditor } from "./note-editor";
@@ -10,12 +11,13 @@ import { TaskDetailPage } from "./task-detail";
 import { MemberAdministrationPage, type OrganizationAdministration } from "./member-administration";
 import { ProjectNotificationsPage } from "./project-notifications";
 import { ImportedIdentitiesPage } from "./imported-identities";
+import { ActivityPage, BoardsPage, DiscussionsPage, InboxPage, NotesPage, NotificationsPage, ProjectGatewayPage, SearchPage } from "./core-workflows";
 
 export type SessionState =
   | { readonly status: "loading" }
   | { readonly status: "anonymous" }
   | { readonly status: "error"; readonly message: string; readonly retry?: () => void }
-  | { readonly status: "authenticated"; readonly token?: string; readonly member: { readonly id: string; readonly name: string; readonly email: string }; readonly workspace: { readonly name: string }; readonly capabilities: readonly string[]; readonly organizationAdministrations?: readonly OrganizationAdministration[]; readonly activeOrganizationId?: string };
+  | { readonly status: "authenticated"; readonly token?: string; readonly member: { readonly id: string; readonly name: string; readonly email: string }; readonly workspace: { readonly id?: string; readonly name: string }; readonly capabilities: readonly string[]; readonly organizationAdministrations?: readonly OrganizationAdministration[]; readonly activeOrganizationId?: string };
 
 interface AppShellProps { readonly session?: SessionState }
 
@@ -27,6 +29,7 @@ export function resolveReturnTo(search: string): string {
 
 const navigation = [
   { to: "/app", label: "Home", icon: "home" },
+  { to: "/app/inbox", label: "Inbox", icon: "inbox" },
   { to: "/app/notes", label: "Notes", icon: "note" },
   { to: "/app/tasks", label: "Tasks", icon: "task" },
   { to: "/app/activity", label: "Activity", icon: "pulse" },
@@ -51,6 +54,7 @@ function Icon({ name }: { readonly name: string }) {
     import: <><circle cx="12" cy="12" r="8" /><path d="M8 12h8M12 8v8" /></>,
     plus: <path d="M12 5v14M5 12h14" />,
     search: <><circle cx="11" cy="11" r="6" /><path d="m16 16 4 4" /></>,
+    inbox: <><path d="M4 5h16v14H4z"/><path d="M4 13h5l2 3h2l2-3h5"/></>,
   };
   return <svg className={styles.icon} viewBox="0 0 24 24" aria-hidden="true">{paths[name]}</svg>;
 }
@@ -79,13 +83,21 @@ function StateScreen({ state }: { readonly state: Extract<SessionState, { status
   </main>;
 }
 
-function SignIn() {
+function SignIn({ returnTo }: { readonly returnTo: string }) {
+  const [email, setEmail] = useState(""); const [password, setPassword] = useState("");
+  const signIn = useMutation({ mutationFn: async () => {
+    const response = await fetch("/api/auth/sessions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email, password }) });
+    const body = await response.json() as { token?: string; message?: string };
+    if (!response.ok || !body.token) throw new Error(body.message || "Sign-in could not be completed.");
+    localStorage.setItem("stash.member-session", JSON.stringify({ token: body.token }));
+    window.location.assign(returnTo);
+  } });
   return <main className={styles.signIn}>
     <div className={styles.signInBrand}><span className={styles.brandMark}>S</span><span>Stash</span></div>
     <section className={styles.signInPanel} aria-labelledby="sign-in-title">
       <p className={styles.kicker}>Welcome back</p><h1 id="sign-in-title">Sign in to Stash</h1>
       <p>Your Instance manages access. Use the authentication method configured by your administrator.</p>
-      <p className={styles.authenticationNotice} role="status">Interactive sign-in will be connected by the authentication flow migration.</p>
+      <form className={styles.signInForm} onSubmit={(event) => { event.preventDefault(); signIn.mutate(); }}><label>Email<input autoComplete="email" required type="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label><label>Password<input autoComplete="current-password" minLength={12} required type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label><button className={styles.primaryButton} disabled={signIn.isPending} type="submit">{signIn.isPending ? "Signing in…" : "Sign in"}</button>{signIn.isError ? <p className={styles.authenticationNotice} role="alert">{signIn.error.message}</p> : null}</form>
     </section>
   </main>;
 }
@@ -113,6 +125,8 @@ function PlaceholderPage({ workspaceName, title, description, action, actionTo }
 
 function WorkspaceShell({ session }: { readonly session: Extract<SessionState, { status: "authenticated" }> }) {
   const location = useLocation();
+  const navigate = useNavigate();
+  const [search, setSearch] = useState("");
   const shellRef = useRef<HTMLDivElement>(null);
   const mainRef = useRef<HTMLElement>(null);
   const workspaceName = displayLabel(session.workspace.name, "Personal workspace");
@@ -141,21 +155,27 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
       <div className={styles.sidebarFooter}><span className={styles.avatar} aria-hidden="true">{initials(memberName, "M")}</span><span><strong>{memberName}</strong><small>{memberEmail}</small></span></div>
     </aside>
     <div className={styles.workspace}>
-      <header className={styles.topbar}><div className={styles.searchPreview}><Icon name="search" /><span>Search coming soon</span></div><Link aria-label="New note" className={styles.compactCreate} to="/app/notes/new"><Icon name="plus" /><span>New note</span></Link></header>
+      <header className={styles.topbar}><form className={styles.searchPreview} role="search" onSubmit={(event: FormEvent) => { event.preventDefault(); if (search.trim()) navigate(`/app/search?q=${encodeURIComponent(search.trim())}`); }}><Icon name="search" /><input aria-label="Search Workspace" type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search Notes" /></form><Link aria-label="Notifications" className={styles.notificationLink} to="/app/notifications">Notifications</Link><Link className={styles.compactCreate} to="/app/inbox"><Icon name="plus" /><span>Capture</span></Link></header>
       {/^\/app\/notes\/[^/]+$/.test(location.pathname) && location.pathname !== "/app/notes/new"
         ? <NoteEditor noteId={decodeURIComponent(location.pathname.split("/")[3]!)} memberId={session.member.id} token={session.token ?? ""} />
         : <main id="workspace-content" className={styles.content} ref={mainRef} tabIndex={-1}>
         <Routes>
           <Route path="/app" element={<EmptyHome />} />
-          <Route path="/app/notes" element={<PlaceholderPage workspaceName={workspaceName} title="Notes" description="Ideas, decisions, and durable project knowledge." action="New note" actionTo="/app/notes/new" />} />
-          <Route path="/app/notes/new" element={<PlaceholderPage workspaceName={workspaceName} title="New note" description="A focused editor will arrive in the rich-text migration slice." action="Save draft" />} />
-          <Route path="/app/tasks" element={<PlaceholderPage workspaceName={workspaceName} title="Tasks" description="Actionable work connected to the thinking that shaped it." action="New task" />} />
+          <Route path="/app/inbox" element={<InboxPage workspaceId={session.workspace.id ?? ""} token={session.token ?? ""} />} />
+          <Route path="/app/notes" element={<NotesPage workspaceId={session.workspace.id ?? ""} token={session.token ?? ""} />} />
+          <Route path="/app/notes/new" element={<Navigate replace to="/app/notes" />} />
+          <Route path="/app/tasks" element={<ProjectGatewayPage />} />
+          <Route path="/app/projects/:projectId/boards" element={<BoardsPage token={session.token ?? ""} />} />
+          <Route path="/app/projects/:projectId/boards/:boardId" element={<BoardsPage token={session.token ?? ""} />} />
+          <Route path="/app/:targetType(notes|tasks)/:targetId/discussions" element={<DiscussionsPage token={session.token ?? ""} />} />
           <Route path="/app/projects/:projectId/tasks/:taskKey/development" element={<DevelopmentSignalsRoute />} />
           <Route path="/app/projects/:projectId/tasks/:taskKey" element={<TaskDetailPage memberId={session.member.id} token={session.token} />} />
           <Route path="/app/projects/:projectId/notifications" element={<ProjectNotificationsPage token={session.token} />} />
           <Route path="/app/settings/members" element={<MemberAdministrationPage administrations={session.organizationAdministrations} activeOrganizationId={session.activeOrganizationId} currentMemberId={session.member.id} token={session.token} />} />
           <Route path="/app/settings/imported-identities" element={<ImportedIdentitiesPage administrations={session.organizationAdministrations} currentMember={session.member} token={session.token} />} />
-          <Route path="/app/activity" element={<PlaceholderPage workspaceName={workspaceName} title="Activity" description="Meaningful changes, explained without unnecessary noise." action="Filter" />} />
+          <Route path="/app/activity" element={<ActivityPage workspaceId={session.workspace.id ?? ""} token={session.token ?? ""} />} />
+          <Route path="/app/notifications" element={<NotificationsPage token={session.token ?? ""} />} />
+          <Route path="/app/search" element={<SearchPage workspaceId={session.workspace.id ?? ""} token={session.token ?? ""} />} />
           <Route path="*" element={<PlaceholderPage workspaceName={workspaceName} title="Not found" description="This Workspace route does not exist." action="Go home" actionTo="/app" />} />
         </Routes>
       </main>}
@@ -167,7 +187,7 @@ export function AppShell({ session = { status: "loading" } }: AppShellProps) {
   const location = useLocation();
   if (session.status === "loading" || session.status === "error") return <StateScreen state={session} />;
   if (session.status === "anonymous") {
-    if (location.pathname === "/sign-in") return <SignIn />;
+    if (location.pathname === "/sign-in") return <SignIn returnTo={resolveReturnTo(location.search)} />;
     return <Navigate replace to={`/sign-in?returnTo=${encodeURIComponent(`${location.pathname}${location.search}`)}`} />;
   }
   if (location.pathname === "/sign-in") return <Navigate replace to={resolveReturnTo(location.search)} />;

@@ -13,6 +13,8 @@ const secondNoteId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const richNoteId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const emptyCodeNoteId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 const principalBoundaryNoteId = "12121212-1212-4212-8212-121212121212";
+const browserWorkspaceId = "88888888-8888-4888-8888-888888888888";
+let inboxNotes: any[] = [];
 const seededDocument = collaborativeDocumentFromRichText({ type: "doc", blocks: [{ type: "paragraph", blockKey: "77777777-7777-4777-8777-777777777777",
   id: "66666666-6666-4666-8666-666666666666", content: [{ text: "Preserve this linked Block" }] }] });
 const secondSeededDocument = collaborativeDocumentFromRichText({ type: "doc", blocks: [{ type: "paragraph",
@@ -108,7 +110,7 @@ const instance = await startInstance({
     return { member: { id: accountId,
       name: accountId === browserMemberId ? "Browser Member" : accountId === "browser-second-member" ? "Second Browser Member" : "Browser Guest",
       email: accountId === browserMemberId ? "member@stash.test" : `${accountId}@stash.test` },
-      workspace: { id: "browser-workspace", name: "Acceptance Workspace" }, capabilities: [], ...(accountId === browserMemberId ? {
+      workspace: { id: browserWorkspaceId, name: "Acceptance Workspace" }, capabilities: [], ...(accountId === browserMemberId ? {
       activeOrganizationId: organizationId, organizationAdministrations: [
       { organizationId: otherOrganizationId, organizationName: "Other Organization", members: [
         { id: browserMemberId, name: "Browser Member", email: "member@stash.test", role: "Admin" as const },
@@ -129,7 +131,10 @@ const instance = await startInstance({
       return accountId ? { accountId, sessionId: `session-${accountId}` } : undefined;
     },
   },
-  notes: { async get(memberId: string, requestedNoteId: string) { if (![browserMemberId, "browser-second-member", "browser-guest"].includes(memberId) || !collaborations.has(requestedNoteId)) return undefined;
+  notes: { async listInbox(memberId: string, workspaceId: string) { return memberId === browserMemberId && workspaceId === browserWorkspaceId ? { status: "found", notes: inboxNotes } : { status: "workspace_forbidden" }; },
+    async capture(memberId: string, workspaceId: string, value: { content?: string }) { const note = { id: "abababab-abab-4bab-8bab-abababababab", workspaceId, content: value.content ?? "", document: { type: "doc", blocks: [] }, revision: 1, tags: [], createdByMemberId: memberId, createdAt: new Date().toISOString() }; inboxNotes = [note]; return { status: "created", note, projection: { schema: "stash.note.v2" } }; },
+    async triage(memberId: string, workspaceId: string, requestedNoteId: string, value: { action?: string }) { const note = inboxNotes.find(({ id }) => id === requestedNoteId); if (memberId !== browserMemberId || workspaceId !== browserWorkspaceId) return { status: "workspace_forbidden" }; if (!note) return { status: "note_not_found" }; if (value.action === "archive") { inboxNotes = []; return { status: "updated", result: { kind: "archived", note: { ...note, archivedAt: new Date().toISOString() }, projections: [{ schema: "stash.note-state.v1" }] } }; } return { status: "project_forbidden" }; },
+    async get(memberId: string, requestedNoteId: string) { if (![browserMemberId, "browser-second-member", "browser-guest"].includes(memberId) || !collaborations.has(requestedNoteId)) return undefined;
     if (requestedNoteId === richNoteId) { const current = new Y.Doc(); Y.applyUpdate(current, collaborations.get(requestedNoteId)!.update);
       const document = richTextFromCollaborativeDocument(current); current.destroy(); return {
         id: requestedNoteId, workspaceId: "88888888-8888-4888-8888-888888888888", content: richTextToMarkdown(document), revision: collaborations.get(requestedNoteId)!.sequence + 1,

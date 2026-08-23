@@ -68,6 +68,7 @@ test("keeps a malformed backup visible and announces its verification diagnosis"
 
 test("supports keyboard navigation and focuses changed route content", async ({ page }) => {
   await installMemberSession(page);
+  await page.route("**/api/workspaces/88888888-8888-4888-8888-888888888888/activity", (route) => route.fulfill({ json: { activities: [] } }));
   await page.goto("/app");
   const activity = page.getByRole("link", { name: "Activity" });
   await activity.focus();
@@ -112,13 +113,12 @@ test("configures followed Project notifications by keyboard without accessibilit
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 });
 
-test("keeps unavailable actions non-interactive and navigates every available shell action", async ({ page }) => {
+test("keeps unavailable Task actions non-interactive and navigates implemented shell actions", async ({ page }) => {
   await installMemberSession(page);
   await page.goto("/app/tasks");
-  await expect(page.getByRole("button")).toHaveCount(0);
-  await expect(page.getByText("New task")).toBeVisible();
-  await page.getByRole("link", { name: "New note" }).click();
-  await expect(page).toHaveURL(/\/app\/notes\/new$/);
+  await expect(page.getByRole("button", { name: "Open Project boards" })).toBeDisabled();
+  await page.getByRole("link", { name: "Capture" }).click();
+  await expect(page).toHaveURL(/\/app\/inbox$/);
   await page.goto("/app/missing");
   await page.getByRole("link", { name: "Go home" }).click();
   await expect(page).toHaveURL(/\/app$/);
