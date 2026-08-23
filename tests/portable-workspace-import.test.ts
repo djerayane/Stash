@@ -35,6 +35,11 @@ class ImportMemory implements PortableWorkspaceImportRepository {
   committed?: PortableWorkspaceImportBundle;
   fail = false;
   async findWorkspaceImport(importId: string) { const value = this.imports.get(importId); return value ? { archiveSha256: value.digest, report: value.report } : undefined; }
+  readonly mappings=new Map<string,string>();
+  async mapImportedIdentity(input:{importId:string;sourceAccountId:string;localAccountId:string;idempotencyKey:string}) { const existing=this.mappings.get(input.idempotencyKey);
+    if(existing) return existing===JSON.stringify(input)?{status:"duplicate" as const,sourceAccountId:input.sourceAccountId,localAccountId:input.localAccountId}:{status:"conflict" as const};
+    if(!this.imports.has(input.importId)) return {status:"not_found" as const}; this.mappings.set(input.idempotencyKey,JSON.stringify(input));
+    return {status:"mapped" as const,sourceAccountId:input.sourceAccountId,localAccountId:input.localAccountId}; }
   async importWorkspace(importId: string, bundle: PortableWorkspaceImportBundle) {
     if (this.fail) throw new Error("storage_down");
     const previous = this.imports.get(importId);
@@ -89,6 +94,11 @@ describe("Portable Workspace import", () => {
       const duplicate = await fetch(`${instance.url}/api/workspace-imports`, { method: "POST",
         headers: { authorization: "Bearer admin", "idempotency-key": importId, "x-stash-import-owner-account-id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }, body: new Uint8Array(exported) });
       assert.equal(duplicate.status, 200); assert.equal((await duplicate.json() as any).status, "duplicate");
+      const mappingId=randomUUID(); const mappingBody={importId,sourceAccountId:actor.localAccountId,localAccountId:"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"};
+      const mapped=await fetch(`${instance.url}/api/workspace-import-identity-mappings`,{method:"POST",headers:{authorization:"Bearer admin","idempotency-key":mappingId,"content-type":"application/json"},body:JSON.stringify(mappingBody)});
+      assert.equal(mapped.status,201); assert.equal((await mapped.json() as any).status,"mapped");
+      const replay=await fetch(`${instance.url}/api/workspace-import-identity-mappings`,{method:"POST",headers:{authorization:"Bearer admin","idempotency-key":mappingId,"content-type":"application/json"},body:JSON.stringify(mappingBody)});
+      assert.equal(replay.status,200);
     } finally { await instance.close(); }
   });
 
@@ -100,6 +110,7 @@ describe("Portable Workspace import", () => {
       const exported = await archive(); const headers = { authorization: "Bearer admin", "idempotency-key": randomUUID(), "x-stash-import-owner-account-id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" };
       assert.equal((await fetch(`${instance.url}/api/workspace-imports`, { method: "POST", body: new Uint8Array(exported) })).status, 401);
       assert.equal((await fetch(`${instance.url}/api/v1/workspace-imports`, { method: "POST", headers, body: new Uint8Array(exported) })).status, 404);
+      assert.equal((await fetch(`${instance.url}/api/v1/workspace-import-identity-mappings`, { method:"POST",headers:{authorization:"Bearer admin","idempotency-key":randomUUID(),"content-type":"application/json"},body:"{}"})).status,404);
       const corrupt = Buffer.from(exported); const marker = corrupt.indexOf(Buffer.from("objects/workspace.json")); assert.ok(marker > 0);
       corrupt.writeUInt8(corrupt.readUInt8(marker + 2) ^ 1, marker + 2);
       assert.equal((await fetch(`${instance.url}/api/workspace-imports`, { method: "POST", headers, body: new Uint8Array(corrupt) })).status, 422);
@@ -139,13 +150,15 @@ describe("PostgreSQL Portable Workspace import", { skip: postgresUrl ? false : "
     await admin.query(`CREATE SCHEMA ${schema}`); const separator = connectionString.includes("?") ? "&" : "?";
     const database = new PostgresDatabase(`${connectionString}${separator}options=-csearch_path%3D${schema}`,
       createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
-    const ownerId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"; const storage = new LocalAttachmentStorage(await mkdtemp(join(tmpdir(), "stash-import-pg-")));
+    const ownerId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"; const localGuestId = "abababab-abab-4bab-8bab-abababababab";
+    const storage = new LocalAttachmentStorage(await mkdtemp(join(tmpdir(), "stash-import-pg-")));
     let instance: Awaited<ReturnType<typeof startInstance>> | undefined;
     try {
       await database.createFirstOrganizationOwner({ organizationId: randomUUID(), organizationName: "Destination", ownerId, ownerName: "Grace",
         ownerEmail: "grace@example.test", passwordHash: "test", role: "Owner" });
       instance = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin",
-        memberAccess: { async authenticateBearer(value) { return value === "Bearer owner" ? { accountId: ownerId, sessionId: "owner" } : undefined; } },
+        memberAccess: { async authenticateBearer(value) { return value === "Bearer owner" ? { accountId: ownerId, sessionId: "owner" }
+          : value === "Bearer local-guest" ? { accountId: localGuestId, sessionId: "local-guest" } : undefined; } },
         portableWorkspaceImports: new PortableWorkspaceImportService(database, storage), portableWorkspaceExports: new PortableWorkspaceExportService(database, storage) });
       const projectId = "44444444-4444-4444-8444-444444444444"; const statusId = "55555555-5555-4555-8555-555555555555";
       const taskId = "66666666-6666-4666-8666-666666666666"; const boardId = "77777777-7777-4777-8777-777777777777";
@@ -182,6 +195,21 @@ describe("PostgreSQL Portable Workspace import", { skip: postgresUrl ? false : "
         durableObjects: rich.durableObjects!.map((item)=>item.kind==="RepositoryConnection"?{...item,schema:disconnected.schema,payload:disconnected}:item)
           .sort((left,right) => `${left.kind}:${left.id}`.localeCompare(`${right.kind}:${right.id}`)) });
       assert.deepEqual(files.get(snapshot.attachments[0]!.projection.relativePath.slice(2)), Buffer.from([1,2,3]));
+      await admin.query(`INSERT INTO ${schema}.stash_accounts(id,name,email,password_hash) VALUES($1,$2,$3,$4)`,
+        [localGuestId,"Local Guest","local-guest@example.test","not-used"]);
+      const mapActorKey=randomUUID(); const mapActorBody={importId,sourceAccountId:actor.localAccountId,localAccountId:ownerId};
+      const mappedActor=await fetch(`${instance.url}/api/workspace-import-identity-mappings`,{method:"POST",headers:{authorization:"Bearer admin","idempotency-key":mapActorKey,"content-type":"application/json"},body:JSON.stringify(mapActorBody)});
+      assert.equal(mappedActor.status,201);
+      const replayActor=await fetch(`${instance.url}/api/workspace-import-identity-mappings`,{method:"POST",headers:{authorization:"Bearer admin","idempotency-key":mapActorKey,"content-type":"application/json"},body:JSON.stringify(mapActorBody)});
+      assert.equal(replayActor.status,200); assert.equal((await replayActor.json() as any).status,"duplicate");
+      const mappedGuest=await fetch(`${instance.url}/api/workspace-import-identity-mappings`,{method:"POST",headers:{authorization:"Bearer admin","idempotency-key":randomUUID(),"content-type":"application/json"},body:JSON.stringify({importId,sourceAccountId:guest.localAccountId,localAccountId:localGuestId})});
+      assert.equal(mappedGuest.status,201);
+      const attributed=await fetch(`${instance.url}/api/workspaces/${workspaceId}/export`,{headers:{authorization:"Bearer owner"}});
+      const attributedState=JSON.parse(storedFiles(Buffer.from(await attributed.arrayBuffer())).get("objects/workspace.json")!.toString());
+      const localOwner={localAccountId:ownerId,displayName:"Grace"};
+      assert.deepEqual(attributedState.notes[0].createdBy,localOwner); assert.deepEqual(attributedState.tasks[0].createdBy,localOwner);
+      assert.deepEqual(attributedState.activities[0].actor,localOwner); assert.deepEqual(attributedState.noteHistory[0].actor,localOwner);
+      assert.equal((await fetch(`${instance.url}/api/workspaces/${workspaceId}/export`,{headers:{authorization:"Bearer local-guest"}})).status,200);
       const duplicate = await fetch(`${instance.url}/api/workspace-imports`, { method:"POST", headers:{ authorization:"Bearer admin",
         "idempotency-key":importId,"x-stash-import-owner-account-id":ownerId },body:new Uint8Array(exported) });
       assert.equal(duplicate.status,200);

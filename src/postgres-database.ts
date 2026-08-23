@@ -3321,7 +3321,8 @@ export class PostgresDatabase implements
         return { status: "workspace_conflict" as const };
       const identityAccounts = new Map<string, string>();
       for (const identity of bundle.identityStubs) {
-        const existing = await client.query<{ account_id: string }>("SELECT account_id FROM stash_identity_stubs WHERE source_account_id=$1", [identity.sourceAccountId]);
+        const existing = await client.query<{ account_id: string; mapped_to_account_id: string | null }>(
+          "SELECT account_id,mapped_to_account_id FROM stash_identity_stubs WHERE source_account_id=$1", [identity.sourceAccountId]);
         const accountId = existing.rows[0]?.account_id ?? randomUUID();
         if (!existing.rows[0]) {
           await client.query("INSERT INTO stash_accounts(id,name,email,password_hash) VALUES($1,$2,$3,$4)", [accountId, identity.displayName,
@@ -3329,7 +3330,9 @@ export class PostgresDatabase implements
           await client.query("INSERT INTO stash_identity_stubs(source_account_id,account_id,display_name) VALUES($1,$2,$3)",
             [identity.sourceAccountId, accountId, identity.displayName]);
         }
-        identityAccounts.set(identity.sourceAccountId, accountId);
+        // A mapping is an explicit Instance-level decision and therefore also
+        // applies to later imports carrying the same portable source identity.
+        identityAccounts.set(identity.sourceAccountId, existing.rows[0]?.mapped_to_account_id ?? accountId);
       }
       const accountFor = (identity: { localAccountId: string }) => identityAccounts.get(identity.localAccountId)!;
       await client.query(`INSERT INTO stash_workspaces(id,name,owner_type,personal_owner_id,created_by_account_id)
@@ -3443,6 +3446,53 @@ export class PostgresDatabase implements
       await client.query("INSERT INTO stash_workspace_imports(import_id,archive_sha256,workspace_id,report) VALUES($1,$2,$3,$4::jsonb)",
         [importId,bundle.archiveSha256,state.workspace.id,JSON.stringify(report)]);
       return { status:"imported" as const,report };
+    });
+  }
+
+  async mapImportedIdentity(input: { importId:string; sourceAccountId:string; localAccountId:string; idempotencyKey:string }) {
+    return this.#withTransaction(async(client)=>{
+      await this.#ensureWorkspaceImportSchema(client); await client.query("SELECT pg_advisory_xact_lock(hashtext($1))",[`identity-map:${input.idempotencyKey}`]);
+      const prior=await client.query<any>("SELECT * FROM stash_identity_mapping_receipts WHERE idempotency_key=$1",[input.idempotencyKey]);
+      if(prior.rows[0]) return prior.rows[0].import_id===input.importId&&prior.rows[0].source_account_id===input.sourceAccountId&&prior.rows[0].local_account_id===input.localAccountId
+        ?{status:"duplicate" as const,sourceAccountId:input.sourceAccountId,localAccountId:input.localAccountId}:{status:"conflict" as const};
+      const imported=await client.query<{workspace_id:string;report:PortableWorkspaceImportReport}>("SELECT workspace_id,report FROM stash_workspace_imports WHERE import_id=$1",[input.importId]);
+      if(!imported.rows[0] || !imported.rows[0].report.identityStubs.some(({sourceAccountId})=>sourceAccountId===input.sourceAccountId))
+        return {status:"not_found" as const};
+      const workspaceId=imported.rows[0].workspace_id;
+      const local=await client.query<{name:string}>("SELECT name FROM stash_accounts WHERE id=$1",[input.localAccountId]);
+      if(!local.rows[0]) return {status:"local_account_not_found" as const};
+      const stub=await client.query<{account_id:string;mapped_to_account_id:string|null}>("SELECT account_id,mapped_to_account_id FROM stash_identity_stubs WHERE source_account_id=$1 FOR UPDATE",[input.sourceAccountId]);
+      if(!stub.rows[0]) return {status:"not_found" as const};
+      if(stub.rows[0].mapped_to_account_id&&stub.rows[0].mapped_to_account_id!==input.localAccountId) return {status:"conflict" as const};
+      const stubId=stub.rows[0].account_id;
+      for(const table of ["stash_workspaces","stash_projects","stash_notes","stash_tasks","stash_attachments"])
+        await client.query(`UPDATE ${table} SET created_by_account_id=$1 WHERE created_by_account_id=$2 AND ${table==="stash_workspaces"?"id":"workspace_id"}=$3`,[input.localAccountId,stubId,workspaceId]);
+      await client.query("UPDATE stash_note_history SET actor_account_id=$1 WHERE actor_account_id=$2 AND workspace_id=$3",[input.localAccountId,stubId,workspaceId]);
+      await client.query("UPDATE stash_workspace_activity SET actor_account_id=$1 WHERE actor_account_id=$2 AND workspace_id=$3",[input.localAccountId,stubId,workspaceId]);
+      await client.query(`UPDATE stash_discussion_messages message SET author_account_id=$1 FROM stash_discussions discussion
+        WHERE message.discussion_id=discussion.id AND message.author_account_id=$2 AND discussion.workspace_id=$3`,[input.localAccountId,stubId,workspaceId]);
+      await client.query(`UPDATE stash_discussion_work_links link SET created_by_account_id=$1 FROM stash_discussions discussion
+        WHERE link.discussion_id=discussion.id AND link.created_by_account_id=$2 AND discussion.workspace_id=$3`,[input.localAccountId,stubId,workspaceId]);
+      await client.query(`INSERT INTO stash_project_guests(project_id,account_id) SELECT guest.project_id,$1 FROM stash_project_guests guest
+        JOIN stash_projects project ON project.id=guest.project_id WHERE guest.account_id=$2 AND project.workspace_id=$3 ON CONFLICT DO NOTHING`,[input.localAccountId,stubId,workspaceId]);
+      await client.query(`DELETE FROM stash_project_guests guest USING stash_projects project WHERE guest.project_id=project.id
+        AND guest.account_id=$1 AND project.workspace_id=$2`,[stubId,workspaceId]);
+      const projects=await client.query<{id:string}>("SELECT id FROM stash_projects WHERE workspace_id=$1",[workspaceId]); const projectIds=new Set(projects.rows.map(({id})=>id));
+      const projections=await client.query<any>("SELECT object_kind,object_id,revision,payload FROM stash_portable_projection_outbox");
+      const replace=(value:unknown):unknown=>{ if(Array.isArray(value)) return value.map(replace); if(value&&typeof value==="object") { const record=value as Record<string,unknown>;
+        const mapped=record.localAccountId===input.sourceAccountId&&typeof record.displayName==="string"?{...record,localAccountId:input.localAccountId,displayName:local.rows[0]!.name}:record;
+        return Object.fromEntries(Object.entries(mapped).map(([key,child])=>[key,replace(child)])); } return value; };
+      for(const row of projections.rows) { const payload=row.payload as any; const belongs=payload.id===workspaceId||payload.workspaceId===workspaceId||projectIds.has(payload.projectId)
+        ||Array.isArray(payload.projectIds)&&payload.projectIds.some((id:string)=>projectIds.has(id))||Array.isArray(payload.projects)&&payload.projects.some((p:any)=>p.workspaceId===workspaceId);
+        if(belongs&&JSON.stringify(payload).includes(input.sourceAccountId)) await client.query(`UPDATE stash_portable_projection_outbox SET payload=$4::jsonb
+          WHERE object_kind=$1 AND object_id=$2 AND revision=$3`,[row.object_kind,row.object_id,row.revision,JSON.stringify(replace(payload))]); }
+      const disconnected=await client.query<{id:string;payload:unknown}>("SELECT id,payload FROM stash_disconnected_repository_connections WHERE workspace_id=$1",[workspaceId]);
+      for(const connection of disconnected.rows) if(JSON.stringify(connection.payload).includes(input.sourceAccountId))
+        await client.query("UPDATE stash_disconnected_repository_connections SET payload=$2::jsonb WHERE id=$1",[connection.id,JSON.stringify(replace(connection.payload))]);
+      await client.query("UPDATE stash_identity_stubs SET mapped_to_account_id=$2,mapped_at=now() WHERE source_account_id=$1",[input.sourceAccountId,input.localAccountId]);
+      await client.query("INSERT INTO stash_identity_mapping_receipts(idempotency_key,import_id,source_account_id,local_account_id) VALUES($1,$2,$3,$4)",
+        [input.idempotencyKey,input.importId,input.sourceAccountId,input.localAccountId]);
+      return {status:"mapped" as const,sourceAccountId:input.sourceAccountId,localAccountId:input.localAccountId};
     });
   }
 
@@ -3678,6 +3728,12 @@ export class PostgresDatabase implements
     );
     CREATE TABLE IF NOT EXISTS stash_disconnected_repository_connections (
       id UUID PRIMARY KEY, workspace_id UUID NOT NULL REFERENCES stash_workspaces(id), payload JSONB NOT NULL
+    );
+    ALTER TABLE stash_identity_stubs ADD COLUMN IF NOT EXISTS mapped_to_account_id UUID REFERENCES stash_accounts(id);
+    ALTER TABLE stash_identity_stubs ADD COLUMN IF NOT EXISTS mapped_at TIMESTAMPTZ;
+    CREATE TABLE IF NOT EXISTS stash_identity_mapping_receipts (
+      idempotency_key UUID PRIMARY KEY, import_id UUID NOT NULL REFERENCES stash_workspace_imports(import_id), source_account_id TEXT NOT NULL,
+      local_account_id UUID NOT NULL REFERENCES stash_accounts(id)
     )`);
   }
 

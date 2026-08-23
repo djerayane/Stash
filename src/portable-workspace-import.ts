@@ -34,6 +34,9 @@ export interface PortableWorkspaceImportRepository {
     | { status: "forbidden" }
     | { status: "workspace_conflict" }
   >;
+  mapImportedIdentity(input: { importId: string; sourceAccountId: string; localAccountId: string; idempotencyKey: string }): Promise<
+    | { status: "mapped" | "duplicate"; sourceAccountId: string; localAccountId: string }
+    | { status: "not_found" | "conflict" | "local_account_not_found" }>;
 }
 
 export class InvalidPortableWorkspaceImport extends Error {}
@@ -62,6 +65,27 @@ function exact(value: unknown, allowed: string[], kind: string): asserts value i
 function exactIdentity(value: unknown, kind: string): asserts value is { localAccountId: string; displayName: string } {
   exact(value,["localAccountId","displayName"],kind); if (!portableIdentity(value) || !uuid.test(value.localAccountId))
     throw new InvalidPortableWorkspaceImport(`invalid_${kind}`);
+}
+function rejectSensitiveKeys(value: unknown): void {
+  if (Array.isArray(value)) { for (const child of value) rejectSensitiveKeys(child); return; }
+  if (!object(value)) return;
+  for (const [key, child] of Object.entries(value)) {
+    if (/^(?:accessToken|refreshToken|token|password|secret|credentials?|privateKey|installationId)$/i.test(key))
+      throw new InvalidPortableWorkspaceImport("non_portable_secret");
+    rejectSensitiveKeys(child);
+  }
+}
+function exactCause(value: unknown, kind: string): void {
+  if (!object(value) || !["member","automation","signal","agent","migration"].includes(String(value.kind)))
+    throw new InvalidPortableWorkspaceImport(`invalid_${kind}`);
+  const keys: Record<string,string[]> = { member:["kind","restorationOfRevision"], automation:["kind","automationId"],
+    signal:["kind","signalId"], agent:["kind","agentGrantId","sponsoringMemberId"], migration:["kind","source"] };
+  exact(value,keys[String(value.kind)]!,kind);
+  if (value.kind === "member" && value.restorationOfRevision !== undefined && (!Number.isInteger(value.restorationOfRevision) || Number(value.restorationOfRevision) < 1)
+    || value.kind === "automation" && !uuid.test(String(value.automationId))
+    || value.kind === "signal" && !uuid.test(String(value.signalId))
+    || value.kind === "agent" && (!uuid.test(String(value.agentGrantId)) || !uuid.test(String(value.sponsoringMemberId)))
+    || value.kind === "migration" && value.source !== "existing_note") throw new InvalidPortableWorkspaceImport(`invalid_${kind}`);
 }
 
 function unzipStored(archive: Buffer, limits: { maxEntries: number; maxFileBytes: number }): Entry[] {
@@ -121,12 +145,17 @@ function parseState(content: Buffer): PortableWorkspaceCanonicalState {
   if (!Array.isArray(value.durableObjects)) throw new InvalidPortableWorkspaceImport("invalid_canonical_state");
   const workspaceId = String(value.workspace.id);
   if (!portableIdentity(value.workspace.createdBy) || !object(value.workspace.owner)
-    || value.workspace.owner.type === "personal" && !portableIdentity(value.workspace.owner.identity)
-    || value.workspace.owner.type === "organization" && (!object(value.workspace.owner.identity)
-      || !uuid.test(String(value.workspace.owner.identity.localOrganizationId)) || typeof value.workspace.owner.identity.displayName !== "string")
     || !["personal","organization"].includes(String(value.workspace.owner.type))) {
     throw new InvalidPortableWorkspaceImport("invalid_canonical_state");
   }
+  if (value.workspace.owner.type === "personal" && !portableIdentity(value.workspace.owner.identity))
+    throw new InvalidPortableWorkspaceImport("invalid_canonical_state");
+  if (value.workspace.owner.type === "organization" && (!object(value.workspace.owner.identity)
+    || !uuid.test(String(value.workspace.owner.identity.localOrganizationId)) || typeof value.workspace.owner.identity.displayName !== "string"))
+    throw new InvalidPortableWorkspaceImport("invalid_canonical_state");
+  exactIdentity(value.workspace.createdBy,"workspace_creator");
+  if(value.workspace.owner.type==="personal") { exact(value.workspace.owner,["type","identity"],"workspace_owner"); exactIdentity(value.workspace.owner.identity,"workspace_owner_identity"); }
+  else { exact(value.workspace.owner,["type","identity"],"workspace_owner"); exact(value.workspace.owner.identity,["localOrganizationId","displayName"],"workspace_owner_identity"); }
   const typedArrays: Array<[unknown[], string, boolean]> = [
     [value.notes, "stash.note.v1", true], [value.tasks, "stash.task.v1", true],
     [value.boards, "stash.board.v1", false], [value.attachments, "stash.attachment.v1", true],
@@ -161,24 +190,42 @@ function parseState(content: Buffer): PortableWorkspaceCanonicalState {
   if (value.noteLocations.some((location) => !object(location) || typeof location.path !== "string" || !Array.isArray(location.aliases)
     || location.aliases.some((alias) => typeof alias !== "string" || !safePath(alias)) || !Number.isInteger(location.revision) || Number(location.revision) < 1))
     throw new InvalidPortableWorkspaceImport("invalid_note_locations");
-  for (const note of value.notes) if (!object(note) || typeof note.content !== "string" || !note.content.length
+  for (const note of value.notes) { exact(note,["schema","id","workspaceId","content","tags","createdAt","createdBy","projectId","reminder"],"note"); exactIdentity(note.createdBy,"note_creator");
+    if(note.reminder!==undefined) { exact(note.reminder,["at"],"note_reminder"); if(!timestamp(note.reminder.at)) throw new InvalidPortableWorkspaceImport("invalid_note"); }
+    if (typeof note.content !== "string" || !note.content.length
     || !Array.isArray(note.tags) || !note.tags.every((tag) => typeof tag === "string") || !timestamp(note.createdAt)
-    || note.projectId !== undefined && !projects.has(String(note.projectId))) throw new InvalidPortableWorkspaceImport("invalid_note");
-  for (const task of value.tasks) if (!object(task) || !projects.has(String(task.projectId)) || typeof task.title !== "string" || !task.title
+    || note.projectId !== undefined && !projects.has(String(note.projectId))) throw new InvalidPortableWorkspaceImport("invalid_note"); }
+  for (const task of value.tasks) { exact(task,["schema","id","workspaceId","projectId","title","key","status","keyAliases","sourceNoteIds","createdAt","createdBy","sourceBlocks","assigneeIds","priority","labelNames","dueDate","estimate","linkedNoteIds","dependencies","developmentLinks"],"task");
+    exactIdentity(task.createdBy,"task_creator"); exact(task.status,["id","name","category"],"task_status");
+    if (!projects.has(String(task.projectId)) || typeof task.title !== "string" || !task.title
     || typeof task.key !== "string" || !object(task.status) || !uuid.test(String(task.status.id)) || !timestamp(task.createdAt)
     || !Array.isArray(task.sourceNoteIds) || task.sourceNoteIds.some((id) => !notes.has(String(id)))
     || task.linkedNoteIds !== undefined && (!Array.isArray(task.linkedNoteIds) || task.linkedNoteIds.some((id) => !notes.has(String(id))))
     || task.dependencies !== undefined && (!Array.isArray(task.dependencies) || task.dependencies.some((edge) => !object(edge) || !tasks.has(String(edge.taskId))))
     || task.sourceBlocks !== undefined && (!Array.isArray(task.sourceBlocks) || task.sourceBlocks.some((source) => !object(source)
       || !notes.has(String(source.noteId)) || !uuid.test(String(source.blockId))))
+    || typeof task.status.name !== "string" || !["unstarted","started","completed"].includes(String(task.status.category))
+    || task.assigneeIds !== undefined && (!Array.isArray(task.assigneeIds) || task.assigneeIds.some((id)=>!uuid.test(String(id))))
+    || task.labelNames !== undefined && (!Array.isArray(task.labelNames) || task.labelNames.some((label)=>typeof label!=="string"))
+    || task.priority !== undefined && !["none","low","medium","high","urgent"].includes(String(task.priority))
+    || task.dueDate !== undefined && !timestamp(task.dueDate) || task.estimate !== undefined && (!Number.isFinite(task.estimate) || Number(task.estimate)<0)
     || task.keyAliases !== undefined && (!Array.isArray(task.keyAliases) || task.keyAliases.some((alias) => !object(alias)
       || !projects.has(String(alias.projectId)) || typeof alias.key !== "string")))
-    throw new InvalidPortableWorkspaceImport("invalid_task");
-  for (const board of value.boards) if (!object(board) || !projects.has(String(board.projectId)) || typeof board.name !== "string"
-    || !["status", "priority"].includes(String(board.groupBy)) || !timestamp(board.createdAt)) throw new InvalidPortableWorkspaceImport("invalid_board");
-  for (const link of value.noteLinks) if (!object(link) || !notes.has(String(link.sourceNoteId))
+    throw new InvalidPortableWorkspaceImport("invalid_task"); }
+  for (const task of value.tasks) {
+    for (const alias of task.keyAliases ?? []) exact(alias,["projectId","key"],"task_key_alias");
+    for (const source of task.sourceBlocks ?? []) exact(source,["noteId","blockId"],"task_source_block");
+    for (const edge of task.dependencies ?? []) { exact(edge,["taskId","type"],"task_dependency"); if(!["depends_on","required_by"].includes(String(edge.type))) throw new InvalidPortableWorkspaceImport("invalid_task_dependency"); }
+    for (const link of task.developmentLinks ?? []) { exact(link,["provider","url","kind"],"task_development_link"); if(typeof link.provider!=="string"||typeof link.url!=="string"||!["branch","commit","pull_request"].includes(String(link.kind))) throw new InvalidPortableWorkspaceImport("invalid_task_development_link"); }
+  }
+  for (const board of value.boards) { exact(board,["schema","id","projectId","name","groupBy","createdAt"],"board"); if (!projects.has(String(board.projectId)) || typeof board.name !== "string"
+    || !["status", "priority"].includes(String(board.groupBy)) || !timestamp(board.createdAt)) throw new InvalidPortableWorkspaceImport("invalid_board"); }
+  for (const attachment of value.attachments) { exact(attachment,["schema","id","workspaceId","filename","contentType","size","relativePath","source","createdAt","createdBy"],"attachment"); exactIdentity(attachment.createdBy,"attachment_creator"); }
+  for (const location of value.noteLocations) exact(location,["schema","noteId","workspaceId","path","aliases","revision"],"note_location");
+  for (const link of value.noteLinks) { exact(link,link.schema==="stash.note-link.v1"?["schema","id","workspaceId","sourceNoteId","targetNoteId"]
+    :["schema","id","workspaceId","sourceNoteId","targetNoteId","targetPath","candidateNoteIds","label","revision"],"note_link"); if (!notes.has(String(link.sourceNoteId))
     || link.targetNoteId !== undefined && link.targetNoteId !== null && !notes.has(String(link.targetNoteId))
-    || !Number.isInteger(link.revision ?? 1) || Number(link.revision ?? 1) < 1) throw new InvalidPortableWorkspaceImport("invalid_note_link");
+    || !Number.isInteger(link.revision ?? 1) || Number(link.revision ?? 1) < 1) throw new InvalidPortableWorkspaceImport("invalid_note_link"); }
   const allowedDurable = new Map([["Project", ["stash.project.v1"]], ["Workflow", ["stash.workflow.v1"]],
     ["GuestProjectAccess", ["stash.guest-project-access.v1"]], ["RepositoryConnection", ["stash.repository-connection.v1","stash.disconnected-repository-connection.v1"]],
     ["Discussion", ["stash.discussion.v1"]], ["DiscussionWorkLink", ["stash.discussion-work-link.v1"]]]);
@@ -241,7 +288,7 @@ function parseState(content: Buffer): PortableWorkspaceCanonicalState {
       if(payload.provider!=="github"||typeof payload.repositoryUrl!=="string"||!/^https:\/\//.test(payload.repositoryUrl)
         ||!uuid.test(String(payload.organization.localOrganizationId))||typeof payload.organization.displayName!=="string"
         ||value.workspace.owner.type!=="organization"||!object(value.workspace.owner.identity)
-        ||payload.organization.localOrganizationId!==value.workspace.owner.identity.localOrganizationId
+        ||payload.organization.localOrganizationId!==(value.workspace.owner.identity as Record<string, unknown>).localOrganizationId
         ||!uuid.test(String(payload.createdBy.localAccountId))||typeof payload.createdBy.displayName!=="string"
         ||!["recorded","inferred-during-upgrade"].includes(String(payload.createdBy.attribution))
         ||!Array.isArray(payload.projectIds)||(disconnected&&(payload.state!=="disconnected"||payload.reason!=="credentials_not_portable")))
@@ -255,11 +302,15 @@ function parseState(content: Buffer): PortableWorkspaceCanonicalState {
   if (value.activities.some((activity) => !object(activity) || !object(activity.object) || !domainIds.has(String(activity.object.id))
     || typeof activity.action !== "string" || !timestamp(activity.occurredAt) || !object(activity.before) || !object(activity.after)))
     throw new InvalidPortableWorkspaceImport("invalid_activity");
+  for(const activity of value.activities) { exact(activity,["schema","id","workspaceId","object","action","actor","cause","occurredAt","before","after"],"activity");
+    exact(activity.object,["kind","id"],"activity_object"); exactIdentity(activity.actor,"activity_actor"); exactCause(activity.cause,"activity_cause"); }
   const revisions = new Set<string>();
   if (value.noteHistory.some((history) => !object(history) || !notes.has(String(history.noteId)) || !Number.isInteger(history.revision)
     || Number(history.revision) < 1 || typeof history.content !== "string" || !history.content.length || !isRichTextDocument(history.document)
     || !timestamp(history.recordedAt) || revisions.has(`${String(history.noteId)}:${String(history.revision)}`)
     || !revisions.add(`${String(history.noteId)}:${String(history.revision)}`))) throw new InvalidPortableWorkspaceImport("invalid_note_history");
+  for(const history of value.noteHistory) { exact(history,["noteId","workspaceId","revision","content","document","recordedAt","actor","cause"],"note_history"); exactIdentity(history.actor,"history_actor");
+    exactCause(history.cause,"history_cause"); }
   if (value.noteLinks.some((item) => !object(item) || !["stash.note-link.v1", "stash.note-link.v2"].includes(String(item.schema))
     || item.workspaceId !== workspaceId)
     || value.activities.some((item) => !object(item) || item.schema !== "stash.activity.v1" || item.workspaceId !== workspaceId)
@@ -277,7 +328,22 @@ function parseState(content: Buffer): PortableWorkspaceCanonicalState {
   if ([...value.notes, ...value.tasks, ...value.attachments].some((item) => !object(item) || !portableIdentity(item.createdBy))
     || value.activities.some((item) => !object(item) || !portableIdentity(item.actor))
     || value.noteHistory.some((item) => !object(item) || !portableIdentity(item.actor))) throw new InvalidPortableWorkspaceImport("invalid_canonical_state");
-  return { ...(value as unknown as PortableWorkspaceCanonicalState), durableObjects:sanitizedDurable };
+  // Nothing from the untrusted parsed object crosses the repository boundary by
+  // reference. Exact schemas above reject unknown fields; this reconstruction
+  // also prevents later mutation of the parsed archive from affecting storage.
+  rejectSensitiveKeys(value);
+  return structuredClone({
+    workspace: value.workspace,
+    notes: value.notes,
+    tasks: value.tasks,
+    boards: value.boards,
+    attachments: value.attachments,
+    noteLocations: value.noteLocations,
+    noteLinks: value.noteLinks,
+    activities: value.activities,
+    noteHistory: value.noteHistory,
+    durableObjects: sanitizedDurable,
+  }) as unknown as PortableWorkspaceCanonicalState;
 }
 function identities(state: PortableWorkspaceCanonicalState): IdentityStub[] {
   const values = new Map<string, string>();
@@ -348,5 +414,11 @@ export class PortableWorkspaceImportService {
       for (const key of attachmentStorageKeys.values()) await this.storage!.delete(key).catch(() => undefined);
       throw error;
     }
+  }
+
+  async mapIdentity(input: { importId: string; sourceAccountId: string; localAccountId: string; idempotencyKey: string }) {
+    if (![input.importId,input.sourceAccountId,input.localAccountId,input.idempotencyKey].every((value)=>uuid.test(value)))
+      throw new InvalidPortableWorkspaceImport("invalid_identity_mapping");
+    return this.repository.mapImportedIdentity(input);
   }
 }
