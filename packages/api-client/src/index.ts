@@ -4,8 +4,8 @@ export interface StashApiClientOptions {
   readonly memberToken?: string;
 }
 
-import type { AgentGrant, AgentGrantOption, AgentProposal, CreateAgentGrantRequest, CreateAgentGrantResponse } from "@stash/domain-types";
-import { agentGrantListResponse, agentGrantOptionsResponse, agentProposalListResponse, createAgentGrantResponse, revokeAgentGrantResponse } from "@stash/validation";
+import type { AgentGrant, AgentGrantOption, AgentProposal, CreateAgentGrantRequest, CreateAgentGrantResponse, ReviewAgentProposalRequest, ReviewAgentProposalResponse } from "@stash/domain-types";
+import { agentGrantListResponse, agentGrantOptionsResponse, agentProposalListResponse, agentProposalResponse, createAgentGrantResponse, reviewAgentProposalResponse, revokeAgentGrantResponse } from "@stash/validation";
 
 export interface AgentGrantsApi {
   options(): Promise<{ organizations: AgentGrantOption[] }>;
@@ -13,6 +13,8 @@ export interface AgentGrantsApi {
   create(input: CreateAgentGrantRequest): Promise<CreateAgentGrantResponse>;
   revoke(organizationId: string, grantId: string): Promise<{ grantId: string; revoked: true }>;
   proposals(organizationId: string): Promise<{ proposals: AgentProposal[] }>;
+  proposal(organizationId: string, proposalId: string): Promise<{ proposal: AgentProposal }>;
+  reviewProposal(organizationId: string, proposalId: string, input: ReviewAgentProposalRequest): Promise<ReviewAgentProposalResponse>;
 }
 
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -81,6 +83,8 @@ export function createAgentGrantsApi(options: StashApiClientOptions): AgentGrant
     create: (input) => validated(send(root(input.organizationId), { method: "POST", body: JSON.stringify(input) }), createAgentGrantResponse),
     revoke: (organizationId, grantId) => validated(send(`${root(organizationId)}/${encodeURIComponent(grantId)}`, { method: "DELETE" }), revokeAgentGrantResponse),
     proposals: (organizationId) => validated(send(`${root(organizationId)}/proposals`), agentProposalListResponse),
+    proposal: (organizationId, proposalId) => validated(send(`${root(organizationId)}/proposals/${encodeURIComponent(proposalId)}`), agentProposalResponse),
+    reviewProposal: (organizationId, proposalId, input) => validated(send(`${root(organizationId)}/proposals/${encodeURIComponent(proposalId)}/review`, { method: "POST", body: JSON.stringify(input) }), reviewAgentProposalResponse),
   };
 }
 

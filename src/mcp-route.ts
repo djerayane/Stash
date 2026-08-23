@@ -99,7 +99,11 @@ async function callTool(response: Parameters<typeof json>[0], id: string | numbe
   if (!validToolArguments(scope.capability, args)) { rpc(response, id, undefined, { code: -32602, message: "Invalid tool arguments" }); return; }
   if (!validProjectScope(grant, capability, args)) { rpc(response, id, undefined, { code: -32003, message: "Agent Grant does not authorize that Project" }); return; }
   if (capability !== "note.read" && !await service.authorizeTarget(grant, targetFrom(args))) { rpc(response, id, undefined, { code: -32003, message: "Agent Grant does not authorize that Organization or Project" }); return; }
-  if (scope.mode === "propose") { const proposal = await service.propose(grant, scope.capability, args); rpc(response, id, {
+  if (scope.mode === "propose") { let baseRevision: number | undefined;
+    if (scope.capability === "task.write") { const input = args as any; const current = await domain.tasks?.findByKey(grant.sponsoringMemberId, input.projectId, input.taskKey);
+      if (!current || current.status !== "found") { rpc(response, id, undefined, { code: -32004, message: "Authorized domain object was not found" }); return; }
+      baseRevision = current.task.revision; }
+    const proposal = await service.propose(grant, scope.capability, args, baseRevision); rpc(response, id, {
     content: [{ type: "text", text: "Proposal created for Member review." }], structuredContent: { proposalId: proposal.id, status: proposal.status, capability } }); return; }
   try {
     const result = await executeDirect(grant, capability, args, domain);

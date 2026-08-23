@@ -82,7 +82,7 @@ export interface TaskPlanningRepository {
   >;
 }
 
-export interface TaskEditBatch { operationId: string; baseRevision: number; changes: TaskPlanningUpdate; createdAt: string; createdBy: PortableIdentity; }
+export interface TaskEditBatch { operationId: string; baseRevision: number; changes: TaskPlanningUpdate; createdAt: string; createdBy: PortableIdentity; cause?: ActivityCause }
 export interface TaskEditConflict {
   id: string; taskId: string; baseRevision: number; currentRevision: number; fields: string[]; contribution: TaskPlanningUpdate;
   createdAt: string; createdBy: { displayName: string; attribution: "recorded" };
@@ -97,7 +97,7 @@ export interface StructuredTaskEditRepository {
   listStructuredTaskConflicts(memberId: string, projectId: string, taskKey: string): Promise<
     { status: "found"; revision: number; conflicts: TaskEditConflict[] } | { status: "not_found" }>;
   resolveStructuredTaskConflict(memberId: string, projectId: string, taskKey: string, conflictId: string,
-    resolution: "keep_current" | "apply_contribution", expectedRevision: number): Promise<
+    resolution: "keep_current" | "apply_contribution", expectedRevision: number, operationId?: string): Promise<
       | { status: "resolved"; task: TaskPlanningReadModel; revision: number; activity: unknown }
       | { status: "conflict_changed"; conflict: TaskEditConflict }
       | { status: "not_found" | "conflict_not_found" | "already_resolved" | "invalid_reference" }>;
@@ -183,6 +183,14 @@ export class TaskService {
       baseRevision: value.baseRevision as number, changes: normalizePlanningUpdate(value.changes as TaskPlanningUpdate),
       createdAt: new Date().toISOString(), createdBy: actor });
   }
+  async applyProposedEdit(memberId: string, projectId: string, taskKey: string, operationId: string, baseRevision: number,
+    changes: unknown, cause: ActivityCause) {
+    if (!uuid.test(projectId) || !isTaskKey(taskKey) || !uuid.test(operationId) || !Number.isSafeInteger(baseRevision) || baseRevision < 1
+      || !this.tasks.applyStructuredTaskEdit || !isPlanningUpdate(changes)) throw new InvalidTaskFromBlockInput();
+    const actor = await this.actors.findPortableMemberIdentity(memberId); if (!actor) throw new Error("member_identity_unavailable");
+    return this.tasks.applyStructuredTaskEdit(memberId, projectId, taskKey.toUpperCase(), { operationId, baseRevision,
+      changes: normalizePlanningUpdate(changes as TaskPlanningUpdate), createdAt: new Date().toISOString(), createdBy: actor, cause });
+  }
 
   async listStructuredConflicts(memberId: string, projectId: string, taskKey: string) {
     if (!uuid.test(projectId) || !isTaskKey(taskKey) || !this.tasks.listStructuredTaskConflicts) throw new InvalidTaskFromBlockInput();
@@ -193,9 +201,10 @@ export class TaskService {
     if (!uuid.test(projectId) || !isTaskKey(taskKey) || !uuid.test(conflictId) || !this.tasks.resolveStructuredTaskConflict
       || !isPlainObject(value) || !["keep_current", "apply_contribution"].includes(value.resolution as string)
       || !Number.isSafeInteger(value.expectedRevision) || (value.expectedRevision as number) < 0
-      || Object.keys(value).some((key) => !["resolution", "expectedRevision"].includes(key))) throw new InvalidTaskFromBlockInput();
+      || value.operationId !== undefined && (typeof value.operationId !== "string" || !uuid.test(value.operationId))
+      || Object.keys(value).some((key) => !["resolution", "expectedRevision", "operationId"].includes(key))) throw new InvalidTaskFromBlockInput();
     return this.tasks.resolveStructuredTaskConflict(memberId, projectId, taskKey.toUpperCase(), conflictId,
-      value.resolution as "keep_current" | "apply_contribution", value.expectedRevision as number);
+      value.resolution as "keep_current" | "apply_contribution", value.expectedRevision as number, value.operationId as string | undefined);
   }
 }
 

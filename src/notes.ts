@@ -119,7 +119,8 @@ export interface NoteRepository {
     note: NoteRecord,
     projection: PortableNoteProjection,
     cause?: ActivityCause,
-  ): Promise<"created" | "workspace_forbidden" | "project_forbidden">;
+    operation?: { id: string; digest: string },
+  ): Promise<"created" | "workspace_forbidden" | "project_forbidden" | { status: "duplicate"; note: NoteRecord }>;
   listInboxNotes(memberId: string, workspaceId: string): Promise<
     { status: "found"; notes: NoteRecord[] } | { status: "workspace_forbidden" }
   >;
@@ -211,11 +212,11 @@ export class NoteService {
     return this.#repository.findNoteForMember(memberId, noteId);
   }
 
-  async capture(memberId: string, workspaceId: string, value: unknown, cause?: ActivityCause): Promise<
+  async capture(memberId: string, workspaceId: string, value: unknown, cause?: ActivityCause, operationId?: string): Promise<
     | { status: "created"; note: NoteRecord; projection: PortableNoteProjection }
     | { status: "workspace_forbidden" | "project_forbidden" }
   > {
-    if (!isUuid(workspaceId) || !isNoteInput(value)) throw new InvalidNoteInput();
+    if (!isUuid(workspaceId) || !isNoteInput(value) || operationId !== undefined && !isUuid(operationId)) throw new InvalidNoteInput();
     const createdBy = await this.#repository.findPortableMemberIdentity(memberId);
     if (!createdBy) throw new Error("member_identity_unavailable");
     const content = value.content ?? decisionStarter;
@@ -245,7 +246,12 @@ export class NoteService {
       ...(note.projectId ? { projectId: note.projectId } : {}),
       ...(note.reminder ? { reminder: note.reminder } : {}),
     };
-    const status = await this.#repository.createNote(memberId, note, projection, cause);
+    const operation = operationId ? { id: operationId, digest: createHash("sha256").update(JSON.stringify(canonicalJson({ workspaceId, value }))).digest("hex") } : undefined;
+    const status = await this.#repository.createNote(memberId, note, projection, cause, operation);
+    if (typeof status === "object") { const existing = status.note; return { status: "created", note: existing, projection: {
+      schema: "stash.note.v1", id: existing.id, workspaceId: existing.workspaceId, content: existing.content, tags: existing.tags,
+      createdAt: existing.createdAt, createdBy, ...(existing.projectId ? { projectId: existing.projectId } : {}), ...(existing.reminder ? { reminder: existing.reminder } : {}),
+    } }; }
     return status === "created" ? { status, note, projection } : { status };
   }
 
