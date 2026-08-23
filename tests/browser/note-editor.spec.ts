@@ -2,13 +2,14 @@ import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
 
 const noteId = "99999999-9999-4999-8999-999999999999";
+const memberSession = JSON.stringify({ token: "browser-acceptance-member-token" });
 
 test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem("stash.memberToken", "browser-acceptance-member-token"));
+  await page.addInitScript((session) => localStorage.setItem("stash.member-session", session), memberSession);
 });
 
 test("edits a stable linked Block with the collaborative React editor", async ({ page }) => {
-  await page.goto(`/notes/${noteId}`);
+  await page.goto(`/app/notes/${noteId}`);
   await expect(page.getByRole("heading", { name: "Release collaboration plan" })).toBeVisible();
   const editor = page.getByRole("textbox", { name: "Note content" });
   await expect(editor.locator("[data-block-id='66666666-6666-4666-8666-666666666666']")).toHaveText("Preserve this linked Block");
@@ -18,7 +19,7 @@ test("edits a stable linked Block with the collaborative React editor", async ({
 });
 
 test("offers link, callout, and Workspace Attachment authoring controls", async ({ page }) => {
-  await page.goto(`/notes/${noteId}`);
+  await page.goto(`/app/notes/${noteId}`);
   await expect(page.getByRole("button", { name: "Insert link" })).toBeVisible();
   await page.getByRole("button", { name: "Insert callout" }).click();
   await expect(page.getByRole("textbox", { name: "Note content" }).locator("[data-callout]")).toContainText("Callout");
@@ -30,10 +31,10 @@ test("offers link, callout, and Workspace Attachment authoring controls", async 
 
 test("two real editors merge concurrent contributions without changing linked Block identity", async ({ browser }) => {
   const firstContext = await browser.newContext(); const secondContext = await browser.newContext();
-  await Promise.all([firstContext.addInitScript(() => localStorage.setItem("stash.memberToken", "browser-acceptance-member-token")),
-    secondContext.addInitScript(() => localStorage.setItem("stash.memberToken", "browser-acceptance-member-token"))]);
+  await Promise.all([firstContext.addInitScript((session) => localStorage.setItem("stash.member-session", session), memberSession),
+    secondContext.addInitScript((session) => localStorage.setItem("stash.member-session", session), memberSession)]);
   const first = await firstContext.newPage(); const second = await secondContext.newPage();
-  await Promise.all([first.goto(`/notes/${noteId}`), second.goto(`/notes/${noteId}`)]);
+  await Promise.all([first.goto(`/app/notes/${noteId}`), second.goto(`/app/notes/${noteId}`)]);
   const firstBlock = first.getByRole("textbox", { name: "Note content" }).locator("[data-block-id='66666666-6666-4666-8666-666666666666']");
   const secondBlock = second.getByRole("textbox", { name: "Note content" }).locator("[data-block-id='66666666-6666-4666-8666-666666666666']");
   await Promise.all([firstBlock.click(), secondBlock.click()]);
@@ -46,7 +47,7 @@ test("two real editors merge concurrent contributions without changing linked Bl
 });
 
 test("the collaborative editor is keyboard operable and axe-clean @a11y", async ({ page }) => {
-  await page.emulateMedia({ reducedMotion: "reduce" }); await page.goto(`/notes/${noteId}`);
+  await page.emulateMedia({ reducedMotion: "reduce" }); await page.goto(`/app/notes/${noteId}`);
   await page.getByRole("button", { name: "Bold" }).focus(); await page.keyboard.press("Enter");
   await expect(page.getByRole("button", { name: "Bold" })).toHaveAttribute("aria-pressed", "true");
   const editor = page.getByRole("textbox", { name: "Note content" }); await editor.focus();
@@ -61,7 +62,7 @@ test("initial collaboration errors preserve landmarks and recover accessibly @a1
     if (unavailable) await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "unavailable" }) });
     else await route.continue();
   });
-  await page.goto(`/notes/${noteId}`);
+  await page.goto(`/app/notes/${noteId}`);
   await expect(page.getByRole("main")).toBeVisible();
   const alert = page.getByRole("alert"); await expect(alert).toBeFocused({ timeout: 15_000 });
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);

@@ -140,14 +140,14 @@ export function NoteEditor({ noteId, fetcher = globalThis.fetch, token = localSt
     if (isUnavailable) unavailableRef.current?.focus();
   }, [isUnavailable]);
 
-  if (isUnavailable) return <main className={styles.errorState}>
+  if (isUnavailable) return <main id="workspace-content" className={styles.errorState}>
     <div ref={unavailableRef} role="alert" tabIndex={-1} className={styles.errorPanel}>
       <h1>The Note editor is unavailable.</h1>
       <p>Check the Instance connection, then try loading the collaborative document again.</p>
       <button className={styles.retry} type="button" onClick={() => { void note.refetch(); void collaboration.refetch(); }}>Try again</button>
     </div>
   </main>;
-  return <main ref={layoutRef} className={styles.layout} aria-busy={!editor || !note.data || !collaboration.data}>
+  return <main id="workspace-content" ref={layoutRef} className={styles.layout} aria-busy={!editor || !note.data || !collaboration.data}>
     <article className={styles.document}>
       <header className={styles.header}><p className={styles.kicker}>Collaborative Note</p><h1 className={styles.title}>{note.data?.content.split("\n")[0] || "Untitled Note"}</h1></header>
       <div ref={toolbarRef} className={styles.toolbar} role="toolbar" aria-label="Text formatting">
