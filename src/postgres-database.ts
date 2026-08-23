@@ -4556,6 +4556,7 @@ export class PostgresDatabase implements
       VALUES ($1,$2,'Note',$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb)`, [activity.id, note.workspaceId, note.id, action,
       memberId, JSON.stringify(cause), occurredAt, JSON.stringify(activity.before), JSON.stringify(activity.after)]);
     await this.#recordPortableProjection(client, "Activity", activity.id, activity.schema, activity);
+    if (JSON.stringify(activity.before) !== JSON.stringify(activity.after)) await this.#recordProjectActivityNotifications(client, activity);
     return activity;
   }
 
@@ -4578,25 +4579,34 @@ export class PostgresDatabase implements
       activity.actor.localAccountId, JSON.stringify(activity.cause), activity.occurredAt, JSON.stringify(activity.before), JSON.stringify(activity.after)]);
     await this.#recordPortableProjection(client, "Activity", activity.id, activity.schema, activity);
     if (activity.action !== "automation_execution_failed" && JSON.stringify(activity.before) !== JSON.stringify(activity.after)) {
-      await this.#recordFollowedProjectNotifications(client, activity);
+      await this.#recordProjectActivityNotifications(client, activity);
     }
   }
 
-  async #recordFollowedProjectNotifications(client: PoolClient, activity: ActivityRecord): Promise<void> {
+  async #recordProjectActivityNotifications(client: PoolClient, activity: ActivityRecord): Promise<void> {
+    await this.#ensureNoteSchema(client);
     await this.#ensureNotificationSchema(client);
-    const scope = await client.query<any>(`SELECT task.project_id, account.id AS member_id,
+    const scope = await client.query<any>(`WITH activity_scope AS (
+      SELECT COALESCE(task.project_id, note.project_id, location_note.project_id, link_note.project_id) AS project_id
+      FROM (SELECT 1) seed
+      LEFT JOIN stash_tasks task ON $2='Task' AND task.id=$1
+      LEFT JOIN stash_notes note ON $2='Note' AND note.id=$1
+      LEFT JOIN stash_notes location_note ON $2='NoteLocation' AND location_note.id=$1
+      LEFT JOIN stash_note_links link ON $2='NoteLink' AND link.id=$1
+      LEFT JOIN stash_notes link_note ON link_note.id=link.source_note_id
+    ) SELECT scope.project_id, account.id AS member_id,
       COALESCE(preference.activity,'followed') AS activity_preference, COALESCE(preference.digest,'off') AS digest,
       preference.quiet_start, preference.quiet_end, preference.quiet_time_zone
-      FROM stash_tasks task JOIN stash_projects project ON project.id=task.project_id
+      FROM activity_scope scope JOIN stash_projects project ON project.id=scope.project_id
       JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
       JOIN stash_accounts account ON (workspace.owner_type='personal' AND account.id=workspace.personal_owner_id) OR
         (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
           WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=account.id))
       LEFT JOIN stash_notification_preferences preference ON preference.project_id=project.id AND preference.member_id=account.id
       LEFT JOIN stash_project_follows follow ON follow.project_id=project.id AND follow.member_id=account.id
-      WHERE task.id=$1 AND account.id<>$2 AND COALESCE(preference.activity,'followed')<>'muted'
+      WHERE account.id<>$3 AND COALESCE(preference.activity,'followed')<>'muted'
         AND (COALESCE(preference.activity,'followed')='all' OR follow.member_id IS NOT NULL)
-      ORDER BY account.id`, [activity.object.id, activity.actor.localAccountId]);
+      ORDER BY account.id`, [activity.object.id, activity.object.kind, activity.actor.localAccountId]);
     for (const recipient of scope.rows) {
       const preferences: NotificationPreferences = { activity: recipient.activity_preference, digest: recipient.digest,
         ...(recipient.quiet_start ? { quietHours: { start: recipient.quiet_start, end: recipient.quiet_end, timeZone: recipient.quiet_time_zone } } : {}) };
@@ -4604,7 +4614,7 @@ export class PostgresDatabase implements
         (id,member_id,workspace_id,project_id,trigger,summary,activity,created_at,delivery)
         VALUES($1,$2,$3,$4,'followed_change',$5,$6::jsonb,$7,$8)
         ON CONFLICT(member_id,activity_id,trigger) DO NOTHING`, [randomUUID(), recipient.member_id, activity.workspaceId,
-        recipient.project_id, `${activity.actor.displayName} changed a Task in this Project`, JSON.stringify(activity), activity.occurredAt,
+        recipient.project_id, `${activity.actor.displayName} changed ${activity.object.kind === "Note" ? "a Note" : activity.object.kind === "Task" ? "a Task" : "Project content"}`, JSON.stringify(activity), activity.occurredAt,
         notificationDeliveryMode(new Date(activity.occurredAt), preferences)]);
     }
   }
@@ -4697,7 +4707,7 @@ export class PostgresDatabase implements
       VALUES($1,$2,$3,$4,$5,$6,'member',$7,$8::jsonb,$9::jsonb)`,[activity.id,workspaceId,kind,objectId,action,memberId,
       activity.occurredAt,JSON.stringify(activity.before),JSON.stringify(activity.after)]);
     await this.#recordPortableProjection(client,"Activity",activity.id,activity.schema,activity);
-    if (kind === "Task") await this.#recordFollowedProjectNotifications(client, activity);
+    if (JSON.stringify(activity.before) !== JSON.stringify(activity.after)) await this.#recordProjectActivityNotifications(client, activity);
   }
 
   async loadNoteCollaboration(memberId: string, noteId: string): Promise<CollaborationSnapshot | undefined> {

@@ -45,6 +45,13 @@ export function createStashApiClient(options: StashApiClientOptions) {
       if (!response.ok) throw await apiError(response);
       return response.json() as Promise<T>;
     },
+    async put<T>(path: string, body: unknown): Promise<T> {
+      const response = await request(`${baseUrl}${path}`, { method: "PUT", credentials: "include",
+        headers: { ...(options.memberToken ? { authorization: `Bearer ${options.memberToken}` } : {}), "content-type": "application/json" },
+        body: JSON.stringify(body) });
+      if (!response.ok) throw await apiError(response);
+      return response.json() as Promise<T>;
+    },
   };
 }
 

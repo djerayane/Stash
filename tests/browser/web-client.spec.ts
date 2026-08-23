@@ -48,16 +48,19 @@ test("configures followed Project notifications by keyboard without accessibilit
   await installMemberSession(page);
   await page.emulateMedia({ reducedMotion: "reduce" });
   const projectId = "11111111-1111-4111-8111-111111111111";
-  let activity = "followed"; let followed = false;
+  let activity = "followed"; let digest = "off"; let followed = false; let loadFailures = 1;
   await page.route(`**/api/projects/${projectId}/notification-settings`, async (route) => {
-    if (route.request().method() === "PUT") activity = (await route.request().postDataJSON()).activity;
-    await route.fulfill({ json: { settings: { activity, digest: "off" } } });
+    if (route.request().method() === "GET" && loadFailures-- > 0) { await route.fulfill({ status: 503, json: { message: "Temporarily unavailable" } }); return; }
+    if (route.request().method() === "PUT") { const body = await route.request().postDataJSON(); activity = body.activity; digest = body.digest; }
+    await route.fulfill({ json: { settings: { activity, digest } } });
   });
   await page.route(`**/api/projects/${projectId}/follow`, async (route) => {
     if (route.request().method() === "PUT") followed = (await route.request().postDataJSON()).followed;
     await route.fulfill({ json: { followed } });
   });
   await page.goto(`/app/projects/${projectId}/notifications`);
+  const alert = page.getByRole("alert"); await expect(alert).toBeFocused();
+  await page.getByRole("button", { name: "Try again" }).focus(); await page.keyboard.press("Enter");
   await expect(page.getByRole("heading", { name: "Choose what reaches you." })).toBeVisible();
   const all = page.getByRole("radio", { name: /All Project Activity/ });
   await all.focus(); await page.keyboard.press("Space");
@@ -65,6 +68,9 @@ test("configures followed Project notifications by keyboard without accessibilit
   const follow = page.getByRole("checkbox", { name: /Follow this Project/ });
   await follow.focus(); await page.keyboard.press("Space");
   await expect(follow).toBeChecked();
+  await page.getByRole("combobox", { name: /Digest cadence/ }).selectOption("weekly");
+  await page.getByRole("checkbox", { name: /Quiet hours/ }).check();
+  await page.getByRole("button", { name: "Save preferences" }).focus(); await page.keyboard.press("Enter");
   await expect(page.getByText("Preferences saved.")).toBeVisible();
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 });

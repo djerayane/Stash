@@ -247,6 +247,20 @@ describe("Member notifications", () => {
     assert.equal(database.deliveries[0]?.summary, "Task planning changed", "a retry cannot replace immutable attribution or summary");
   });
 
+  it("delivers canonical Project-scoped Note and relationship Activity with preserved attribution", async () => {
+    database.deliveries.length = 0; database.preferences.clear(); database.follows.add(`${memberId}:${projectId}`);
+    const noteActivity: ActivityRecord = { ...activity, id: "21000000-0000-4000-8000-000000000001",
+      object: { kind: "Note", id: "22000000-0000-4000-8000-000000000001" }, action: "note_edited",
+      before: { revision: 1 }, after: { revision: 2 } };
+    const linkActivity: ActivityRecord = { ...activity, id: "21000000-0000-4000-8000-000000000002",
+      object: { kind: "NoteLink", id: "22000000-0000-4000-8000-000000000002" }, action: "note_link_repaired",
+      before: { target: "old" }, after: { target: "new" } };
+    assert.deepEqual(await service.publishProjectActivity(projectId, noteActivity, "Grace Hopper changed a Note"), { created: 1, suppressed: 0 });
+    assert.deepEqual(await service.publishProjectActivity(projectId, linkActivity, "Grace Hopper changed Project content"), { created: 1, suppressed: 0 });
+    assert.deepEqual(database.deliveries.map(({ activity: delivered }) => [delivered.object.kind, delivered.actor.displayName]),
+      [["Note", "Grace Hopper"], ["NoteLink", "Grace Hopper"]]);
+  });
+
   it("persists follow state through a running authenticated Instance", async () => {
     database.follows.clear();
     const saved = await request(`/api/projects/${projectId}/follow`, "PUT", { followed: true });

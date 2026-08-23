@@ -15,4 +15,12 @@
 .radio:focus-visible, .follow input:focus-visible { outline: 3px solid var(--stash-color-accent); outline-offset: 3px; }
 .status { min-height: 1.5rem; color: var(--stash-color-muted); }
 .error { color: var(--stash-color-danger); }
+.delivery { display: grid; gap: var(--stash-space-5); padding: var(--stash-space-5) var(--stash-space-2); }
+.delivery > label:first-child { display: grid; grid-template-columns: 1fr minmax(10rem, auto); gap: var(--stash-space-4); align-items: center; }
+.delivery select, .delivery input { min-height: 2.75rem; padding: .55rem .7rem; border: 1px solid var(--stash-border-subtle); border-radius: var(--stash-radius-sm); background: var(--stash-color-background); color: var(--stash-color-text); font: inherit; }
+.delivery fieldset { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--stash-space-4); border: 1px solid var(--stash-border-subtle); padding: var(--stash-space-4); }
+.delivery fieldset label { display: grid; gap: var(--stash-space-2); }
+.save, .error button { min-height: 2.8rem; padding: .7rem 1rem; border: 0; border-radius: var(--stash-radius-sm); background: var(--stash-color-text); color: var(--stash-color-background); font: inherit; font-weight: 720; cursor: pointer; }
+.error:focus { outline: 3px solid var(--stash-color-accent); outline-offset: 3px; }
+@media (max-width: 42rem) { .delivery fieldset { grid-template-columns: 1fr; } }
 @media (prefers-reduced-motion: no-preference) { .option, .follow { transition: background .18s ease; } }
