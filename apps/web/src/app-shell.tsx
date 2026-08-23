@@ -11,7 +11,7 @@ export type SessionState =
   | { readonly status: "loading" }
   | { readonly status: "anonymous" }
   | { readonly status: "error"; readonly message: string; readonly retry?: () => void }
-  | { readonly status: "authenticated"; readonly token?: string; readonly member: { readonly name: string; readonly email: string }; readonly workspace: { readonly name: string }; readonly capabilities: readonly string[] };
+  | { readonly status: "authenticated"; readonly token?: string; readonly member: { readonly id: string; readonly name: string; readonly email: string }; readonly workspace: { readonly name: string }; readonly capabilities: readonly string[] };
 
 interface AppShellProps { readonly session?: SessionState }
 
@@ -135,7 +135,7 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
     <div className={styles.workspace}>
       <header className={styles.topbar}><div className={styles.searchPreview}><Icon name="search" /><span>Search coming soon</span></div><Link className={styles.compactCreate} to="/app/notes/new"><Icon name="plus" /><span>New note</span></Link></header>
       {/^\/app\/notes\/[^/]+$/.test(location.pathname) && location.pathname !== "/app/notes/new"
-        ? <NoteEditor noteId={decodeURIComponent(location.pathname.split("/")[3]!)} token={session.token ?? ""} />
+        ? <NoteEditor noteId={decodeURIComponent(location.pathname.split("/")[3]!)} memberId={session.member.id} token={session.token ?? ""} />
         : <main id="workspace-content" className={styles.content} ref={mainRef} tabIndex={-1}>
         <Routes>
           <Route path="/app" element={<EmptyHome />} />

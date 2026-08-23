@@ -20,7 +20,7 @@ gsap.registerPlugin(useGSAP);
 
 interface Note { id: string; content: string; document: NoteDocument; revision: number }
 interface Snapshot { sequence: number; update: string; updatedAt: string; updatedByMemberId: string; access: "edit" | "read" }
-interface NoteEditorProps { noteId: string; fetcher?: typeof fetch; token?: string }
+interface NoteEditorProps { noteId: string; memberId: string; fetcher?: typeof fetch; token?: string }
 
 const blockIdentity = (document: Y.Doc) => Extension.create({
   name: "blockIdentity",
@@ -95,10 +95,10 @@ export function createSerializedSynchronization(run: () => Promise<void>): () =>
 }
 
 export function NoteEditor(props: NoteEditorProps) {
-  return <NoteEditorDocument key={props.noteId} {...props} />;
+  return <NoteEditorDocument key={`${props.memberId}:${props.noteId}`} {...props} />;
 }
 
-function NoteEditorDocument({ noteId, fetcher = globalThis.fetch, token = localStorage.getItem("stash.memberToken") ?? "" }: NoteEditorProps) {
+function NoteEditorDocument({ noteId, memberId, fetcher = globalThis.fetch, token = localStorage.getItem("stash.memberToken") ?? "" }: NoteEditorProps) {
   const [status, setStatus] = useState("Loading collaborative document");
   const [error, setError] = useState("");
   const [, refreshToolbar] = useState(0);
@@ -111,12 +111,13 @@ function NoteEditorDocument({ noteId, fetcher = globalThis.fetch, token = localS
   const statusRef = useRef<HTMLParagraphElement>(null);
   const unavailableRef = useRef<HTMLDivElement>(null);
   const headers = useMemo(() => ({ authorization: `Bearer ${token}` }), [token]);
-  const ydoc = useMemo(() => new Y.Doc(), [noteId]);
-  const note = useQuery({ queryKey: ["note", noteId], queryFn: async () => {
+  const pendingUpdateKey = `stash.pending-note-update:${memberId}:${noteId}`;
+  const ydoc = useMemo(() => new Y.Doc(), [memberId, noteId]);
+  const note = useQuery({ queryKey: ["note", memberId, noteId], queryFn: async () => {
     const response = await fetcher(`/api/notes/${encodeURIComponent(noteId)}`, { headers });
     if (!response.ok) throw new Error("The Note could not be loaded."); return response.json() as Promise<Note>;
   }});
-  const collaboration = useQuery({ queryKey: ["note-collaboration", noteId], queryFn: async () => {
+  const collaboration = useQuery({ queryKey: ["note-collaboration", memberId, noteId], queryFn: async () => {
     const response = await fetcher(`/api/notes/${encodeURIComponent(noteId)}/collaboration`, { headers });
     if (!response.ok) throw new Error("Collaboration could not be started."); return response.json() as Promise<Snapshot>;
   }});
@@ -125,7 +126,7 @@ function NoteEditorDocument({ noteId, fetcher = globalThis.fetch, token = localS
     persistedVector.current = applyAcknowledgedUpdate(ydoc, decode(collaboration.data.update));
     shouldSeedCanonicalDocument.current = ydoc.getXmlFragment("default").length === 0;
     try {
-      const pending = readPendingUpdate(`stash.pending-note-update:${noteId}`);
+      const pending = readPendingUpdate(pendingUpdateKey);
       if (pending && collaboration.data.access === "edit") { Y.applyUpdate(ydoc, decode(pending)); restoredPendingUpdate.current = true; }
     } catch { /* Browser storage may be disabled; the live Y.Doc still retains this session's contribution. */ }
   }
@@ -162,7 +163,7 @@ function NoteEditorDocument({ noteId, fetcher = globalThis.fetch, token = localS
     if (!canEditRef.current) return;
     const update = Y.encodeStateAsUpdate(ydoc, persistedVector.current);
     if (update.byteLength <= 2) return;
-    const key = `stash.pending-note-update:${noteId}`;
+    const key = pendingUpdateKey;
     setStatus("Saving changes");
     const encodedUpdate = encodeUpdateBase64(update);
     const storedOnDevice = storePendingUpdate(key, encodedUpdate);
@@ -175,7 +176,7 @@ function NoteEditorDocument({ noteId, fetcher = globalThis.fetch, token = localS
       removePendingUpdate(key); setStatus("All changes saved"); setError("");
     } catch (cause) { setStatus(storedOnDevice ? "Changes kept on this device" : "Changes remain only in this open tab");
       setError(cause instanceof Error ? cause.message : "The update could not be saved."); }
-  }, [fetcher, headers, noteId, ydoc]);
+  }, [fetcher, headers, noteId, pendingUpdateKey, ydoc]);
 
   const synchronize = useMemo(() => createSerializedSynchronization(performSynchronization), [performSynchronization]);
 
@@ -193,10 +194,10 @@ function NoteEditorDocument({ noteId, fetcher = globalThis.fetch, token = localS
     const refresh = window.setInterval(() => { void fetcher(`/api/notes/${encodeURIComponent(noteId)}/collaboration`, { headers })
       .then(async (response) => { if (!response.ok) return; const snapshot = await response.json() as Snapshot;
         persistedVector.current = applyAcknowledgedUpdate(ydoc, decode(snapshot.update));
-        if (canEdit && readPendingUpdate(`stash.pending-note-update:${noteId}`)) void synchronize(); })
+        if (canEdit && readPendingUpdate(pendingUpdateKey)) void synchronize(); })
       .catch(() => undefined); }, 2_000);
     return () => clearInterval(refresh);
-  }, [canEdit, collaboration.data, fetcher, headers, noteId, synchronize, ydoc]);
+  }, [canEdit, collaboration.data, fetcher, headers, noteId, pendingUpdateKey, synchronize, ydoc]);
 
   const isUnavailable = note.isError || collaboration.isError;
   useEffect(() => {

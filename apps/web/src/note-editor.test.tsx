@@ -53,7 +53,7 @@ it("loads an authorized collaborative Note and exposes keyboard-operable rich-te
     ] } }));
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(<QueryClientProvider client={client}><NoteEditor noteId="note" fetcher={fetcher} token="member-token" /></QueryClientProvider>);
+  render(<QueryClientProvider client={client}><NoteEditor noteId="note" memberId="member" fetcher={fetcher} token="member-token" /></QueryClientProvider>);
   expect(await screen.findByRole("heading", { name: "Release plan" })).toBeInTheDocument();
   await waitFor(() => expect(screen.getByRole("textbox", { name: "Note content" })).toHaveTextContent("Preserve this Block"));
   expect(screen.getByRole("toolbar", { name: "Text formatting" })).toBeInTheDocument();
@@ -67,7 +67,7 @@ it("loads an authorized collaborative Note and exposes keyboard-operable rich-te
 });
 
 it("presents an authorized read-only Note without interactive editing or pending writes", async () => {
-  storage.set("stash.pending-note-update:note", collaborativeUpdate("Unsent edit", "11111111-1111-4111-8111-111111111111"));
+  storage.set("stash.pending-note-update:guest:note", collaborativeUpdate("Unsent edit", "11111111-1111-4111-8111-111111111111"));
   const fetcher = vi.fn<typeof fetch>(async (input) => {
     const url = String(input);
     if (url.endsWith("/collaboration")) return new Response(JSON.stringify({ sequence: 0,
@@ -77,14 +77,14 @@ it("presents an authorized read-only Note without interactive editing or pending
       document: { type: "doc", blocks: [{ type: "paragraph", blockKey: "22222222-2222-4222-8222-222222222222", content: [{ text: "Published content" }] }] } }));
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(<QueryClientProvider client={client}><NoteEditor noteId="note" fetcher={fetcher} token="guest-token" /></QueryClientProvider>);
+  render(<QueryClientProvider client={client}><NoteEditor noteId="note" memberId="guest" fetcher={fetcher} token="guest-token" /></QueryClientProvider>);
   const editor = await screen.findByRole("textbox", { name: "Note content" });
   await waitFor(() => expect(editor).toHaveTextContent("Published content"));
   expect(editor).toHaveAttribute("contenteditable", "false");
   expect(editor).toHaveAttribute("aria-readonly", "true");
   expect(screen.getByRole("status")).toHaveTextContent("Read-only Note");
   for (const control of screen.getAllByRole("button")) expect(control).toBeDisabled();
-  expect(storage.get("stash.pending-note-update:note")).toBeDefined();
+  expect(storage.get("stash.pending-note-update:guest:note")).toBeDefined();
   expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(0);
 });
 
@@ -103,16 +103,51 @@ it("loads the authoritative collaboration snapshot when navigating directly betw
     ] } }));
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const view = render(<QueryClientProvider client={client}><NoteEditor noteId="first" fetcher={fetcher} token="token" /></QueryClientProvider>);
+  const view = render(<QueryClientProvider client={client}><NoteEditor noteId="first" memberId="member" fetcher={fetcher} token="token" /></QueryClientProvider>);
   await waitFor(() => expect(screen.getByRole("textbox", { name: "Note content" })).toHaveTextContent("Authoritative first"));
-  view.rerender(<QueryClientProvider client={client}><NoteEditor noteId="second" fetcher={fetcher} token="token" /></QueryClientProvider>);
+  view.rerender(<QueryClientProvider client={client}><NoteEditor noteId="second" memberId="member" fetcher={fetcher} token="token" /></QueryClientProvider>);
   await waitFor(() => expect(screen.getByRole("textbox", { name: "Note content" })).toHaveTextContent("Authoritative second"));
   expect(screen.getByRole("textbox", { name: "Note content" })).not.toHaveTextContent("Canonical second");
 });
 
+it("isolates cached documents and offline contributions when the authenticated Member changes", async () => {
+  const firstPending = collaborativeUpdate("First Member offline contribution", "33333333-3333-4333-8333-333333333333");
+  localStorage.setItem("stash.pending-note-update:first-member:note", firstPending);
+  const posts: Array<{ authorization: string; update: string }> = [];
+  let releaseSecond!: () => void;
+  const secondMemberResponse = new Promise<void>((resolve) => { releaseSecond = resolve; });
+  const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+    const authorization = String((init?.headers as Record<string, string> | undefined)?.authorization ?? "");
+    const member = authorization.includes("second-token") ? "second" : "first";
+    if (init?.method === "POST") {
+      const update = (JSON.parse(String(init.body)) as { update: string }).update;
+      posts.push({ authorization, update });
+      if (member === "first") throw new TypeError("revoked session");
+      return new Response(JSON.stringify({ sequence: 1, update, updatedAt: new Date(0).toISOString(), updatedByMemberId: `${member}-member`, access: "edit" }));
+    }
+    if (member === "second") await secondMemberResponse;
+    if (String(input).endsWith("/collaboration")) return new Response(JSON.stringify({ sequence: 0,
+      update: collaborativeUpdate(`${member} authoritative content`, member === "first" ? "11111111-1111-4111-8111-111111111111" : "22222222-2222-4222-8222-222222222222"),
+      updatedAt: new Date(0).toISOString(), updatedByMemberId: `${member}-member`, access: "edit" }));
+    return new Response(JSON.stringify({ id: "note", revision: 1, content: `${member} title`, document: { type: "doc", blocks: [
+      { type: "paragraph", blockKey: member === "first" ? "11111111-1111-4111-8111-111111111111" : "22222222-2222-4222-8222-222222222222",
+        content: [{ text: `${member} canonical content` }] },
+    ] } }));
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(<QueryClientProvider client={client}><NoteEditor noteId="note" memberId="first-member" fetcher={fetcher} token="first-token" /></QueryClientProvider>);
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "Note content" })).toHaveTextContent("First Member offline contribution"));
+  view.rerender(<QueryClientProvider client={client}><NoteEditor noteId="note" memberId="second-member" fetcher={fetcher} token="second-token" /></QueryClientProvider>);
+  expect(screen.queryByText(/first authoritative content|First Member offline contribution/)).not.toBeInTheDocument();
+  releaseSecond();
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "Note content" })).toHaveTextContent("second authoritative content"));
+  expect(posts.filter((post) => post.authorization === "Bearer second-token" && post.update === firstPending)).toHaveLength(0);
+  expect(localStorage.getItem("stash.pending-note-update:first-member:note")).toBe(firstPending);
+});
+
 it("replays a restored offline update as soon as collaboration reconnects", async () => {
   const pendingDocument = new Y.Doc(); pendingDocument.getText("offline").insert(0, "Kept contribution");
-  localStorage.setItem("stash.pending-note-update:note", btoa(String.fromCharCode(...Y.encodeStateAsUpdate(pendingDocument))));
+  localStorage.setItem("stash.pending-note-update:member:note", btoa(String.fromCharCode(...Y.encodeStateAsUpdate(pendingDocument))));
   const fetcher = vi.fn<typeof fetch>(async (input, init) => {
     const url = String(input);
     if (init?.method === "POST") {
@@ -123,9 +158,9 @@ it("replays a restored offline update as soon as collaboration reconnects", asyn
     return new Response(JSON.stringify({ id: "note", revision: 1, content: "Offline plan", document: { type: "doc", blocks: [{ type: "paragraph", blockKey: "key", content: [{ text: "Draft" }] }] } }));
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(<QueryClientProvider client={client}><NoteEditor noteId="note" fetcher={fetcher} token="token" /></QueryClientProvider>);
+  render(<QueryClientProvider client={client}><NoteEditor noteId="note" memberId="member" fetcher={fetcher} token="token" /></QueryClientProvider>);
   await waitFor(() => expect(fetcher.mock.calls.some(([, init]) => init?.method === "POST")).toBe(true));
-  await waitFor(() => expect(localStorage.getItem("stash.pending-note-update:note")).toBeNull());
+  await waitFor(() => expect(localStorage.getItem("stash.pending-note-update:member:note")).toBeNull());
 });
 
 it("keeps unsaved Yjs updates locally and offers recovery when the Instance is offline", async () => {
@@ -137,11 +172,11 @@ it("keeps unsaved Yjs updates locally and offers recovery when the Instance is o
     return new Response(JSON.stringify({ id: "note", revision: 1, content: "Offline plan", document: { type: "doc", blocks: [{ type: "paragraph", blockKey: "key", content: [{ text: "Draft" }] }] } }));
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(<QueryClientProvider client={client}><NoteEditor noteId="note" fetcher={fetcher} token="token" /></QueryClientProvider>);
+  render(<QueryClientProvider client={client}><NoteEditor noteId="note" memberId="member" fetcher={fetcher} token="token" /></QueryClientProvider>);
   await vi.waitFor(() => expect(screen.getByRole("textbox", { name: "Note content" })).toHaveTextContent("Draft"));
   await vi.advanceTimersByTimeAsync(400);
   await vi.waitFor(() => expect(screen.getByRole("button", { name: "Retry saving" })).toBeInTheDocument());
-  expect(localStorage.getItem("stash.pending-note-update:note")).toBeTruthy();
+  expect(localStorage.getItem("stash.pending-note-update:member:note")).toBeTruthy();
   vi.useRealTimers();
 });
 
@@ -175,7 +210,7 @@ it("reports tab-only recovery and still sends changes when browser storage is un
     return new Response(JSON.stringify({ id: "note", revision: 1, content: "Online plan", document: { type: "doc", blocks: [{ type: "paragraph", blockKey: "key", content: [{ text: "Draft" }] }] } }));
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(<QueryClientProvider client={client}><NoteEditor noteId="note" fetcher={fetcher} token="token" /></QueryClientProvider>);
+  render(<QueryClientProvider client={client}><NoteEditor noteId="note" memberId="member" fetcher={fetcher} token="token" /></QueryClientProvider>);
   await vi.waitFor(() => expect(screen.getByRole("textbox", { name: "Note content" })).toHaveTextContent("Draft"));
   await vi.advanceTimersByTimeAsync(400);
   await vi.waitFor(() => expect(fetcher.mock.calls.some(([, init]) => init?.method === "POST")).toBe(true));

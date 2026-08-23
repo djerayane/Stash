@@ -5,10 +5,13 @@ const noteId = "99999999-9999-4999-8999-999999999999";
 const secondNoteId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const richNoteId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const emptyCodeNoteId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+const principalBoundaryNoteId = "12121212-1212-4212-8212-121212121212";
 const memberSession = JSON.stringify({ token: "browser-acceptance-member-token" });
 
 test.beforeEach(async ({ page }) => {
-  await page.addInitScript((session) => localStorage.setItem("stash.member-session", session), memberSession);
+  await page.addInitScript((session) => {
+    if (!localStorage.getItem("stash.member-session")) localStorage.setItem("stash.member-session", session);
+  }, memberSession);
 });
 
 test("edits a stable linked Block with the collaborative React editor", async ({ page }) => {
@@ -97,6 +100,37 @@ test("two real editors merge concurrent contributions without changing linked Bl
   await expect(firstBlock).toContainText("First", { timeout: 6_000 }); await expect(firstBlock).toContainText("Second", { timeout: 6_000 });
   await expect(firstBlock).toHaveAttribute("data-block-id", "66666666-6666-4666-8666-666666666666");
   await firstContext.close(); await secondContext.close();
+});
+
+test("a replacement Member cannot see or submit a revoked Member's offline contribution", async ({ page }) => {
+  await page.route(`**/api/notes/${principalBoundaryNoteId}/collaboration`, async (route) => {
+    if (route.request().method() === "POST" && route.request().headers().authorization === "Bearer browser-acceptance-member-token")
+      await route.abort("failed");
+    else await route.continue();
+  });
+  await page.goto(`/app/notes/${principalBoundaryNoteId}`);
+  const firstEditor = page.getByRole("textbox", { name: "Note content" });
+  await firstEditor.click(); await page.keyboard.press("End"); await page.keyboard.type(" revoked offline contribution");
+  await expect(page.getByRole("status")).toHaveText("Changes kept on this device");
+  const firstPendingKey = `stash.pending-note-update:browser-member:${principalBoundaryNoteId}`;
+  await expect.poll(() => page.evaluate((key) => localStorage.getItem(key), firstPendingKey)).not.toBeNull();
+
+  await page.evaluate(() => localStorage.setItem("stash.member-session", JSON.stringify({ token: "browser-acceptance-second-member-token" })));
+  await page.reload();
+  await expect(page.getByText("Second Browser Member", { exact: true })).toBeVisible();
+  const secondEditor = page.getByRole("textbox", { name: "Note content" });
+  await expect(secondEditor).toContainText("Principal boundary seed");
+  await expect(secondEditor).not.toContainText("revoked offline contribution");
+  await expect.poll(() => page.evaluate((key) => localStorage.getItem(key), firstPendingKey)).not.toBeNull();
+  const secondPersisted = page.waitForResponse((response) => response.request().method() === "POST"
+    && response.request().headers().authorization === "Bearer browser-acceptance-second-member-token");
+  await secondEditor.click(); await page.keyboard.press("End"); await page.keyboard.type(" second Member contribution");
+  await secondPersisted;
+  await expect(page.getByRole("status")).toHaveText("All changes saved");
+  const snapshot = await page.evaluate(async ({ id }) => (await fetch(`/api/notes/${id}/collaboration`, {
+    headers: { authorization: "Bearer browser-acceptance-second-member-token" },
+  })).json(), { id: principalBoundaryNoteId }) as { updatedByMemberId: string };
+  expect(snapshot.updatedByMemberId).toBe("browser-second-member");
 });
 
 test("the collaborative editor is keyboard operable and axe-clean @a11y", async ({ page }) => {
