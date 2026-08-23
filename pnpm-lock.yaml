@@ -230,6 +230,16 @@ importers:
         version: 3.2.7(@types/node@24.13.3)(jsdom@29.1.1)(lightningcss@1.33.0)(terser@5.50.0)(tsx@4.23.12)(yaml@2.9.0)
 
   packages/sync:
+    dependencies:
+      '@stash/api-client':
+        specifier: workspace:*
+        version: link:../api-client
+      '@stash/domain-types':
+        specifier: workspace:*
+        version: link:../domain-types
+      '@stash/validation':
+        specifier: workspace:*
+        version: link:../validation
     devDependencies:
       '@types/node':
         specifier: ^24.3.0

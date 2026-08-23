@@ -5,7 +5,7 @@ import { AudioModule, RecordingPresets, setAudioModeAsync, useAudioRecorder, use
 import { useEffect, useRef, useState } from "react";
 import { Text, View } from "react-native";
 
-import type { MobileCapture } from "@stash/sync";
+import type { MobileCapture } from "@stash/domain-types";
 import { NativeActionButton } from "@/components/native-controls";
 import { colors } from "@/theme/colors";
 import { MAX_VOICE_DURATION_SECONDS, readBoundedOriginal } from "@/src/media-input";

@@ -1,14 +1,20 @@
 import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
 import test from "node:test";
+import type { RichTextBlock, RichTextMark, RichTextSpan } from "@stash/sync";
 
 const root = new URL("../", import.meta.url);
+
+const compatibilityMark: RichTextMark = "bold";
+const compatibilitySpan: RichTextSpan = { text: "Shared contract", marks: [compatibilityMark] };
+const compatibilityBlock: RichTextBlock = { type: "paragraph", content: [compatibilitySpan] };
 
 async function json(path: string) {
   return JSON.parse(await readFile(new URL(path, root), "utf8")) as Record<string, unknown>;
 }
 
 test("the approved clients and focused shared packages form a pnpm workspace", async () => {
+  assert.equal(compatibilityBlock.content[0]?.text, "Shared contract");
   const workspace = await readFile(new URL("pnpm-workspace.yaml", root), "utf8");
   assert.match(workspace, /apps\/\*/);
   assert.match(workspace, /packages\/\*/);
@@ -29,11 +35,19 @@ test("the approved clients and focused shared packages form a pnpm workspace", a
   assert.equal(typeof (web.devDependencies as Record<string, string>).vite, "string");
 
   const mobile = await json("apps/mobile/package.json");
-  assert.equal(typeof (mobile.dependencies as Record<string, string>).expo, "string");
+  const mobileDependencies = mobile.dependencies as Record<string, string>;
+  assert.equal(typeof mobileDependencies.expo, "string");
+  for (const name of ["api-client", "domain-types", "validation", "sync"]) {
+    assert.equal(mobileDependencies[`@stash/${name}`], "workspace:*", `mobile must consume @stash/${name} through pnpm`);
+  }
 
   for (const name of ["domain-types", "api-client", "validation", "sync", "tokens"]) {
     const manifest = await json(`packages/${name}/package.json`);
     assert.equal(typeof manifest.exports, "object", `${name} must publish an explicit API`);
+    const dependencies = { ...(manifest.dependencies as Record<string, string> | undefined),
+      ...(manifest.devDependencies as Record<string, string> | undefined) };
+    assert.equal(dependencies.react, undefined, `${name} must remain independent of React`);
+    assert.equal(dependencies["react-dom"], undefined, `${name} must remain independent of React DOM`);
   }
 
   await assert.rejects(access(new URL("packages/ui/package.json", root)));

@@ -6,8 +6,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppState, Pressable, ScrollView, Text, TextInput, View, useColorScheme } from "react-native";
 
 import { MobileCaptureClient } from "@stash/sync";
+import type { MobileCaptureOptions } from "@stash/domain-types";
 import { SecureMobileCaptureStore } from "../src/secure-mobile-store";
-import type { MobileCaptureOptions } from "@stash/sync";
 import { NativeActionButton, NativeToggle } from "@/components/native-controls";
 import { NativeChoice } from "@/components/native-choice";
 import { StatusFeedback } from "@/components/status-feedback";

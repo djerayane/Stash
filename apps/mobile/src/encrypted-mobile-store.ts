@@ -1,4 +1,5 @@
-import type { EncryptedMobileCaptureStore, IncomingShareDelivery, MobileCapture, MobileCaptureOptions, MobileCapturePairing, MobileSyncMutation } from "@stash/sync";
+import type { IncomingShareDelivery, MobileCapture, MobileCaptureOptions, MobileCapturePairing, MobileSyncMutation } from "@stash/domain-types";
+import type { EncryptedMobileCaptureStore } from "@stash/sync";
 
 export interface MobileCipher { encrypt(plaintext: string): Promise<string>; decrypt(ciphertext: string): Promise<string> }
 export interface CiphertextStateRepository { read(key: string): Promise<string | undefined>; write(key: string, ciphertext: string): Promise<void> }

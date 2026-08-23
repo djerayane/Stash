@@ -1,81 +1,14 @@
-export type RichTextMark = "bold" | "italic" | "code";
-export interface RichTextSpan { text: string; marks?: RichTextMark[]; href?: string }
-export type RichTextBlock =
-  | { type: "paragraph" | "quote" | "bullet"; blockKey?: string; id?: string; content: RichTextSpan[] }
-  | { type: "heading"; level: 1 | 2 | 3; blockKey?: string; id?: string; content: RichTextSpan[] }
-  | { type: "check"; checked: boolean; blockKey?: string; id?: string; content: RichTextSpan[] }
-  | { type: "code"; language?: string; blockKey?: string; id?: string; text: string };
-export type NoteEditOperation =
-  | { id: string; type: "replace_block"; blockKey: string; block: RichTextBlock }
-  | { id: string; type: "insert_block"; blockKey: string; afterBlockKey: string | null; block: RichTextBlock }
-  | { id: string; type: "delete_block"; blockKey: string };
-export interface TaskPlanningUpdate {
-  title?: string;
-  assigneeIds?: string[];
-  priority?: "none" | "low" | "medium" | "high" | "urgent";
-  labelNames?: string[];
-  linkedNoteIds?: string[];
-  dependencies?: Array<{ taskId: string; type: "depends_on" | "required_by" }>;
-  developmentLinks?: Array<{ provider: string; url: string; kind: "branch" | "commit" | "pull_request" }>;
-  statusId?: string;
-  dueDate?: string | null;
-  estimate?: number | null;
-}
+import { createMobileProtocolClient } from "@stash/api-client";
+import type {
+  IncomingShareDelivery, MobileCapture, MobileCaptureOptions, MobileCapturePairing, MobileSyncMutation,
+  MobileSyncResult, NoteEditOperation, TaskPlanningUpdate,
+} from "@stash/domain-types";
+import { canonicalUuid, isUuid, validMobilePairingOrigin, validPortableFilename } from "@stash/validation";
 
-export interface MobileCapturePairing {
-  instanceUrl: string;
-  memberToken: string;
-  workspaceId: string;
-  memberId?: string;
-}
-
-export interface MobileCaptureOptions {
-  projects: { id: string; name: string }[];
-  tags: string[];
-  reminders: { id: string; label: string; offsetMinutes: number }[];
-}
-
-export interface MobileCapture {
-  id: string;
-  kind: "text" | "checklist" | "photo" | "file" | "voice";
-  content: string;
-  checklist?: { text: string; checked: boolean }[];
-  projectId?: string;
-  tags?: string[];
-  reminder?: { at: string };
-  createdAt: string;
-  origin?: { instanceUrl: string; workspaceId: string; memberId?: string };
-  attempts: number;
-  nextRetryAt?: string;
-  lastError?: string;
-  source?: "app" | "share_sheet" | "widget";
-  attachment?: {
-    filename: string;
-    contentType: string;
-    base64: string;
-    remote?: { id: string; portableLink: string };
-  };
-}
-
-interface MobileSyncMutationBase {
-  id: string;
-  origin: { instanceUrl: string; workspaceId: string; memberId: string };
-  attempts: number;
-  nextRetryAt?: string;
-  lastError?: string;
-}
-
-export type MobileSyncMutation = MobileSyncMutationBase & (
-  | { kind: "note_edit"; noteId: string; baseRevision: number; operations: NoteEditOperation[] }
-  | { kind: "task_edit"; projectId: string; taskKey: string; baseRevision: number; changes: TaskPlanningUpdate }
-);
-
-export interface IncomingShareDelivery {
-  id: string;
-  payload: { value: string; shareType: string; mimeType?: string };
-  status?: "retry_pending" | "quarantined";
-  lastError?: string;
-}
+export type {
+  IncomingShareDelivery, MobileCapture, MobileCaptureOptions, MobileCapturePairing, MobileSyncMutation,
+  MobileSyncResult, NoteEditOperation, RichTextBlock, RichTextMark, RichTextSpan, TaskPlanningUpdate,
+} from "@stash/domain-types";
 
 export interface EncryptedMobileCaptureStore {
   loadPairing(): Promise<MobileCapturePairing | undefined>;
@@ -96,12 +29,6 @@ export interface EncryptedMobileCaptureStore {
 }
 
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
-
-export type MobileSyncResult =
-  | { status: "synced"; count: number }
-  | { status: "offline" | "retry_pending"; count: number }
-  | { status: "cancelled"; count: number }
-  | { status: "attention_required"; count: number; error: string; retryPending?: boolean };
 
 export class LegacyRecoveryRequired extends Error {
   constructor() { super("Export the legacy captures before replacing this pairing."); this.name = "LegacyRecoveryRequired"; }
@@ -127,21 +54,16 @@ export class MobileCaptureClient {
   async pair(pairing: MobileCapturePairing, signal?: AbortSignal, options: { replaceLegacy?: boolean } = {}): Promise<void> {
     const acknowledgedLegacyExport = options.replaceLegacy && this.#legacyExportAcknowledged;
     if (options.replaceLegacy) this.#legacyExportAcknowledged = false;
-    let url: URL;
-    try { url = new URL(pairing.instanceUrl); } catch { throw new Error("Instance URL must be a valid HTTPS origin."); }
-    const testLoopback = this.#allowInsecureInstanceForTest && url.protocol === "http:"
-      && (url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "::1");
-    if ((url.protocol !== "https:" && !testLoopback)
-      || url.username || url.password || url.origin !== url.href.replace(/\/$/, "")) {
+    if (!validMobilePairingOrigin(pairing.instanceUrl, this.#allowInsecureInstanceForTest)) {
       throw new Error("Instance URL must be a valid HTTPS origin.");
     }
+    const url = new URL(pairing.instanceUrl);
     if (!pairing.memberToken.trim() || !isUuid(pairing.workspaceId)) throw new Error("Pairing requires a Member token and Workspace.");
     const controller = this.#controller(signal);
     this.#refreshControllers.add(controller);
     try {
-      const response = await this.#fetch(`${url.origin}/api/mobile/v1/workspaces/${pairing.workspaceId}/capture-options`, {
-        headers: { authorization: `Bearer ${pairing.memberToken}` }, signal: controller.signal,
-      });
+      const response = await createMobileProtocolClient({ instanceUrl: url.origin, memberToken: pairing.memberToken,
+        fetch: this.#fetch }).captureOptions(pairing.workspaceId, controller.signal);
       const body = await response.json().catch(() => ({})) as MobileCaptureOptions & { memberId?: string; message?: string };
       if (!response.ok || !body.memberId) throw new Error(body.message ?? "The Member pairing could not be authenticated.");
       const previous = await this.#store.loadPairing();
@@ -246,9 +168,8 @@ export class MobileCaptureClient {
     try {
       const pairing = await this.#store.loadPairing();
       if (!pairing) throw new Error("Pair the app before refreshing capture options.");
-      const response = await this.#fetch(`${pairing.instanceUrl}/api/mobile/v1/workspaces/${pairing.workspaceId}/capture-options`, {
-        headers: { authorization: `Bearer ${pairing.memberToken}` }, signal: controller.signal,
-      });
+      const response = await createMobileProtocolClient({ instanceUrl: pairing.instanceUrl, memberToken: pairing.memberToken,
+        fetch: this.#fetch }).captureOptions(pairing.workspaceId, controller.signal);
       const body = await response.json().catch(() => ({})) as MobileCaptureOptions & { memberId?: string; message?: string };
       if (!response.ok) throw new Error(body.message ?? "Capture options could not be refreshed.");
       const options = { projects: body.projects, tags: body.tags, reminders: body.reminders };
@@ -359,6 +280,8 @@ export class MobileCaptureClient {
     const pairing = await this.#store.loadPairing();
     if (!pairing) return { status: "attention_required", count: 0, error: "not_paired" };
     if (!pairing.memberId) return { status: "attention_required", count: 0, error: "pairing_identity_unknown" };
+    const protocol = createMobileProtocolClient({ instanceUrl: pairing.instanceUrl, memberToken: pairing.memberToken,
+      fetch: this.#fetch });
     let count = 0;
     let attentionError: string | undefined;
     let retryPending = false;
@@ -373,13 +296,10 @@ export class MobileCaptureClient {
       let currentCapture = capture;
       try {
         if (currentCapture.attachment && !currentCapture.attachment.remote) {
-          const upload = await this.#fetch(`${pairing.instanceUrl}/api/workspaces/${pairing.workspaceId}/attachments`, {
-            method: "POST",
-            headers: { authorization: `Bearer ${pairing.memberToken}`, "content-type": currentCapture.attachment.contentType,
-              "x-stash-filename": encodePortableFilename(currentCapture.attachment.filename), "x-stash-source": "upload",
-              "x-stash-operation-key": currentCapture.id },
-            body: decodeBase64(currentCapture.attachment.base64), signal: controller.signal,
-          });
+          const upload = await protocol.uploadAttachment(pairing.workspaceId, {
+            captureId: currentCapture.id, filename: currentCapture.attachment.filename,
+            contentType: currentCapture.attachment.contentType, body: decodeBase64(currentCapture.attachment.base64),
+          }, controller.signal);
           const uploaded = await upload.json().catch(() => ({})) as { id?: string; portableLink?: string; error?: string; message?: string };
           if (!upload.ok || !uploaded.id || !uploaded.portableLink) {
             response = new Response(JSON.stringify(uploaded), { status: upload.status, headers: upload.headers });
@@ -391,12 +311,8 @@ export class MobileCaptureClient {
         }
         const noteContent = currentCapture.attachment?.remote
           ? `${currentCapture.content}\n\n${currentCapture.attachment.remote.portableLink}` : currentCapture.content;
-        response = await this.#fetch(`${pairing.instanceUrl}/api/mobile/v1/workspaces/${pairing.workspaceId}/captures`, {
-          method: "POST",
-          headers: { authorization: `Bearer ${pairing.memberToken}`, "content-type": "application/json" },
-          body: JSON.stringify(mobileProtocolPayload(currentCapture, noteContent)),
-          signal: controller.signal,
-        });
+        response = await protocol.createCapture(pairing.workspaceId,
+          mobileProtocolPayload(currentCapture, noteContent), controller.signal);
       } catch (error) {
         if (error instanceof UploadRejected) response = error.response;
         else {
@@ -425,17 +341,11 @@ export class MobileCaptureClient {
       if (mutation.nextRetryAt && Date.parse(mutation.nextRetryAt) > this.#now()) { retryPending = true; continue; }
       let response: Response;
       try {
-        const target = mutation.kind === "note_edit"
-          ? `${pairing.instanceUrl}/api/notes/${encodeURIComponent(mutation.noteId)}`
-          : `${pairing.instanceUrl}/api/projects/${encodeURIComponent(mutation.projectId)}/tasks/${encodeURIComponent(mutation.taskKey)}/edits`;
-        response = await this.#fetch(target, {
-          method: mutation.kind === "note_edit" ? "PUT" : "POST",
-          headers: { authorization: `Bearer ${pairing.memberToken}`, "content-type": "application/json" },
-          body: JSON.stringify(mutation.kind === "note_edit"
-            ? { baseRevision: mutation.baseRevision, operations: mutation.operations }
-            : { operationId: mutation.id, baseRevision: mutation.baseRevision, changes: mutation.changes }),
-          signal: controller.signal,
-        });
+        response = mutation.kind === "note_edit"
+          ? await protocol.applyNoteEdit(mutation.noteId,
+            { baseRevision: mutation.baseRevision, operations: mutation.operations }, controller.signal)
+          : await protocol.applyTaskEdit(mutation.projectId, mutation.taskKey,
+            { operationId: mutation.id, baseRevision: mutation.baseRevision, changes: mutation.changes }, controller.signal);
       } catch {
         if (controller.signal.aborted) return { status: "cancelled", count };
         if (attentionError) return { status: "attention_required", count, error: attentionError, retryPending: true };
@@ -486,10 +396,6 @@ function mobileProtocolPayload(capture: MobileCapture, content: string) {
   };
 }
 
-function validPortableFilename(value: string) {
-  return Boolean(value && value.length <= 255 && value === value.trim() && !/[\/\\\u0000-\u001f\u007f]/.test(value)
-    && !/[. ]$/.test(value) && value !== "." && value !== ".." && !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(value));
-}
 const supportedAttachmentType = /^(?:image\/(?:png|jpeg|gif|webp|heic|heif)|audio\/(?:mp4|m4a|mpeg|wav|x-wav|aac|3gpp|ogg)|application\/(?:pdf|octet-stream)|text\/plain)$/;
 function validBase64(value: string) {
   if (!value.length || !/^[A-Za-z0-9+/]+={0,2}$/.test(value) || value.length % 4 !== 0) return false;
@@ -502,7 +408,6 @@ function requireUuid(value: string): string {
   return value;
 }
 function decodeBase64(value: string) { const binary = atob(value); return Uint8Array.from(binary, (character) => character.charCodeAt(0)); }
-function encodePortableFilename(value: string) { return encodeURIComponent(value).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`); }
 
 function emptyOptions(): MobileCaptureOptions { return { projects: [], tags: [], reminders: [] }; }
 function pairingScope(pairing: MobileCapturePairing): string {
@@ -513,7 +418,6 @@ function pairingOrigin(pairing: MobileCapturePairing & { memberId: string }) {
     memberId: canonicalUuid(pairing.memberId) };
 }
 
-function canonicalUuid(value: string) { return isUuid(value) ? value.toLowerCase() : value; }
 function sameDestination(left: Pick<MobileCapturePairing, "instanceUrl" | "workspaceId">,
   right: Pick<MobileCapturePairing, "instanceUrl" | "workspaceId">) {
   return new URL(left.instanceUrl).origin === new URL(right.instanceUrl).origin
@@ -554,6 +458,4 @@ function retryDelay(retryAfter: string | null, attempts: number, now: number): n
   return Math.min(1_000 * 2 ** Math.max(0, attempts - 1), 60_000);
 }
 
-export function isUuid(value: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
-}
+export { isUuid } from "@stash/validation";

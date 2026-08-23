@@ -5,5 +5,10 @@
   "type": "module",
   "exports": { ".": { "types": "./src/index.ts", "default": "./dist/index.js" } },
   "scripts": { "check": "tsc --noEmit", "build": "tsc", "test": "vitest run --passWithNoTests" },
+  "dependencies": {
+    "@stash/api-client": "workspace:*",
+    "@stash/domain-types": "workspace:*",
+    "@stash/validation": "workspace:*"
+  },
   "devDependencies": { "@types/node": "^24.3.0", "typescript": "~5.9.2", "vitest": "^3.2.4" }
 }
