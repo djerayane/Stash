@@ -28,7 +28,7 @@ test("the approved clients and focused shared packages form a pnpm workspace", a
     "tests must build the sync runtime and its transitive workspace dependencies from a clean checkout",
   );
   const scripts = rootPackage.scripts as Record<string, string>;
-  assert.equal(scripts["build:shared"], "pnpm --filter @stash/sync... build");
+  assert.equal(scripts["build:shared"], "pnpm --filter @stash/sync... --filter @stash/rich-text... build");
   for (const entryPoint of ["unit", "integration", "browser", "a11y"]) {
     assert.equal(
       scripts[`pretest:${entryPoint}`],
@@ -54,7 +54,7 @@ test("the approved clients and focused shared packages form a pnpm workspace", a
     assert.equal(mobileDependencies[`@stash/${name}`], "workspace:*", `mobile must consume @stash/${name} through pnpm`);
   }
 
-  for (const name of ["domain-types", "api-client", "validation", "sync", "tokens"]) {
+  for (const name of ["domain-types", "api-client", "validation", "sync", "rich-text", "tokens"]) {
     const manifest = await json(`packages/${name}/package.json`);
     assert.equal(typeof manifest.exports, "object", `${name} must publish an explicit API`);
     const dependencies = { ...(manifest.dependencies as Record<string, string> | undefined),

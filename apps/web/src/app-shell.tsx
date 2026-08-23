@@ -5,12 +5,13 @@ import { useEffect, useRef, type ReactNode } from "react";
 import { Link, Navigate, NavLink, Route, Routes, useLocation } from "react-router";
 import styles from "./app-shell.module.css";
 import { DevelopmentSignalsRoute } from "./development-signals";
+import { NoteEditor } from "./note-editor";
 
 export type SessionState =
   | { readonly status: "loading" }
   | { readonly status: "anonymous" }
   | { readonly status: "error"; readonly message: string; readonly retry?: () => void }
-  | { readonly status: "authenticated"; readonly member: { readonly name: string; readonly email: string }; readonly workspace: { readonly name: string }; readonly capabilities: readonly string[] };
+  | { readonly status: "authenticated"; readonly token?: string; readonly member: { readonly id: string; readonly name: string; readonly email: string }; readonly workspace: { readonly name: string }; readonly capabilities: readonly string[] };
 
 interface AppShellProps { readonly session?: SessionState }
 
@@ -133,7 +134,9 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
     </aside>
     <div className={styles.workspace}>
       <header className={styles.topbar}><div className={styles.searchPreview}><Icon name="search" /><span>Search coming soon</span></div><Link className={styles.compactCreate} to="/app/notes/new"><Icon name="plus" /><span>New note</span></Link></header>
-      <main id="workspace-content" className={styles.content} ref={mainRef} tabIndex={-1}>
+      {/^\/app\/notes\/[^/]+$/.test(location.pathname) && location.pathname !== "/app/notes/new"
+        ? <NoteEditor noteId={decodeURIComponent(location.pathname.split("/")[3]!)} memberId={session.member.id} token={session.token ?? ""} />
+        : <main id="workspace-content" className={styles.content} ref={mainRef} tabIndex={-1}>
         <Routes>
           <Route path="/app" element={<EmptyHome />} />
           <Route path="/app/notes" element={<PlaceholderPage workspaceName={workspaceName} title="Notes" description="Ideas, decisions, and durable project knowledge." action="New note" actionTo="/app/notes/new" />} />
@@ -143,7 +146,7 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
           <Route path="/app/activity" element={<PlaceholderPage workspaceName={workspaceName} title="Activity" description="Meaningful changes, explained without unnecessary noise." action="Filter" />} />
           <Route path="*" element={<PlaceholderPage workspaceName={workspaceName} title="Not found" description="This Workspace route does not exist." action="Go home" actionTo="/app" />} />
         </Routes>
-      </main>
+      </main>}
     </div>
   </div>;
 }

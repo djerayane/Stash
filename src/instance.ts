@@ -64,6 +64,8 @@ import { notificationRoutes } from "./notification-routes.js";
 import type { NotificationService } from "./notifications.js";
 import { automationRoutes } from "./automation-routes.js";
 import type { AutomationService } from "./automations.js";
+import { noteCollaborationRoutes } from "./note-collaboration-routes.js";
+import type { NoteCollaborationService } from "./note-collaboration.js";
 
 export interface DatabaseProbe {
   verifyConnection(): Promise<void>;
@@ -91,6 +93,7 @@ export interface InstanceOptions {
   passwordAuth?: PasswordAuthService;
   workspaceProjects?: WorkspaceProjectService;
   notes?: NoteService;
+  noteCollaboration?: NoteCollaborationService;
   memberAccess?: MemberAccessResolver;
   organizationRoles?: OrganizationRoleService;
   memberLocalization?: MemberLocalizationService;
@@ -206,6 +209,7 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
     ...(options.organizationRoles ? [organizationRoleRoutes(options.organizationRoles, memberAccess)] : []),
     ...(options.invitations ? [invitationRoutes(options.invitations, memberAccess)] : []),
     ...(options.notes ? [noteRoutes(options.notes, memberAccess)] : []),
+    ...(options.noteCollaboration ? [noteCollaborationRoutes(options.noteCollaboration, memberAccess)] : []),
     ...(options.noteLinks ? [noteLinkRoutes(options.noteLinks, memberAccess)] : []),
     ...(options.tasks ? [taskRoutes(options.tasks, memberAccess)] : []),
     ...(options.projectWorkflows ? [projectWorkflowRoutes(options.projectWorkflows, memberAccess)] : []),

@@ -1,10 +1,57 @@
 import { fileURLToPath } from "node:url";
 
 import { startInstance } from "../src/instance.js";
+import { NoteCollaborationService, type CollaborationSnapshot } from "../src/note-collaboration.js";
+import * as Y from "yjs";
+import { collaborativeDocumentFromRichText, richTextFromCollaborativeDocument } from "../src/postgres-database.js";
+import { richTextToMarkdown } from "../src/rich-text.js";
+
+const noteId = "99999999-9999-4999-8999-999999999999";
+const secondNoteId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const richNoteId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const emptyCodeNoteId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+const principalBoundaryNoteId = "12121212-1212-4212-8212-121212121212";
+const seededDocument = collaborativeDocumentFromRichText({ type: "doc", blocks: [{ type: "paragraph", blockKey: "77777777-7777-4777-8777-777777777777",
+  id: "66666666-6666-4666-8666-666666666666", content: [{ text: "Preserve this linked Block" }] }] });
+const secondSeededDocument = collaborativeDocumentFromRichText({ type: "doc", blocks: [{ type: "paragraph",
+  blockKey: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", content: [{ text: "Authoritative second Note" }] }] });
+const richSeededDocument = collaborativeDocumentFromRichText({ type: "doc", blocks: [{ type: "paragraph",
+  blockKey: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", content: [{ text: "Rich structure seed" }] }] });
+const emptyCodeSeededDocument = collaborativeDocumentFromRichText({ type: "doc", blocks: [{ type: "paragraph",
+  blockKey: "ffffffff-ffff-4fff-8fff-ffffffffffff", content: [{ text: "Clear this content" }] }] });
+const principalBoundaryDocument = collaborativeDocumentFromRichText({ type: "doc", blocks: [{ type: "paragraph",
+  blockKey: "13131313-1313-4313-8313-131313131313", content: [{ text: "Principal boundary seed" }] }] });
+const collaborations = new Map<string, CollaborationSnapshot>([
+  [noteId, { noteId, sequence: 0, update: Y.encodeStateAsUpdate(seededDocument), updatedAt: new Date(0).toISOString(), updatedByMemberId: "browser-member", access: "edit" }],
+  [secondNoteId, { noteId: secondNoteId, sequence: 0, update: Y.encodeStateAsUpdate(secondSeededDocument), updatedAt: new Date(0).toISOString(), updatedByMemberId: "browser-member", access: "edit" }],
+  [richNoteId, { noteId: richNoteId, sequence: 0, update: Y.encodeStateAsUpdate(richSeededDocument), updatedAt: new Date(0).toISOString(), updatedByMemberId: "browser-member", access: "edit" }],
+  [emptyCodeNoteId, { noteId: emptyCodeNoteId, sequence: 0, update: Y.encodeStateAsUpdate(emptyCodeSeededDocument), updatedAt: new Date(0).toISOString(), updatedByMemberId: "browser-member", access: "edit" }],
+  [principalBoundaryNoteId, { noteId: principalBoundaryNoteId, sequence: 0, update: Y.encodeStateAsUpdate(principalBoundaryDocument), updatedAt: new Date(0).toISOString(), updatedByMemberId: "browser-member", access: "edit" }],
+]);
+seededDocument.destroy();
+secondSeededDocument.destroy();
+richSeededDocument.destroy();
+emptyCodeSeededDocument.destroy();
+principalBoundaryDocument.destroy();
+const collaborationRepository = {
+  async loadNoteCollaboration(memberId: string, requestedNoteId: string) {
+    if (!["browser-member", "browser-second-member", "browser-guest"].includes(memberId)) return undefined;
+    const snapshot = collaborations.get(requestedNoteId);
+    return snapshot ? { ...snapshot, access: memberId === "browser-guest" ? "read" as const : "edit" as const } : undefined;
+  },
+  async appendNoteCollaboration(memberId: string, requestedNoteId: string, update: Uint8Array) {
+    const collaboration = collaborations.get(requestedNoteId);
+    if (!["browser-member", "browser-second-member"].includes(memberId) || !collaboration) return undefined;
+    const document = new Y.Doc(); Y.applyUpdate(document, collaboration.update); Y.applyUpdate(document, update);
+    const next = { noteId: requestedNoteId, sequence: collaboration.sequence + 1, update: Y.encodeStateAsUpdate(document),
+      updatedAt: new Date().toISOString(), updatedByMemberId: memberId, access: "edit" as const };
+    collaborations.set(requestedNoteId, next); return next;
+  },
+};
 
 const instance = await startInstance({
   database: { async verifyConnection() {}, async close() {}, async resolveClientSessionPrincipal(accountId: string) {
-    return accountId === "browser-member" ? { member: { id: accountId, name: "Browser Member", email: "member@stash.test" },
+    return ["browser-member", "browser-second-member", "browser-guest"].includes(accountId) ? { member: { id: accountId, name: accountId === "browser-member" ? "Browser Member" : accountId === "browser-second-member" ? "Second Browser Member" : "Browser Guest", email: `${accountId}@stash.test` },
       workspace: { id: "browser-workspace", name: "Acceptance Workspace" }, capabilities: [] } : undefined;
   } },
   host: "127.0.0.1",
@@ -12,11 +59,25 @@ const instance = await startInstance({
   instanceAdminToken: "browser-acceptance-admin-token",
   memberAccess: {
     async authenticateBearer(authorization) {
-      return authorization === "Bearer browser-acceptance-member-token"
-        ? { accountId: "browser-member", sessionId: "browser-session" }
-        : undefined;
+      if (authorization === "Bearer browser-acceptance-member-token") return { accountId: "browser-member", sessionId: "browser-session" };
+      if (authorization === "Bearer browser-acceptance-second-member-token") return { accountId: "browser-second-member", sessionId: "browser-second-session" };
+      if (authorization === "Bearer browser-acceptance-guest-token") return { accountId: "browser-guest", sessionId: "browser-guest-session" };
+      return undefined;
     },
   },
+  notes: { async get(memberId: string, requestedNoteId: string) { if (!["browser-member", "browser-second-member", "browser-guest"].includes(memberId) || !collaborations.has(requestedNoteId)) return undefined;
+    if (requestedNoteId === richNoteId) { const current = new Y.Doc(); Y.applyUpdate(current, collaborations.get(requestedNoteId)!.update);
+      const document = richTextFromCollaborativeDocument(current); current.destroy(); return {
+        id: requestedNoteId, workspaceId: "88888888-8888-4888-8888-888888888888", content: richTextToMarkdown(document), revision: collaborations.get(requestedNoteId)!.sequence + 1,
+        document, tags: [], createdByMemberId: memberId, createdAt: new Date(0).toISOString(),
+      }; }
+    const second = requestedNoteId === secondNoteId; const emptyCode = requestedNoteId === emptyCodeNoteId; return {
+    id: requestedNoteId, workspaceId: "88888888-8888-4888-8888-888888888888", content: second ? "Stale canonical second Note" : emptyCode ? "Clear this content" : "Release collaboration plan", revision: 1,
+    document: { type: "doc", blocks: [{ type: "paragraph", blockKey: second ? "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" : emptyCode ? "ffffffff-ffff-4fff-8fff-ffffffffffff" : "77777777-7777-4777-8777-777777777777",
+      ...(!second && !emptyCode ? { id: "66666666-6666-4666-8666-666666666666" } : {}), content: [{ text: second ? "Stale canonical second Note" : emptyCode ? "Clear this content" : "Preserve this linked Block" }] }] },
+    tags: [], createdByMemberId: memberId, createdAt: new Date(0).toISOString(),
+  }; } } as any,
+  noteCollaboration: new NoteCollaborationService(collaborationRepository),
   webClientRoot: fileURLToPath(new URL("../apps/web/dist", import.meta.url)),
 });
 

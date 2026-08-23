@@ -3,7 +3,7 @@ import { Pool, type PoolClient } from "pg";
 
 import type { DatabaseProbe } from "./instance.js";
 import { noteOperationDigest, type NoteConflictResolution, type NoteEditBatch, type NoteEditConflict, type NoteRecord, type NoteRepository, type NoteTriageChange, type NoteTriageResult, type PortableNoteLinkProjection, type PortableNoteProjection, type PortableTaskProjection, type TaskCreation } from "./notes.js";
-import { markdownToRichText, paragraphDocument, richTextToMarkdown } from "./rich-text.js";
+import { isRichTextDocument, markdownToRichText, paragraphDocument, richTextToMarkdown } from "./rich-text.js";
 import type { BootstrapRecord, OwnerBootstrapRepository } from "./owner-bootstrap.js";
 import type { AccountAuthenticationRecord, PasswordAuthRepository, SessionRecord } from "./password-auth.js";
 import type { OidcAuthRepository, OidcIdentityKey, OidcIdentityRecord, OidcOrganizationConfiguration } from "./oidc-auth.js";
@@ -39,6 +39,11 @@ import type { DevelopmentArtifact, GitHubArtifactRepository } from "./github-art
 import type { GitHubSignal, GitHubSignalRepository, SignalCandidate } from "./github-signals.js";
 import { assignmentNotificationInputs, directMentionMemberIds, directMentionNotificationInputs, notificationDeliveryMode, type NotificationDelivery, type NotificationPreferences, type NotificationRepository } from "./notifications.js";
 import type { AutomationRecipe, AutomationRepository, AutomationState, AutomationTransition, AutomationTrigger } from "./automations.js";
+import * as Y from "yjs";
+import { prosemirrorJSONToYDoc, yDocToProsemirrorJSON } from "y-prosemirror";
+import { Schema } from "prosemirror-model";
+import { InvalidCollaborationUpdate, type CollaborationSnapshot, type NoteCollaborationRepository } from "./note-collaboration.js";
+import { proseMirrorToRichText, richTextToProseMirror } from "@stash/rich-text";
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
@@ -116,6 +121,41 @@ function boardFromRow(row: any): Board {
     groupBy: row.group_by, createdAt: new Date(row.created_at).toISOString() };
 }
 
+const collaborationSchema = new Schema({
+  nodes: {
+    doc: { content: "block+" }, text: { group: "inline" }, paragraph: { group: "block", content: "inline*", attrs: { blockKey: { default: null }, blockId: { default: null } } },
+    heading: { group: "block", content: "inline*", attrs: { level: { default: 1 }, blockKey: { default: null }, blockId: { default: null } } },
+    codeBlock: { group: "block", content: "text*", marks: "", code: true, attrs: { language: { default: null }, blockKey: { default: null }, blockId: { default: null } } },
+    blockquote: { group: "block", content: "block+", attrs: { blockKey: { default: null }, blockId: { default: null } } },
+    bulletList: { group: "block", content: "listItem+", attrs: { blockKey: { default: null }, blockId: { default: null } } },
+    listItem: { content: "paragraph block*", attrs: { blockKey: { default: null }, blockId: { default: null } } },
+    taskList: { group: "block", content: "taskItem+", attrs: { blockKey: { default: null }, blockId: { default: null } } },
+    taskItem: { content: "paragraph block*", attrs: { checked: { default: false }, blockKey: { default: null }, blockId: { default: null } } },
+    callout: { group: "block", content: "block+", attrs: { blockKey: { default: null }, blockId: { default: null }, kind: { default: "note" } } },
+    workspaceAttachment: { group: "block", atom: true, attrs: { blockKey: { default: null }, blockId: { default: null }, href: {}, label: {} } },
+    image: { group: "block", atom: true, attrs: { blockKey: { default: null }, blockId: { default: null }, src: {}, alt: { default: "" }, title: { default: null } } },
+    table: { group: "block", content: "tableRow+", tableRole: "table", attrs: { blockKey: { default: null }, blockId: { default: null } } },
+    tableRow: { content: "(tableCell|tableHeader)+", tableRole: "row" },
+    tableCell: { content: "paragraph", tableRole: "cell", attrs: { colspan: { default: 1 }, rowspan: { default: 1 }, colwidth: { default: null } } },
+    tableHeader: { content: "paragraph", tableRole: "header_cell", attrs: { colspan: { default: 1 }, rowspan: { default: 1 }, colwidth: { default: null } } },
+  },
+  marks: { bold: {}, italic: {}, code: { code: true }, link: { attrs: { href: {} }, inclusive: false } },
+});
+
+export function collaborativeDocumentFromRichText(document: import("./rich-text.js").RichTextDocument): Y.Doc {
+  return prosemirrorJSONToYDoc(collaborationSchema, richTextToProseMirror(document), "default");
+}
+
+export function richTextFromCollaborativeDocument(document: Y.Doc): import("./rich-text.js").RichTextDocument {
+  return proseMirrorToRichText(yDocToProsemirrorJSON(document, "default"));
+}
+
+export function validatedRichTextFromCollaborativeDocument(document: Y.Doc): import("./rich-text.js").RichTextDocument {
+  const materialized = richTextFromCollaborativeDocument(document);
+  if (!isRichTextDocument(materialized)) throw new InvalidCollaborationUpdate();
+  return materialized;
+}
+
 export class PostgresDatabase implements
   DatabaseProbe,
   OwnerBootstrapRepository,
@@ -143,7 +183,8 @@ export class PostgresDatabase implements
   BoardRepository,
   ActivityRepository,
   NotificationRepository,
-  AutomationRepository
+  AutomationRepository,
+  NoteCollaborationRepository
 {
   readonly #pool: Pool;
   readonly #authenticationSecrets: AuthenticationSecretCodec;
@@ -1536,13 +1577,11 @@ export class PostgresDatabase implements
 
   async findNoteForMember(memberId: string, noteId: string): Promise<NoteRecord | undefined> {
     await this.#ensureNoteSchemaForPool();
+    if (await this.#authorizeNote(this.#pool, memberId, noteId) === "none") return undefined;
     const result = await this.#pool.query<{
       id: string; workspace_id: string; project_id: string | null; content: string; document: NoteRecord["document"];
       revision: number; tags: string[]; reminder_at: Date | null; created_by_account_id: string; created_at: Date;
-    }>(`SELECT note.* FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id = note.workspace_id
-       WHERE note.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2)
-       OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
-       WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)))`, [noteId, memberId]);
+    }>("SELECT * FROM stash_notes WHERE id=$1", [noteId]);
     const row = result.rows[0];
     return row ? {
       id: row.id, workspaceId: row.workspace_id, content: row.content, document: row.document, revision: row.revision,
@@ -4276,6 +4315,101 @@ export class PostgresDatabase implements
       VALUES($1,$2,$3,$4,$5,$6,'member',$7,$8::jsonb,$9::jsonb)`,[activity.id,workspaceId,kind,objectId,action,memberId,
       activity.occurredAt,JSON.stringify(activity.before),JSON.stringify(activity.after)]);
     await this.#recordPortableProjection(client,"Activity",activity.id,activity.schema,activity);
+  }
+
+  async loadNoteCollaboration(memberId: string, noteId: string): Promise<CollaborationSnapshot | undefined> {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureCollaborationSchema(client);
+      const access = await this.#authorizeNote(client, memberId, noteId);
+      if (access === "none") return undefined;
+      let row = (await client.query<any>(`SELECT note_id,sequence,update,updated_at,updated_by_account_id
+        FROM stash_note_collaboration WHERE note_id=$1`, [noteId])).rows[0];
+      if (!row) row = await this.#seedNoteCollaboration(client, noteId);
+      return { noteId: row.note_id, sequence: Number(row.sequence), update: new Uint8Array(row.update),
+        updatedAt: new Date(row.updated_at).toISOString(), updatedByMemberId: row.updated_by_account_id, access };
+    });
+  }
+
+  async appendNoteCollaboration(memberId: string, noteId: string, update: Uint8Array): Promise<CollaborationSnapshot | undefined> {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureCollaborationSchema(client); await this.#ensureNoteHistorySchema(client);
+      if (await this.#authorizeNote(client, memberId, noteId) !== "edit") return undefined;
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`note-collaboration:${noteId}`]);
+      const noteRow = (await client.query<any>(`SELECT note.*, creator.name AS creator_name FROM stash_notes note
+        JOIN stash_accounts creator ON creator.id=note.created_by_account_id WHERE note.id=$1 FOR UPDATE OF note`, [noteId])).rows[0];
+      if (!noteRow) return undefined;
+      const before = this.#noteFromRow(noteRow);
+      let current = (await client.query<any>(`SELECT note_id,sequence,update,updated_at,updated_by_account_id
+        FROM stash_note_collaboration WHERE note_id=$1 FOR UPDATE`, [noteId])).rows[0];
+      if (!current) current = await this.#seedNoteCollaboration(client, noteId);
+      const document = new Y.Doc();
+      if (current) Y.applyUpdate(document, new Uint8Array(current.update));
+      const beforeUpdate = Y.encodeStateAsUpdate(document);
+      Y.applyUpdate(document, update);
+      const merged = Y.encodeStateAsUpdate(document);
+      if (Buffer.from(beforeUpdate).equals(Buffer.from(merged))) {
+        document.destroy();
+        return { noteId: current.note_id, sequence: Number(current.sequence), update: new Uint8Array(current.update),
+          updatedAt: new Date(current.updated_at).toISOString(), updatedByMemberId: current.updated_by_account_id, access: "edit" };
+      }
+      let canonicalDocument: import("./rich-text.js").RichTextDocument;
+      try { canonicalDocument = validatedRichTextFromCollaborativeDocument(document); }
+      finally { document.destroy(); }
+      const note: NoteRecord = { ...before, document: canonicalDocument, content: richTextToMarkdown(canonicalDocument), revision: before.revision + 1 };
+      await client.query("UPDATE stash_notes SET content=$2,document=$3::jsonb,revision=$4 WHERE id=$1",
+        [noteId, note.content, JSON.stringify(note.document), note.revision]);
+      const row = (await client.query<any>(`INSERT INTO stash_note_collaboration(note_id,sequence,update,updated_by_account_id)
+        VALUES($1,$2,$3,$4) ON CONFLICT(note_id) DO UPDATE SET sequence=EXCLUDED.sequence,update=EXCLUDED.update,
+        updated_by_account_id=EXCLUDED.updated_by_account_id,updated_at=now()
+        RETURNING note_id,sequence,update,updated_at,updated_by_account_id`,
+      [noteId, Number(current?.sequence ?? 0) + 1, Buffer.from(merged), memberId])).rows[0];
+      await client.query(`INSERT INTO stash_note_collaboration_activity(note_id,sequence,actor_account_id,update_bytes)
+        VALUES($1,$2,$3,$4)`, [noteId, row.sequence, memberId, update.byteLength]);
+      const projection: PortableNoteProjection = { schema: "stash.note.v1", id: note.id, workspaceId: note.workspaceId,
+        content: note.content, tags: note.tags, createdAt: note.createdAt,
+        createdBy: { localAccountId: before.createdByMemberId, displayName: noteRow.creator_name },
+        ...(note.projectId ? { projectId: note.projectId } : {}), ...(note.reminder ? { reminder: note.reminder } : {}) };
+      await this.#recordPortableProjection(client, "Note", note.id, projection.schema, projection);
+      await this.#recordNoteRevisionAndActivity(client, memberId, before, note, "note_edited", { kind: "member" });
+      return { noteId: row.note_id, sequence: Number(row.sequence), update: new Uint8Array(row.update),
+        updatedAt: new Date(row.updated_at).toISOString(), updatedByMemberId: row.updated_by_account_id, access: "edit" };
+    });
+  }
+
+  async #authorizeNote(client: Pool | PoolClient, memberId: string, noteId: string): Promise<"edit" | "read" | "none"> {
+    const result = await client.query<{ can_edit: boolean; can_read: boolean }>(`SELECT
+      ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
+       (workspace.owner_type='organization' AND EXISTS(SELECT 1 FROM stash_organization_memberships membership
+         WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2))) AS can_edit,
+      ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
+       (workspace.owner_type='organization' AND EXISTS(SELECT 1 FROM stash_organization_memberships membership
+         WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2)) OR
+       (note.project_id IS NOT NULL AND EXISTS(SELECT 1 FROM stash_project_guests guest
+         WHERE guest.project_id=note.project_id AND guest.account_id=$2))) AS can_read
+      FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id=note.workspace_id WHERE note.id=$1`, [noteId, memberId]);
+    return result.rows[0]?.can_edit ? "edit" : result.rows[0]?.can_read ? "read" : "none";
+  }
+
+  async #seedNoteCollaboration(client: PoolClient, noteId: string): Promise<any> {
+    const note = (await client.query<any>("SELECT document,created_by_account_id,created_at FROM stash_notes WHERE id=$1", [noteId])).rows[0];
+    if (!note) throw new Error("note_not_found");
+    const document = collaborativeDocumentFromRichText(note.document);
+    const update = Y.encodeStateAsUpdate(document); document.destroy();
+    return (await client.query<any>(`INSERT INTO stash_note_collaboration(note_id,sequence,update,updated_by_account_id,updated_at)
+      VALUES($1,0,$2,$3,$4) ON CONFLICT(note_id) DO UPDATE SET note_id=EXCLUDED.note_id
+      RETURNING note_id,sequence,update,updated_at,updated_by_account_id`,
+    [noteId, Buffer.from(update), note.created_by_account_id, note.created_at])).rows[0];
+  }
+
+  async #ensureCollaborationSchema(client: PoolClient): Promise<void> {
+    await this.#ensureNoteSchema(client);
+    await client.query(`CREATE TABLE IF NOT EXISTS stash_note_collaboration(
+      note_id uuid PRIMARY KEY REFERENCES stash_notes(id) ON DELETE CASCADE,sequence bigint NOT NULL CHECK(sequence>=0),
+      update bytea NOT NULL,updated_by_account_id uuid NOT NULL REFERENCES stash_accounts(id),updated_at timestamptz NOT NULL DEFAULT now())`);
+    await client.query(`CREATE TABLE IF NOT EXISTS stash_note_collaboration_activity(
+      note_id uuid NOT NULL REFERENCES stash_notes(id) ON DELETE CASCADE,sequence bigint NOT NULL,
+      actor_account_id uuid NOT NULL REFERENCES stash_accounts(id),update_bytes integer NOT NULL CHECK(update_bytes>0),
+      occurred_at timestamptz NOT NULL DEFAULT now(),PRIMARY KEY(note_id,sequence))`);
   }
 }
 
