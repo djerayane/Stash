@@ -24,7 +24,13 @@ export class GitHubAppClient implements GitHubApp, GitHubArtifactProvider {
     if (typeof metadata.default_branch !== "string") throw new Error("GitHub returned no default branch");
     const source = await this.githubJson(`repositories/${encodeURIComponent(repository.repositoryId)}/git/ref/heads/${encodeURIComponent(metadata.default_branch)}`, token) as { object?: { sha?: unknown } };
     if (typeof source.object?.sha !== "string") throw new Error("GitHub returned an invalid branch reference");
-    await this.githubJson(`repositories/${encodeURIComponent(repository.repositoryId)}/git/refs`, token, "POST", { ref: `refs/heads/${name}`, sha: source.object.sha });
+    try {
+      await this.githubJson(`repositories/${encodeURIComponent(repository.repositoryId)}/git/refs`, token, "POST", { ref: `refs/heads/${name}`, sha: source.object.sha });
+    } catch (error) {
+      if (!(error instanceof GitHubRequestError) || error.status !== 422) throw error;
+      const existing = await this.githubJson(`repositories/${encodeURIComponent(repository.repositoryId)}/git/ref/heads/${encodeURIComponent(name)}`, token) as { object?: { sha?: unknown } };
+      if (existing.object?.sha !== source.object.sha) throw new Error("GitHub branch name is already used by unrelated work");
+    }
     return { kind: "branch" as const, providerId: name, label: name, url: `${repository.repositoryUrl}/tree/${encodeURIComponent(name)}` };
   }
   async inspectArtifact(repository: GitHubArtifactRepositoryIdentity, kind: DevelopmentArtifactKind, reference: string) {
@@ -54,7 +60,7 @@ export class GitHubAppClient implements GitHubApp, GitHubArtifactProvider {
   }
   private async githubJson(path: string, token: string, method = "GET", body?: object): Promise<unknown> {
     const response = await this.request(`https://api.github.com/${path}`, { method, headers: { accept: "application/vnd.github+json", authorization: `Bearer ${token}`, "content-type": "application/json", "user-agent": "Stash", "x-github-api-version": "2022-11-28" }, ...(body ? { body: JSON.stringify(body) } : {}) });
-    if (!response.ok) throw new Error("GitHub development artifact operation failed");
+    if (!response.ok) throw new GitHubRequestError(response.status);
     return response.status === 204 ? {} : response.json();
   }
   private jwt(): string {
@@ -65,4 +71,5 @@ export class GitHubAppClient implements GitHubApp, GitHubArtifactProvider {
     return `${encoded}.${signer.sign(this.privateKey, "base64url")}`;
   }
 }
+class GitHubRequestError extends Error { constructor(readonly status: number) { super("GitHub development artifact operation failed"); } }
 function base64url(value: object): string { return Buffer.from(JSON.stringify(value)).toString("base64url"); }

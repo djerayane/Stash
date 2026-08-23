@@ -4,6 +4,7 @@ export interface GitHubArtifactRepositoryIdentity { installationId: number; repo
 export interface GitHubArtifactRepository {
   resolveTask(memberId: string, projectId: string, taskKey: string): Promise<{ id: string; key: string; title: string } | undefined>;
   resolveConnection(memberId: string, projectId: string, connectionId: string): Promise<GitHubArtifactRepositoryIdentity | undefined>;
+  canLinkArtifact(memberId: string, projectId: string, taskKey: string): Promise<boolean>;
   linkArtifact(memberId: string, projectId: string, taskKey: string, artifact: DevelopmentArtifact): Promise<"linked" | "forbidden">;
   listArtifacts(memberId: string, projectId: string, taskKey: string): Promise<DevelopmentArtifact[] | undefined>;
 }
@@ -22,6 +23,7 @@ export class GitHubArtifactService {
   constructor(private readonly repository: GitHubArtifactRepository, private readonly github: GitHubArtifactProvider) {}
   async createBranch(memberId: string, projectId: string, taskKey: string, value: unknown) {
     const input = parseCreate(value); const context = await this.context(memberId, projectId, taskKey, input.connectionId);
+    await this.requireWrite(memberId, projectId, taskKey);
     const branchName = input.branchName ?? `${context.task.key.toLowerCase()}-${slug(context.task.title)}`.slice(0, 120).replace(/-+$/g, "");
     let artifact: DevelopmentArtifact;
     try { artifact = await this.github.createBranch(context.connection, branchName); } catch { throw new GitHubArtifactUnavailable(); }
@@ -31,6 +33,7 @@ export class GitHubArtifactService {
   }
   async link(memberId: string, projectId: string, taskKey: string, value: unknown) {
     const input = parseLink(value); const context = await this.context(memberId, projectId, taskKey, input.connectionId);
+    await this.requireWrite(memberId, projectId, taskKey);
     let artifact: DevelopmentArtifact;
     try { artifact = await this.github.inspectArtifact(context.connection, input.kind, input.reference); } catch { throw new GitHubArtifactUnavailable(); }
     validateArtifact(artifact, input.kind);
@@ -52,6 +55,9 @@ export class GitHubArtifactService {
   }
   private async persist(memberId: string, projectId: string, taskKey: string, artifact: DevelopmentArtifact) {
     if (await this.repository.linkArtifact(memberId, projectId, taskKey, artifact) === "forbidden") throw new GitHubArtifactWriteForbidden();
+  }
+  private async requireWrite(memberId: string, projectId: string, taskKey: string) {
+    if (!await this.repository.canLinkArtifact(memberId, projectId, taskKey.toUpperCase())) throw new GitHubArtifactWriteForbidden();
   }
 }
 function validatePath(projectId: string, taskKey: string) { if (!uuid.test(projectId) || !taskKeyPattern.test(taskKey.toUpperCase())) throw new InvalidGitHubArtifactInput(); }

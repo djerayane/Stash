@@ -2068,13 +2068,45 @@ export class PostgresDatabase implements
     return row ? { installationId: Number(row.installation_id), repositoryId: row.repository_id, repositoryUrl: row.repository_url } : undefined;
   }
 
+  async canLinkArtifact(memberId: string, projectId: string, taskKey: string) {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureInvitationSchema(client);
+      const result = await client.query(`SELECT 1 FROM stash_tasks task
+      JOIN stash_projects project ON project.id = task.project_id
+      JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
+      WHERE ((task.project_id = $1 AND task.task_key = $2) OR EXISTS (SELECT 1 FROM stash_task_key_aliases alias
+        WHERE alias.task_id = task.id AND alias.project_id = $1 AND alias.task_key = $2))
+        AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $3)
+          OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+            WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $3)))`, [projectId, taskKey, memberId]);
+      return Boolean(result.rowCount);
+    } finally { client.release(); }
+  }
+
   async linkArtifact(memberId: string, projectId: string, taskKey: string, artifact: DevelopmentArtifact) {
-    const current = await this.findTaskByKey(memberId, projectId, taskKey);
-    if (current.status !== "found") return "forbidden" as const;
-    const links = current.task.developmentLinks ?? [];
-    const updated = await this.updateTaskByKey(memberId, projectId, taskKey, { developmentLinks: links.some(({ url }) => url === artifact.url)
-      ? links : [...links, { provider: "github", kind: artifact.kind, url: artifact.url }] });
-    return updated.status === "updated" ? "linked" as const : "forbidden" as const;
+    return this.#withTransaction(async (client) => {
+      await this.#ensureNoteSchema(client); await this.#ensureInvitationSchema(client);
+      const current = await client.query<any>(`${taskPlanningSelect} FOR UPDATE OF task`, [projectId, taskKey, memberId]);
+      const row = current.rows[0]; if (!row) return "forbidden" as const;
+      const writable = await client.query(`SELECT 1 FROM stash_workspaces workspace WHERE workspace.id = $1
+        AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2)
+          OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+            WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2))) FOR UPDATE`, [row.workspace_id, memberId]);
+      if (!writable.rowCount) return "forbidden" as const;
+      const before = taskPlanningReadModelFromRow(row); const links = before.developmentLinks ?? [];
+      if (links.some(({ url }) => url === artifact.url)) return "linked" as const;
+      const nextLinks = [...links, { provider: "github", kind: artifact.kind, url: artifact.url }];
+      const nextRevision = Number(row.revision) + 1;
+      await client.query(`UPDATE stash_tasks SET development_links=$2::jsonb, revision=$3,
+        field_revisions=jsonb_set(field_revisions,'{developmentLinks}',to_jsonb($3::int),true) WHERE id=$1`,
+      [row.id, JSON.stringify(nextLinks), nextRevision]);
+      const saved = await client.query<any>(taskPlanningSelectById, [row.id, memberId]);
+      const after = taskPlanningReadModelFromRow(saved.rows[0]);
+      await this.#recordPortableProjection(client, "Task", after.id, after.schema, taskProjectionFromRow(saved.rows[0]));
+      await this.#recordTaskActivity(client, memberId, after.workspaceId, after.id, "task_planning_updated", before, after);
+      return "linked" as const;
+    });
   }
 
   async listArtifacts(memberId: string, projectId: string, taskKey: string) {
