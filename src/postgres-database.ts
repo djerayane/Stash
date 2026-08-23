@@ -933,6 +933,7 @@ export class PostgresDatabase implements
         activity.object.kind, activity.object.id, activity.action, memberId, activity.cause.kind, activity.occurredAt,
         JSON.stringify(activity.before), JSON.stringify(activity.after)]);
       await this.#recordPortableProjection(client, "Activity", activity.id, activity.schema, activity);
+      await this.#recordProjectActivityNotifications(client, activity);
       const outcome = { status: "created" as const, work, activity, projections: [workProjection, link, activity] };
       await client.query("INSERT INTO stash_discussion_work_receipts (account_id,idempotency_key,fingerprint,outcome) VALUES ($1,$2,$3,$4::jsonb)",
         [memberId, draft.idempotencyKey, fingerprint, JSON.stringify(outcome)]);
@@ -1439,6 +1440,7 @@ export class PostgresDatabase implements
         activity.action, memberId, occurredAt, JSON.stringify(activity.before), JSON.stringify(activity.after)]);
       await this.#recordPortableProjection(client, "Task", task.id, task.schema, taskProjectionFromRow(saved.rows[0]));
       await this.#recordPortableProjection(client, "Activity", activity.id, activity.schema, activity);
+      await this.#recordProjectActivityNotifications(client, activity);
       if (resolution === "apply_contribution") await this.#recordAssignmentNotifications(client, projectId, activity, before, task);
       return { status: "resolved" as const, task, revision: row.revision, activity };
     });
@@ -1525,6 +1527,7 @@ export class PostgresDatabase implements
         VALUES ($1,$2,'Task',$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb)`, [activity.id, activity.workspaceId, task.id,
         activity.action, memberId, activity.cause.kind, activity.occurredAt, JSON.stringify(activity.before), JSON.stringify(activity.after)]);
       await this.#recordPortableProjection(client, "Activity", activity.id, activity.schema, activity);
+      await this.#recordProjectActivityNotifications(client, activity);
       return { status: "moved" as const, task, activity };
     });
   }
@@ -4625,6 +4628,8 @@ export class PostgresDatabase implements
     if (!inputs.length) return;
     await this.#ensureNotificationSchema(client);
     for (const input of inputs) {
+      await client.query(`DELETE FROM stash_notifications WHERE member_id=$1 AND activity_id=$2 AND trigger='followed_change'`,
+        [input.memberId, activity.id]);
       const settings = await client.query<any>(`SELECT preference.* FROM stash_projects project
         JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
         LEFT JOIN stash_notification_preferences preference ON preference.project_id=project.id AND preference.member_id=$1
@@ -4675,11 +4680,14 @@ export class PostgresDatabase implements
     [activity.id, activity.workspaceId, discussion.id, activity.action, memberId, activity.occurredAt,
       JSON.stringify(activity.before), JSON.stringify(activity.after)]);
     await this.#recordPortableProjection(client, "Activity", activity.id, activity.schema, activity);
+    if (projectId) await this.#recordProjectActivityNotifications(client, activity);
     await this.#ensureNotificationSchema(client);
     const inputs = projectId ? directMentionNotificationInputs(activity, projectId, recipients.rows.map(({ id }) => id))
       : recipients.rows.map(({ id }) => ({ memberId: id, trigger: "direct_mention" as const,
         summary: `${activity.actor.displayName} mentioned you in a Discussion`, activity }));
     for (const input of inputs) {
+      if (projectId) await client.query(`DELETE FROM stash_notifications WHERE member_id=$1 AND activity_id=$2 AND trigger='followed_change'`,
+        [input.memberId, activity.id]);
       const settings = projectId ? await client.query<any>(`SELECT preference.* FROM stash_notification_preferences preference
         WHERE preference.project_id=$2 AND preference.member_id=$1`, [input.memberId, projectId]) : { rows: [] };
       const row = settings.rows[0];

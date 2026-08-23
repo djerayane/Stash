@@ -62,6 +62,7 @@ test("configures followed Project notifications by keyboard without accessibilit
   const alert = page.getByRole("alert"); await expect(alert).toBeFocused();
   await page.getByRole("button", { name: "Try again" }).focus(); await page.keyboard.press("Enter");
   await expect(page.getByRole("heading", { name: "Choose what reaches you." })).toBeVisible();
+  await expect(page.locator("form")).toHaveCSS("transform", "none");
   const all = page.getByRole("radio", { name: /All Project Activity/ });
   await all.focus(); await page.keyboard.press("Space");
   await expect(all).toBeChecked();

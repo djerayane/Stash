@@ -1,9 +1,11 @@
 import * as RadioGroup from "@radix-ui/react-radio-group";
+import { useGSAP } from "@gsap/react";
 import { createStashApiClient } from "@stash/api-client";
 import { projectFollowState, projectNotificationSettings, type NotificationDigestCadence,
   type ProjectActivityPreference, type ProjectNotificationSettings } from "@stash/validation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
+import gsap from "gsap";
 import { useParams } from "react-router";
 import styles from "./project-notifications.module.css";
 
@@ -27,7 +29,7 @@ async function readSettings(token: string, projectId: string): Promise<State> {
 }
 
 export function ProjectNotificationsPage({ token }: { readonly token?: string }) {
-  const { projectId = "" } = useParams(); const queryClient = useQueryClient(); const alertRef = useRef<HTMLDivElement>(null);
+  const { projectId = "" } = useParams(); const queryClient = useQueryClient(); const alertRef = useRef<HTMLDivElement>(null); const pageRef = useRef<HTMLElement>(null);
   const key = ["project-notifications", projectId, token] as const;
   const query = useQuery({ queryKey: key, enabled: Boolean(token && projectId), retry: false, queryFn: () => readSettings(token!, projectId) });
   const [draft, setDraft] = useState<State>(); useEffect(() => { if (query.data) setDraft(query.data); }, [query.data]);
@@ -36,11 +38,15 @@ export function ProjectNotificationsPage({ token }: { readonly token?: string })
       ...(next.quietHours ? { quietHours: next.quietHours } : {}) }), client.put(`/api/projects/${encodeURIComponent(projectId)}/follow`, { followed: next.followed })]); return next;
   }, onSuccess: (next) => queryClient.setQueryData(key, next) });
   useEffect(() => { if (query.isError || save.isError) alertRef.current?.focus(); }, [query.isError, save.isError]);
+  useGSAP(() => {
+    if (!draft || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+    gsap.from("header > *, form > *", { opacity: 0, y: 8, duration: .36, stagger: .035, ease: "power2.out", clearProps: "all" });
+  }, { scope: pageRef, dependencies: [Boolean(draft)] });
   if (!token || query.isPending) return <section className={styles.page} aria-busy="true"><p>Loading notification settings…</p></section>;
   if (query.isError || !draft) return <section className={styles.page}><div className={styles.error} ref={alertRef} role="alert" tabIndex={-1}>
     <p>{query.error?.message ?? "Project notification settings are unavailable."}</p><button type="button" onClick={() => query.refetch()}>Try again</button></div></section>;
   const quiet = draft.quietHours;
-  return <section className={styles.page} aria-labelledby="notification-title"><header><p className={styles.eyebrow}>Project preferences</p>
+  return <section className={styles.page} aria-labelledby="notification-title" ref={pageRef}><header><p className={styles.eyebrow}>Project preferences</p>
     <h1 id="notification-title">Choose what reaches you.</h1><p className={styles.lede}>Activity stays trustworthy and attributed. Notifications only interrupt you at the level you choose.</p></header>
     <form className={styles.panel} onSubmit={(event) => { event.preventDefault(); save.mutate(draft); }}>
       <RadioGroup.Root className={styles.options} aria-label="Project Activity notifications" value={draft.activity}
