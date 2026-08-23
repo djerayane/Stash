@@ -17,12 +17,12 @@ export function canonicalUuid(value: string): string {
   return isUuid(value) ? value.toLowerCase() : value;
 }
 
-import { agentGrantCapabilities, agentGrantModes, type AgentGrant, type AgentGrantOption, type AgentProposal, type CreateAgentGrantRequest, type CreateAgentGrantResponse, type RevokeAgentGrantResponse } from "@stash/domain-types";
+import { agentGrantCapabilities, agentGrantModes, directAuthorityConfirmation, type AgentGrant, type AgentGrantOption, type AgentProposal, type CreateAgentGrantRequest, type CreateAgentGrantResponse, type RevokeAgentGrantResponse } from "@stash/domain-types";
 
 export function createAgentGrantRequest(value: unknown): ValidationResult<CreateAgentGrantRequest> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return { ok: false, message: "Agent Grant request is invalid" };
   const input = value as Record<string, unknown>;
-  if (!Object.keys(input).every((key) => ["organizationId", "projectId", "name", "scopes", "expiresAt"].includes(key))
+  if (!Object.keys(input).every((key) => ["organizationId", "projectId", "name", "scopes", "expiresAt", "directAuthorityConfirmation"].includes(key))
     || typeof input.organizationId !== "string" || !isUuid(input.organizationId)
     || input.projectId !== undefined && (typeof input.projectId !== "string" || !isUuid(input.projectId))
     || typeof input.name !== "string" || !input.name.trim() || input.name.trim().length > 80
@@ -34,8 +34,12 @@ export function createAgentGrantRequest(value: unknown): ValidationResult<Create
       && agentGrantCapabilities.includes((scope as any).capability) && agentGrantModes.includes((scope as any).mode)
       && (!(scope as any).capability.endsWith(".read") || (scope as any).mode !== "propose")))
     return { ok: false, message: "Agent Grant request is invalid" };
+  if (scopes.some((scope) => (scope as any).mode === "direct") && input.directAuthorityConfirmation !== directAuthorityConfirmation
+    || input.directAuthorityConfirmation !== undefined && input.directAuthorityConfirmation !== directAuthorityConfirmation)
+    return { ok: false, message: "Direct authority confirmation is required" };
   return { ok: true, value: { organizationId: input.organizationId, ...(input.projectId ? { projectId: input.projectId as string } : {}),
-    name: input.name.trim(), scopes: scopes as CreateAgentGrantRequest["scopes"], expiresAt: input.expiresAt } };
+    name: input.name.trim(), scopes: scopes as CreateAgentGrantRequest["scopes"], expiresAt: input.expiresAt,
+    ...(input.directAuthorityConfirmation ? { directAuthorityConfirmation } : {}) } };
 }
 
 export function agentGrantOptionsResponse(value: unknown): ValidationResult<{ organizations: AgentGrantOption[] }> { return collectionResponse(value, "organizations", isOption); }

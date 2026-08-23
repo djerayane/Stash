@@ -3,10 +3,12 @@ import type { AgentGrant, AgentGrantService } from "./agent-grants.js";
 import type { AgentGrantCapability } from "@stash/domain-types";
 import type { NoteService } from "./notes.js";
 import type { TaskService } from "./tasks.js";
+import { randomUUID } from "node:crypto";
 
 interface McpDomainServices { notes?: NoteService; tasks?: TaskService }
 
 export function mcpRoute(service: AgentGrantService, enabled: boolean, domain: McpDomainServices): HttpRoute {
+  const sessions = new Map<string, { grantId: string; initialized: boolean }>();
   return {
     matches: (_request, url) => url.pathname === "/mcp",
     async handle(request, response) {
@@ -17,10 +19,18 @@ export function mcpRoute(service: AgentGrantService, enabled: boolean, domain: M
       if (!grant) { json(response, 401, { error: "unauthorized", message: "A valid, active Agent Grant is required." }); return true; }
       try {
         const value = await readJson(request);
-        if (!isRequest(value)) { rpc(response, null, undefined, { code: -32600, message: "Invalid Request" }); return true; }
-        if (value.method === "initialize") rpc(response, value.id, { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "stash", version: "0.1.0" } });
-        else if (value.method === "tools/list") rpc(response, value.id, { tools: toolsFor(grant) });
-        else if (value.method === "tools/call") await callTool(response, value.id, grant, value.params, service, domain);
+        if (!isMessage(value)) { rpc(response, null, undefined, { code: -32600, message: "Invalid Request" }); return true; }
+        const sessionId = typeof request.headers["mcp-session-id"] === "string" ? request.headers["mcp-session-id"] : undefined;
+        const session = sessionId ? sessions.get(sessionId) : undefined;
+        if (value.method === "initialize" && value.id !== undefined) { if (!validInitialize(value.params)) { rpc(response, value.id, undefined, { code: -32602, message: "Unsupported MCP protocol version" }); return true; }
+          const createdSessionId = randomUUID(); sessions.set(createdSessionId, { grantId: grant.id, initialized: false }); response.setHeader("mcp-session-id", createdSessionId);
+          rpc(response, value.id, { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "stash", version: "0.1.0" } }); }
+        else if (value.method === "notifications/initialized" && value.id === undefined) { if (!session || session.grantId !== grant.id) { empty(response, 400); return true; }
+          session.initialized = true; response.writeHead(202, { "cache-control": "no-store" }); response.end(); }
+        else if (!session || session.grantId !== grant.id || !session.initialized) value.id === undefined ? empty(response, 400) : rpc(response, value.id, undefined, { code: -32002, message: "MCP session is not initialized" });
+        else if (value.method === "tools/list" && value.id !== undefined) rpc(response, value.id, { tools: toolsFor(grant) });
+        else if (value.method === "tools/call" && value.id !== undefined) await callTool(response, value.id, grant, value.params, service, domain);
+        else if (value.id === undefined) { response.writeHead(202, { "cache-control": "no-store" }); response.end(); }
         else rpc(response, value.id, undefined, { code: -32601, message: "Method not found" });
       } catch (error) {
         if (error instanceof SyntaxError) rpc(response, null, undefined, { code: -32700, message: "Parse error" });
@@ -101,4 +111,6 @@ function targetFrom(value: unknown): { workspaceId?: string; projectId?: string 
   const item = value as any; return { ...(typeof item.workspaceId === "string" ? { workspaceId: item.workspaceId } : {}),
     ...(typeof item.projectId === "string" ? { projectId: item.projectId } : {}) }; }
 function rpc(response: Parameters<typeof json>[0], id: string | number | null, result?: object, error?: object) { json(response, 200, { jsonrpc: "2.0", id, ...(result ? { result } : {}), ...(error ? { error } : {}) }); }
-function isRequest(value: unknown): value is { jsonrpc: "2.0"; id: string | number; method: string; params?: unknown } { return Boolean(value && typeof value === "object" && (value as any).jsonrpc === "2.0" && ["string", "number"].includes(typeof (value as any).id) && typeof (value as any).method === "string"); }
+function empty(response: Parameters<typeof json>[0], status: number) { response.writeHead(status, { "cache-control": "no-store" }); response.end(); }
+function isMessage(value: unknown): value is { jsonrpc: "2.0"; id?: string | number; method: string; params?: unknown } { return Boolean(value && typeof value === "object" && (value as any).jsonrpc === "2.0" && ((value as any).id === undefined || ["string", "number"].includes(typeof (value as any).id)) && typeof (value as any).method === "string"); }
+function validInitialize(value: unknown): boolean { return plain(value) && value.protocolVersion === "2025-06-18" && plain(value.capabilities) && plain(value.clientInfo) && typeof value.clientInfo.name === "string" && typeof value.clientInfo.version === "string"; }

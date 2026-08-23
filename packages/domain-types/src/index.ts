@@ -10,7 +10,8 @@ export interface AgentGrant {
   projectId?: string; scopes: AgentGrantScope[]; expiresAt: string; createdAt: string; revokedAt?: string;
 }
 export interface AgentGrantOption { readonly organizationId: string; readonly organizationName: string; readonly projects: ReadonlyArray<{ id: string; name: string }> }
-export interface CreateAgentGrantRequest { readonly organizationId: string; readonly projectId?: string; readonly name: string; readonly scopes: AgentGrantScope[]; readonly expiresAt: string }
+export const directAuthorityConfirmation = "I authorize this agent to use Direct capabilities without Proposal review" as const;
+export interface CreateAgentGrantRequest { readonly organizationId: string; readonly projectId?: string; readonly name: string; readonly scopes: AgentGrantScope[]; readonly expiresAt: string; readonly directAuthorityConfirmation?: typeof directAuthorityConfirmation }
 export interface CreateAgentGrantResponse { readonly status: "created"; readonly grant: AgentGrant; readonly token: string }
 export interface RevokeAgentGrantResponse { readonly grantId: string; readonly revoked: true }
 export interface AgentProposal { readonly id: string; readonly grantId: string; readonly sponsoringMemberId: string; readonly capability: AgentGrantCapability; readonly input: unknown; readonly createdAt: string; readonly status: "pending" }

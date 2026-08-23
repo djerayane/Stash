@@ -3,6 +3,7 @@ import { afterEach, describe, it } from "node:test";
 import { AgentGrantService, type AgentGrant, type AgentGrantRepository, type StoredAgentGrant } from "../src/agent-grants.js";
 import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
 import type { MemberAccessResolver } from "../src/workspaces-projects.js";
+import { directAuthorityConfirmation } from "@stash/domain-types";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
 class RepositoryFake implements AgentGrantRepository {
@@ -35,9 +36,14 @@ describe("Agent Grants and MCP", () => {
           return { status: "created", note: { id: "33333333-3333-4333-8333-333333333333" } }; } } as any }); return repository; }
   async function issue(scopes: Array<{ capability: string; mode: "direct" | "propose" | "deny" }>, session = "member-session", projectId?: string) {
     const response = await fetch(`${instance!.url}/api/v1/organizations/${organizationId}/agent-grants`, { method: "POST", headers: { authorization: `Bearer ${session}`, "content-type": "application/json" },
-      body: JSON.stringify({ organizationId, ...(projectId ? { projectId } : {}), name: "Planning assistant", expiresAt: "2026-09-01T10:00:00.000Z", scopes }) });
+      body: JSON.stringify({ organizationId, ...(projectId ? { projectId } : {}), name: "Planning assistant", expiresAt: "2026-09-01T10:00:00.000Z", scopes,
+        ...(scopes.some(({ mode }) => mode === "direct") ? { directAuthorityConfirmation } : {}) }) });
     return { response, body: await response.json() as { grant: AgentGrant; token: string; error?: string } };
   }
+  const mcp = (token: string, sessionId: string | undefined, body: unknown) => fetch(`${instance!.url}/mcp`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json", ...(sessionId ? { "mcp-session-id": sessionId } : {}) }, body: JSON.stringify(body) });
+  async function initializeMcp(token: string) { const initialized = await mcp(token, undefined, { jsonrpc: "2.0", id: "init", method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "compatibility-test", version: "1" } } });
+    const sessionId = initialized.headers.get("mcp-session-id")!; assert.ok(sessionId); assert.equal((await initialized.json() as any).result.protocolVersion, "2025-06-18");
+    const notification = await mcp(token, sessionId, { jsonrpc: "2.0", method: "notifications/initialized" }); assert.equal(notification.status, 202); assert.equal(await notification.text(), ""); return sessionId; }
 
   it("is disabled by default and never accepts a Member session as an agent credential", async () => {
     await run(false);
@@ -48,34 +54,34 @@ describe("Agent Grants and MCP", () => {
     assert.equal(denied.status, 401);
   });
 
-  it("issues a credential once and exposes only non-denied scoped MCP tools with their confirmation policy", async () => {
+  it("follows the 2025-06-18 initialize lifecycle before discovery and calls", async () => {
     const repository = await run(); const { response, body } = await issue([{ capability: "note.read", mode: "direct" }, { capability: "note.write", mode: "propose" }, { capability: "task.write", mode: "deny" }]);
     assert.equal(response.status, 201); assert.match(body.token, /^stash_agent_/); assert.equal("token" in body.grant, false);
-    const tools = await fetch(`${instance!.url}/mcp`, { method: "POST", headers: { authorization: `Bearer ${body.token}`, "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
-    const initialized = await fetch(`${instance!.url}/mcp`, { method: "POST", headers: { authorization: `Bearer ${body.token}`, "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: "init", method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "compatibility-test", version: "1" } } }) });
-    assert.equal((await initialized.json() as any).result.protocolVersion, "2025-06-18");
+    const premature = await mcp(body.token, undefined, { jsonrpc: "2.0", id: 0, method: "tools/list" }); assert.equal((await premature.json() as any).error.code, -32002);
+    const sessionId = await initializeMcp(body.token);
+    const tools = await mcp(body.token, sessionId, { jsonrpc: "2.0", id: 1, method: "tools/list" });
     const toolsBody = await tools.json() as any; assert.deepEqual(toolsBody.result.tools.map((tool: any) => tool.name), ["stash.note.read", "stash.note.write"]);
     assert.deepEqual(toolsBody.result.tools[0].inputSchema.required, ["noteId"]); assert.equal(toolsBody.result.tools[0].inputSchema.additionalProperties, false);
     assert.deepEqual(toolsBody.result.tools[1].inputSchema.required, ["workspaceId", "input"]); assert.equal(toolsBody.result.tools[1].inputSchema.properties.input.additionalProperties, false);
-    const read = await fetch(`${instance!.url}/mcp`, { method: "POST", headers: { authorization: `Bearer ${body.token}`, "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "stash.note.read", arguments: { noteId: "22222222-2222-4222-8222-222222222222" } } }) });
+    const read = await mcp(body.token, sessionId, { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "stash.note.read", arguments: { noteId: "22222222-2222-4222-8222-222222222222" } } });
     assert.equal((await read.json() as any).result.structuredContent.result.content, "Authorized context");
-    const proposal = await fetch(`${instance!.url}/mcp`, { method: "POST", headers: { authorization: `Bearer ${body.token}`, "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "stash.note.write", arguments: { workspaceId: "55555555-5555-4555-8555-555555555555", input: { content: "Proposed contribution" } } } }) });
+    const proposal = await mcp(body.token, sessionId, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "stash.note.write", arguments: { workspaceId: "55555555-5555-4555-8555-555555555555", input: { content: "Proposed contribution" } } } });
     assert.equal((await proposal.json() as any).result.structuredContent.status, "pending"); assert.equal(repository.proposals.length, 1);
     const proposals = await fetch(`${instance!.url}/api/organizations/${organizationId}/agent-grants/proposals`, { headers: { authorization: "Bearer member-session" } });
     assert.deepEqual((await proposals.json() as any).proposals.map((item: any) => item.status), ["pending"]);
-    const extra = await fetch(`${instance!.url}/mcp`, { method: "POST", headers: { authorization: `Bearer ${body.token}`, "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "stash.note.read", arguments: { noteId: "22222222-2222-4222-8222-222222222222", unexpected: true } } }) });
+    const extra = await mcp(body.token, sessionId, { jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "stash.note.read", arguments: { noteId: "22222222-2222-4222-8222-222222222222", unexpected: true } } });
     assert.equal((await extra.json() as any).error.code, -32602);
-    const denied = await fetch(`${instance!.url}/mcp`, { method: "POST", headers: { authorization: `Bearer ${body.token}`, "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "stash.task.write" } }) });
+    const denied = await mcp(body.token, sessionId, { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "stash.task.write" } });
     assert.equal((await denied.json() as any).error.code, -32003);
   });
 
   it("applies Direct writes through the sponsoring Member domain service and enforces Project scope before effects", async () => {
     const repository = await run(); const projectId = "44444444-4444-4444-8444-444444444444"; const { body } = await issue([{ capability: "note.write", mode: "direct" }], "member-session", projectId);
-    const call = (requestedProjectId: string, workspaceId = "55555555-5555-4555-8555-555555555555", nestedProjectId?: string) => fetch(`${instance!.url}/mcp`, { method: "POST", headers: { authorization: `Bearer ${body.token}`, "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "stash.note.write", arguments: { projectId: requestedProjectId, workspaceId, input: { content: "Agent contribution", ...(nestedProjectId ? { projectId: nestedProjectId } : {}) } } } }) });
+    const sessionId = await initializeMcp(body.token); const call = (requestedProjectId: string, workspaceId = "55555555-5555-4555-8555-555555555555", nestedProjectId?: string) => mcp(body.token, sessionId, { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "stash.note.write", arguments: { projectId: requestedProjectId, workspaceId, input: { content: "Agent contribution", ...(nestedProjectId ? { projectId: nestedProjectId } : {}) } } } });
     assert.equal((await (await call(projectId, undefined, "66666666-6666-4666-8666-666666666666")).json() as any).error.code, -32602); assert.equal(repository.directWrites.length, 0);
     assert.equal((await (await call("66666666-6666-4666-8666-666666666666")).json() as any).error.code, -32003); assert.equal(repository.directWrites.length, 0);
     assert.equal((await (await call(projectId, "77777777-7777-4777-8777-777777777777")).json() as any).error.code, -32003); assert.equal(repository.directWrites.length, 0);
-    const omitted = await fetch(`${instance!.url}/mcp`, { method: "POST", headers: { authorization: `Bearer ${body.token}`, "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "stash.note.write", arguments: { workspaceId: "55555555-5555-4555-8555-555555555555", input: { content: "Workspace-wide attempt" } } } }) });
+    const omitted = await mcp(body.token, sessionId, { jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "stash.note.write", arguments: { workspaceId: "55555555-5555-4555-8555-555555555555", input: { content: "Workspace-wide attempt" } } } });
     assert.equal((await omitted.json() as any).error.code, -32003); assert.equal(repository.directWrites.length, 0);
     const accepted = await call(projectId); assert.equal((await accepted.json() as any).result.structuredContent.result.status, "created");
     const cause = { kind: "agent", agentGrantId: body.grant.id, sponsoringMemberId: "member", agentName: "Planning assistant" };
@@ -85,7 +91,7 @@ describe("Agent Grants and MCP", () => {
 
   it("uses one authoritative Project for scoped Proposals without side effects", async () => {
     const repository = await run(); const projectId = "44444444-4444-4444-8444-444444444444"; const { body } = await issue([{ capability: "note.write", mode: "propose" }], "member-session", projectId);
-    const invoke = (argumentsValue: unknown) => fetch(`${instance!.url}/mcp`, { method: "POST", headers: { authorization: `Bearer ${body.token}`, "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "stash.note.write", arguments: argumentsValue } }) });
+    const sessionId = await initializeMcp(body.token); const invoke = (argumentsValue: unknown) => mcp(body.token, sessionId, { jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "stash.note.write", arguments: argumentsValue } });
     const mismatch = await invoke({ projectId, workspaceId: "55555555-5555-4555-8555-555555555555", input: { content: "Mismatch", projectId: "66666666-6666-4666-8666-666666666666" } });
     assert.equal((await mismatch.json() as any).error.code, -32602); assert.equal(repository.proposals.length, 0); assert.equal(repository.directWrites.length, 0);
     const crossProject = await invoke({ projectId: "66666666-6666-4666-8666-666666666666", workspaceId: "55555555-5555-4555-8555-555555555555", input: { content: "Cross Project" } });
@@ -99,6 +105,8 @@ describe("Agent Grants and MCP", () => {
 
   it("enforces sponsorship, validation, expiry, and immediate revocation without leaking credentials", async () => {
     const repository = await run(); const forbidden = await issue([{ capability: "note.read", mode: "direct" }], "other-session"); assert.equal(forbidden.response.status, 403);
+    const unconfirmed = await fetch(`${instance!.url}/api/organizations/${organizationId}/agent-grants`, { method: "POST", headers: { authorization: "Bearer member-session", "content-type": "application/json" }, body: JSON.stringify({ organizationId, name: "Unconfirmed", expiresAt: "2026-09-01T10:00:00.000Z", scopes: [{ capability: "note.read", mode: "direct" }] }) });
+    assert.equal(unconfirmed.status, 422); assert.equal(repository.grants.length, 0);
     const invalid = await fetch(`${instance!.url}/api/organizations/${organizationId}/agent-grants`, { method: "POST", headers: { authorization: "Bearer member-session", "content-type": "application/json" }, body: JSON.stringify({ organizationId, name: "", expiresAt: "never", scopes: [] }) }); assert.equal(invalid.status, 422);
     const ambiguous = await fetch(`${instance!.url}/api/organizations/${organizationId}/agent-grants`, { method: "POST", headers: { authorization: "Bearer member-session", "content-type": "application/json" }, body: JSON.stringify({ organizationId, name: "Ambiguous", expiresAt: "2026-09-01T10:00:00.000Z", scopes: [{ capability: "note.write", mode: "direct" }, { capability: "note.write", mode: "deny" }] }) }); assert.equal(ambiguous.status, 422);
     const { body } = await issue([{ capability: "note.read", mode: "direct" }]);
