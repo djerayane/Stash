@@ -24,9 +24,18 @@ test("the approved clients and focused shared packages form a pnpm workspace", a
   assert.deepEqual(Object.keys(rootPackage.scripts as object).filter((name) => ["build", "check", "test"].includes(name)).sort(), ["build", "check", "test"]);
   assert.equal(
     (rootPackage.scripts as Record<string, string>).pretest,
-    "pnpm --filter @stash/sync... build",
+    "pnpm run build:shared",
     "tests must build the sync runtime and its transitive workspace dependencies from a clean checkout",
   );
+  const scripts = rootPackage.scripts as Record<string, string>;
+  assert.equal(scripts["build:shared"], "pnpm --filter @stash/sync... build");
+  for (const entryPoint of ["unit", "integration", "browser", "a11y"]) {
+    assert.equal(
+      scripts[`pretest:${entryPoint}`],
+      "pnpm run build:shared",
+      `the direct ${entryPoint} client test entry point must build shared runtime packages first`,
+    );
+  }
 
   const readme = await readFile(new URL("README.md", root), "utf8");
   assert.doesNotMatch(readme, /\bnpm (?:ci|install|run|test)\b|package-lock\.json/);
