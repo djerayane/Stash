@@ -84,7 +84,7 @@ export class NotificationService {
   /** Trusted domain adapters call this only with canonical Activity they just committed. */
   async notify(input: { activity: ActivityRecord; projectId: string; memberId: string; trigger: NotificationTrigger; summary: string; followed?: boolean }) {
     if (!uuid.test(input.projectId) || !uuid.test(input.memberId) || !input.summary.trim() || input.summary.length > 500) throw new InvalidNotificationInput();
-    if (input.activity.actor.localAccountId === input.memberId) return { status: "suppressed" as const };
+    if (input.activity.actor.localAccountId === input.memberId && input.trigger !== "automation_failure") return { status: "suppressed" as const };
     const preferences = await this.repository.getNotificationPreferences(input.memberId, input.projectId) ?? defaultPreferences;
     if (input.trigger === "followed_change" && (preferences.activity === "muted"
       || preferences.activity === "followed" && input.followed !== true)) return { status: "suppressed" as const };

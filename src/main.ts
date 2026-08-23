@@ -59,7 +59,8 @@ async function main(): Promise<void> {
   }
 
   const passwordAuth = new PasswordAuthService(database);
-  const automations = new AutomationService(database);
+  const notifications = new NotificationService(database);
+  const automations = new AutomationService(database, notifications);
   const attachmentStoragePath = process.env.ATTACHMENT_STORAGE_PATH?.trim() || "/var/lib/stash/attachments";
   const attachmentStorage = new LocalAttachmentStorage(attachmentStoragePath);
   const githubAppId = process.env.GITHUB_APP_ID?.trim();
@@ -107,7 +108,7 @@ async function main(): Promise<void> {
     activities: new ActivityService(database),
     instanceBackups,
     ...(process.env.INSTANCE_BACKUP_PATH?.trim() ? { instanceBackupRoot: process.env.INSTANCE_BACKUP_PATH.trim() } : {}),
-    notifications: new NotificationService(database),
+    notifications,
     memberLocalization: new MemberLocalizationService(database),
     oidcAuth: new OidcAuthService(database),
     oidcManagement: new OidcManagementService(database),

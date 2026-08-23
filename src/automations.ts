@@ -1,4 +1,6 @@
 import type { AutomationRecipe, AutomationState, AutomationTransition, AutomationTrigger } from "@stash/domain-types";
+import type { ActivityRecord } from "./activity.js";
+import type { NotificationService } from "./notifications.js";
 
 export type { AutomationRecipe, AutomationState, AutomationTransition, AutomationTrigger } from "@stash/domain-types";
 
@@ -10,19 +12,30 @@ export interface AutomationRepository {
   reverseAutomation(memberId: string, projectId: string, taskKey: string, transitionId: string): Promise<
     { status: "reversed"; transition: AutomationTransition } | "forbidden" | "not_found" | "conflict"
   >;
-  applySignalAutomations?(signal: { id: string; trigger?: AutomationTrigger }, candidates: ReadonlyArray<{ taskId: string; projectId: string; status: "confirmed" | "pending_confirmation" }>): Promise<void>;
+  applySignalAutomations?(signal: { id: string; trigger?: AutomationTrigger }, candidates: ReadonlyArray<AutomationCandidate>): Promise<
+    { failed: boolean; notifications: AutomationFailureNotification[] } | void
+  >;
+}
+
+export interface AutomationCandidate { taskId: string; projectId: string; status: "confirmed" | "pending_confirmation" }
+export interface AutomationFailureNotification {
+  activity: ActivityRecord;
+  projectId: string;
+  memberId: string;
+  summary: string;
 }
 
 export class InvalidAutomationInput extends Error {}
 export class AutomationForbidden extends Error {}
 export class AutomationNotFound extends Error {}
 export class AutomationConflict extends Error {}
+export class AutomationExecutionFailed extends Error {}
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const key = /^[A-Z][A-Z0-9]{0,15}-[1-9][0-9]*$/i;
 
 export class AutomationService {
-  constructor(private readonly repository: AutomationRepository) {}
+  constructor(private readonly repository: AutomationRepository, private readonly notifications?: NotificationService) {}
 
   async list(memberId: string, projectId: string, taskKey: string) {
     validateProjectAndKey(projectId, taskKey);
@@ -52,8 +65,13 @@ export class AutomationService {
     return result.transition;
   }
 
-  async applySignal(signal: { id: string; trigger?: AutomationTrigger }, candidates: ReadonlyArray<{ taskId: string; projectId: string; status: "confirmed" | "pending_confirmation" }>) {
-    if (signal.trigger) await this.repository.applySignalAutomations?.(signal, candidates);
+  async applySignal(signal: { id: string; trigger?: AutomationTrigger }, candidates: ReadonlyArray<AutomationCandidate>) {
+    if (!signal.trigger) return;
+    const result = await this.repository.applySignalAutomations?.(signal, candidates);
+    for (const failure of result?.notifications ?? []) {
+      await this.notifications?.notify({ ...failure, trigger: "automation_failure" });
+    }
+    if (result?.failed) throw new AutomationExecutionFailed("One or more Automation executions failed");
   }
 }
 
