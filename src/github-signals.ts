@@ -117,7 +117,7 @@ function githubUrl(repository: Record<string, unknown>, suffix: string) {
   if (typeof repository.html_url === "string") return safeGitHubUrl(`${repository.html_url}${suffix}`);
   return `https://github.com/repositories/${repository.id}${suffix}`;
 }
-function safeGitHubUrl(value: string) { const url = new URL(value); if (url.protocol !== "https:" || url.hostname !== "github.com" || url.username || url.password) throw new InvalidGitHubSignalInput(); return url.toString(); }
+function safeGitHubUrl(value: string) { let url: URL; try { url = new URL(value); } catch { throw new InvalidGitHubSignalInput(); } if (url.protocol !== "https:" || url.hostname !== "github.com" || url.username || url.password) throw new InvalidGitHubSignalInput(); return url.toString(); }
 function positiveId(value: unknown) { return Number.isSafeInteger(value) && Number(value) > 0; }
 function record(value: unknown): value is Record<string, unknown> { return Boolean(value) && typeof value === "object" && !Array.isArray(value); }
 function validatePath(projectId: string, key: string) { if (!uuid.test(projectId) || !/^[A-Z][A-Z0-9]{0,15}-[1-9][0-9]*$/i.test(key)) throw new InvalidGitHubSignalInput(); }

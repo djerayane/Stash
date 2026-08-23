@@ -109,6 +109,8 @@ describe("GitHub development Signals", () => {
     const body = JSON.stringify({ ref: "refs/heads/STASH-36", repository: { id: 987 }, after: "a".repeat(40) });
     assert.equal((await fetch(`${baseUrl}/api/github/webhooks`, { method: "POST", headers: { "x-github-event": "push", "x-github-delivery": "delivery-3", "x-hub-signature-256": "sha256=forged" }, body })).status, 401);
     assert.equal((await fetch(`${baseUrl}/api/github/webhooks`, { method: "POST", headers: { "x-github-event": "push", "x-github-delivery": "delivery-3", "x-hub-signature-256": signature("{") }, body: "{" })).status, 400);
+    const invalidUrl = JSON.stringify({ repository: { id: 987 }, pull_request: { number: 42, title: "STASH-36", html_url: "not a URL" } });
+    assert.equal((await fetch(`${baseUrl}/api/github/webhooks`, { method: "POST", headers: { "x-github-event": "pull_request", "x-github-delivery": "delivery-invalid-url", "x-hub-signature-256": signature(invalidUrl) }, body: invalidUrl })).status, 400);
     assert.equal((await fetch(`${baseUrl}/api/projects/${projectId}/tasks/STASH-36/development-signals`)).status, 401);
     repository.writable = false;
     assert.equal((await fetch(`${baseUrl}/api/projects/${projectId}/tasks/STASH-36/development-signals/suggestions/00000000-0000-4000-8000-000000000001/confirm`, { method: "POST", headers: { authorization: "Bearer member" } })).status, 403);
