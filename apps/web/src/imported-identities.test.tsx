@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { MemoryRouter } from "react-router";
 import { ImportedIdentitiesPage } from "./imported-identities";
 
 const administrations = [{ organizationId: "org", organizationName: "Organization", members: [
@@ -17,7 +18,7 @@ describe("ImportedIdentitiesPage", () => {
       return new Response(JSON.stringify({ identities: pending ? [{ importId: "import", workspaceId: "workspace", workspaceName: "Imported Workspace", sourceAccountId: "source", displayName: "Grace Hopper" }] : [] }), { status: 200 });
     }));
     render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-      <ImportedIdentitiesPage token="token" administrations={administrations} />
+      <MemoryRouter><ImportedIdentitiesPage token="token" currentMember={{ id: "member", name: "Ada Lovelace", email: "ada@stash.test" }} administrations={administrations} /></MemoryRouter>
     </QueryClientProvider>);
     expect(await screen.findByRole("heading", { name: "Grace Hopper" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Confirm mapping" })).toBeDisabled();
@@ -34,10 +35,21 @@ describe("ImportedIdentitiesPage", () => {
       ? new Response("{}", { status: 409 })
       : new Response(JSON.stringify({ identities: [{ importId: "import", workspaceId: "workspace", workspaceName: "Workspace", sourceAccountId: "source", displayName: "Grace Hopper" }] }), { status: 200 })));
     render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-      <ImportedIdentitiesPage token="token" administrations={administrations} />
+      <MemoryRouter><ImportedIdentitiesPage token="token" currentMember={{ id: "member", name: "Ada Lovelace", email: "ada@stash.test" }} administrations={administrations} /></MemoryRouter>
     </QueryClientProvider>);
     await screen.findByRole("heading", { name: "Grace Hopper" });
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "member" } }); fireEvent.click(screen.getByRole("button"));
     const alert = await screen.findByRole("alert"); expect(alert).toHaveFocus(); expect(alert).toHaveTextContent("already mapped differently");
+  });
+
+  it("lets a personal Workspace owner map only to their own verified account", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ identities: [{ importId: "import", workspaceId: "workspace",
+      workspaceName: "Personal Workspace", sourceAccountId: "source", displayName: "Grace Hopper" }] }), { status: 200 })));
+    render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+      <MemoryRouter><ImportedIdentitiesPage token="token" currentMember={{ id: "owner", name: "Personal Owner", email: "owner@stash.test" }} /></MemoryRouter>
+    </QueryClientProvider>);
+    const choices = await screen.findByRole("combobox", { name: "Local Member" });
+    expect(choices).toHaveTextContent("Personal Owner · owner@stash.test");
+    expect(choices.querySelectorAll("option")).toHaveLength(2);
   });
 });

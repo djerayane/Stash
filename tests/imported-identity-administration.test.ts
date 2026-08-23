@@ -30,8 +30,8 @@ describe("Imported Identity administration", () => {
       importedIdentityAdministration: { async listPendingImportedIdentities() { return []; }, async mapImportedIdentityAsMember(_member, input) { return { status: input.localAccountId.startsWith("5555") ? "forbidden" : "conflict" }; } } });
     assert.equal((await fetch(`${instance.url}/api/imported-identities`)).status, 401);
     for (const [localAccountId, expected] of [["55555555-5555-4555-8555-555555555555", 403], ["66666666-6666-4666-8666-666666666666", 409]] as const) {
-      const response = await fetch(`${instance.url}/api/imported-identity-mappings`, { method: "POST", headers: { authorization: "Bearer member", "idempotency-key": idempotencyKey, "content-type": "application/json" },
-        body: JSON.stringify({ importId, sourceAccountId, localAccountId }) }); assert.equal(response.status, expected);
+      const mappingResponse: Response = await fetch(`${instance.url}/api/imported-identity-mappings`, { method: "POST", headers: { authorization: "Bearer member", "idempotency-key": idempotencyKey, "content-type": "application/json" },
+        body: JSON.stringify({ importId, sourceAccountId, localAccountId }) }); assert.equal(mappingResponse.status, expected);
     }
   });
 });

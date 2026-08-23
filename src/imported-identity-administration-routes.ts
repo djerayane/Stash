@@ -7,6 +7,7 @@ export interface PendingImportedIdentity {
   importId: string;
   workspaceId: string;
   workspaceName: string;
+  organizationId?: string;
   sourceAccountId: string;
   displayName: string;
 }

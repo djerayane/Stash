@@ -4172,8 +4172,8 @@ export class PostgresDatabase implements
     const client=await this.#pool.connect();
     try {
       await this.#ensureWorkspaceImportSchema(client); await this.#ensureWorkspaceProjectSchema(client);
-      const result=await client.query<{import_id:string;workspace_id:string;workspace_name:string;report:PortableWorkspaceImportReport}>(`
-        SELECT imported.import_id,imported.workspace_id,workspace.name workspace_name,imported.report
+      const result=await client.query<{import_id:string;workspace_id:string;workspace_name:string;organization_id:string|null;report:PortableWorkspaceImportReport}>(`
+        SELECT imported.import_id,imported.workspace_id,workspace.name workspace_name,workspace.organization_owner_id organization_id,imported.report
         FROM stash_workspace_imports imported JOIN stash_workspaces workspace ON workspace.id=imported.workspace_id
         WHERE workspace.personal_owner_id=$1 OR workspace.organization_owner_id IN (
           SELECT organization_id FROM stash_organization_memberships WHERE account_id=$1 AND role IN ('Owner','Admin'))
@@ -4181,7 +4181,7 @@ export class PostgresDatabase implements
       const mapped=await client.query<{source_account_id:string}>("SELECT source_account_id FROM stash_identity_stubs WHERE mapped_to_account_id IS NOT NULL");
       const resolved=new Set(mapped.rows.map(({source_account_id})=>source_account_id));
       return result.rows.flatMap((row)=>row.report.identityStubs.filter(({sourceAccountId})=>!resolved.has(sourceAccountId)).map((identity)=>({
-        importId:row.import_id,workspaceId:row.workspace_id,workspaceName:row.workspace_name,...identity,
+        importId:row.import_id,workspaceId:row.workspace_id,workspaceName:row.workspace_name,...(row.organization_id?{organizationId:row.organization_id}:{}),...identity,
       })));
     } finally { client.release(); }
   }
@@ -4191,10 +4191,11 @@ export class PostgresDatabase implements
     try {
       await this.#ensureWorkspaceImportSchema(client); await this.#ensureWorkspaceProjectSchema(client);
       const allowed=await client.query(`SELECT 1 FROM stash_workspace_imports imported JOIN stash_workspaces workspace ON workspace.id=imported.workspace_id
-        WHERE imported.import_id=$1 AND (workspace.personal_owner_id=$2 OR workspace.organization_owner_id IN (
-          SELECT organization_id FROM stash_organization_memberships WHERE account_id=$2 AND role IN ('Owner','Admin')))
-        AND ($3=$2 OR EXISTS (SELECT 1 FROM stash_organization_memberships actor JOIN stash_organization_memberships target
-          ON target.organization_id=actor.organization_id WHERE actor.account_id=$2 AND actor.role IN ('Owner','Admin') AND target.account_id=$3))`,
+        WHERE imported.import_id=$1 AND ((workspace.personal_owner_id=$2 AND $3=$2) OR
+          (workspace.organization_owner_id IS NOT NULL AND EXISTS (SELECT 1 FROM stash_organization_memberships actor
+            JOIN stash_organization_memberships target ON target.organization_id=actor.organization_id
+            WHERE actor.organization_id=workspace.organization_owner_id AND actor.account_id=$2
+              AND actor.role IN ('Owner','Admin') AND target.account_id=$3)))`,
       [input.importId,memberId,input.localAccountId]);
       if(!allowed.rowCount) return {status:"forbidden" as const};
     } finally { client.release(); }
