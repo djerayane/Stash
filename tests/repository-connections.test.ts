@@ -56,17 +56,18 @@ class DatabaseFake implements DatabaseProbe, RepositoryConnectionRepository {
     this.beforeAttach?.();
     if (await this.organizationRole(organizationId, actorId) !== "Admin") return "forbidden" as const;
     const record = this.records.find((candidate) => candidate.id === connectionId && candidate.organizationId === organizationId);
-    if (!record || ![projectOne, projectTwo].includes(projectId)) return "not_found" as const;
+    if (!record || record.state === "degraded" || ![projectOne, projectTwo].includes(projectId)) return "not_found" as const;
     if (this.projectionFailure) throw new Error("outbox unavailable");
     if (!record.projectIds.includes(projectId)) record.projectIds.push(projectId);
     this.portable.push(projection(record));
     return "attached" as const;
   }
-  async repairRepositoryConnection(actorId: string, organizationId: string, connectionId: string) {
+  async replaceDegradedRepositoryConnection(actorId: string, organizationId: string, connectionId: string,
+    replacement: GitHubRepositoryIdentity) {
     if (await this.organizationRole(organizationId, actorId) !== "Admin") return "forbidden" as const;
     const record = this.records.find((candidate) => candidate.id === connectionId && candidate.organizationId === organizationId && candidate.state === "degraded");
     if (!record) return "not_found" as const;
-    record.ownership = "organization"; record.state = "active";
+    Object.assign(record, replacement, { createdByMemberId: actorId, createdByAttribution: "recorded", ownership: "organization", state: "active" });
     this.portable.push(projection(record));
     return "repaired" as const;
   }
@@ -170,8 +171,8 @@ describe("Organization Repository Connections", () => {
     assert.doesNotMatch(JSON.stringify(database.portable), /installationId|repositoryId|token|private/i);
   });
 
-  it("creates a personal connection, exposes degradation, and lets an Admin repair it as Organization-owned", async () => {
-    const { baseUrl, database } = await run();
+  it("keeps departed personal authority revoked until an Admin supplies a verified Organization replacement", async () => {
+    const { baseUrl, database, github } = await run();
     const created = await fetch(`${baseUrl}/api/organizations/${acme}/repository-connections`, {
       method: "POST", headers: { authorization: "Bearer admin-session", "content-type": "application/json" },
       body: JSON.stringify({ installationId: 42, owner: "acme", name: "personal-repo", ownership: "personal" }),
@@ -183,11 +184,35 @@ describe("Organization Repository Connections", () => {
     database.records[0]!.state = "degraded";
     const listed = await fetch(`${baseUrl}/api/organizations/${acme}/repository-connections`, { headers: { authorization: "Bearer admin-session" } });
     assert.deepEqual((await listed.json() as any).repositoryConnections[0].state, "degraded");
-    const repaired = await fetch(`${baseUrl}/api/organizations/${acme}/repository-connections/${connection.id}/repair`, {
+    const oldAuthority = await fetch(`${baseUrl}/api/organizations/${acme}/repository-connections/${connection.id}/projects/${projectOne}`, {
+      method: "POST", headers: { authorization: "Bearer admin-session" },
+    });
+    assert.equal(oldAuthority.status, 404);
+    const emptyRepair = await fetch(`${baseUrl}/api/organizations/${acme}/repository-connections/${connection.id}/repair`, {
       method: "PUT", headers: { authorization: "Bearer admin-session" },
+    });
+    assert.equal(emptyRepair.status, 400);
+    assert.equal(database.records[0]!.ownership, "personal"); assert.equal(database.records[0]!.state, "degraded");
+
+    github.failure = new Error("replacement denied");
+    const rejectedRepair = await fetch(`${baseUrl}/api/organizations/${acme}/repository-connections/${connection.id}/repair`, {
+      method: "PUT", headers: { authorization: "Bearer admin-session", "content-type": "application/json" },
+      body: JSON.stringify({ installationId: 84, owner: "acme", name: "personal-repo" }),
+    });
+    assert.equal(rejectedRepair.status, 502);
+    assert.equal(database.records[0]!.ownership, "personal"); assert.equal(database.records[0]!.state, "degraded");
+
+    github.failure = undefined;
+    const repaired = await fetch(`${baseUrl}/api/organizations/${acme}/repository-connections/${connection.id}/repair`, {
+      method: "PUT", headers: { authorization: "Bearer admin-session", "content-type": "application/json" },
+      body: JSON.stringify({ installationId: 84, owner: "acme", name: "personal-repo" }),
     });
     assert.equal(repaired.status, 204);
     assert.equal(database.records[0]!.ownership, "organization"); assert.equal(database.records[0]!.state, "active");
+    assert.equal(database.records[0]!.installationId, 84);
+    assert.equal(database.records[0]!.repositoryUrl, "https://github.com/acme/personal-repo");
+    assert.equal(github.calls, 3);
+    assert.equal(github.minted, 4, "successful replacement is separately verified before activation");
   });
 
   it("rechecks authority atomically after provider calls and before Project attachment", async () => {

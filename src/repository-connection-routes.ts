@@ -19,7 +19,7 @@ export function repositoryConnectionRoutes(service: RepositoryConnectionService,
         if (attached === "not_found") json(response, 404, { error: "repository_connection_not_found", message: "That Repository Connection or Project is not available in this Organization." });
         else { response.writeHead(204, { "cache-control": "no-store" }); response.end(); }
       } else if (repairPath.test(url.pathname) && request.method === "PUT") {
-        const repaired = await service.repair(member.accountId, organizationId, decodePathValue(match[2]!));
+        const repaired = await service.repair(member.accountId, organizationId, decodePathValue(match[2]!), await readJson(request));
         if (repaired === "forbidden") throw new RepositoryConnectionWriteForbidden();
         if (repaired === "not_found") json(response, 404, { error: "repository_connection_not_found", message: "That degraded Repository Connection is not available." });
         else response.writeHead(204, { "cache-control": "no-store" }).end();

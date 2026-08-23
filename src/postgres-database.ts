@@ -2267,15 +2267,21 @@ export class PostgresDatabase implements
     return result.rows.map(repositoryConnectionRecord);
   }
 
-  async repairRepositoryConnection(actorId: string, organizationId: string, connectionId: string) {
+  async replaceDegradedRepositoryConnection(actorId: string, organizationId: string, connectionId: string,
+    replacement: import("./repository-connections.js").GitHubRepositoryIdentity) {
     await this.#ensureRepositoryConnectionSchema();
     return this.#withTransaction(async (client) => {
       const memberships = await this.#lockedOrganizationMemberships(client, organizationId);
       if (!this.#canManageRepositoryConnections(memberships, actorId)) return "forbidden" as const;
       const repaired = await client.query<RepositoryConnectionRow>(`${repositoryConnectionSelect} WHERE connection.organization_id = $1 AND connection.id = $2 AND connection.state = 'degraded' FOR UPDATE`, [organizationId, connectionId]);
       if (!repaired.rows[0]) return "not_found" as const;
-      await client.query("UPDATE stash_repository_connections SET ownership = 'organization', state = 'active' WHERE id = $1", [connectionId]);
-      const refreshed = { ...repositoryConnectionRecord(repaired.rows[0]), ownership: "organization" as const, state: "active" as const };
+      await client.query(`UPDATE stash_repository_connections SET installation_id = $2, repository_id = $3,
+        repository_url = $4, created_by_account_id = $5, created_by_attribution = 'recorded',
+        ownership = 'organization', state = 'active' WHERE id = $1`,
+      [connectionId, replacement.installationId, replacement.repositoryId, replacement.repositoryUrl, actorId]);
+      const refreshed = { ...repositoryConnectionRecord(repaired.rows[0]), ...replacement,
+        createdByMemberId: actorId, createdByAttribution: "recorded" as const,
+        ownership: "organization" as const, state: "active" as const };
       const revision = await client.query<{ revision: number }>("SELECT COALESCE(MAX(revision),0)+1 AS revision FROM stash_portable_projection_outbox WHERE object_kind='RepositoryConnection' AND object_id=$1", [connectionId]);
       await this.#recordRepositoryConnectionProjection(client, refreshed, Number(revision.rows[0]!.revision));
       return "repaired" as const;
