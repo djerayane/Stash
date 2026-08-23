@@ -2,7 +2,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useGSAP } from "@gsap/react";
 import gsap from "gsap";
-import { createProductSettingsApi } from "@stash/api-client";
+import { createInstanceAdministrationApi } from "@stash/api-client";
 import type { InstanceDiagnosticSettings as Settings } from "@stash/domain-types";
 import { useRef, useState, type FormEvent } from "react";
 import styles from "./product-settings.module.css";
@@ -11,7 +11,7 @@ const key = "stash.instance-admin-session";
 function storedToken() { try { const value = JSON.parse(localStorage.getItem(key) ?? "null") as { token?: unknown } | null; return typeof value?.token === "string" ? value.token : ""; } catch { return ""; } }
 export function InstanceDiagnosticsAdministration() {
   const [token, setToken] = useState(storedToken); const [draft, setDraft] = useState(""); const [consent, setConsent] = useState<Settings>(); const queryClient = useQueryClient();
-  const api = createProductSettingsApi({ baseUrl: "", memberToken: token });
+  const api = createInstanceAdministrationApi({ baseUrl: "", instanceAdminToken: token });
   const pageRef = useRef<HTMLElement>(null);
   const diagnostics = useQuery({ queryKey: ["instance-diagnostics", token], enabled: Boolean(token), retry: false, queryFn: () => api.diagnostics() });
   const save = useMutation({ mutationFn: (settings: Settings) => api.saveDiagnosticSettings(settings), onSuccess: () => { setConsent(undefined); void diagnostics.refetch(); } });

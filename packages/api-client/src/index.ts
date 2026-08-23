@@ -23,8 +23,9 @@ export interface ProductSettingsApi {
   assignRole(organizationId: string, memberId: string, role: string): Promise<void>; invite(organizationId: string, input: Record<string, unknown>): Promise<OrganizationInvitationResponse>;
   connectRepository(organizationId: string, input: Record<string, unknown>): Promise<void>; verifyRepository(organizationId: string, connectionId: string): Promise<void>; attachRepository(organizationId: string, connectionId: string, projectId: string): Promise<void>; repairRepository(organizationId: string, connectionId: string, input: Record<string, unknown>): Promise<void>; saveOidc(organizationId: string, input: Record<string, unknown>): Promise<void>;
   exportWorkspace(workspaceId: string): Promise<{ blob: Blob; filename: string }>; importWorkspace(workspaceId: string, memberId: string, archive: Blob): Promise<Record<string, unknown>>;
-  diagnostics(): Promise<InstanceDiagnosticsState>; saveDiagnosticSettings(input: InstanceDiagnosticSettings): Promise<void>; runDiagnosticOperation(path: "/api/diagnostics/submit" | "/api/diagnostics/crash-reports/submit" | "/api/diagnostics/update-check"): Promise<void>;
 }
+export interface InstanceAdministrationApiOptions { readonly baseUrl: string; readonly instanceAdminToken: string; readonly fetch?: typeof globalThis.fetch }
+export interface InstanceAdministrationApi { diagnostics(): Promise<InstanceDiagnosticsState>; saveDiagnosticSettings(input: InstanceDiagnosticSettings): Promise<void>; runDiagnosticOperation(path: "/api/diagnostics/submit" | "/api/diagnostics/crash-reports/submit" | "/api/diagnostics/update-check"): Promise<void> }
 
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
@@ -112,8 +113,13 @@ export function createProductSettingsApi(options: StashApiClientOptions): Produc
     connectRepository: (organizationId, input) => write(`${root(organizationId)}/repository-connections`, "POST", input), verifyRepository: (organizationId, connectionId) => write(`${root(organizationId)}/repository-connections/${encodeURIComponent(connectionId)}/verify`, "POST", {}), attachRepository: (organizationId, connectionId, projectId) => write(`${root(organizationId)}/repository-connections/${encodeURIComponent(connectionId)}/projects/${encodeURIComponent(projectId)}`, "POST", {}), repairRepository: (organizationId, connectionId, input) => write(`${root(organizationId)}/repository-connections/${encodeURIComponent(connectionId)}/repair`, "PUT", input), saveOidc: (organizationId, input) => write(`${root(organizationId)}/auth/oidc`, "PUT", input),
     exportWorkspace: async (workspaceId) => { const response = await send(`/api/workspaces/${encodeURIComponent(workspaceId)}/export`); const disposition = response.headers.get("content-disposition"); return { blob: await response.blob(), filename: disposition?.match(/filename="([^"]+)"/)?.[1] ?? "stash-workspace.zip" }; },
     importWorkspace: (workspaceId, memberId, archive) => json(send("/api/workspace-imports", { method: "POST", headers: { "content-type": "application/zip", "idempotency-key": crypto.randomUUID(), "x-stash-import-owner-account-id": memberId, "x-stash-workspace-id": workspaceId }, body: archive }), jsonObjectResponse),
-    diagnostics: () => json(send("/api/diagnostics"), instanceDiagnosticsResponse), saveDiagnosticSettings: (input) => write("/api/diagnostics/settings", "PUT", input), runDiagnosticOperation: (path) => write(path, "POST", {}),
   };
+}
+
+export function createInstanceAdministrationApi(options: InstanceAdministrationApiOptions): InstanceAdministrationApi {
+  const request = options.fetch ?? globalThis.fetch; const baseUrl = options.baseUrl.replace(/\/$/, "");
+  const send = async (path: string, init: RequestInit = {}) => { const response = await request(`${baseUrl}${path}`, { ...init, credentials: "include", headers: { authorization: `Bearer ${options.instanceAdminToken}`, ...(init.body ? { "content-type": "application/json" } : {}), ...init.headers } }); if (!response.ok) throw await apiError(response); return response; };
+  return { diagnostics: async () => { const result = instanceDiagnosticsResponse(await (await send("/api/diagnostics")).json()); if (!result.ok || !result.value) throw new StashApiError(502, result.message ?? "Stash returned an invalid Instance diagnostics response"); return result.value; }, saveDiagnosticSettings: async (input) => { await send("/api/diagnostics/settings", { method: "PUT", body: JSON.stringify(input) }); }, runDiagnosticOperation: async (path) => { await send(path, { method: "POST", body: "{}" }); } };
 }
 
 async function apiError(response: Response) {
