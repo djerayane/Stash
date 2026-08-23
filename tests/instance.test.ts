@@ -16,6 +16,10 @@ class ProtocolCompatibleDatabaseProbe implements DatabaseProbe {
   }
 
   async close(): Promise<void> {}
+  async resolveClientSessionPrincipal(accountId: string) {
+    return accountId === "member" ? { member: { id: "member", name: "Server Member", email: "member@stash.test" },
+      workspace: { id: "workspace", name: "Server Workspace" }, capabilities: [] } : undefined;
+  }
 }
 
 class ProtocolCompatibleRedisFake implements RedisCache {
@@ -143,14 +147,15 @@ describe("running Stash Instance", () => {
     const administrator = await fetch(`${instance.url}/api/client-session`, {
       headers: { authorization: "Bearer test-instance-admin-token" },
     });
-    assert.equal(administrator.status, 200);
-    assert.deepEqual(await administrator.json(), { authenticated: true, permissions: ["instance:manage"] });
+    assert.equal(administrator.status, 401);
 
     const member = await fetch(`${instance.url}/api/client-session`, {
       headers: { authorization: "Bearer member-token" },
     });
     assert.equal(member.status, 200);
-    assert.deepEqual(await member.json(), { authenticated: true, permissions: [] });
+    assert.deepEqual(await member.json(), { authenticated: true,
+      member: { id: "member", name: "Server Member", email: "member@stash.test" },
+      workspace: { id: "workspace", name: "Server Workspace" }, capabilities: [] });
 
     const anonymous = await fetch(`${instance.url}/api/client-session`);
     assert.equal(anonymous.status, 401);

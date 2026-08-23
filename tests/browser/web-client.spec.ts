@@ -3,8 +3,8 @@ import { expect, test, type Page } from "@playwright/test";
 
 const memberSession = JSON.stringify({
   token: "browser-acceptance-member-token",
-  member: { name: "Browser Member", email: "member@stash.test" },
-  workspace: { name: "Acceptance Workspace" },
+  member: { name: "Forged Member", email: "forged@evil.test" },
+  workspace: { name: "Forged Workspace" },
 });
 
 async function installMemberSession(page: Page) {
@@ -21,6 +21,16 @@ test("restores an anonymous deep link after authentication", async ({ page }) =>
 
   await expect(page).toHaveURL(/\/app\/tasks\?assigned=me$/);
   await expect(page.getByRole("heading", { name: "Tasks", exact: true })).toBeVisible();
+  await expect(page.getByText("Acceptance Workspace").first()).toBeVisible();
+  await expect(page.getByText("Forged Workspace")).toHaveCount(0);
+});
+
+test("rejects the Instance Administrator credential from the Member shell", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("stash.member-session", JSON.stringify({ token: "browser-acceptance-admin-token",
+    member: { name: "Forged administrator", email: "admin@evil.test" }, workspace: { name: "Forged Workspace" } })));
+  await page.goto("/app");
+  await expect(page.getByRole("heading", { name: "Sign in to Stash" })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Workspace" })).toHaveCount(0);
 });
 
 test("supports keyboard navigation and focuses changed route content", async ({ page }) => {
@@ -85,7 +95,10 @@ test("announces and focuses a session failure, then retries by keyboard without 
   page.on("framenavigated", (frame) => { if (frame === page.mainFrame()) documentNavigations += 1; });
   await page.route("**/api/client-session", async (route) => {
     sessionAttempts += 1;
-    await route.fulfill({ status: sessionAttempts === 1 ? 503 : 200, contentType: "application/json", body: "{}" });
+    await route.fulfill({ status: sessionAttempts === 1 ? 503 : 200, contentType: "application/json", body: JSON.stringify({
+      authenticated: true, member: { id: "browser-member", name: "Browser Member", email: "member@stash.test" },
+      workspace: { id: "browser-workspace", name: "Acceptance Workspace" }, capabilities: [],
+    }) });
   });
   await page.goto("/app");
 

@@ -3,7 +3,10 @@ import { fileURLToPath } from "node:url";
 import { startInstance } from "../src/instance.js";
 
 const instance = await startInstance({
-  database: { async verifyConnection() {}, async close() {} },
+  database: { async verifyConnection() {}, async close() {}, async resolveClientSessionPrincipal(accountId: string) {
+    return accountId === "browser-member" ? { member: { id: accountId, name: "Browser Member", email: "member@stash.test" },
+      workspace: { id: "browser-workspace", name: "Acceptance Workspace" }, capabilities: [] } : undefined;
+  } },
   host: "127.0.0.1",
   port: Number.parseInt(process.env.STASH_BROWSER_PORT ?? "4173", 10),
   instanceAdminToken: "browser-acceptance-admin-token",

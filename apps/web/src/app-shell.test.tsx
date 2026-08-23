@@ -8,6 +8,7 @@ const member: SessionState = {
   status: "authenticated",
   member: { name: "Ada Lovelace", email: "ada@example.com" },
   workspace: { name: "Engine Room" },
+  capabilities: [],
 };
 
 function LocationProbe() {
@@ -56,7 +57,7 @@ test("derives identity labels and initials with explicit fallbacks", () => {
   expect(displayLabel("   ", "Personal workspace")).toBe("Personal workspace");
   expect(initials("Project Atlas", "PW")).toBe("PA");
   expect(initials("", "M")).toBe("M");
-  renderShell("/app/tasks", { status: "authenticated", member: { name: "", email: "member@example.com" }, workspace: { name: "" } });
+  renderShell("/app/tasks", { status: "authenticated", member: { name: "", email: "member@example.com" }, workspace: { name: "" }, capabilities: [] });
   expect(screen.getAllByText("Personal workspace")).not.toHaveLength(0);
   expect(screen.getByText("PW")).toBeInTheDocument();
   expect(screen.getAllByText("member@example.com")).toHaveLength(2);

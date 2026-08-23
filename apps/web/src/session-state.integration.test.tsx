@@ -7,8 +7,8 @@ import { useSessionState } from "./web-session";
 
 const storedSession = JSON.stringify({
   token: "integration-member-token",
-  member: { name: "Ada Lovelace", email: "ada@example.com" },
-  workspace: { name: "Engine Room" },
+  member: { name: "Forged Member", email: "forged@example.com" },
+  workspace: { name: "Forged Workspace" },
 });
 
 function IntegratedShell({ fetcher }: { readonly fetcher: typeof fetch }) {
@@ -37,7 +37,9 @@ test("recovers from an unavailable authenticated session check", async () => {
   let attempts = 0;
   const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => {
     attempts += 1;
-    return new Response("{}", { status: attempts === 1 ? 503 : 200 });
+    return new Response(JSON.stringify({ authenticated: true, member: { id: "member", name: "Ada Lovelace", email: "ada@example.com" },
+      workspace: { id: "workspace", name: "Engine Room" }, capabilities: [] }),
+    { status: attempts === 1 ? 503 : 200, headers: { "content-type": "application/json" } });
   });
   renderShell(fetcher);
   expect(await screen.findByRole("main")).toBeInTheDocument();
@@ -47,7 +49,16 @@ test("recovers from an unavailable authenticated session check", async () => {
   expect(screen.getByRole("heading", { name: "Workspace unavailable" })).toBeInTheDocument();
   act(() => screen.getByRole("button", { name: "Try again" }).click());
   expect(await screen.findByRole("heading", { name: "Good morning." })).toBeInTheDocument();
+  expect(screen.getAllByText("Engine Room")).not.toHaveLength(0);
+  expect(screen.queryByText("Forged Workspace")).not.toBeInTheDocument();
   expect(attempts).toBe(2);
+});
+
+test("rejects an Instance Administrator token from the Member shell", async () => {
+  localStorage.setItem("stash.member-session", JSON.stringify({ token: "instance-admin-token" }));
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response("{}", { status: 401 }));
+  renderShell(fetcher);
+  expect(await screen.findByRole("heading", { name: "Sign in to Stash" })).toBeInTheDocument();
 });
 
 test("does not render authenticated navigation when the Instance rejects the stored session", async () => {

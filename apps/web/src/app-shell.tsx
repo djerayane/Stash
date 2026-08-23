@@ -9,7 +9,7 @@ export type SessionState =
   | { readonly status: "loading" }
   | { readonly status: "anonymous" }
   | { readonly status: "error"; readonly message: string; readonly retry?: () => void }
-  | { readonly status: "authenticated"; readonly member: { readonly name: string; readonly email: string }; readonly workspace: { readonly name: string } };
+  | { readonly status: "authenticated"; readonly member: { readonly name: string; readonly email: string }; readonly workspace: { readonly name: string }; readonly capabilities: readonly string[] };
 
 interface AppShellProps { readonly session?: SessionState }
 
