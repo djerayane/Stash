@@ -45,10 +45,17 @@ import { Schema } from "prosemirror-model";
 import { InvalidCollaborationUpdate, type CollaborationSnapshot, type NoteCollaborationRepository } from "./note-collaboration.js";
 import type { WorkspaceSearchQuery, WorkspaceSearchRepository, WorkspaceSearchResult } from "./workspace-search.js";
 import { proseMirrorToRichText, richTextToProseMirror } from "@stash/rich-text";
+import type { AgentGrant, AgentGrantOption, AgentProposal, StoredAgentGrant } from "./agent-grants.js";
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
 const authenticationKeyCheckLockId = 795_541_992;
+function agentGrantFromRow(row: any): AgentGrant {
+  return { id: row.id, organizationId: row.organization_id, sponsoringMemberId: row.sponsoring_member_id, name: row.name,
+    ...(row.project_id ? { projectId: row.project_id } : {}), scopes: row.capabilities,
+    expiresAt: new Date(row.expires_at).toISOString(), createdAt: new Date(row.created_at).toISOString(),
+    ...(row.revoked_at ? { revokedAt: new Date(row.revoked_at).toISOString() } : {}) };
+}
 interface FailedAutomationRun {
   automationId: string;
   configuringMemberId: string;
@@ -437,6 +444,7 @@ export class PostgresDatabase implements
     memberId: string,
     note: NoteRecord,
     projection: PortableNoteProjection,
+    cause: ActivityCause = { kind: "member" },
   ): Promise<"created" | "workspace_forbidden" | "project_forbidden"> {
     return this.#withTransaction(async (client) => {
       await this.#ensureNoteSchema(client);
@@ -479,7 +487,8 @@ export class PostgresDatabase implements
       );
       await this.#recordInitialNoteLocation(client, note.id, note.workspaceId);
       await this.#recordPortableProjection(client, "Note", note.id, "stash.note.v1", projection);
-      await this.#recordNoteRevisionAndActivity(client, memberId, undefined, note, "note_created", { kind: "member" });
+      await this.#recordNoteRevisionAndActivity(client, memberId, undefined, note, "note_created", cause);
+      if (cause.kind === "agent") await this.#recordAgentExecutionAudit(client, memberId, note.workspaceId, "agent_note_created", note.id, cause);
       return "created";
     });
   }
@@ -1290,7 +1299,7 @@ export class PostgresDatabase implements
     });
   }
 
-  async updateTaskByKey(memberId: string, projectId: string, taskKey: string, update: TaskPlanningUpdate) {
+  async updateTaskByKey(memberId: string, projectId: string, taskKey: string, update: TaskPlanningUpdate, cause: ActivityCause = { kind: "member" }) {
     return this.#withTransaction(async (client) => {
       await this.#ensureNoteSchema(client);
       await this.#ensureInvitationSchema(client);
@@ -1369,7 +1378,8 @@ export class PostgresDatabase implements
       const task = taskPlanningReadModelFromRow(saved.rows[0]);
       await this.#recordPortableProjection(client, "Task", task.id, task.schema, taskProjectionFromRow(saved.rows[0]));
       const beforeTask = taskPlanningReadModelFromRow(row);
-      const activity = await this.#recordTaskActivity(client, memberId, task.workspaceId, task.id, "task_planning_updated", beforeTask, task);
+      const activity = await this.#recordTaskActivity(client, memberId, task.workspaceId, task.id, "task_planning_updated", beforeTask, task, cause);
+      if (cause.kind === "agent") await this.#recordAgentExecutionAudit(client, memberId, task.workspaceId, "agent_task_updated", task.id, cause);
       await this.#recordAssignmentNotifications(client, projectId, activity, beforeTask, task);
       for (const affectedId of (row.affected_dependency_task_ids ?? []).filter((id: string) => id !== task.id)) {
         const affectedBefore = await client.query<any>(taskPlanningSelectById, [affectedId, memberId]);
@@ -1381,7 +1391,7 @@ export class PostgresDatabase implements
           await this.#recordPortableProjection(client, "Task", projection.id, projection.schema, projection);
           if (affectedBefore.rows[0]) await this.#recordTaskActivity(client, memberId, task.workspaceId, affectedId,
             "task_dependency_relationship_updated", taskPlanningReadModelFromRow(affectedBefore.rows[0]),
-            taskPlanningReadModelFromRow(affected.rows[0]));
+            taskPlanningReadModelFromRow(affected.rows[0]), cause);
         }
       }
       return { status: "updated" as const, task };
@@ -4584,7 +4594,20 @@ export class PostgresDatabase implements
       capabilities JSONB NOT NULL CHECK (jsonb_typeof(capabilities) = 'array'),
       expires_at TIMESTAMPTZ NOT NULL,
       confirmation_policy JSONB NOT NULL CHECK (jsonb_typeof(confirmation_policy) = 'object'),
-      revoked_at TIMESTAMPTZ
+      revoked_at TIMESTAMPTZ,
+      name TEXT NOT NULL DEFAULT 'Agent',
+      token_lookup TEXT UNIQUE,
+      token_hash TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    ALTER TABLE stash_agent_grants ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT 'Agent';
+    ALTER TABLE stash_agent_grants ADD COLUMN IF NOT EXISTS token_lookup TEXT UNIQUE;
+    ALTER TABLE stash_agent_grants ADD COLUMN IF NOT EXISTS token_hash TEXT;
+    ALTER TABLE stash_agent_grants ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP;
+    CREATE TABLE IF NOT EXISTS stash_agent_proposals (
+      id UUID PRIMARY KEY, grant_id UUID NOT NULL REFERENCES stash_agent_grants(id), sponsoring_member_id UUID NOT NULL REFERENCES stash_accounts(id),
+      capability TEXT NOT NULL, input JSONB NOT NULL, status TEXT NOT NULL CHECK (status IN ('pending','accepted','rejected')),
+      created_at TIMESTAMPTZ NOT NULL
     );
     CREATE TABLE IF NOT EXISTS stash_personal_access_tokens (
       id UUID PRIMARY KEY,
@@ -4600,6 +4623,102 @@ export class PostgresDatabase implements
       organization_id UUID NOT NULL REFERENCES stash_organizations(id), target_account_id UUID NOT NULL REFERENCES stash_accounts(id),
       occurred_at TIMESTAMPTZ NOT NULL, before_state JSONB NOT NULL, after_state JSONB NOT NULL
     )`);
+  }
+
+  async createAgentGrant(actorId: string, grant: StoredAgentGrant): Promise<"created" | "forbidden"> {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureMemberDepartureSchema(client);
+      const allowed = await client.query(`SELECT 1 FROM stash_organization_memberships membership
+        WHERE membership.organization_id=$1 AND membership.account_id=$2
+          AND ($3::uuid IS NULL OR EXISTS (SELECT 1 FROM stash_projects project WHERE project.id=$3 AND EXISTS (
+            SELECT 1 FROM stash_workspaces workspace WHERE workspace.id=project.workspace_id AND workspace.organization_owner_id=$1)))`,
+      [grant.organizationId, actorId, grant.projectId ?? null]);
+      if (!allowed.rowCount) return "forbidden";
+      await client.query(`INSERT INTO stash_agent_grants
+        (id,organization_id,project_id,sponsoring_member_id,capabilities,expires_at,confirmation_policy,revoked_at,name,token_lookup,token_hash,created_at)
+        VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7::jsonb,NULL,$8,$9,$10,$11)`, [grant.id, grant.organizationId, grant.projectId ?? null,
+        actorId, JSON.stringify(grant.scopes), grant.expiresAt, JSON.stringify({ modes: grant.scopes }), grant.name, grant.tokenLookup, grant.tokenHash, grant.createdAt]);
+      return "created";
+    } finally { client.release(); }
+  }
+
+  async listAgentGrants(actorId: string, organizationId: string): Promise<AgentGrant[] | undefined> {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureMemberDepartureSchema(client);
+      const membership = await client.query("SELECT 1 FROM stash_organization_memberships WHERE organization_id=$1 AND account_id=$2", [organizationId, actorId]);
+      if (!membership.rowCount) return undefined;
+      const result = await client.query<any>(`SELECT id,organization_id,project_id,sponsoring_member_id,name,capabilities,expires_at,created_at,revoked_at
+        FROM stash_agent_grants WHERE organization_id=$1 AND sponsoring_member_id=$2 ORDER BY created_at DESC,id`, [organizationId, actorId]);
+      return result.rows.map(agentGrantFromRow);
+    } finally { client.release(); }
+  }
+
+  async revokeAgentGrant(actorId: string, organizationId: string, grantId: string): Promise<"revoked" | "not_found" | "forbidden"> {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureMemberDepartureSchema(client);
+      const result = await client.query(`UPDATE stash_agent_grants SET revoked_at=CURRENT_TIMESTAMP
+        WHERE id=$1 AND organization_id=$2 AND sponsoring_member_id=$3 AND revoked_at IS NULL RETURNING id`, [grantId, organizationId, actorId]);
+      if (result.rowCount) return "revoked";
+      const existing = await client.query<{ sponsoring_member_id: string }>("SELECT sponsoring_member_id FROM stash_agent_grants WHERE id=$1 AND organization_id=$2", [grantId, organizationId]);
+      return !existing.rowCount ? "not_found" : existing.rows[0]!.sponsoring_member_id === actorId ? "revoked" : "forbidden";
+    } finally { client.release(); }
+  }
+
+  async findActiveAgentGrant(tokenLookup: string): Promise<StoredAgentGrant | undefined> {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureMemberDepartureSchema(client);
+      const result = await client.query<any>(`SELECT id,organization_id,project_id,sponsoring_member_id,name,capabilities,expires_at,created_at,revoked_at,token_lookup,token_hash
+        FROM stash_agent_grants WHERE token_lookup=$1 AND revoked_at IS NULL AND expires_at>CURRENT_TIMESTAMP`, [tokenLookup]);
+      const row = result.rows[0]; if (!row?.token_hash) return undefined;
+      return { ...agentGrantFromRow(row), tokenLookup: row.token_lookup, tokenHash: row.token_hash };
+    } finally { client.release(); }
+  }
+
+  async agentGrantOptions(actorId: string): Promise<AgentGrantOption[]> {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureMemberDepartureSchema(client);
+      const result = await client.query<{ organization_id: string; organization_name: string; project_id: string | null; project_name: string | null }>(`
+        SELECT organization.id organization_id,organization.name organization_name,project.id project_id,project.name project_name
+        FROM stash_organization_memberships membership JOIN stash_organizations organization ON organization.id=membership.organization_id
+        LEFT JOIN stash_workspaces workspace ON workspace.organization_owner_id=organization.id
+        LEFT JOIN stash_projects project ON project.workspace_id=workspace.id WHERE membership.account_id=$1
+        ORDER BY organization.name,organization.id,project.name,project.id`, [actorId]);
+      return [...new Set(result.rows.map((row) => row.organization_id))].map((organizationId) => {
+        const rows = result.rows.filter((row) => row.organization_id === organizationId); return { organizationId,
+          organizationName: rows[0]!.organization_name, projects: rows.flatMap((row) => row.project_id ? [{ id: row.project_id, name: row.project_name! }] : []) };
+      });
+    } finally { client.release(); }
+  }
+
+  async createAgentProposal(proposal: AgentProposal): Promise<void> {
+    await this.#pool.query(`INSERT INTO stash_agent_proposals (id,grant_id,sponsoring_member_id,capability,input,status,created_at)
+      VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7)`, [proposal.id, proposal.grantId, proposal.sponsoringMemberId, proposal.capability,
+      JSON.stringify(proposal.input), proposal.status, proposal.createdAt]);
+  }
+
+  async listAgentProposals(actorId: string, organizationId: string): Promise<AgentProposal[] | undefined> {
+    const client = await this.#pool.connect(); try { await this.#ensureMemberDepartureSchema(client);
+    const membership = await client.query("SELECT 1 FROM stash_organization_memberships WHERE organization_id=$1 AND account_id=$2", [organizationId, actorId]);
+    if (!membership.rowCount) return undefined;
+    const result = await client.query<any>(`SELECT proposal.id,proposal.grant_id,proposal.sponsoring_member_id,proposal.capability,proposal.input,proposal.created_at,proposal.status
+      FROM stash_agent_proposals proposal JOIN stash_agent_grants grant ON grant.id=proposal.grant_id
+      WHERE grant.organization_id=$1 AND proposal.sponsoring_member_id=$2 AND proposal.status='pending' ORDER BY proposal.created_at DESC,proposal.id`, [organizationId, actorId]);
+    return result.rows.map((row) => ({ id: row.id, grantId: row.grant_id, sponsoringMemberId: row.sponsoring_member_id,
+      capability: row.capability, input: row.input, createdAt: new Date(row.created_at).toISOString(), status: "pending" }));
+    } finally { client.release(); }
+  }
+
+  async agentGrantTargetAllowed(grant: AgentGrant, target: { workspaceId?: string; projectId?: string }): Promise<boolean> {
+    if (!target.workspaceId && !target.projectId) return false;
+    const result = await this.#pool.query(`SELECT 1 FROM stash_workspaces workspace LEFT JOIN stash_projects project ON project.workspace_id=workspace.id
+      WHERE workspace.organization_owner_id=$1 AND ($2::uuid IS NULL OR workspace.id=$2) AND ($3::uuid IS NULL OR project.id=$3)
+        AND ($4::uuid IS NULL OR project.id=$4) LIMIT 1`, [grant.organizationId, target.workspaceId ?? null, target.projectId ?? null, grant.projectId ?? null]);
+    return Boolean(result.rowCount);
   }
 
   async #markFormerAssignments(client: PoolClient, organizationId: string, accountId: string, actorId: string): Promise<string[]> {
@@ -4688,6 +4807,20 @@ export class PostgresDatabase implements
       (id, action, actor_account_id, organization_id, target_account_id, occurred_at, before_state, after_state)
       VALUES ($1,'organization_member_departed',$2,$3,$4,CURRENT_TIMESTAMP,$5::jsonb,$6::jsonb)`,
     [randomUUID(), actorId, organizationId, accountId, JSON.stringify({ role, active: true }), JSON.stringify({ active: false, ...after })]);
+  }
+
+  async #recordAgentExecutionAudit(client: PoolClient, memberId: string, workspaceId: string, action: string,
+    objectId: string, cause: Extract<ActivityCause, { kind: "agent" }>): Promise<void> {
+    await this.#ensureMemberDepartureSchema(client);
+    const organization = await client.query<{ organization_id: string }>(
+      "SELECT organization_owner_id organization_id FROM stash_workspaces WHERE id=$1 AND owner_type='organization'", [workspaceId]);
+    if (!organization.rows[0]) return;
+    await client.query(`INSERT INTO stash_operator_audit
+      (id,action,actor_account_id,organization_id,target_account_id,occurred_at,before_state,after_state)
+      VALUES ($1,$2,$3,$4,$3,CURRENT_TIMESTAMP,$5::jsonb,$6::jsonb)`, [randomUUID(), action, memberId,
+      organization.rows[0].organization_id, JSON.stringify({ authority: "agent_grant", agentGrantId: cause.agentGrantId,
+        sponsoringMemberId: cause.sponsoringMemberId, agentName: cause.agentName ?? null }),
+      JSON.stringify({ objectId, cause: "mcp_direct", attributed: true })]);
   }
 
   async #ensureWorkspaceImportSchema(client: PoolClient): Promise<void> {

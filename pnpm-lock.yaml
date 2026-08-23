@@ -20,6 +20,9 @@ importers:
       '@stash/sync':
         specifier: workspace:*
         version: link:packages/sync
+      '@stash/validation':
+        specifier: workspace:*
+        version: link:packages/validation
       gsap:
         specifier: ^3.15.0
         version: 3.15.0
@@ -284,6 +287,9 @@ importers:
       '@stash/domain-types':
         specifier: workspace:*
         version: link:../domain-types
+      '@stash/validation':
+        specifier: workspace:*
+        version: link:../validation
     devDependencies:
       typescript:
         specifier: ~5.9.2
@@ -339,6 +345,10 @@ importers:
   packages/tokens: {}
 
   packages/validation:
+    dependencies:
+      '@stash/domain-types':
+        specifier: workspace:*
+        version: link:../domain-types
     devDependencies:
       typescript:
         specifier: ~5.9.2

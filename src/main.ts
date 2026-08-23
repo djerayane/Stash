@@ -36,6 +36,7 @@ import { NotificationService } from "./notifications.js";
 import { AutomationService } from "./automations.js";
 import { NoteCollaborationService } from "./note-collaboration.js";
 import { WorkspaceSearchService } from "./workspace-search.js";
+import { AgentGrantService } from "./agent-grants.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -97,6 +98,8 @@ async function main(): Promise<void> {
     automations,
     notes: new NoteService(database),
     noteCollaboration: new NoteCollaborationService(database),
+    agentGrants: new AgentGrantService(database),
+    mcpEnabled: process.env.MCP_ENABLED?.trim().toLowerCase() === "true",
     noteLinks: new NoteLinkService(database),
     tasks: new TaskService(database, database),
     projectWorkflows: new ProjectWorkflowService(database),

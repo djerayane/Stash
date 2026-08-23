@@ -274,6 +274,36 @@ test("announces and focuses a session failure, then retries by keyboard without 
   expect(documentNavigations).toBe(0);
 });
 
+test("issues and revokes an Agent Grant with visible credential and accessible recovery", async ({ page }) => {
+  await installMemberSession(page); await page.emulateMedia({ reducedMotion: "reduce" }); let loadAttempts = 0; let created = false; let revoked = false; let navigations = 0; let submitted: any;
+  await page.addInitScript(() => { (window as any).__stashRejectClipboard = true; Object.defineProperty(navigator, "clipboard", { configurable: true,
+    value: { writeText: async () => { if ((window as any).__stashRejectClipboard) throw new DOMException("Denied", "NotAllowedError"); } } }); });
+  page.on("framenavigated", (frame) => { if (frame === page.mainFrame()) navigations += 1; });
+  await page.route("**/api/agent-grant-options", (route) => route.fulfill({ json: { organizations: [{ organizationId: "44444444-4444-4444-8444-444444444444", organizationName: "Acceptance Organization", projects: [{ id: "22222222-2222-4222-8222-222222222222", name: "Release planning" }] }] } }));
+  await page.route("**/api/organizations/44444444-4444-4444-8444-444444444444/agent-grants**", async (route) => {
+    if (route.request().url().endsWith("/proposals")) { await route.fulfill({ json: { proposals: [{ id: "proposal-1", grantId: "grant-1", sponsoringMemberId: "browser-member", capability: "note.write", input: { content: "Review me" }, createdAt: "2026-08-23T10:00:00.000Z", status: "pending" }] } }); return; }
+    const method = route.request().method();
+    if (method === "POST") { created = true; submitted = route.request().postDataJSON(); await route.fulfill({ status: 201, json: { status: "created", token: "stash_agent_abcdefghijklmnop.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", grant: { id: "99999999-9999-4999-8999-999999999999", organizationId: "44444444-4444-4444-8444-444444444444", sponsoringMemberId: "browser-member", name: "Research assistant", scopes: submitted.scopes, expiresAt: submitted.expiresAt, createdAt: "2026-08-23T10:00:00.000Z" } } }); return; }
+    if (method === "DELETE") { revoked = true; await route.fulfill({ json: { grantId: "99999999-9999-4999-8999-999999999999", revoked: true } }); return; }
+    loadAttempts += 1; if (loadAttempts === 1) { await route.fulfill({ status: 503, json: { message: "Agent Grants are temporarily unavailable." } }); return; }
+    await route.fulfill({ json: { grants: created ? [{ id: "99999999-9999-4999-8999-999999999999", organizationId: "44444444-4444-4444-8444-444444444444", sponsoringMemberId: "browser-member", name: "Research assistant", scopes: [{ capability: "note.write", mode: "propose" }], expiresAt: "2026-09-22T10:00:00.000Z", createdAt: "2026-08-23T10:00:00.000Z", ...(revoked ? { revokedAt: "2026-08-23T10:00:00.000Z" } : {}) }] : [] } });
+  });
+  await page.goto("/app"); navigations = 0; await page.getByRole("link", { name: "Agents" }).focus(); await page.keyboard.press("Enter");
+  await expect(page.getByRole("heading", { name: "Agent access, kept deliberate" })).toBeVisible(); navigations = 0; const alert = page.getByRole("alert"); await expect(alert).toBeFocused();
+  await alert.getByRole("button", { name: "Try again" }).click(); await expect(page.getByText("No agents can access this Organization.")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Pending Proposals" })).toBeVisible(); await expect(page.getByText("Pending review — no change has been applied.")).toBeVisible();
+  await page.getByLabel("Agent name").fill("Research assistant"); await page.getByLabel("Project scope").selectOption("22222222-2222-4222-8222-222222222222"); await page.getByLabel("Create Notes").check(); await page.getByLabel("Create Notes policy").selectOption("direct"); await page.getByLabel("Lifetime").selectOption("1"); await page.getByRole("button", { name: "Review Direct authority" }).focus(); await page.keyboard.press("Enter");
+  const directDialog = page.getByRole("dialog", { name: "Confirm Direct agent authority" }); await expect(directDialog).toBeVisible(); expect(created).toBe(false); await expect(directDialog.getByRole("button", { name: "Keep review required" })).toBeFocused(); expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]); await page.keyboard.press("Tab"); await expect(directDialog.getByRole("button", { name: "Issue with Direct authority" })).toBeFocused(); await page.keyboard.press("Enter");
+  const credential = page.getByRole("region", { name: "Copy this credential now" }); await expect(credential).toBeFocused(); await expect(credential).toContainText("stash_agent_");
+  expect(submitted.projectId).toBe("22222222-2222-4222-8222-222222222222"); expect(submitted.scopes).toEqual([{ capability: "note.read", mode: "direct" }, { capability: "note.write", mode: "direct" }]); expect(new Date(submitted.expiresAt).getTime()-Date.now()).toBeLessThanOrEqual(86_400_000);
+  expect(submitted.directAuthorityConfirmation).toBe("I authorize this agent to use Direct capabilities without Proposal review");
+  const copy = page.getByRole("button", { name: "Copy credential" }); await copy.focus(); await page.keyboard.press("Enter"); const copyError = page.getByRole("alert"); await expect(copyError).toBeFocused(); await expect(copyError).toContainText("copy it manually");
+  const code = credential.locator("code"); await expect(code).toContainText("stash_agent_"); await expect(code).toHaveCSS("user-select", "text"); expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  await page.evaluate(() => { (window as any).__stashRejectClipboard = false; }); await copy.focus(); await page.keyboard.press("Enter"); const copied = credential.getByRole("status"); await expect(copied).toHaveText("Credential copied."); await expect(copied).toBeFocused();
+  await page.getByRole("button", { name: "Revoke" }).click(); await expect(page.getByRole("button", { name: "Revoked" })).toBeDisabled();
+  expect(navigations).toBe(0);
+});
+
 test("reviews and confirms an ambiguous GitHub Signal by keyboard without reloading", async ({ page }) => {
   await installMemberSession(page);
   const projectId = "11111111-1111-4111-8111-111111111111";

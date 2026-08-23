@@ -54,9 +54,14 @@ The application fails at startup with a clear error when required configuration 
 | `GITHUB_APP_ID` | no | Numeric ID of the Instance-owned GitHub App; must be configured with `GITHUB_APP_PRIVATE_KEY` |
 | `GITHUB_APP_PRIVATE_KEY` | no | PEM private key for the Instance-owned GitHub App; keep it outside PostgreSQL and configure it with `GITHUB_APP_ID` |
 | `GITHUB_WEBHOOK_SECRET` | no | Shared secret used to verify GitHub webhook deliveries before development Signals are accepted |
+| `MCP_ENABLED` | no | Set to `true` to expose `/mcp`; disabled by default and always requires an active Agent Grant credential |
 | `INSTANCE_BACKUP_PATH` | no | Operator-owned directory for backups created through the protected Instance administration API |
 
 Never commit production secrets or include them in a Portable Workspace Export.
+
+### Optional MCP access
+
+MCP is disabled unless the Instance Administrator sets `MCP_ENABLED=true`. A Member then pairs a client from **Agents** in the React application, selects Direct, Propose, or Deny policy, and copies the one-time Agent Grant credential into that client. The Instance stores only a lookup and hash. Grants are scoped to the sponsoring Member's Organization, optionally to one Project, expire within 90 days, and can be revoked immediately from the same screen. Member sessions and the Instance Administrator token are never accepted at `/mcp`.
 
 ### Optional OpenID Connect
 

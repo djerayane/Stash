@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { PortableTaskProjection } from "./notes.js";
 import type { PortableIdentity } from "./workspaces-projects.js";
+import type { ActivityCause } from "./activity.js";
 
 export interface CreateTaskFromBlockDraft {
   id: string;
@@ -76,7 +77,7 @@ export interface TaskPlanningRepository {
   findTaskByKey(memberId: string, projectId: string, taskKey: string): Promise<
     { status: "found"; task: TaskPlanningReadModel } | { status: "not_found" }
   >;
-  updateTaskByKey(memberId: string, projectId: string, taskKey: string, update: TaskPlanningUpdate): Promise<
+  updateTaskByKey(memberId: string, projectId: string, taskKey: string, update: TaskPlanningUpdate, cause?: ActivityCause): Promise<
     { status: "updated"; task: TaskPlanningReadModel } | { status: "not_found" | "invalid_reference" }
   >;
 }
@@ -157,11 +158,11 @@ export class TaskService {
     return this.tasks.findTaskByKey(memberId, projectId, taskKey.toUpperCase());
   }
 
-  async updateByKey(memberId: string, projectId: string, taskKey: string, value: unknown) {
+  async updateByKey(memberId: string, projectId: string, taskKey: string, value: unknown, cause?: ActivityCause) {
     if (!uuid.test(projectId) || !isTaskKey(taskKey) || !this.tasks.updateTaskByKey || !isPlanningUpdate(value))
       throw new InvalidTaskFromBlockInput();
     const update = normalizePlanningUpdate(value as TaskPlanningUpdate);
-    return this.tasks.updateTaskByKey(memberId, projectId, taskKey.toUpperCase(), update);
+    return this.tasks.updateTaskByKey(memberId, projectId, taskKey.toUpperCase(), update, cause);
   }
 
   async move(memberId: string, projectId: string, taskKey: string, value: unknown) {
@@ -211,7 +212,7 @@ function isTaskKey(value: string): boolean { return /^[A-Za-z][A-Za-z0-9-]{1,19}
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
-function isPlanningUpdate(value: unknown): value is TaskPlanningUpdate {
+export function isPlanningUpdate(value: unknown): value is TaskPlanningUpdate {
   if (!isPlainObject(value) || Object.keys(value).length === 0) return false;
   const allowed = ["title", "statusId", "assigneeIds", "priority", "labelNames", "dueDate", "estimate", "linkedNoteIds", "dependencies", "developmentLinks"];
   if (!Object.keys(value).every((key) => allowed.includes(key))) return false;

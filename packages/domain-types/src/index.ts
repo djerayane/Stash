@@ -1,5 +1,21 @@
 export type EntityId = string;
 
+export const agentGrantModes = ["direct", "propose", "deny"] as const;
+export const agentGrantCapabilities = ["note.read", "note.write", "task.read", "task.write"] as const;
+export type AgentGrantMode = (typeof agentGrantModes)[number];
+export type AgentGrantCapability = (typeof agentGrantCapabilities)[number];
+export interface AgentGrantScope { readonly capability: AgentGrantCapability; readonly mode: AgentGrantMode }
+export interface AgentGrant {
+  id: string; organizationId: string; sponsoringMemberId: string; name: string;
+  projectId?: string; scopes: AgentGrantScope[]; expiresAt: string; createdAt: string; revokedAt?: string;
+}
+export interface AgentGrantOption { readonly organizationId: string; readonly organizationName: string; readonly projects: ReadonlyArray<{ id: string; name: string }> }
+export const directAuthorityConfirmation = "I authorize this agent to use Direct capabilities without Proposal review" as const;
+export interface CreateAgentGrantRequest { readonly organizationId: string; readonly projectId?: string; readonly name: string; readonly scopes: AgentGrantScope[]; readonly expiresAt: string; readonly directAuthorityConfirmation?: typeof directAuthorityConfirmation }
+export interface CreateAgentGrantResponse { readonly status: "created"; readonly grant: AgentGrant; readonly token: string }
+export interface RevokeAgentGrantResponse { readonly grantId: string; readonly revoked: true }
+export interface AgentProposal { readonly id: string; readonly grantId: string; readonly sponsoringMemberId: string; readonly capability: AgentGrantCapability; readonly input: unknown; readonly createdAt: string; readonly status: "pending" }
+
 export interface WorkspaceSummary {
   readonly id: EntityId;
   readonly name: string;
@@ -16,7 +32,7 @@ export type ActivityCause =
   | { readonly kind: "member"; readonly restorationOfRevision?: number; readonly automationId?: string; readonly signalId?: string }
   | { readonly kind: "automation"; readonly automationId: string; readonly signalId?: string }
   | { readonly kind: "signal"; readonly signalId: string }
-  | { readonly kind: "agent"; readonly agentGrantId: string; readonly sponsoringMemberId: string }
+  | { readonly kind: "agent"; readonly agentGrantId: string; readonly sponsoringMemberId: string; readonly agentName?: string }
   | { readonly kind: "migration"; readonly source: "existing_note" };
 export interface ActivityRecord {
   readonly schema: "stash.activity.v1";

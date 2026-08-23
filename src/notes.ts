@@ -3,6 +3,7 @@ import { normalizeExplicitOffsetTimestamp } from "./explicit-offset-timestamp.js
 import type { PortableIdentity } from "./workspaces-projects.js";
 import { isRichTextDocument, markdownToRichText, paragraphDocument, type RichTextBlock, type RichTextDocument } from "./rich-text.js";
 import type { TaskSourceBlockReference } from "./tasks.js";
+import type { ActivityCause } from "./activity.js";
 
 export interface NoteReminder {
   at: string;
@@ -117,6 +118,7 @@ export interface NoteRepository {
     memberId: string,
     note: NoteRecord,
     projection: PortableNoteProjection,
+    cause?: ActivityCause,
   ): Promise<"created" | "workspace_forbidden" | "project_forbidden">;
   listInboxNotes(memberId: string, workspaceId: string): Promise<
     { status: "found"; notes: NoteRecord[] } | { status: "workspace_forbidden" }
@@ -159,7 +161,7 @@ function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
-function isNoteInput(value: unknown): value is NoteInput {
+export function isNoteInput(value: unknown): value is NoteInput {
   if (!isPlainObject(value)
     || (value.content !== undefined && (typeof value.content !== "string" || value.content.trim().length === 0))
     || (value.templateId !== undefined && value.templateId !== "decision")
@@ -209,7 +211,7 @@ export class NoteService {
     return this.#repository.findNoteForMember(memberId, noteId);
   }
 
-  async capture(memberId: string, workspaceId: string, value: unknown): Promise<
+  async capture(memberId: string, workspaceId: string, value: unknown, cause?: ActivityCause): Promise<
     | { status: "created"; note: NoteRecord; projection: PortableNoteProjection }
     | { status: "workspace_forbidden" | "project_forbidden" }
   > {
@@ -243,7 +245,7 @@ export class NoteService {
       ...(note.projectId ? { projectId: note.projectId } : {}),
       ...(note.reminder ? { reminder: note.reminder } : {}),
     };
-    const status = await this.#repository.createNote(memberId, note, projection);
+    const status = await this.#repository.createNote(memberId, note, projection, cause);
     return status === "created" ? { status, note, projection } : { status };
   }
 
