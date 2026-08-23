@@ -1,4 +1,4 @@
-import type { MobileCapture, MobileSyncMutation, MobileSyncResult } from "@stash/sync";
+import type { MobileCapture, MobileSyncMutation, MobileSyncResult } from "@stash/domain-types";
 
 export function presentMobileSyncResult(result: MobileSyncResult, outbox: Array<MobileCapture | MobileSyncMutation>): string {
   if (result.status === "synced") return result.count ? "Queued captures synchronized with your Instance." : "Synchronized with your Instance.";

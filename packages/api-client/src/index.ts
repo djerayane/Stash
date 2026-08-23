@@ -3,6 +3,24 @@ export interface StashApiClientOptions {
   readonly fetch?: typeof globalThis.fetch;
 }
 
+type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+export interface MobileProtocolClientOptions {
+  readonly instanceUrl: string;
+  readonly memberToken: string;
+  readonly fetch?: Fetch;
+}
+
+export interface MobileProtocolClient {
+  captureOptions(workspaceId: string, signal: AbortSignal): Promise<Response>;
+  uploadAttachment(workspaceId: string, input: {
+    captureId: string; filename: string; contentType: string; body: Uint8Array;
+  }, signal: AbortSignal): Promise<Response>;
+  createCapture(workspaceId: string, body: unknown, signal: AbortSignal): Promise<Response>;
+  applyNoteEdit(noteId: string, body: unknown, signal: AbortSignal): Promise<Response>;
+  applyTaskEdit(projectId: string, taskKey: string, body: unknown, signal: AbortSignal): Promise<Response>;
+}
+
 export class StashApiError extends Error {
   constructor(readonly status: number, message: string) {
     super(message);
@@ -20,4 +38,37 @@ export function createStashApiClient(options: StashApiClientOptions) {
       return response.json() as Promise<T>;
     },
   };
+}
+
+export function createMobileProtocolClient(options: MobileProtocolClientOptions): MobileProtocolClient {
+  const request = options.fetch ?? globalThis.fetch;
+  const baseUrl = options.instanceUrl.replace(/\/$/, "");
+  const send = (path: string, init: RequestInit = {}) => request(`${baseUrl}${path}`, {
+    ...init,
+    headers: { authorization: `Bearer ${options.memberToken}`, ...init.headers },
+  });
+  return {
+    captureOptions: (workspaceId, signal) => send(`/api/mobile/v1/workspaces/${encodeURIComponent(workspaceId)}/capture-options`, { signal }),
+    uploadAttachment: (workspaceId, input, signal) => send(`/api/workspaces/${encodeURIComponent(workspaceId)}/attachments`, {
+      method: "POST",
+      headers: { "content-type": input.contentType, "x-stash-filename": encodePortableFilename(input.filename),
+        "x-stash-source": "upload", "x-stash-operation-key": input.captureId },
+      body: input.body as BodyInit,
+      signal,
+    }),
+    createCapture: (workspaceId, body, signal) => send(`/api/mobile/v1/workspaces/${encodeURIComponent(workspaceId)}/captures`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal,
+    }),
+    applyNoteEdit: (noteId, body, signal) => send(`/api/notes/${encodeURIComponent(noteId)}`, {
+      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal,
+    }),
+    applyTaskEdit: (projectId, taskKey, body, signal) => send(
+      `/api/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskKey)}/edits`,
+      { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal },
+    ),
+  };
+}
+
+function encodePortableFilename(value: string): string {
+  return encodeURIComponent(value).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
 }

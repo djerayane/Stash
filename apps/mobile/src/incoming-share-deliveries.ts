@@ -73,4 +73,5 @@ export class IncomingShareDeliveryBatch<T extends IncomingShareValue = IncomingS
 
   pending(): IncomingShareDelivery<T>[] { return [...this.#deliveries]; }
 }
-import type { EncryptedMobileCaptureStore, IncomingShareDelivery as DurableIncomingShareDelivery } from "@stash/sync";
+import type { IncomingShareDelivery as DurableIncomingShareDelivery } from "@stash/domain-types";
+import type { EncryptedMobileCaptureStore } from "@stash/sync";
