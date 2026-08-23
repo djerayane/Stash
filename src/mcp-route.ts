@@ -1,8 +1,8 @@
 import { json, readJson, type HttpRoute } from "./http-routing.js";
 import type { AgentGrant, AgentGrantService } from "./agent-grants.js";
 import type { AgentGrantCapability } from "@stash/domain-types";
-import type { NoteService } from "./notes.js";
-import type { TaskService } from "./tasks.js";
+import { isNoteInput, type NoteService } from "./notes.js";
+import { isPlanningUpdate, type TaskService } from "./tasks.js";
 import { randomUUID } from "node:crypto";
 
 interface McpDomainServices { notes?: NoteService; tasks?: TaskService }
@@ -79,7 +79,14 @@ async function callTool(response: Parameters<typeof json>[0], id: string | numbe
   } catch { rpc(response, id, undefined, { code: -32602, message: "Invalid or unauthorized domain input" }); }
 }
 function validToolArguments(capability: AgentGrantCapability, value: unknown): boolean {
-  return matchesSchema(toolSchemas[capability] as JsonSchema, value);
+  if (!matchesSchema(toolSchemas[capability] as JsonSchema, value)) return false;
+  if (!plain(value)) return false;
+  if (capability === "note.write") {
+    const input = plain(value.input) ? { ...value.input, ...(typeof value.projectId === "string" ? { projectId: value.projectId } : {}) } : value.input;
+    return isNoteInput(input);
+  }
+  if (capability === "task.write") return isPlanningUpdate(value.input);
+  return true;
 }
 interface JsonSchema { type?: string | string[]; format?: string; pattern?: string; enum?: unknown[]; properties?: Record<string, JsonSchema>; required?: string[]; additionalProperties?: boolean; items?: JsonSchema; minProperties?: number }
 function matchesSchema(schema: JsonSchema, value: unknown): boolean {

@@ -212,7 +212,7 @@ function isTaskKey(value: string): boolean { return /^[A-Za-z][A-Za-z0-9-]{1,19}
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
-function isPlanningUpdate(value: unknown): value is TaskPlanningUpdate {
+export function isPlanningUpdate(value: unknown): value is TaskPlanningUpdate {
   if (!isPlainObject(value) || Object.keys(value).length === 0) return false;
   const allowed = ["title", "statusId", "assigneeIds", "priority", "labelNames", "dueDate", "estimate", "linkedNoteIds", "dependencies", "developmentLinks"];
   if (!Object.keys(value).every((key) => allowed.includes(key))) return false;

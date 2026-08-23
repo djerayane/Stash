@@ -126,6 +126,24 @@ describe("Agent Grants and MCP", () => {
     assert.deepEqual(repository.operatorAudit, [{ action: "agent_task_updated", actor: "member", cause }]);
   });
 
+  it("rejects malformed Note and Task inputs before Direct effects or durable Proposals", async () => {
+    const projectId = "44444444-4444-4444-8444-444444444444";
+    for (const mode of ["direct", "propose"] as const) {
+      const repository = await run();
+      const { body } = await issue([{ capability: "note.write", mode }, { capability: "task.write", mode }], "member-session", projectId);
+      const sessionId = await initializeMcp(body.token);
+      const note = await mcp(body.token, sessionId, { jsonrpc: "2.0", id: 10, method: "tools/call", params: { name: "stash.note.write",
+        arguments: { projectId, workspaceId: "55555555-5555-4555-8555-555555555555", input: {} } } });
+      assert.equal((await note.json() as any).error.code, -32602);
+      const task = await mcp(body.token, sessionId, { jsonrpc: "2.0", id: 11, method: "tools/call", params: { name: "stash.task.write",
+        arguments: { projectId, taskKey: "STASH-12", input: { title: "   " } } } });
+      assert.equal((await task.json() as any).error.code, -32602);
+      assert.equal(repository.directWrites.length, 0);
+      assert.equal(repository.proposals.length, 0);
+      await instance!.close(); instance = undefined;
+    }
+  });
+
   it("enforces sponsorship, validation, expiry, and immediate revocation without leaking credentials", async () => {
     const repository = await run(); const forbidden = await issue([{ capability: "note.read", mode: "direct" }], "other-session"); assert.equal(forbidden.response.status, 403);
     const unconfirmed = await fetch(`${instance!.url}/api/organizations/${organizationId}/agent-grants`, { method: "POST", headers: { authorization: "Bearer member-session", "content-type": "application/json" }, body: JSON.stringify({ organizationId, name: "Unconfirmed", expiresAt: "2026-09-01T10:00:00.000Z", scopes: [{ capability: "note.read", mode: "direct" }] }) });
