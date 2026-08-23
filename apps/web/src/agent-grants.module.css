@@ -1,0 +1,24 @@
+.page { max-width: 72rem; margin: 0 auto; padding: clamp(2rem, 6vw, 5rem); color: var(--stash-color-ink); }
+.header { max-width: 58rem; padding: 2rem 0 4rem; border-bottom: 1px solid var(--stash-border-subtle); }
+.header h1 { max-width: 18ch; margin: .3rem 0 1rem; font: 600 clamp(2.5rem, 6vw, 5.4rem)/.98 var(--stash-font-display); letter-spacing: -.055em; }
+.header p:last-child { max-width: 43rem; color: var(--stash-color-muted); font-size: 1.1rem; line-height: 1.65; }
+.kicker { color: var(--stash-color-accent); font-size: .76rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+.composer,.list,.credential { display: grid; grid-template-columns: minmax(14rem, .7fr) minmax(18rem, 1.3fr); gap: clamp(2rem, 6vw, 7rem); padding: 4rem 0; border-bottom: 1px solid var(--stash-border-subtle); }
+.composer h2,.list h2,.credential h2 { margin: 0 0 .65rem; font-size: 1.45rem; }
+.composer p,.list p,.credential p, .list small { color: var(--stash-color-muted); line-height: 1.55; }
+.composer form { display: grid; gap: 1.25rem; }
+.composer label { display: grid; gap: .5rem; font-weight: 650; }
+.composer input,.composer select { min-height: 3rem; padding: .7rem .85rem; color: inherit; background: var(--stash-color-surface); border: 1px solid var(--stash-border-strong); border-radius: var(--stash-radius-sm); font: inherit; }
+.composer button,.credential button,.alert button,.list button { min-height: 2.75rem; padding: .7rem 1rem; color: var(--stash-color-surface); background: var(--stash-color-ink); border: 0; border-radius: var(--stash-radius-sm); font-weight: 700; cursor: pointer; }
+.composer button:disabled,.list button:disabled { opacity: .52; cursor: not-allowed; }
+.credential { padding: 2rem; margin-top: 2rem; background: var(--stash-color-accent-soft); border: 1px solid var(--stash-color-accent); border-radius: var(--stash-radius-md); }
+.credential p { color: var(--stash-color-ink); }
+.credential code { overflow-wrap: anywhere; align-self: center; }
+.credential button { color: var(--stash-color-ink); background: var(--stash-color-surface); border: 1px solid var(--stash-border-strong); }
+.list ul { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
+.list li { display: flex; gap: 1rem; align-items: center; justify-content: space-between; padding: 1.3rem 0; border-top: 1px solid var(--stash-border-subtle); }
+.list li div { display: grid; gap: .3rem; }
+.list button { color: var(--stash-color-error); background: transparent; border: 1px solid currentColor; }
+.alert { margin: 2rem 0; padding: 1rem; color: var(--stash-color-error); border: 1px solid currentColor; }
+@media (max-width: 700px) { .page { padding: 1.25rem; } .header { padding-bottom: 2.5rem; } .composer,.list,.credential { grid-template-columns: 1fr; gap: 1.5rem; padding: 2.5rem 0; } }
+@media (prefers-reduced-motion: reduce) { .page *, .page *::before, .page *::after { scroll-behavior: auto !important; transition-duration: .001ms !important; animation-duration: .001ms !important; } }

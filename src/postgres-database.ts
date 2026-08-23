@@ -45,10 +45,17 @@ import { Schema } from "prosemirror-model";
 import { InvalidCollaborationUpdate, type CollaborationSnapshot, type NoteCollaborationRepository } from "./note-collaboration.js";
 import type { WorkspaceSearchQuery, WorkspaceSearchRepository, WorkspaceSearchResult } from "./workspace-search.js";
 import { proseMirrorToRichText, richTextToProseMirror } from "@stash/rich-text";
+import type { AgentGrant, AgentGrantRepository, StoredAgentGrant } from "./agent-grants.js";
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
 const authenticationKeyCheckLockId = 795_541_992;
+function agentGrantFromRow(row: any): AgentGrant {
+  return { id: row.id, organizationId: row.organization_id, sponsoringMemberId: row.sponsoring_member_id, name: row.name,
+    ...(row.project_id ? { projectId: row.project_id } : {}), scopes: row.capabilities,
+    expiresAt: new Date(row.expires_at).toISOString(), createdAt: new Date(row.created_at).toISOString(),
+    ...(row.revoked_at ? { revokedAt: new Date(row.revoked_at).toISOString() } : {}) };
+}
 interface FailedAutomationRun {
   automationId: string;
   configuringMemberId: string;
@@ -4584,8 +4591,16 @@ export class PostgresDatabase implements
       capabilities JSONB NOT NULL CHECK (jsonb_typeof(capabilities) = 'array'),
       expires_at TIMESTAMPTZ NOT NULL,
       confirmation_policy JSONB NOT NULL CHECK (jsonb_typeof(confirmation_policy) = 'object'),
-      revoked_at TIMESTAMPTZ
+      revoked_at TIMESTAMPTZ,
+      name TEXT NOT NULL DEFAULT 'Agent',
+      token_lookup TEXT UNIQUE,
+      token_hash TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+    ALTER TABLE stash_agent_grants ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT 'Agent';
+    ALTER TABLE stash_agent_grants ADD COLUMN IF NOT EXISTS token_lookup TEXT UNIQUE;
+    ALTER TABLE stash_agent_grants ADD COLUMN IF NOT EXISTS token_hash TEXT;
+    ALTER TABLE stash_agent_grants ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP;
     CREATE TABLE IF NOT EXISTS stash_personal_access_tokens (
       id UUID PRIMARY KEY,
       organization_id UUID NOT NULL REFERENCES stash_organizations(id) ON DELETE CASCADE,
@@ -4600,6 +4615,59 @@ export class PostgresDatabase implements
       organization_id UUID NOT NULL REFERENCES stash_organizations(id), target_account_id UUID NOT NULL REFERENCES stash_accounts(id),
       occurred_at TIMESTAMPTZ NOT NULL, before_state JSONB NOT NULL, after_state JSONB NOT NULL
     )`);
+  }
+
+  async createAgentGrant(actorId: string, grant: StoredAgentGrant): Promise<"created" | "forbidden"> {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureMemberDepartureSchema(client);
+      const allowed = await client.query(`SELECT 1 FROM stash_organization_memberships membership
+        WHERE membership.organization_id=$1 AND membership.account_id=$2
+          AND ($3::uuid IS NULL OR EXISTS (SELECT 1 FROM stash_projects project WHERE project.id=$3 AND EXISTS (
+            SELECT 1 FROM stash_workspaces workspace WHERE workspace.id=project.workspace_id AND workspace.organization_owner_id=$1)))`,
+      [grant.organizationId, actorId, grant.projectId ?? null]);
+      if (!allowed.rowCount) return "forbidden";
+      await client.query(`INSERT INTO stash_agent_grants
+        (id,organization_id,project_id,sponsoring_member_id,capabilities,expires_at,confirmation_policy,revoked_at,name,token_lookup,token_hash,created_at)
+        VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7::jsonb,NULL,$8,$9,$10,$11)`, [grant.id, grant.organizationId, grant.projectId ?? null,
+        actorId, JSON.stringify(grant.scopes), grant.expiresAt, JSON.stringify({ modes: grant.scopes }), grant.name, grant.tokenLookup, grant.tokenHash, grant.createdAt]);
+      return "created";
+    } finally { client.release(); }
+  }
+
+  async listAgentGrants(actorId: string, organizationId: string): Promise<AgentGrant[] | undefined> {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureMemberDepartureSchema(client);
+      const membership = await client.query("SELECT 1 FROM stash_organization_memberships WHERE organization_id=$1 AND account_id=$2", [organizationId, actorId]);
+      if (!membership.rowCount) return undefined;
+      const result = await client.query<any>(`SELECT id,organization_id,project_id,sponsoring_member_id,name,capabilities,expires_at,created_at,revoked_at
+        FROM stash_agent_grants WHERE organization_id=$1 AND sponsoring_member_id=$2 ORDER BY created_at DESC,id`, [organizationId, actorId]);
+      return result.rows.map(agentGrantFromRow);
+    } finally { client.release(); }
+  }
+
+  async revokeAgentGrant(actorId: string, organizationId: string, grantId: string): Promise<"revoked" | "not_found" | "forbidden"> {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureMemberDepartureSchema(client);
+      const result = await client.query(`UPDATE stash_agent_grants SET revoked_at=CURRENT_TIMESTAMP
+        WHERE id=$1 AND organization_id=$2 AND sponsoring_member_id=$3 AND revoked_at IS NULL RETURNING id`, [grantId, organizationId, actorId]);
+      if (result.rowCount) return "revoked";
+      const existing = await client.query("SELECT sponsoring_member_id FROM stash_agent_grants WHERE id=$1 AND organization_id=$2", [grantId, organizationId]);
+      return existing.rowCount ? "forbidden" : "not_found";
+    } finally { client.release(); }
+  }
+
+  async findActiveAgentGrant(tokenLookup: string): Promise<StoredAgentGrant | undefined> {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureMemberDepartureSchema(client);
+      const result = await client.query<any>(`SELECT id,organization_id,project_id,sponsoring_member_id,name,capabilities,expires_at,created_at,revoked_at,token_lookup,token_hash
+        FROM stash_agent_grants WHERE token_lookup=$1 AND revoked_at IS NULL AND expires_at>CURRENT_TIMESTAMP`, [tokenLookup]);
+      const row = result.rows[0]; if (!row?.token_hash) return undefined;
+      return { ...agentGrantFromRow(row), tokenLookup: row.token_lookup, tokenHash: row.token_hash };
+    } finally { client.release(); }
   }
 
   async #markFormerAssignments(client: PoolClient, organizationId: string, accountId: string, actorId: string): Promise<string[]> {

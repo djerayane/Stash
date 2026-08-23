@@ -69,6 +69,9 @@ import type { NoteCollaborationService } from "./note-collaboration.js";
 import { importedIdentityAdministrationRoutes, type ImportedIdentityAdministration } from "./imported-identity-administration-routes.js";
 import { workspaceSearchRoutes } from "./workspace-search-routes.js";
 import type { WorkspaceSearchService } from "./workspace-search.js";
+import { agentGrantRoutes } from "./agent-grant-routes.js";
+import { mcpRoute } from "./mcp-route.js";
+import type { AgentGrantService } from "./agent-grants.js";
 
 export interface DatabaseProbe {
   verifyConnection(): Promise<void>;
@@ -135,6 +138,8 @@ export interface InstanceOptions {
   automations?: AutomationService;
   importedIdentityAdministration?: ImportedIdentityAdministration;
   searches?: WorkspaceSearchService;
+  agentGrants?: AgentGrantService;
+  mcpEnabled?: boolean;
 }
 
 const browserSurface = `<!doctype html>
@@ -237,6 +242,7 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
     ...(options.automations ? [automationRoutes(options.automations, memberAccess)] : []),
     ...(options.importedIdentityAdministration ? [importedIdentityAdministrationRoutes(options.importedIdentityAdministration, memberAccess)] : []),
     ...(options.searches ? [workspaceSearchRoutes(options.searches, memberAccess)] : []),
+    ...(options.agentGrants ? [agentGrantRoutes(options.agentGrants, memberAccess)] : []),
   ] : [];
   const applicationRoutes = [
     boardSurfaceRoute(),
@@ -266,6 +272,7 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
   ];
   const routes = [
     ...(options.githubSignals ? [githubWebhookRoute(options.githubSignals)] : []),
+    ...(options.agentGrants ? [mcpRoute(options.agentGrants, options.mcpEnabled === true)] : []),
     publicDomainApiRoute(publicDomainRoutes), ...applicationRoutes,
   ];
 
