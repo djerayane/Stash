@@ -64,7 +64,7 @@ export interface EncryptedMobileCaptureStore {
   removeCapture(id: string): Promise<void>;
   listMutations(): Promise<MobileSyncMutation[]>;
   saveMutation(mutation: MobileSyncMutation): Promise<void>;
-  removeMutation(id: string): Promise<void>;
+  removeMutation(mutation: Pick<MobileSyncMutation, "id" | "origin">): Promise<void>;
   loadOptions(scope: string): Promise<MobileCaptureOptions>;
   saveOptions(scope: string, options: MobileCaptureOptions): Promise<void>;
   stageIncomingShares(fingerprint: string, deliveries: IncomingShareDelivery[]): Promise<IncomingShareDelivery[]>;
@@ -427,7 +427,7 @@ export class MobileCaptureClient {
       const body = await response.json().catch(() => ({})) as { error?: string; message?: string };
       const preservedConflict = response.status === 409 && (body.error === "revision_conflict" || body.error === "task_edit_conflict");
       if (response.ok || preservedConflict) {
-        await this.#store.removeMutation(mutation.id);
+        await this.#store.removeMutation(mutation);
         count += 1;
         if (preservedConflict) attentionError ??= "conflicts_preserved";
         continue;

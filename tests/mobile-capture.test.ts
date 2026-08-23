@@ -16,7 +16,9 @@ import {
   MobileCaptureService,
   type MobileCaptureRepository,
 } from "../src/mobile-captures.js";
-import type { NoteRecord, PortableNoteProjection } from "../src/notes.js";
+import { NoteService, type NoteEditBatch, type NoteEditConflict, type NoteRecord, type PortableNoteProjection } from "../src/notes.js";
+import { TaskService, type TaskEditBatch, type TaskEditConflict, type TaskPlanningReadModel } from "../src/tasks.js";
+import { paragraphDocument, richTextToMarkdown } from "../src/rich-text.js";
 import type { MemberAccessResolver } from "../src/workspaces-projects.js";
 import { EncryptedStateMobileCaptureStore, type CiphertextStateRepository, type MobileCipher } from "../mobile/src/encrypted-mobile-store.js";
 import { presentMobileSyncResult } from "../mobile/src/sync-status.js";
@@ -48,9 +50,15 @@ class MemoryEncryptedStore implements EncryptedMobileCaptureStore {
   async removeCapture(id: string) { this.captures = this.captures.filter((capture) => capture.id !== id); }
   async listMutations() { return structuredClone(this.mutations); }
   async saveMutation(mutation: MobileSyncMutation) {
-    this.mutations = [...this.mutations.filter(({ id }) => id !== mutation.id), structuredClone(mutation)];
+    const key = mutationIdentity(mutation);
+    const existing = this.mutations.find((item) => mutationIdentity(item) === key);
+    const contribution = ({ attempts: _, nextRetryAt: __, lastError: ___, ...value }: MobileSyncMutation) => JSON.stringify(value);
+    if (existing && contribution(existing) !== contribution(mutation)) throw new Error("operation identity conflict");
+    this.mutations = [...this.mutations.filter((item) => mutationIdentity(item) !== key), structuredClone(mutation)];
   }
-  async removeMutation(id: string) { this.mutations = this.mutations.filter((mutation) => mutation.id !== id); }
+  async removeMutation(mutation: Pick<MobileSyncMutation, "id" | "origin">) {
+    this.mutations = this.mutations.filter((item) => mutationIdentity(item) !== mutationIdentity(mutation));
+  }
   async loadOptions(scope: string) { return structuredClone(this.options.get(scope) ?? { projects: [], tags: [], reminders: [] }); }
   async saveOptions(scope: string, options: { projects: { id: string; name: string }[]; tags: string[];
     reminders: { id: string; label: string; offsetMinutes: number }[] }) { this.options.set(scope, structuredClone(options)); }
@@ -68,6 +76,10 @@ class MemoryEncryptedStore implements EncryptedMobileCaptureStore {
   async saveIncomingShare(delivery: import("../src/mobile-capture-client.js").IncomingShareDelivery) {
     this.incomingShares = [...this.incomingShares.filter(({ id }) => id !== delivery.id), structuredClone(delivery)];
   }
+}
+
+function mutationIdentity(mutation: Pick<MobileSyncMutation, "id" | "origin">) {
+  return `${new URL(mutation.origin.instanceUrl).origin}\n${mutation.origin.workspaceId.toLowerCase()}\n${mutation.origin.memberId}\n${mutation.id.toLowerCase()}`;
 }
 
 class RecordingCiphertextRepository implements CiphertextStateRepository {
@@ -140,6 +152,87 @@ class MobileProtocolDatabase implements DatabaseProbe, MobileCaptureRepository, 
     this.notes.set(note.id, note);
     this.receipts.set(clientCaptureId, { noteId: note.id, payloadDigest });
     return { status: "created" as const, noteId: note.id };
+  }
+}
+
+class CollaborationProtocolDatabase implements DatabaseProbe {
+  readonly noteId = "44444444-4444-4444-8444-444444444444";
+  readonly blockKey = "55555555-5555-4555-8555-555555555555";
+  readonly note: NoteRecord = { id: this.noteId, workspaceId, content: "Published on the Instance",
+    document: paragraphDocument("Published on the Instance", this.blockKey), revision: 2, tags: [],
+    createdByMemberId: "ada", createdAt: "2026-08-22T10:00:00.000Z" };
+  readonly task: TaskPlanningReadModel = { schema: "stash.task.v1", id: "66666666-6666-4666-8666-666666666666",
+    workspaceId, projectId, key: "WEB-12", title: "Ship mobile sync", sourceNoteIds: [],
+    status: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      name: "In Progress", category: "started" }, priority: "high", revision: 4, dependencyWarnings: [],
+    createdAt: "2026-08-22T10:00:00.000Z", createdBy: { localAccountId: "ada", displayName: "Ada Lovelace" } } as TaskPlanningReadModel;
+  noteConflicts: NoteEditConflict[] = [];
+  taskConflicts: TaskEditConflict[] = [];
+  readonly noteReceipts = new Map<string, string>();
+  readonly taskReceipts = new Map<string, string>();
+  async verifyConnection() {}
+  async close() {}
+  async findPortableMemberIdentity(memberId: string) {
+    return memberId === "ada" ? { localAccountId: "ada", displayName: "Ada Lovelace" } : undefined;
+  }
+  async findNoteForMember(memberId: string, noteId: string) { return memberId === "ada" && noteId === this.noteId ? this.note : undefined; }
+  async applyNoteOperations(memberId: string, noteId: string, batch: NoteEditBatch) {
+    if (memberId !== "ada" || noteId !== this.noteId) return { status: "not_found" as const };
+    const operationId = batch.operations[0]!.id;
+    const received = this.noteReceipts.get(operationId);
+    if (received) return { status: "conflict_preserved" as const, conflictId: received };
+    const conflict: NoteEditConflict = { id: "77777777-7777-4777-8777-777777777777", noteId, baseRevision: batch.baseRevision,
+      preservedDocument: structuredClone(this.note.document), preservedMarkdown: this.note.content,
+      operations: structuredClone(batch.operations), kind: "concurrent_edit", currentRevision: this.note.revision,
+      createdBy: { displayName: "Ada Lovelace", attribution: "recorded" }, createdAt: "2026-08-22T11:00:00.000Z" };
+    this.noteConflicts.push(conflict); this.noteReceipts.set(operationId, conflict.id);
+    return { status: "conflict_preserved" as const, conflictId: conflict.id };
+  }
+  async listNoteEditConflicts(memberId: string, noteId: string) {
+    return memberId === "ada" && noteId === this.noteId
+      ? { status: "found" as const, conflicts: structuredClone(this.noteConflicts) } : { status: "not_found" as const };
+  }
+  async resolveNoteEditConflict(memberId: string, noteId: string, conflictId: string, resolution: "keep_current" | "apply_contribution", expectedRevision: number) {
+    const conflict = this.noteConflicts.find(({ id }) => id === conflictId);
+    if (memberId !== "ada" || noteId !== this.noteId || !conflict) return { status: "conflict_not_found" as const };
+    if (expectedRevision !== this.note.revision) return { status: "conflict_changed" as const, conflict };
+    if (resolution === "apply_contribution") {
+      const operation = conflict.operations[0]!;
+      if (operation.type === "replace_block") this.note.document = { type: "doc", blocks: [structuredClone(operation.block)] };
+      this.note.content = richTextToMarkdown(this.note.document); this.note.revision += 1;
+    }
+    conflict.resolvedAt = "2026-08-22T12:00:00.000Z"; conflict.resolution = resolution;
+    return { status: "resolved" as const, note: this.note, projection: this.noteProjection() };
+  }
+  noteProjection(): PortableNoteProjection { return { schema: "stash.note.v1", id: this.note.id, workspaceId,
+    content: this.note.content, tags: [], createdAt: this.note.createdAt,
+    createdBy: { localAccountId: "ada", displayName: "Ada Lovelace" } }; }
+  async applyStructuredTaskEdit(memberId: string, requestedProjectId: string, key: string, batch: TaskEditBatch) {
+    if (memberId !== "ada" || requestedProjectId !== projectId || key !== "WEB-12") return { status: "not_found" as const };
+    const received = this.taskReceipts.get(batch.operationId);
+    if (received) return { status: "conflict_preserved" as const,
+      conflict: this.taskConflicts.find(({ id }) => id === received)! };
+    const conflict: TaskEditConflict = { id: "88888888-8888-4888-8888-888888888888", taskId: this.task.id,
+      baseRevision: batch.baseRevision, currentRevision: this.task.revision, fields: Object.keys(batch.changes),
+      contribution: structuredClone(batch.changes), createdAt: batch.createdAt,
+      createdBy: { displayName: batch.createdBy.displayName, attribution: "recorded" } };
+    this.taskConflicts.push(conflict); this.taskReceipts.set(batch.operationId, conflict.id);
+    return { status: "conflict_preserved" as const, conflict };
+  }
+  async listStructuredTaskConflicts(memberId: string, requestedProjectId: string, key: string) {
+    return memberId === "ada" && requestedProjectId === projectId && key === "WEB-12"
+      ? { status: "found" as const, revision: this.task.revision, conflicts: structuredClone(this.taskConflicts) }
+      : { status: "not_found" as const };
+  }
+  async resolveStructuredTaskConflict(memberId: string, requestedProjectId: string, key: string, conflictId: string,
+    resolution: "keep_current" | "apply_contribution", expectedRevision: number) {
+    const conflict = this.taskConflicts.find(({ id }) => id === conflictId);
+    if (memberId !== "ada" || requestedProjectId !== projectId || key !== "WEB-12") return { status: "not_found" as const };
+    if (!conflict) return { status: "conflict_not_found" as const };
+    if (expectedRevision !== this.task.revision) return { status: "conflict_changed" as const, conflict };
+    if (resolution === "apply_contribution") Object.assign(this.task, conflict.contribution);
+    this.task.revision += 1; conflict.resolvedAt = "2026-08-22T12:00:00.000Z"; conflict.resolution = resolution;
+    return { status: "resolved" as const, task: this.task, revision: this.task.revision, activity: { action: "task_conflict_resolved" } };
   }
 }
 
@@ -221,6 +314,40 @@ describe("offline mobile capture synchronization", () => {
     assert.doesNotMatch([...repository.ciphertext.values()].join(" "), /Private offline plan|WEB-12/);
     const restartedStore = new EncryptedStateMobileCaptureStore(repository, testCipher);
     assert.deepEqual(await restartedStore.listMutations(), [mutation]);
+  });
+
+  it("scopes mutation identities to normalized pairing coordinates", async () => {
+    const repository = new RecordingCiphertextRepository();
+    const store = new EncryptedStateMobileCaptureStore(repository, testCipher);
+    const sharedId = "11111111-1111-4111-8111-111111111111";
+    const ada: MobileSyncMutation = { id: sharedId, kind: "task_edit", projectId, taskKey: "WEB-12",
+      baseRevision: 3, changes: { title: "Ada contribution" }, attempts: 0,
+      origin: { instanceUrl: "https://stash.example/", workspaceId, memberId: "ada" } };
+    const grace: MobileSyncMutation = { ...ada, changes: { title: "Grace contribution" },
+      origin: { instanceUrl: "https://stash.example", workspaceId, memberId: "grace" } };
+    await store.saveMutation(ada);
+    await store.saveMutation(grace);
+    assert.equal((await store.listMutations()).length, 2, "the same UUID in another pairing cannot overwrite Ada's edit");
+
+    await store.removeMutation({ id: sharedId, origin: grace.origin });
+    assert.deepEqual(await store.listMutations(), [ada], "removal is scoped to the full pairing identity");
+  });
+
+  it("accepts identical mutation replay but rejects same-pairing identity reuse", async () => {
+    const repository = new RecordingCiphertextRepository();
+    const store = new EncryptedStateMobileCaptureStore(repository, testCipher);
+    const mutation: MobileSyncMutation = { id: "11111111-1111-4111-8111-111111111111", kind: "task_edit",
+      projectId, taskKey: "WEB-12", baseRevision: 3, changes: { priority: "urgent" }, attempts: 0,
+      origin: { instanceUrl: "https://stash.example", workspaceId, memberId: "ada" } };
+    await store.saveMutation(mutation);
+    await store.saveMutation(structuredClone(mutation));
+    const ordered = { ...mutation, changes: { labelNames: ["mobile"], priority: "urgent" as const } };
+    await store.removeMutation(mutation);
+    await store.saveMutation(ordered);
+    await store.saveMutation({ ...ordered, changes: { priority: "urgent", labelNames: ["mobile"] } });
+    assert.equal((await store.listMutations()).length, 1);
+    await assert.rejects(() => store.saveMutation({ ...ordered, changes: { priority: "low" } }), /different contribution/);
+    assert.deepEqual(await store.listMutations(), [{ ...ordered, changes: { priority: "urgent", labelNames: ["mobile"] } }]);
   });
 
   it("reruns a serialized drain when B is staged while A is awaiting a failed write", async () => {
@@ -1073,5 +1200,68 @@ describe("offline mobile capture synchronization", () => {
 
     store.pairing = { instanceUrl: "https://stash.example", memberToken: "member-grace", workspaceId, memberId: "grace" };
     assert.deepEqual(await client.pendingMutations(), []);
+  });
+
+  it("preserves and resolves stale mobile contributions through a running Stash Instance", async () => {
+    const database = new CollaborationProtocolDatabase();
+    instance = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin",
+      notes: new NoteService(database as any), tasks: new TaskService(database, database), memberAccess: access });
+    const store = new MemoryEncryptedStore();
+    store.pairing = { instanceUrl: instance.url, memberToken: "member-ada", workspaceId, memberId: "ada" };
+    let online = false;
+    const loseOneResponse = new Set([`/api/notes/${database.noteId}`, `/api/projects/${projectId}/tasks/WEB-12/edits`]);
+    const client = new MobileCaptureClient(store, async (input, init) => {
+      if (!online) throw new TypeError("offline");
+      const response = await fetch(input, init);
+      const pathname = new URL(String(input)).pathname;
+      if (loseOneResponse.delete(pathname)) throw new TypeError("response lost after commit");
+      return response;
+    }, { allowInsecureInstanceForTest: true });
+    await client.queueNoteEdit(database.noteId, 1, [{ id: "99999999-9999-4999-8999-999999999999",
+      type: "replace_block", blockKey: database.blockKey,
+      block: { type: "paragraph", blockKey: database.blockKey, content: [{ text: "Mobile Note contribution" }] } }]);
+    await client.queueTaskEdit(projectId, "WEB-12", 3, { priority: "urgent" },
+      "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+
+    assert.deepEqual(await client.sync(), { status: "offline", count: 0 });
+    assert.equal((await client.pendingMutations()).length, 2);
+    online = true;
+    assert.deepEqual(await client.sync(), { status: "offline", count: 0 }, "a lost response keeps the committed Note edit queued");
+    assert.deepEqual(await client.sync(), { status: "attention_required", count: 1,
+      error: "conflicts_preserved", retryPending: true }, "the duplicate Note delivery resolves to its original conflict");
+    assert.deepEqual(await client.sync(), { status: "attention_required", count: 1, error: "conflicts_preserved" });
+    assert.deepEqual(await client.pendingMutations(), []);
+    assert.equal(database.noteConflicts.length, 1);
+    assert.equal(database.taskConflicts.length, 1);
+
+    const noteConflicts = await fetch(`${instance.url}/api/notes/${database.noteId}/conflicts`,
+      { headers: { authorization: "Bearer member-ada" } });
+    assert.equal(noteConflicts.status, 200);
+    assert.deepEqual((await noteConflicts.json() as any).conflicts.map(({ id }: any) => id),
+      ["77777777-7777-4777-8777-777777777777"]);
+    const noteResolution = await fetch(`${instance.url}/api/notes/${database.noteId}/conflicts/77777777-7777-4777-8777-777777777777`, {
+      method: "PUT", headers: { authorization: "Bearer member-ada", "content-type": "application/json" },
+      body: JSON.stringify({ resolution: "apply_contribution", expectedRevision: 2 }),
+    });
+    assert.equal(noteResolution.status, 200);
+    assert.match((await noteResolution.json() as any).content, /Mobile Note contribution/);
+
+    const taskConflicts = await fetch(`${instance.url}/api/projects/${projectId}/tasks/WEB-12/conflicts`,
+      { headers: { authorization: "Bearer member-ada" } });
+    assert.equal(taskConflicts.status, 200);
+    assert.deepEqual((await taskConflicts.json() as any).conflicts.map(({ id }: any) => id),
+      ["88888888-8888-4888-8888-888888888888"]);
+    const taskResolution = await fetch(`${instance.url}/api/projects/${projectId}/tasks/WEB-12/conflicts/88888888-8888-4888-8888-888888888888`, {
+      method: "PUT", headers: { authorization: "Bearer member-ada", "content-type": "application/json" },
+      body: JSON.stringify({ resolution: "apply_contribution", expectedRevision: 4 }),
+    });
+    assert.equal(taskResolution.status, 200);
+    assert.equal((await taskResolution.json() as any).task.priority, "urgent");
+
+    store.pairing = { ...store.pairing!, memberToken: "expired" };
+    await client.queueTaskEdit(projectId, "WEB-12", 5, { priority: "low" },
+      "cccccccc-cccc-4ccc-8ccc-cccccccccccc");
+    assert.deepEqual(await client.sync(), { status: "attention_required", count: 0, error: "unauthorized" });
+    assert.match((await client.pendingMutations())[0]?.lastError ?? "", /valid Member session/i);
   });
 });

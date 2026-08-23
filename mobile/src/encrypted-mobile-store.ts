@@ -17,9 +17,18 @@ export class EncryptedStateMobileCaptureStore implements EncryptedMobileCaptureS
   async removeCapture(id: string) { await this.#mutate((items) => items.filter((capture) => capture.id !== id)); }
   async listMutations() { await this.#writeBarrier; return this.#read<MobileSyncMutation[]>(mutationOutboxKey, []); }
   async saveMutation(mutation: MobileSyncMutation) {
-    await this.#mutateMutations((items) => [...items.filter(({ id }) => id !== mutation.id), mutation]);
+    await this.#mutateMutations((items) => {
+      const key = mutationKey(mutation);
+      const existing = items.find((item) => mutationKey(item) === key);
+      if (existing && mutationContribution(existing) !== mutationContribution(mutation)) {
+        throw new Error("This mobile synchronization identity is already used for a different contribution.");
+      }
+      return [...items.filter((item) => mutationKey(item) !== key), mutation];
+    });
   }
-  async removeMutation(id: string) { await this.#mutateMutations((items) => items.filter((mutation) => mutation.id !== id)); }
+  async removeMutation(mutation: Pick<MobileSyncMutation, "id" | "origin">) {
+    await this.#mutateMutations((items) => items.filter((item) => mutationKey(item) !== mutationKey(mutation)));
+  }
   async loadOptions(scope: string) {
     await this.#writeBarrier;
     return (await this.#read<Record<string, MobileCaptureOptions>>(optionsKey, {}))[scope]
@@ -69,4 +78,21 @@ export class EncryptedStateMobileCaptureStore implements EncryptedMobileCaptureS
     });
     this.#writeBarrier = write.catch(() => undefined); await write; return result;
   }
+}
+
+function mutationKey(mutation: Pick<MobileSyncMutation, "id" | "origin">) {
+  return `${new URL(mutation.origin.instanceUrl).origin}\n${mutation.origin.workspaceId.toLowerCase()}\n${mutation.origin.memberId}\n${mutation.id.toLowerCase()}`;
+}
+
+function mutationContribution(mutation: MobileSyncMutation) {
+  const { attempts: _, nextRetryAt: __, lastError: ___, ...contribution } = mutation;
+  return JSON.stringify(canonicalJson({ ...contribution, origin: { ...contribution.origin,
+    instanceUrl: new URL(contribution.origin.instanceUrl).origin, workspaceId: contribution.origin.workspaceId.toLowerCase() } }));
+}
+
+function canonicalJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (value !== null && typeof value === "object") return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => left.localeCompare(right)).map(([key, nested]) => [key, canonicalJson(nested)]));
+  return value;
 }
