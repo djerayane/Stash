@@ -1,10 +1,10 @@
-import type { RichTextBlock } from "@stash/domain-types";
+import type { RichTextBlock, RichTextSpan } from "@stash/domain-types";
 import type { JSONContent } from "@tiptap/react";
 
 export interface NoteDocument { type: "doc"; blocks: RichTextBlock[] }
 
 const text = (value: string): JSONContent[] => value ? [{ type: "text", text: value }] : [];
-const inline = (block: Exclude<RichTextBlock, { type: "code" }>): JSONContent[] => block.content.map((span) => ({ type: "text", text: span.text,
+const inline = (block: { content: RichTextSpan[] }): JSONContent[] => block.content.map((span) => ({ type: "text", text: span.text,
   ...((span.marks?.length || span.href) ? { marks: [...(span.marks ?? []).map((type) => ({ type })), ...(span.href ? [{ type: "link", attrs: { href: span.href } }] : [])] } : {}) }));
 
 export function toTiptap(document: NoteDocument): JSONContent {
@@ -15,6 +15,12 @@ export function toTiptap(document: NoteDocument): JSONContent {
     if (block.type === "quote") return { type: "blockquote", attrs, content: [{ type: "paragraph", content: inline(block) }] };
     if (block.type === "bullet") return { type: "bulletList", attrs, content: [{ type: "listItem", content: [{ type: "paragraph", content: inline(block) }] }] };
     if (block.type === "check") return { type: "taskList", attrs, content: [{ type: "taskItem", attrs: { checked: block.checked }, content: [{ type: "paragraph", content: inline(block) }] }] };
+    if (block.type === "callout") return { type: "callout", attrs: { ...attrs, kind: block.kind }, content: [{ type: "paragraph", content: inline(block) }] };
+    if (block.type === "attachment") return { type: "workspaceAttachment", attrs: { ...attrs, href: block.href, label: block.label } };
+    if (block.type === "image") return { type: "image", attrs: { ...attrs, src: block.src, alt: block.alt, title: block.title ?? null } };
+    if (block.type === "table") return { type: "table", attrs, content: block.rows.map((row) => ({ type: "tableRow", content: row.map((cell) => ({
+      type: cell.header ? "tableHeader" : "tableCell", content: [{ type: "paragraph", content: inline(cell) }],
+    })) })) };
     return { type: "paragraph", attrs, content: inline(block) };
   }) };
 }
@@ -28,6 +34,8 @@ export function markdownFromTiptap(document: JSONContent): string {
     if (node.type === "bulletList") return `- ${value}`;
     if (node.type === "taskList") return `- [${node.content?.[0]?.attrs?.checked ? "x" : " "}] ${value}`;
     if (node.type === "image") return `![${node.attrs?.alt ?? ""}](${node.attrs?.src ?? ""})`;
+    if (node.type === "callout") return `> [!${String(node.attrs?.kind ?? "note").toUpperCase()}]\n${value.split("\n").map((line) => `> ${line}`).join("\n")}`;
+    if (node.type === "workspaceAttachment") return `[${node.attrs?.label ?? "Attachment"}](<${node.attrs?.href ?? ""}>)`;
     if (node.type === "table") {
       const rows = (node.content ?? []).map((row) => (row.content ?? []).map((cell) => portableText(cell).replaceAll("|", "\\|")).join(" | "));
       return rows.length ? `| ${rows[0]} |\n| ${(node.content?.[0]?.content ?? []).map(() => "---").join(" | ")} |${rows.slice(1).map((row) => `\n| ${row} |`).join("")}` : "";

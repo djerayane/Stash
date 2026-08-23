@@ -3,9 +3,14 @@ import { fileURLToPath } from "node:url";
 import { startInstance } from "../src/instance.js";
 import { NoteCollaborationService, type CollaborationSnapshot } from "../src/note-collaboration.js";
 import * as Y from "yjs";
+import { collaborativeDocumentFromRichText } from "../src/postgres-database.js";
 
 const noteId = "99999999-9999-4999-8999-999999999999";
-let collaboration: CollaborationSnapshot | undefined;
+const seededDocument = collaborativeDocumentFromRichText({ type: "doc", blocks: [{ type: "paragraph", blockKey: "77777777-7777-4777-8777-777777777777",
+  id: "66666666-6666-4666-8666-666666666666", content: [{ text: "Preserve this linked Block" }] }] });
+let collaboration: CollaborationSnapshot | undefined = { noteId, sequence: 0, update: Y.encodeStateAsUpdate(seededDocument),
+  updatedAt: new Date(0).toISOString(), updatedByMemberId: "browser-member" };
+seededDocument.destroy();
 const collaborationRepository = {
   async loadNoteCollaboration(memberId: string, requestedNoteId: string) {
     if (memberId !== "browser-member" || requestedNoteId !== noteId) return undefined;

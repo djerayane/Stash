@@ -4,7 +4,7 @@ import Link from "@tiptap/extension-link";
 import TaskItem from "@tiptap/extension-task-item";
 import TaskList from "@tiptap/extension-task-list";
 import { TableKit } from "@tiptap/extension-table";
-import { Extension } from "@tiptap/core";
+import { Extension, Node, mergeAttributes } from "@tiptap/core";
 import { EditorContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { useQuery } from "@tanstack/react-query";
@@ -23,10 +23,24 @@ interface NoteEditorProps { noteId: string; fetcher?: typeof fetch; token?: stri
 
 const BlockIdentity = Extension.create({
   name: "blockIdentity",
-  addGlobalAttributes() { return [{ types: ["paragraph", "heading", "blockquote", "codeBlock", "bulletList", "taskList"], attributes: {
+  addGlobalAttributes() { return [{ types: ["paragraph", "heading", "blockquote", "codeBlock", "bulletList", "taskList", "callout", "workspaceAttachment"], attributes: {
     blockKey: { default: null, parseHTML: (element) => element.dataset.blockKey, renderHTML: (attributes) => attributes.blockKey ? { "data-block-key": attributes.blockKey } : {} },
     blockId: { default: null, parseHTML: (element) => element.dataset.blockId, renderHTML: (attributes) => attributes.blockId ? { "data-block-id": attributes.blockId } : {} },
   } }]; },
+});
+
+const Callout = Node.create({
+  name: "callout", group: "block", content: "block+", defining: true,
+  addAttributes: () => ({ kind: { default: "note" } }),
+  parseHTML: () => [{ tag: "aside[data-callout]" }],
+  renderHTML: ({ HTMLAttributes }) => ["aside", mergeAttributes(HTMLAttributes, { "data-callout": HTMLAttributes.kind, role: "note" }), 0],
+});
+
+const WorkspaceAttachment = Node.create({
+  name: "workspaceAttachment", group: "block", atom: true,
+  addAttributes: () => ({ href: { default: null }, label: { default: "Attachment" } }),
+  parseHTML: () => [{ tag: "a[data-workspace-attachment]" }],
+  renderHTML: ({ HTMLAttributes }) => ["a", mergeAttributes(HTMLAttributes, { "data-workspace-attachment": "", href: HTMLAttributes.href }), HTMLAttributes.label],
 });
 
 const decode = (value: string) => Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
@@ -44,6 +58,7 @@ export function applyAcknowledgedUpdate(localDocument: Y.Doc, update: Uint8Array
 export function NoteEditor({ noteId, fetcher = globalThis.fetch, token = localStorage.getItem("stash.memberToken") ?? "" }: NoteEditorProps) {
   const [status, setStatus] = useState("Loading collaborative document");
   const [error, setError] = useState("");
+  const [, refreshToolbar] = useState(0);
   const persistedVector = useRef<Uint8Array>(new Uint8Array());
   const layoutRef = useRef<HTMLElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
@@ -68,9 +83,10 @@ export function NoteEditor({ noteId, fetcher = globalThis.fetch, token = localSt
     } catch { /* Browser storage may be disabled; the live Y.Doc still retains this session's contribution. */ }
   }
 
-  const editor = useEditor({ immediatelyRender: false, extensions: [
+  const editor = useEditor({ immediatelyRender: false, onSelectionUpdate: () => refreshToolbar((revision) => revision + 1),
+    onTransaction: () => refreshToolbar((revision) => revision + 1), extensions: [
     StarterKit.configure({ undoRedo: false, link: false }), BlockIdentity, TaskList, TaskItem.configure({ nested: true }), Image, Link.configure({ openOnClick: false }),
-    TableKit, Collaboration.configure({ document: ydoc }),
+    TableKit, Callout, WorkspaceAttachment, Collaboration.configure({ document: ydoc }),
   ], content: undefined, editorProps: { attributes: { "aria-label": "Note content", role: "textbox", "aria-multiline": "true" } } }, [ydoc]);
 
   useGSAP(() => {
@@ -132,6 +148,9 @@ export function NoteEditor({ noteId, fetcher = globalThis.fetch, token = localSt
         <button type="button" aria-label="Quote" aria-pressed={editor?.isActive("blockquote") ?? false} onClick={() => editor?.chain().focus().toggleBlockquote().run()}>Quote</button>
         <button type="button" aria-label="Insert table" onClick={() => editor?.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()}>Table</button>
         <button type="button" aria-label="Insert image" onClick={() => { const src = window.prompt("Image URL"); if (src) editor?.chain().focus().setImage({ src }).run(); }}>Image</button>
+        <button type="button" aria-label="Insert link" aria-pressed={editor?.isActive("link") ?? false} onClick={() => { const href = window.prompt("Link URL"); if (href) editor?.chain().focus().extendMarkRange("link").setLink({ href }).run(); }}>Link</button>
+        <button type="button" aria-label="Insert callout" onClick={() => editor?.chain().focus().insertContent({ type: "callout", attrs: { blockKey: crypto.randomUUID(), blockId: null, kind: "note" }, content: [{ type: "paragraph", content: [{ type: "text", text: "Callout" }] }] }).run()}>Callout</button>
+        <button type="button" aria-label="Insert Workspace Attachment" onClick={() => { const href = window.prompt("Workspace Attachment path"); if (!href?.startsWith("./attachments/")) return; const label = window.prompt("Attachment label")?.trim() || "Attachment"; editor?.chain().focus().insertContent({ type: "workspaceAttachment", attrs: { blockKey: crypto.randomUUID(), blockId: null, href, label } }).run(); }}>Attachment</button>
         <button type="button" aria-label="Undo" onClick={() => editor?.chain().focus().undo().run()}>Undo</button>
         <button type="button" aria-label="Redo" onClick={() => editor?.chain().focus().redo().run()}>Redo</button>
       </div>

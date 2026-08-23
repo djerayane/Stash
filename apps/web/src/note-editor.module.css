@@ -13,6 +13,8 @@
 .editor :global(.tiptap h1), .editor :global(.tiptap h2), .editor :global(.tiptap h3) { line-height: 1.15; letter-spacing: -.025em; }
 .editor :global(.tiptap blockquote) { margin-left: 0; padding-left: 1.25rem; border-left: 3px solid var(--stash-color-accent); color: var(--stash-color-muted); }
 .editor :global(.tiptap pre) { overflow: auto; padding: 1rem; color: var(--stash-color-surface); background: var(--stash-color-ink); }
+.editor :global([data-callout]) { padding: var(--stash-space-4); border-left: 3px solid var(--stash-color-accent); background: var(--stash-color-canvas); }
+.editor :global([data-workspace-attachment]) { display: inline-flex; padding: var(--stash-space-2) var(--stash-space-3); border: 1px solid var(--stash-border-subtle); color: var(--stash-color-accent); font-weight: 700; }
 .aside { align-self: start; position: sticky; top: var(--stash-space-6); padding: 1.25rem; border-top: 4px solid var(--stash-color-accent); background: var(--stash-color-surface); }
 .status { min-height: 3rem; color: var(--stash-color-muted); }
 .retry { border: 0; padding: .65rem .8rem; color: var(--stash-color-surface); background: var(--stash-color-ink); font: inherit; font-weight: 700; }

@@ -18,4 +18,11 @@ describe("Note Markdown round trips", () => {
       { type: "tableRow", content: [{ type: "tableCell", content: [{ type: "paragraph", content: [{ type: "text", text: "Ada" }] }] }, { type: "tableCell", content: [{ type: "paragraph", content: [{ type: "text", text: "Ready" }] }] }] },
     ] }, { type: "image", attrs: { alt: "Diagram", src: "attachments/diagram.png" } }] })).toBe("| Owner | State |\n| --- | --- |\n| Ada | Ready |\n\n![Diagram](attachments/diagram.png)");
   });
+
+  it("projects callouts and Workspace Attachments to portable Markdown", () => {
+    expect(markdownFromTiptap({ type: "doc", content: [
+      { type: "callout", attrs: { kind: "note" }, content: [{ type: "paragraph", content: [{ type: "text", text: "Keep this context" }] }] },
+      { type: "workspaceAttachment", attrs: { href: "./attachments/attachment-id/design.pdf", label: "design.pdf" } },
+    ] })).toBe("> [!NOTE]\n> Keep this context\n\n[design.pdf](<./attachments/attachment-id/design.pdf>)");
+  });
 });

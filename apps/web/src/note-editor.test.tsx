@@ -37,6 +37,9 @@ it("loads an authorized collaborative Note and exposes keyboard-operable rich-te
   expect(await screen.findByRole("heading", { name: "Release plan" })).toBeInTheDocument();
   await waitFor(() => expect(screen.getByRole("textbox", { name: "Note content" })).toHaveTextContent("Preserve this Block"));
   expect(screen.getByRole("toolbar", { name: "Text formatting" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Insert link" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Insert callout" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Insert Workspace Attachment" })).toBeEnabled();
   fireEvent.click(screen.getByRole("button", { name: "Bold" }));
   expect(fetcher).toHaveBeenCalledWith("/api/notes/note", expect.objectContaining({ headers: { authorization: "Bearer member-token" } }));
 });

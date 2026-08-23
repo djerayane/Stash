@@ -17,6 +17,34 @@ test("edits a stable linked Block with the collaborative React editor", async ({
   await expect(editor.locator("[data-block-id='66666666-6666-4666-8666-666666666666']")).toContainText("after review");
 });
 
+test("offers link, callout, and Workspace Attachment authoring controls", async ({ page }) => {
+  await page.goto(`/notes/${noteId}`);
+  await expect(page.getByRole("button", { name: "Insert link" })).toBeVisible();
+  await page.getByRole("button", { name: "Insert callout" }).click();
+  await expect(page.getByRole("textbox", { name: "Note content" }).locator("[data-callout]")).toContainText("Callout");
+  let prompt = 0;
+  page.on("dialog", (dialog) => void dialog.accept(prompt++ === 0 ? "./attachments/attachment-id/design.pdf" : "Design brief"));
+  await page.getByRole("button", { name: "Insert Workspace Attachment" }).click();
+  await expect(page.getByRole("link", { name: "Design brief" })).toHaveAttribute("href", "./attachments/attachment-id/design.pdf");
+});
+
+test("two real editors merge concurrent contributions without changing linked Block identity", async ({ browser }) => {
+  const firstContext = await browser.newContext(); const secondContext = await browser.newContext();
+  await Promise.all([firstContext.addInitScript(() => localStorage.setItem("stash.memberToken", "browser-acceptance-member-token")),
+    secondContext.addInitScript(() => localStorage.setItem("stash.memberToken", "browser-acceptance-member-token"))]);
+  const first = await firstContext.newPage(); const second = await secondContext.newPage();
+  await Promise.all([first.goto(`/notes/${noteId}`), second.goto(`/notes/${noteId}`)]);
+  const firstBlock = first.getByRole("textbox", { name: "Note content" }).locator("[data-block-id='66666666-6666-4666-8666-666666666666']");
+  const secondBlock = second.getByRole("textbox", { name: "Note content" }).locator("[data-block-id='66666666-6666-4666-8666-666666666666']");
+  await Promise.all([firstBlock.click(), secondBlock.click()]);
+  await Promise.all([first.keyboard.press("Home").then(() => first.keyboard.type("First ")),
+    second.keyboard.press("End").then(() => second.keyboard.type(" Second"))]);
+  await Promise.all([first.getByRole("status").waitFor(), second.getByRole("status").waitFor()]);
+  await expect(firstBlock).toContainText("First", { timeout: 6_000 }); await expect(firstBlock).toContainText("Second", { timeout: 6_000 });
+  await expect(firstBlock).toHaveAttribute("data-block-id", "66666666-6666-4666-8666-666666666666");
+  await firstContext.close(); await secondContext.close();
+});
+
 test("the collaborative editor is keyboard operable and axe-clean @a11y", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" }); await page.goto(`/notes/${noteId}`);
   await page.getByRole("button", { name: "Bold" }).focus(); await page.keyboard.press("Enter");
