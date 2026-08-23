@@ -35,6 +35,16 @@ test("an invalid Instance Backup diagnosis has no detectable accessibility viola
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 });
 
+test("the upgrade readiness console has no detectable accessibility violations @a11y", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("stash.instance-admin-session", JSON.stringify({ token: "browser-acceptance-admin-token" })));
+  await page.route("**/api/instance/upgrade", (route) => route.fulfill({ json: { status: "ready", currentVersion: "0.1.0", targetVersion: "0.2.0", checks: [
+    { id: "database", status: "pass", message: "PostgreSQL is reachable." }, { id: "backup", status: "pass", message: "Rollback storage is writable." },
+  ] } }));
+  await page.emulateMedia({ reducedMotion: "reduce" }); await page.goto("/instance-admin/upgrade");
+  await expect(page.getByText("PostgreSQL is reachable.")).toBeVisible();
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+});
+
 test("the development Signal confirmation flow has no detectable accessibility violations @a11y", async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem("stash.member-session", JSON.stringify({ token: "browser-acceptance-member-token" })));
   const projectId = "11111111-1111-4111-8111-111111111111";

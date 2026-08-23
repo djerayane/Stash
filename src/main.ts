@@ -37,6 +37,8 @@ import { AutomationService } from "./automations.js";
 import { NoteCollaborationService } from "./note-collaboration.js";
 import { WorkspaceSearchService } from "./workspace-search.js";
 import { AgentGrantService } from "./agent-grants.js";
+import { InstanceUpgradeService } from "./instance-upgrade.js";
+import { PostgresInstanceUpgradeTarget } from "./postgres-instance-upgrade.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -74,6 +76,10 @@ async function main(): Promise<void> {
   const instanceBackups = new InstanceBackupService(new PostgresLocalInstanceBackupSource({
     databaseUrl: requiredEnvironment("DATABASE_URL"), attachmentRoot: attachmentStoragePath, publicOrigin,
   }), { masterKey: requiredEnvironment("INSTANCE_MASTER_KEY") });
+  const instanceBackupRoot = process.env.INSTANCE_BACKUP_PATH?.trim();
+  const instanceBackupRestoreTarget = new PostgresLocalInstanceRestoreTarget({ databaseUrl: requiredEnvironment("DATABASE_URL"), attachmentRoot: attachmentStoragePath, publicOrigin });
+  const instanceUpgrades = instanceBackupRoot ? new InstanceUpgradeService({ backups: instanceBackups, backupRoot: instanceBackupRoot, targetVersion: "0.1.0",
+    target: new PostgresInstanceUpgradeTarget(requiredEnvironment("DATABASE_URL"), async (backupPath) => { await instanceBackups.restore(backupPath, instanceBackupRestoreTarget, { dryRun: false }); }) }) : undefined;
   const smtpUrl = process.env.SMTP_URL?.trim();
   const emailRecoveryFrom = process.env.EMAIL_RECOVERY_FROM?.trim();
   const recoveryEmail = createRecoveryEmailSender({
@@ -113,8 +119,9 @@ async function main(): Promise<void> {
     activities: new ActivityService(database),
     searches: new WorkspaceSearchService(database),
     instanceBackups,
-    instanceBackupRestoreTarget: new PostgresLocalInstanceRestoreTarget({ databaseUrl: requiredEnvironment("DATABASE_URL"), attachmentRoot: attachmentStoragePath, publicOrigin }),
-    ...(process.env.INSTANCE_BACKUP_PATH?.trim() ? { instanceBackupRoot: process.env.INSTANCE_BACKUP_PATH.trim() } : {}),
+    instanceBackupRestoreTarget,
+    ...(instanceBackupRoot ? { instanceBackupRoot } : {}),
+    ...(instanceUpgrades ? { instanceUpgrades } : {}),
     notifications,
     memberLocalization: new MemberLocalizationService(database),
     oidcAuth: new OidcAuthService(database),

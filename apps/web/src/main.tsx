@@ -5,6 +5,7 @@ import { createBrowserRouter, RouterProvider } from "react-router";
 import { AppShell } from "./app-shell";
 import { useSessionState } from "./web-session";
 import { InstanceBackupAdministration } from "./instance-backup-administration";
+import { InstanceUpgradeAdministration } from "./instance-upgrade-administration";
 import "@stash/tokens/tokens.css";
 import "./global.css";
 
@@ -16,6 +17,7 @@ function MemberApplication() {
 
 const router = createBrowserRouter([
   { path: "/instance-admin/backups", element: <InstanceBackupAdministration /> },
+  { path: "/instance-admin/upgrade", element: <InstanceUpgradeAdministration /> },
   { path: "*", element: <MemberApplication /> },
 ]);
 

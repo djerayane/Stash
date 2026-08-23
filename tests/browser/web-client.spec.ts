@@ -71,6 +71,23 @@ test("verifies and confirms an Instance restore through the operator console", a
   expect(operations).toEqual([{ dryRun: true }, { dryRun: false, confirmation: "release-ready" }]);
 });
 
+test("preflights and confirms an Instance upgrade by keyboard", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("stash.instance-admin-session", JSON.stringify({ token: "browser-acceptance-admin-token" })));
+  let upgraded = false;
+  await page.route("**/api/instance/upgrade", async (route) => {
+    if (route.request().method() === "POST") { upgraded = true; await route.fulfill({ json: { status: "upgraded", restartRequired: true } }); return; }
+    await route.fulfill({ json: { status: "ready", currentVersion: "0.1.0", targetVersion: "0.2.0", checks: [
+      { id: "database", status: "pass", message: "PostgreSQL is reachable." }, { id: "backup", status: "pass", message: "Rollback storage is writable." },
+    ] } });
+  });
+  await page.emulateMedia({ reducedMotion: "reduce" }); await page.goto("/instance-admin/upgrade");
+  await expect(page.getByRole("heading", { name: "Upgrade with a way back." })).toBeVisible();
+  const action = page.getByRole("button", { name: "Upgrade to 0.2.0" }); await expect(action).toBeDisabled();
+  await page.getByRole("textbox", { name: /Type 0.2.0/ }).fill("0.2.0"); await action.press("Enter");
+  await expect(page.getByRole("status")).toBeFocused(); await expect(page.getByRole("status")).toContainText("Restart the Instance");
+  expect(upgraded).toBe(true);
+});
+
 test("keeps a malformed backup visible and announces its verification diagnosis", async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem("stash.instance-admin-session", JSON.stringify({ token: "browser-acceptance-admin-token" })));
   await page.route("**/api/instance/backups", (route) => route.fulfill({ json: { backups: [{ name: "metadata-missing", status: "invalid" }] } }));
