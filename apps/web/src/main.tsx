@@ -6,6 +6,7 @@ import { AppShell } from "./app-shell";
 import { useSessionState } from "./web-session";
 import { InstanceBackupAdministration } from "./instance-backup-administration";
 import { InstanceUpgradeAdministration } from "./instance-upgrade-administration";
+import { InstanceDiagnosticsAdministration } from "./instance-diagnostics";
 import "@stash/tokens/tokens.css";
 import "./global.css";
 
@@ -18,6 +19,7 @@ function MemberApplication() {
 const router = createBrowserRouter([
   { path: "/instance-admin/backups", element: <InstanceBackupAdministration /> },
   { path: "/instance-admin/upgrade", element: <InstanceUpgradeAdministration /> },
+  { path: "/instance-admin/diagnostics", element: <InstanceDiagnosticsAdministration /> },
   { path: "*", element: <MemberApplication /> },
 ]);
 

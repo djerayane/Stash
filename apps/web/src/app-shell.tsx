@@ -11,6 +11,7 @@ import { TaskDetailPage } from "./task-detail";
 import { MemberAdministrationPage, type OrganizationAdministration } from "./member-administration";
 import { ProjectNotificationsPage } from "./project-notifications";
 import { ImportedIdentitiesPage } from "./imported-identities";
+import { MemberSettingsPage, OrganizationSettingsPage, WorkspaceDataPage } from "./product-settings";
 import { ActivityPage, BoardsPage, DiscussionsPage, InboxPage, NoteHistoryPage, NotesPage, NotificationsPage, ProjectGatewayPage, SearchPage } from "./core-workflows";
 import { AgentGrantsPage } from "./agent-grants";
 
@@ -63,6 +64,7 @@ function Icon({ name }: { readonly name: string }) {
     members: <><circle cx="9" cy="8" r="3" /><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 4a3 3 0 0 1 0 6M17 14a5 5 0 0 1 4 5" /></>,
     import: <><circle cx="12" cy="12" r="8" /><path d="M8 12h8M12 8v8" /></>,
     agents: <><path d="M7 8h10v9H7zM9 4h6M12 4v4"/><circle cx="10" cy="12" r=".5"/><circle cx="14" cy="12" r=".5"/><path d="M10 15h4"/></>,
+    settings: <><circle cx="12" cy="12" r="3"/><path d="M19 13.5v-3l-2-.7-.7-1.7.9-1.9-2.1-2.1-1.9.9-1.7-.7-.7-2h-3l-.7 2-1.7.7-1.9-.9-2.1 2.1.9 1.9-.7 1.7-2 .7v3l2 .7.7 1.7-.9 1.9 2.1 2.1 1.9-.9 1.7.7.7 2h3l.7-2 1.7-.7 1.9.9 2.1-2.1-.9-1.9.7-1.7z"/></>,
     plus: <path d="M12 5v14M5 12h14" />,
     search: <><circle cx="11" cy="11" r="6" /><path d="m16 16 4 4" /></>,
     inbox: <><path d="M4 5h16v14H4z"/><path d="M4 13h5l2 3h2l2-3h5"/></>,
@@ -185,9 +187,9 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
       <div className={styles.workspaceIdentity}><span className={styles.workspaceMonogram} aria-hidden="true">{initials(workspaceName, "PW")}</span><span><strong>{workspaceName}</strong><small>Workspace</small></span></div>
       <NavigationMenu.Root className={styles.navigationRoot} orientation="vertical" aria-label="Workspace"><NavigationMenu.List className={styles.navigation}>
         {navigation.map((item) => <NavigationMenu.Item key={item.to}><NavigationMenu.Link asChild><NavLink className={styles.navLink} end={item.to === "/app"} to={item.to}><Icon name={item.icon} />{item.label}</NavLink></NavigationMenu.Link></NavigationMenu.Item>)}
-        {session.organizationAdministrations?.length ? <NavigationMenu.Item><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/members"><Icon name="members" />Members</NavLink></NavigationMenu.Link></NavigationMenu.Item> : null}
-        <NavigationMenu.Item><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/imported-identities"><Icon name="import" />Imported identities</NavLink></NavigationMenu.Link></NavigationMenu.Item>
+        <NavigationMenu.Item><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings"><Icon name="settings" />Settings</NavLink></NavigationMenu.Link></NavigationMenu.Item>
         {session.activeOrganizationId ? <NavigationMenu.Item><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/agents"><Icon name="agents" />Agents</NavLink></NavigationMenu.Link></NavigationMenu.Item> : null}
+        {session.organizationAdministrations?.length ? <><NavigationMenu.Item><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/organization"><Icon name="settings" />Organization</NavLink></NavigationMenu.Link></NavigationMenu.Item><NavigationMenu.Item><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/members"><Icon name="members" />Members</NavLink></NavigationMenu.Link></NavigationMenu.Item><NavigationMenu.Item><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/imported-identities"><Icon name="import" />Imported identities</NavLink></NavigationMenu.Link></NavigationMenu.Item></> : null}
       </NavigationMenu.List></NavigationMenu.Root>
       <div className={styles.sidebarFooter}><span className={styles.avatar} aria-hidden="true">{initials(memberName, "M")}</span><span><strong>{memberName}</strong><small>{memberEmail}</small></span></div>
     </aside>
@@ -212,6 +214,9 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
           <Route path="/app/projects/:projectId/tasks/:taskKey" element={<TaskDetailPage memberId={session.member.id} token={session.token} />} />
           <Route path="/app/projects/:projectId/notifications" element={<ProjectNotificationsPage token={session.token} />} />
           <Route path="/app/settings/members" element={<MemberAdministrationPage administrations={session.organizationAdministrations} activeOrganizationId={session.activeOrganizationId} currentMemberId={session.member.id} token={session.token} />} />
+          <Route path="/app/settings" element={<MemberSettingsPage token={session.token ?? ""} />} />
+          <Route path="/app/settings/data" element={<WorkspaceDataPage token={session.token ?? ""} workspaceId={session.workspace.id ?? ""} memberId={session.member.id} />} />
+          <Route path="/app/settings/organization" element={session.organizationAdministrations?.length ? <OrganizationSettingsPage token={session.token ?? ""} administrations={session.organizationAdministrations} activeOrganizationId={session.activeOrganizationId} /> : <Navigate replace to="/app/settings" />} />
           <Route path="/app/settings/imported-identities" element={<ImportedIdentitiesPage administrations={session.organizationAdministrations} currentMember={session.member} token={session.token} />} />
           <Route path="/app/activity" element={<ActivityPage workspaceId={session.workspace.id ?? ""} token={session.token ?? ""} />} />
           <Route path="/app/notifications" element={<NotificationsPage token={session.token ?? ""} />} />
