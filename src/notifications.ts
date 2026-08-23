@@ -17,7 +17,7 @@ export interface NotificationDelivery {
   id: string;
   memberId: string;
   workspaceId: string;
-  projectId: string;
+  projectId?: string;
   trigger: NotificationTrigger;
   summary: string;
   activity: ActivityRecord;
@@ -47,6 +47,21 @@ export function assignmentNotificationInputs(activity: ActivityRecord, projectId
   return (after.assigneeIds ?? []).filter((memberId) => !previous.has(memberId) && memberId !== activity.actor.localAccountId)
     .map((memberId) => ({ memberId, projectId, trigger: "assignment" as const,
       summary: after.key && after.title ? `Assigned to ${after.key}: ${after.title}` : "A Task was assigned to you", activity }));
+}
+
+const directMention = /<@([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})>/gi;
+
+/** Stable account references are parsed from the committed message; display text is never trusted as identity. */
+export function directMentionMemberIds(content: string): string[] {
+  return [...content.matchAll(directMention)].map((match) => match[1]!.toLowerCase())
+    .filter((memberId, index, values) => values.indexOf(memberId) === index);
+}
+
+export function directMentionNotificationInputs(activity: ActivityRecord, projectId: string,
+  memberIds: readonly string[]) {
+  return [...new Set(memberIds)].filter((memberId) => memberId !== activity.actor.localAccountId)
+    .map((memberId) => ({ memberId, projectId, trigger: "direct_mention" as const,
+      summary: `${activity.actor.displayName} mentioned you in a Discussion`, activity }));
 }
 
 function isTimeZone(value: string): boolean {

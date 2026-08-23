@@ -36,7 +36,7 @@ import type { Board, BoardRepository, BoardTask } from "./boards.js";
 import type { NoteLinkRecord, NoteLocationRecord, PortableNoteLinkStateProjection, PortableNoteLocationProjection } from "./note-links.js";
 import type { ActivityCause, ActivityRecord, ActivityRepository, NoteHistoryRevision } from "./activity.js";
 import type { DevelopmentArtifact, GitHubArtifactRepository } from "./github-artifacts.js";
-import { assignmentNotificationInputs, notificationDeliveryMode, type NotificationDelivery, type NotificationPreferences, type NotificationRepository } from "./notifications.js";
+import { assignmentNotificationInputs, directMentionMemberIds, directMentionNotificationInputs, notificationDeliveryMode, type NotificationDelivery, type NotificationPreferences, type NotificationRepository } from "./notifications.js";
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
@@ -709,6 +709,7 @@ export class PostgresDatabase implements
         VALUES ($1,$2,$3,$4,$5)`, [first.id, discussion.id, first.content, first.author.localAccountId, first.createdAt]);
       const projection = this.#portableDiscussion(discussion);
       await this.#recordPortableProjection(client, "Discussion", discussion.id, projection.schema, projection);
+      await this.#recordDiscussionMentionNotifications(client, memberId, discussion, first);
       return { status: "created" as const, discussion, projection };
     });
   }
@@ -774,6 +775,7 @@ export class PostgresDatabase implements
       discussion.messages.push(message);
       const projection = this.#portableDiscussion(discussion);
       await this.#recordPortableProjection(client, "Discussion", discussionId, projection.schema, projection);
+      await this.#recordDiscussionMentionNotifications(client, memberId, discussion, message);
       return { status: "updated" as const, discussion, projection };
     });
   }
@@ -1897,8 +1899,7 @@ export class PostgresDatabase implements
   async listNotifications(memberId: string) {
     await this.#ensureNotificationSchema();
     const result = await this.#pool.query<any>(`SELECT notification.* FROM stash_notifications notification
-      JOIN stash_projects project ON project.id=notification.project_id
-      JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
+      JOIN stash_workspaces workspace ON workspace.id=notification.workspace_id
       WHERE notification.member_id=$1 AND (
         (workspace.owner_type='personal' AND workspace.personal_owner_id=$1) OR
         (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
@@ -1910,8 +1911,8 @@ export class PostgresDatabase implements
   async markNotificationRead(memberId: string, id: string, readAt: string) {
     await this.#ensureNotificationSchema();
     const result = await this.#pool.query<any>(`UPDATE stash_notifications notification SET read_at=$3
-      FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
-      WHERE notification.id=$1 AND notification.member_id=$2 AND project.id=notification.project_id AND (
+      FROM stash_workspaces workspace
+      WHERE notification.id=$1 AND notification.member_id=$2 AND workspace.id=notification.workspace_id AND (
         (workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
         (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
           WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2))) RETURNING notification.*`, [id, memberId, readAt]);
@@ -1964,7 +1965,7 @@ export class PostgresDatabase implements
 
   #notificationFromRow(row: any): NotificationDelivery {
     return { schema: "stash.notification.v1", id: row.id, memberId: row.member_id, workspaceId: row.workspace_id,
-      projectId: row.project_id, trigger: row.trigger, summary: row.summary, activity: row.activity, delivery: row.delivery,
+      ...(row.project_id ? { projectId: row.project_id } : {}), trigger: row.trigger, summary: row.summary, activity: row.activity, delivery: row.delivery,
       createdAt: new Date(row.created_at).toISOString(), ...(row.read_at ? { readAt: new Date(row.read_at).toISOString() } : {}),
       ...(row.digested_at ? { digestedAt: new Date(row.digested_at).toISOString() } : {}) };
   }
@@ -2966,6 +2967,7 @@ export class PostgresDatabase implements
         UNIQUE (member_id,activity_id,trigger)
       );
       ALTER TABLE stash_notifications ADD COLUMN IF NOT EXISTS digested_at TIMESTAMPTZ;
+      ALTER TABLE stash_notifications ALTER COLUMN project_id DROP NOT NULL;
       CREATE INDEX IF NOT EXISTS stash_notifications_member_created_idx ON stash_notifications(member_id,created_at DESC)`);
     } finally { if (!transactionClient) client.release(); }
   }
@@ -3979,6 +3981,56 @@ export class PostgresDatabase implements
       await client.query(`INSERT INTO stash_notifications
         (id,member_id,workspace_id,project_id,trigger,summary,activity,created_at,delivery)
         VALUES ($1,$2,$3,$4,'assignment',$5,$6::jsonb,$7,$8)
+        ON CONFLICT (member_id,activity_id,trigger) DO NOTHING`, [randomUUID(), input.memberId, activity.workspaceId,
+        projectId, input.summary, JSON.stringify(activity), activity.occurredAt,
+        notificationDeliveryMode(new Date(activity.occurredAt), preferences)]);
+    }
+  }
+
+  async #recordDiscussionMentionNotifications(client: PoolClient, memberId: string, discussion: DiscussionRecord,
+    message: DiscussionMessage): Promise<void> {
+    const requestedMemberIds = directMentionMemberIds(message.content).filter((id) => id !== memberId);
+    if (!requestedMemberIds.length) return;
+    const scope = await client.query<{ project_id: string | null }>(`SELECT COALESCE(task.project_id,note.project_id) AS project_id
+      FROM stash_discussions discussion
+      LEFT JOIN stash_tasks task ON task.id=discussion.task_id
+      LEFT JOIN stash_notes note ON note.id=discussion.note_id
+      WHERE discussion.id=$1`, [discussion.id]);
+    if (!scope.rows[0]) return;
+    const projectId = scope.rows[0].project_id;
+    const recipients = await client.query<{ id: string }>(`SELECT account.id FROM stash_accounts account
+      JOIN stash_workspaces workspace ON workspace.id=$2
+      WHERE account.id=ANY($1::uuid[]) AND account.id<>$3 AND (
+        (workspace.owner_type='personal' AND workspace.personal_owner_id=account.id) OR
+        (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=account.id)))
+      AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM stash_projects project WHERE project.id=$4 AND project.workspace_id=workspace.id))
+      ORDER BY account.id`, [requestedMemberIds, discussion.workspaceId, memberId, projectId]);
+    if (!recipients.rowCount) return;
+    const activity: ActivityRecord = { schema: "stash.activity.v1", id: message.id, workspaceId: discussion.workspaceId,
+      object: { kind: "Discussion", id: discussion.id }, action: "discussion_message_mentioned_members", actor: message.author,
+      cause: { kind: "member" }, occurredAt: message.createdAt, before: {},
+      after: { messageId: message.id, mentionedMemberIds: recipients.rows.map(({ id }) => id) } };
+    await client.query(`INSERT INTO stash_workspace_activity
+      (id,workspace_id,object_kind,object_id,action,actor_account_id,cause,occurred_at,before_state,after_state)
+      VALUES($1,$2,'Discussion',$3,$4,$5,'member',$6,$7::jsonb,$8::jsonb) ON CONFLICT (id) DO NOTHING`,
+    [activity.id, activity.workspaceId, discussion.id, activity.action, memberId, activity.occurredAt,
+      JSON.stringify(activity.before), JSON.stringify(activity.after)]);
+    await this.#recordPortableProjection(client, "Activity", activity.id, activity.schema, activity);
+    await this.#ensureNotificationSchema(client);
+    const inputs = projectId ? directMentionNotificationInputs(activity, projectId, recipients.rows.map(({ id }) => id))
+      : recipients.rows.map(({ id }) => ({ memberId: id, trigger: "direct_mention" as const,
+        summary: `${activity.actor.displayName} mentioned you in a Discussion`, activity }));
+    for (const input of inputs) {
+      const settings = projectId ? await client.query<any>(`SELECT preference.* FROM stash_notification_preferences preference
+        WHERE preference.project_id=$2 AND preference.member_id=$1`, [input.memberId, projectId]) : { rows: [] };
+      const row = settings.rows[0];
+      const preferences: NotificationPreferences = row ? { activity: row.activity, digest: row.digest,
+        ...(row.quiet_start ? { quietHours: { start: row.quiet_start, end: row.quiet_end, timeZone: row.quiet_time_zone } } : {}) }
+        : { activity: "followed", digest: "off" };
+      await client.query(`INSERT INTO stash_notifications
+        (id,member_id,workspace_id,project_id,trigger,summary,activity,created_at,delivery)
+        VALUES($1,$2,$3,$4,'direct_mention',$5,$6::jsonb,$7,$8)
         ON CONFLICT (member_id,activity_id,trigger) DO NOTHING`, [randomUUID(), input.memberId, activity.workspaceId,
         projectId, input.summary, JSON.stringify(activity), activity.occurredAt,
         notificationDeliveryMode(new Date(activity.occurredAt), preferences)]);
