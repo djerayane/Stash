@@ -7,6 +7,12 @@
 .composer h2,.list h2,.credential h2 { margin: 0 0 .65rem; font-size: 1.45rem; }
 .composer p,.list p,.credential p, .list small { color: var(--stash-color-muted); line-height: 1.55; }
 .composer form { display: grid; gap: 1.25rem; }
+.composer fieldset { display: grid; gap: .75rem; padding: 1rem; border: 1px solid var(--stash-border-subtle); border-radius: var(--stash-radius-sm); }
+.composer legend { padding: 0 .4rem; font-weight: 650; }
+.capability { display: grid; grid-template-columns: 1fr minmax(11rem, .8fr); gap: 1rem; align-items: center; }
+.capability label:first-child { display: flex; grid-template-columns: none; align-items: center; gap: .65rem; }
+.capability input { min-height: auto; }
+.visuallyHidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 .composer label { display: grid; gap: .5rem; font-weight: 650; }
 .composer input,.composer select { min-height: 3rem; padding: .7rem .85rem; color: inherit; background: var(--stash-color-surface); border: 1px solid var(--stash-border-strong); border-radius: var(--stash-radius-sm); font: inherit; }
 .composer button,.credential button,.alert button,.list button { min-height: 2.75rem; padding: .7rem 1rem; color: var(--stash-color-surface); background: var(--stash-color-ink); border: 0; border-radius: var(--stash-radius-sm); font-weight: 700; cursor: pointer; }
@@ -20,5 +26,5 @@
 .list li div { display: grid; gap: .3rem; }
 .list button { color: var(--stash-color-error); background: transparent; border: 1px solid currentColor; }
 .alert { margin: 2rem 0; padding: 1rem; color: var(--stash-color-error); border: 1px solid currentColor; }
-@media (max-width: 700px) { .page { padding: 1.25rem; } .header { padding-bottom: 2.5rem; } .composer,.list,.credential { grid-template-columns: 1fr; gap: 1.5rem; padding: 2.5rem 0; } }
+@media (max-width: 700px) { .page { padding: 1.25rem; } .header { padding-bottom: 2.5rem; } .composer,.list,.credential { grid-template-columns: 1fr; gap: 1.5rem; padding: 2.5rem 0; } .capability { grid-template-columns: 1fr; } }
 @media (prefers-reduced-motion: reduce) { .page *, .page *::before, .page *::after { scroll-behavior: auto !important; transition-duration: .001ms !important; animation-duration: .001ms !important; } }

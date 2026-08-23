@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 
 export const agentGrantModes = ["direct", "propose", "deny"] as const;
-export const agentGrantCapabilities = ["workspace.read", "note.write", "task.write"] as const;
+export const agentGrantCapabilities = ["note.read", "note.write", "task.read", "task.write"] as const;
 export type AgentGrantMode = (typeof agentGrantModes)[number];
 
 export interface AgentGrantScope { capability: string; mode: AgentGrantMode }
@@ -10,12 +10,17 @@ export interface AgentGrant {
   projectId?: string; scopes: AgentGrantScope[]; expiresAt: string; createdAt: string; revokedAt?: string;
 }
 export interface StoredAgentGrant extends AgentGrant { tokenLookup: string; tokenHash: string }
+export interface AgentGrantOptions { organizationId: string; organizationName: string; projects: Array<{ id: string; name: string }> }
+export interface AgentProposal { id: string; grantId: string; sponsoringMemberId: string; capability: string; input: unknown; createdAt: string; status: "pending" }
 
 export interface AgentGrantRepository {
   createAgentGrant(actorId: string, grant: StoredAgentGrant): Promise<"created" | "forbidden">;
   listAgentGrants(actorId: string, organizationId: string): Promise<AgentGrant[] | undefined>;
   revokeAgentGrant(actorId: string, organizationId: string, grantId: string): Promise<"revoked" | "not_found" | "forbidden">;
   findActiveAgentGrant(tokenLookup: string): Promise<StoredAgentGrant | undefined>;
+  agentGrantOptions(actorId: string): Promise<AgentGrantOptions[]>;
+  createAgentProposal(proposal: AgentProposal): Promise<void>;
+  agentGrantTargetAllowed(grant: AgentGrant, target: { workspaceId?: string; projectId?: string }): Promise<boolean>;
 }
 
 export class InvalidAgentGrantInput extends Error {}
@@ -23,8 +28,8 @@ export class InvalidAgentGrantInput extends Error {}
 export class AgentGrantService {
   constructor(private readonly repository: AgentGrantRepository, private readonly now = () => new Date()) {}
 
-  async create(actorId: string, input: unknown): Promise<{ status: "created"; grant: AgentGrant; token: string } | { status: "forbidden" }> {
-    if (!isCreateInput(input)) throw new InvalidAgentGrantInput();
+  async create(actorId: string, input: unknown, expectedOrganizationId?: string): Promise<{ status: "created"; grant: AgentGrant; token: string } | { status: "forbidden" }> {
+    if (!isCreateInput(input) || expectedOrganizationId && input.organizationId !== expectedOrganizationId) throw new InvalidAgentGrantInput();
     const expiresAt = new Date(input.expiresAt);
     if (!Number.isFinite(expiresAt.valueOf()) || expiresAt <= this.now() || expiresAt.valueOf() > this.now().valueOf() + 90 * 86_400_000) throw new InvalidAgentGrantInput();
     const secret = randomBytes(32).toString("base64url");
@@ -42,6 +47,15 @@ export class AgentGrantService {
     if (!isUuid(organizationId)) throw new InvalidAgentGrantInput();
     return this.repository.listAgentGrants(actorId, organizationId);
   }
+
+  options(actorId: string) { return this.repository.agentGrantOptions(actorId); }
+
+  async propose(grant: AgentGrant, capability: string, input: unknown): Promise<AgentProposal> {
+    const proposal: AgentProposal = { id: randomUUID(), grantId: grant.id, sponsoringMemberId: grant.sponsoringMemberId,
+      capability, input, createdAt: this.now().toISOString(), status: "pending" };
+    await this.repository.createAgentProposal(proposal); return proposal;
+  }
+  authorizeTarget(grant: AgentGrant, target: { workspaceId?: string; projectId?: string }) { return this.repository.agentGrantTargetAllowed(grant, target); }
 
   async revoke(actorId: string, organizationId: string, grantId: string) {
     if (!isUuid(organizationId) || !isUuid(grantId)) throw new InvalidAgentGrantInput();
@@ -72,5 +86,6 @@ function isCreateInput(value: unknown): value is { organizationId: string; proje
     && input.scopes.every((scope) => scope && typeof scope === "object" && !Array.isArray(scope)
       && Object.keys(scope).length === 2 && typeof (scope as AgentGrantScope).capability === "string"
       && agentGrantCapabilities.includes((scope as AgentGrantScope).capability as (typeof agentGrantCapabilities)[number])
+      && (!(scope as AgentGrantScope).capability.endsWith(".read") || (scope as AgentGrantScope).mode !== "propose")
       && agentGrantModes.includes((scope as AgentGrantScope).mode));
 }

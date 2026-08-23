@@ -45,7 +45,7 @@ import { Schema } from "prosemirror-model";
 import { InvalidCollaborationUpdate, type CollaborationSnapshot, type NoteCollaborationRepository } from "./note-collaboration.js";
 import type { WorkspaceSearchQuery, WorkspaceSearchRepository, WorkspaceSearchResult } from "./workspace-search.js";
 import { proseMirrorToRichText, richTextToProseMirror } from "@stash/rich-text";
-import type { AgentGrant, AgentGrantRepository, StoredAgentGrant } from "./agent-grants.js";
+import type { AgentGrant, AgentGrantOptions, AgentProposal, StoredAgentGrant } from "./agent-grants.js";
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
@@ -4601,6 +4601,11 @@ export class PostgresDatabase implements
     ALTER TABLE stash_agent_grants ADD COLUMN IF NOT EXISTS token_lookup TEXT UNIQUE;
     ALTER TABLE stash_agent_grants ADD COLUMN IF NOT EXISTS token_hash TEXT;
     ALTER TABLE stash_agent_grants ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP;
+    CREATE TABLE IF NOT EXISTS stash_agent_proposals (
+      id UUID PRIMARY KEY, grant_id UUID NOT NULL REFERENCES stash_agent_grants(id), sponsoring_member_id UUID NOT NULL REFERENCES stash_accounts(id),
+      capability TEXT NOT NULL, input JSONB NOT NULL, status TEXT NOT NULL CHECK (status IN ('pending','accepted','rejected')),
+      created_at TIMESTAMPTZ NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS stash_personal_access_tokens (
       id UUID PRIMARY KEY,
       organization_id UUID NOT NULL REFERENCES stash_organizations(id) ON DELETE CASCADE,
@@ -4668,6 +4673,37 @@ export class PostgresDatabase implements
       const row = result.rows[0]; if (!row?.token_hash) return undefined;
       return { ...agentGrantFromRow(row), tokenLookup: row.token_lookup, tokenHash: row.token_hash };
     } finally { client.release(); }
+  }
+
+  async agentGrantOptions(actorId: string): Promise<AgentGrantOptions[]> {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureMemberDepartureSchema(client);
+      const result = await client.query<{ organization_id: string; organization_name: string; project_id: string | null; project_name: string | null }>(`
+        SELECT organization.id organization_id,organization.name organization_name,project.id project_id,project.name project_name
+        FROM stash_organization_memberships membership JOIN stash_organizations organization ON organization.id=membership.organization_id
+        LEFT JOIN stash_workspaces workspace ON workspace.organization_owner_id=organization.id
+        LEFT JOIN stash_projects project ON project.workspace_id=workspace.id WHERE membership.account_id=$1
+        ORDER BY organization.name,organization.id,project.name,project.id`, [actorId]);
+      return [...new Set(result.rows.map((row) => row.organization_id))].map((organizationId) => {
+        const rows = result.rows.filter((row) => row.organization_id === organizationId); return { organizationId,
+          organizationName: rows[0]!.organization_name, projects: rows.flatMap((row) => row.project_id ? [{ id: row.project_id, name: row.project_name! }] : []) };
+      });
+    } finally { client.release(); }
+  }
+
+  async createAgentProposal(proposal: AgentProposal): Promise<void> {
+    await this.#pool.query(`INSERT INTO stash_agent_proposals (id,grant_id,sponsoring_member_id,capability,input,status,created_at)
+      VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7)`, [proposal.id, proposal.grantId, proposal.sponsoringMemberId, proposal.capability,
+      JSON.stringify(proposal.input), proposal.status, proposal.createdAt]);
+  }
+
+  async agentGrantTargetAllowed(grant: AgentGrant, target: { workspaceId?: string; projectId?: string }): Promise<boolean> {
+    if (!target.workspaceId && !target.projectId) return false;
+    const result = await this.#pool.query(`SELECT 1 FROM stash_workspaces workspace LEFT JOIN stash_projects project ON project.workspace_id=workspace.id
+      WHERE workspace.organization_owner_id=$1 AND ($2::uuid IS NULL OR workspace.id=$2) AND ($3::uuid IS NULL OR project.id=$3)
+        AND ($4::uuid IS NULL OR project.id=$4) LIMIT 1`, [grant.organizationId, target.workspaceId ?? null, target.projectId ?? null, grant.projectId ?? null]);
+    return Boolean(result.rowCount);
   }
 
   async #markFormerAssignments(client: PoolClient, organizationId: string, accountId: string, actorId: string): Promise<string[]> {

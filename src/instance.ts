@@ -272,7 +272,8 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
   ];
   const routes = [
     ...(options.githubSignals ? [githubWebhookRoute(options.githubSignals)] : []),
-    ...(options.agentGrants ? [mcpRoute(options.agentGrants, options.mcpEnabled === true)] : []),
+    ...(options.agentGrants ? [mcpRoute(options.agentGrants, options.mcpEnabled === true,
+      { ...(options.notes ? { notes: options.notes } : {}), ...(options.tasks ? { tasks: options.tasks } : {}) })] : []),
     publicDomainApiRoute(publicDomainRoutes), ...applicationRoutes,
   ];
 
