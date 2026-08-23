@@ -1,5 +1,5 @@
 import { createAgentGrantsApi } from "@stash/api-client";
-import type { CreateAgentGrantRequest } from "@stash/domain-types";
+import type { CreateAgentGrantRequest, ReviewAgentProposalRequest } from "@stash/domain-types";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 export function useAgentGrants(token: string | undefined, organizationId: string) {
@@ -11,5 +11,7 @@ export function useAgentGrants(token: string | undefined, organizationId: string
     await Promise.all([cache.invalidateQueries({ queryKey: ["agent-grants", organizationId] }), cache.invalidateQueries({ queryKey: ["agent-proposals", organizationId] })]);
   } });
   const revoke = useMutation({ mutationFn: (id: string) => client.revoke(organizationId, id), onSuccess: async () => cache.invalidateQueries({ queryKey: ["agent-grants", organizationId] }) });
-  return { options, grants, proposals, create, revoke };
+  const review = useMutation({ mutationFn: ({ proposalId, ...input }: ReviewAgentProposalRequest & { proposalId: string }) => client.reviewProposal(organizationId, proposalId, input),
+    onSuccess: async () => cache.invalidateQueries({ queryKey: ["agent-proposals", organizationId] }) });
+  return { options, grants, proposals, create, revoke, review };
 }

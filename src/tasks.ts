@@ -82,7 +82,7 @@ export interface TaskPlanningRepository {
   >;
 }
 
-export interface TaskEditBatch { operationId: string; baseRevision: number; changes: TaskPlanningUpdate; createdAt: string; createdBy: PortableIdentity; }
+export interface TaskEditBatch { operationId: string; baseRevision: number; changes: TaskPlanningUpdate; createdAt: string; createdBy: PortableIdentity; cause?: ActivityCause }
 export interface TaskEditConflict {
   id: string; taskId: string; baseRevision: number; currentRevision: number; fields: string[]; contribution: TaskPlanningUpdate;
   createdAt: string; createdBy: { displayName: string; attribution: "recorded" };
@@ -182,6 +182,14 @@ export class TaskService {
     return this.tasks.applyStructuredTaskEdit(memberId, projectId, taskKey.toUpperCase(), { operationId: value.operationId,
       baseRevision: value.baseRevision as number, changes: normalizePlanningUpdate(value.changes as TaskPlanningUpdate),
       createdAt: new Date().toISOString(), createdBy: actor });
+  }
+  async applyProposedEdit(memberId: string, projectId: string, taskKey: string, operationId: string, baseRevision: number,
+    changes: unknown, cause: ActivityCause) {
+    if (!uuid.test(projectId) || !isTaskKey(taskKey) || !uuid.test(operationId) || !Number.isSafeInteger(baseRevision) || baseRevision < 1
+      || !this.tasks.applyStructuredTaskEdit || !isPlanningUpdate(changes)) throw new InvalidTaskFromBlockInput();
+    const actor = await this.actors.findPortableMemberIdentity(memberId); if (!actor) throw new Error("member_identity_unavailable");
+    return this.tasks.applyStructuredTaskEdit(memberId, projectId, taskKey.toUpperCase(), { operationId, baseRevision,
+      changes: normalizePlanningUpdate(changes as TaskPlanningUpdate), createdAt: new Date().toISOString(), createdBy: actor, cause });
   }
 
   async listStructuredConflicts(memberId: string, projectId: string, taskKey: string) {

@@ -13,6 +13,8 @@ class RepositoryFake implements AgentGrantRepository {
   directWrites: unknown[] = [];
   activities: unknown[] = [];
   operatorAudit: unknown[] = [];
+  failNextProposalWrite = false;
+  taskRevision = 1;
   async createAgentGrant(actorId: string, grant: StoredAgentGrant) { if (actorId !== "member" || grant.organizationId !== organizationId) return "forbidden" as const; this.grants.push(grant); return "created" as const; }
   async listAgentGrants(actorId: string, organization: string) { return actorId === "member" && organization === organizationId ? this.grants.map(({ tokenLookup: _, tokenHash: __, ...grant }) => grant) : undefined; }
   async revokeAgentGrant(actorId: string, organization: string, id: string) { const grant = this.grants.find((candidate) => candidate.id === id && candidate.organizationId === organization); if (!grant) return "not_found" as const; if (grant.sponsoringMemberId !== actorId) return "forbidden" as const; grant.revokedAt ??= new Date().toISOString(); return "revoked" as const; }
@@ -20,6 +22,12 @@ class RepositoryFake implements AgentGrantRepository {
   async agentGrantOptions(actorId: string) { return actorId === "member" ? [{ organizationId, organizationName: "Test Organization", projects: [] }] : []; }
   async createAgentProposal(proposal: import("../src/agent-grants.js").AgentProposal) { this.proposals.push(proposal); }
   async listAgentProposals(actorId: string, requestedOrganizationId: string) { return actorId === "member" && requestedOrganizationId === organizationId ? this.proposals : undefined; }
+  async findAgentProposal(actorId: string, requestedOrganizationId: string, proposalId: string) { if (actorId !== "member" || requestedOrganizationId !== organizationId) return "forbidden" as const; return this.proposals.find(({ id }) => id === proposalId); }
+  async claimAgentProposal(actorId: string, requestedOrganizationId: string, proposalId: string, operationId: string) { const proposal = await this.findAgentProposal(actorId, requestedOrganizationId, proposalId); if (proposal === "forbidden") return { status: "forbidden" as const }; if (!proposal) return { status: "not_found" as const };
+    if (proposal.status !== "pending" && proposal.status !== "conflict") return { status: proposal.operationId === operationId ? "duplicate" as const : "already_reviewed" as const, proposal };
+    Object.assign(proposal, { status: "applying", operationId }); return { status: "claimed" as const, proposal }; }
+  async finishAgentProposal(actorId: string, proposalId: string, operationId: string, update: any) { const proposal = this.proposals.find(({ id }) => id === proposalId)!; Object.assign(proposal, update, { operationId }); return proposal; }
+  async releaseAgentProposal(_actorId: string, proposalId: string, operationId: string) { const proposal = this.proposals.find(({ id }) => id === proposalId); if (proposal?.operationId === operationId) Object.assign(proposal, { status: proposal.conflict ? "conflict" : "pending", operationId: undefined }); }
   async agentGrantTargetAllowed(grant: AgentGrant, target: { workspaceId?: string; projectId?: string }) { return grant.organizationId === organizationId
     && (!grant.projectId || target.projectId === grant.projectId) && target.workspaceId !== "77777777-7777-4777-8777-777777777777"; }
 }
@@ -33,14 +41,21 @@ describe("Agent Grants and MCP", () => {
     instance = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin", memberAccess: access, agentGrants: service, mcpEnabled: enabled,
       notes: { async get(memberId: string, noteId: string) { return memberId === "member" && noteId === "22222222-2222-4222-8222-222222222222" ? { id: noteId, workspaceId: "55555555-5555-4555-8555-555555555555", content: "Authorized context" } : undefined; },
         async capture(memberId: string, workspaceId: string, input: unknown, cause: unknown) { repository.directWrites.push({ memberId, workspaceId, input, cause });
+          if (repository.failNextProposalWrite) { repository.failNextProposalWrite = false; repository.directWrites.pop(); throw new Error("temporary write failure"); }
           repository.activities.push({ actor: memberId, cause }); repository.operatorAudit.push({ action: "agent_note_created", actor: memberId, cause });
           return { status: "created", note: { id: "33333333-3333-4333-8333-333333333333" } }; } } as any,
-      tasks: { async updateByKey(memberId: string, projectId: string, taskKey: string, input: unknown, cause: unknown) {
+      tasks: { async findByKey() { return { status: "found", task: { revision: repository.taskRevision } }; },
+        async updateByKey(memberId: string, projectId: string, taskKey: string, input: unknown, cause: unknown) {
         repository.directWrites.push({ memberId, projectId, taskKey, input, cause });
         repository.activities.push({ action: "task_planning_updated", actor: memberId, cause },
           { action: "task_dependency_relationship_updated", actor: memberId, cause });
         repository.operatorAudit.push({ action: "agent_task_updated", actor: memberId, cause });
         return { status: "updated", task: { id: "88888888-8888-4888-8888-888888888888", key: taskKey } };
+      }, async applyProposedEdit(memberId: string, projectId: string, taskKey: string, operationId: string, baseRevision: number, input: unknown, cause: unknown) {
+        if (repository.taskRevision > baseRevision) return { status: "conflict_preserved", conflict: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", fields: ["title"], currentRevision: repository.taskRevision } };
+        repository.directWrites.push({ memberId, projectId, taskKey, operationId, input, cause }); return { status: "applied", revision: ++repository.taskRevision };
+      }, async resolveStructuredConflict(memberId: string, projectId: string, taskKey: string, conflictId: string, value: unknown) {
+        repository.directWrites.push({ memberId, projectId, taskKey, conflictId, value }); return { status: "resolved", revision: ++repository.taskRevision };
       } } as any }); return repository; }
   async function issue(scopes: Array<{ capability: string; mode: "direct" | "propose" | "deny" }>, session = "member-session", projectId?: string) {
     const response = await fetch(`${instance!.url}/api/v1/organizations/${organizationId}/agent-grants`, { method: "POST", headers: { authorization: `Bearer ${session}`, "content-type": "application/json" },
@@ -126,6 +141,46 @@ describe("Agent Grants and MCP", () => {
     const accepted = await invoke({ projectId, workspaceId: "55555555-5555-4555-8555-555555555555", input: { content: "Review this" } });
     assert.equal((await accepted.json() as any).result.structuredContent.status, "pending"); assert.equal(repository.proposals.length, 1);
     assert.deepEqual(repository.proposals[0]?.input, { projectId, workspaceId: "55555555-5555-4555-8555-555555555555", input: { content: "Review this" } }); assert.equal(repository.directWrites.length, 0);
+  });
+
+  it("lets only the sponsoring Member explicitly apply or reject a Proposal idempotently", async () => {
+    const repository = await run(); const projectId = "44444444-4444-4444-8444-444444444444";
+    const { body } = await issue([{ capability: "note.write", mode: "propose" }], "member-session", projectId);
+    const sessionId = await initializeMcp(body.token); const created = await mcp(body.token, sessionId, { jsonrpc: "2.0", id: 14, method: "tools/call", params: { name: "stash.note.write",
+      arguments: { projectId, workspaceId: "55555555-5555-4555-8555-555555555555", input: { content: "Reviewed contribution" } } } });
+    const proposalId = (await created.json() as any).result.structuredContent.proposalId;
+    const forbidden = await fetch(`${instance!.url}/api/organizations/${organizationId}/agent-grants/proposals/${proposalId}`, { headers: { authorization: "Bearer other-session" } });
+    assert.equal(forbidden.status, 403);
+    const operationId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"; const review = () => fetch(`${instance!.url}/api/organizations/${organizationId}/agent-grants/proposals/${proposalId}/review`, {
+      method: "POST", headers: { authorization: "Bearer member-session", "content-type": "application/json" }, body: JSON.stringify({ operationId, decision: "apply", confirmed: true }) });
+    const applied = await review(); assert.equal(applied.status, 200); assert.equal((await applied.json() as any).status, "applied"); assert.equal(repository.directWrites.length, 1);
+    const duplicate = await review(); assert.equal(duplicate.status, 200); assert.equal((await duplicate.json() as any).status, "duplicate"); assert.equal(repository.directWrites.length, 1);
+  });
+
+  it("releases a failed Proposal claim so the sponsoring Member can safely retry", async () => {
+    const repository = await run(); const projectId = "44444444-4444-4444-8444-444444444444";
+    const { body } = await issue([{ capability: "note.write", mode: "propose" }], "member-session", projectId);
+    const sessionId = await initializeMcp(body.token); const created = await mcp(body.token, sessionId, { jsonrpc: "2.0", id: 18, method: "tools/call", params: { name: "stash.note.write",
+      arguments: { projectId, workspaceId: "55555555-5555-4555-8555-555555555555", input: { content: "Retry safely" } } } });
+    const proposalId = (await created.json() as any).result.structuredContent.proposalId; repository.failNextProposalWrite = true;
+    const review = (operationId: string) => fetch(`${instance!.url}/api/organizations/${organizationId}/agent-grants/proposals/${proposalId}/review`, { method: "POST",
+      headers: { authorization: "Bearer member-session", "content-type": "application/json" }, body: JSON.stringify({ operationId, decision: "apply", confirmed: true }) });
+    const failed = await review("cccccccc-cccc-4ccc-8ccc-cccccccccccc"); assert.equal(failed.status, 503); assert.equal(repository.proposals[0]?.status, "pending");
+    const retried = await review("dddddddd-dddd-4ddd-8ddd-dddddddddddd"); assert.equal(retried.status, 200); assert.equal((await retried.json() as any).status, "applied");
+    assert.equal(repository.directWrites.length, 1);
+  });
+
+  it("preserves stale Task overlaps for explicit Member resolution", async () => {
+    const repository = await run(); const projectId = "44444444-4444-4444-8444-444444444444";
+    const { body } = await issue([{ capability: "task.write", mode: "propose" }], "member-session", projectId); const sessionId = await initializeMcp(body.token);
+    const created = await mcp(body.token, sessionId, { jsonrpc: "2.0", id: 15, method: "tools/call", params: { name: "stash.task.write", arguments: { projectId, taskKey: "STASH-12", input: { title: "Agent title" } } } });
+    const proposalId = (await created.json() as any).result.structuredContent.proposalId; repository.taskRevision = 2;
+    const review = async (operationId: string, decision: string) => fetch(`${instance!.url}/api/organizations/${organizationId}/agent-grants/proposals/${proposalId}/review`, {
+      method: "POST", headers: { authorization: "Bearer member-session", "content-type": "application/json" }, body: JSON.stringify({ operationId, decision, confirmed: true }) });
+    const conflicted = await review("cccccccc-cccc-4ccc-8ccc-cccccccccccc", "apply"); const conflictBody = await conflicted.json() as any;
+    assert.equal(conflictBody.status, "conflict"); assert.deepEqual(conflictBody.proposal.conflict.fields, ["title"]); assert.equal(repository.directWrites.length, 0);
+    const resolved = await review("dddddddd-dddd-4ddd-8ddd-dddddddddddd", "keep_current"); assert.equal((await resolved.json() as any).status, "applied");
+    assert.equal(repository.directWrites.length, 1);
   });
 
   it("attributes every Activity from a Direct dependency update to the agent execution", async () => {

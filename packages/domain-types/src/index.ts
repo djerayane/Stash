@@ -14,7 +14,14 @@ export const directAuthorityConfirmation = "I authorize this agent to use Direct
 export interface CreateAgentGrantRequest { readonly organizationId: string; readonly projectId?: string; readonly name: string; readonly scopes: AgentGrantScope[]; readonly expiresAt: string; readonly directAuthorityConfirmation?: typeof directAuthorityConfirmation }
 export interface CreateAgentGrantResponse { readonly status: "created"; readonly grant: AgentGrant; readonly token: string }
 export interface RevokeAgentGrantResponse { readonly grantId: string; readonly revoked: true }
-export interface AgentProposal { readonly id: string; readonly grantId: string; readonly sponsoringMemberId: string; readonly capability: AgentGrantCapability; readonly input: unknown; readonly createdAt: string; readonly status: "pending" }
+export type AgentProposalStatus = "pending" | "applying" | "applied" | "rejected" | "conflict";
+export interface AgentProposalConflict { readonly id: string; readonly fields: readonly string[]; readonly currentRevision: number }
+export interface AgentProposal { readonly id: string; readonly grantId: string; readonly organizationId: string; readonly sponsoringMemberId: string;
+  readonly agentName: string; readonly projectId?: string; readonly capability: AgentGrantCapability; readonly input: unknown;
+  readonly baseRevision?: number; readonly createdAt: string; readonly status: AgentProposalStatus; readonly operationId?: string;
+  readonly reviewedAt?: string; readonly reviewedByMemberId?: string; readonly result?: unknown; readonly conflict?: AgentProposalConflict }
+export interface ReviewAgentProposalRequest { readonly operationId: string; readonly decision: "apply" | "reject" | "keep_current" | "apply_contribution"; readonly confirmed: true }
+export interface ReviewAgentProposalResponse { readonly status: "applied" | "rejected" | "conflict" | "duplicate"; readonly proposal: AgentProposal }
 
 export interface WorkspaceSummary {
   readonly id: EntityId;

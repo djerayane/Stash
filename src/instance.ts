@@ -245,7 +245,8 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
     ...(options.automations ? [automationRoutes(options.automations, memberAccess)] : []),
     ...(options.importedIdentityAdministration ? [importedIdentityAdministrationRoutes(options.importedIdentityAdministration, memberAccess)] : []),
     ...(options.searches ? [workspaceSearchRoutes(options.searches, memberAccess)] : []),
-    ...(options.agentGrants ? [agentGrantRoutes(options.agentGrants, memberAccess)] : []),
+    ...(options.agentGrants ? [agentGrantRoutes(options.agentGrants, memberAccess,
+      { ...(options.notes ? { notes: options.notes } : {}), ...(options.tasks ? { tasks: options.tasks } : {}) })] : []),
   ] : [];
   const applicationRoutes = [
     boardSurfaceRoute(),

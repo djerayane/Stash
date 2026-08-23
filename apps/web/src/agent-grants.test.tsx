@@ -12,7 +12,7 @@ describe("AgentGrantsPage motion", () => {
       ? { organizations: [{ organizationId: "11111111-1111-4111-8111-111111111111", organizationName: "Team", projects: [] }] }
       : path.endsWith("proposals") ? { proposals: [] } : { grants: [] }), { status: 200 })));
     render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><AgentGrantsPage token="member" /></QueryClientProvider>);
-    expect(await screen.findByRole("heading", { name: "Pending Proposals" })).toBeVisible(); expect(gsap.from).not.toHaveBeenCalled();
+    expect(await screen.findByRole("heading", { name: "Agent Proposals" })).toBeVisible(); expect(gsap.from).not.toHaveBeenCalled();
   });
   it("runs state motion through the scoped GSAP lifecycle", async () => {
     vi.spyOn(gsap, "from").mockReturnValue({} as any);
@@ -20,6 +20,6 @@ describe("AgentGrantsPage motion", () => {
       ? { organizations: [{ organizationId: "11111111-1111-4111-8111-111111111111", organizationName: "Team", projects: [] }] }
       : path.endsWith("proposals") ? { proposals: [] } : { grants: [] }), { status: 200 })));
     render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><AgentGrantsPage token="member" /></QueryClientProvider>);
-    expect(await screen.findByRole("heading", { name: "Pending Proposals" })).toBeVisible(); expect(gsap.from).toHaveBeenCalledWith("header > *, section", expect.objectContaining({ clearProps: "all" }));
+    expect(await screen.findByRole("heading", { name: "Agent Proposals" })).toBeVisible(); expect(gsap.from).toHaveBeenCalledWith("header > *, section", expect.objectContaining({ clearProps: "all" }));
   });
 });
