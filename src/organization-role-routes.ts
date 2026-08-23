@@ -70,9 +70,13 @@ export function organizationRoleRoutes(
           }
         } else if (request.method === "DELETE" && !url.pathname.endsWith("/role")) {
           result = await service.remove(organizationId, access.accountId, memberId!);
-          if (result === "removed") {
-            response.writeHead(204, { "cache-control": "no-store" });
-            response.end();
+          if (typeof result === "object" && result.status === "removed") {
+            json(response, 200, {
+              memberId: result.departure.memberId,
+              affectedTaskIds: result.departure.affectedTaskIds,
+              degradedRepositoryConnectionIds: result.departure.degradedRepositoryConnectionIds,
+              authorityRevoked: true,
+            });
             return true;
           }
         } else {
@@ -81,7 +85,7 @@ export function organizationRoleRoutes(
         }
 
         if (result === "forbidden") {
-          forbidden(response);
+          forbidden(response, request.method === "DELETE" && !url.pathname.endsWith("/role"));
         } else if (result === "member_not_found") {
           json(response, 404, { error: result, message: "That Member does not belong to this Organization." });
         } else if (result === "final_owner") {
@@ -104,10 +108,12 @@ export function organizationRoleRoutes(
   };
 }
 
-function forbidden(response: Parameters<typeof json>[0]): void {
+function forbidden(response: Parameters<typeof json>[0], membershipOperation = false): void {
   json(response, 403, {
     error: "organization_forbidden",
-    message: "Only an Organization Owner can manage built-in Roles.",
+    message: membershipOperation
+      ? "Organization Owner or Admin permission is required to manage Members."
+      : "Only an Organization Owner can manage built-in Roles.",
   });
 }
 

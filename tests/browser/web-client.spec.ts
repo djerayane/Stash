@@ -88,6 +88,63 @@ test("removes functional motion under the Member's reduced-motion preference", a
   await expect(pageContent).toHaveCSS("opacity", "1");
 });
 
+test("removes a Member, revokes authority, and keeps former assignment repair accessible", async ({ page }) => {
+  await installMemberSession(page);
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/app/settings/members");
+
+  const organization = page.getByRole("combobox", { name: "Organization" });
+  await expect(organization).toHaveValue("44444444-4444-4444-8444-444444444444");
+  await organization.selectOption("33333333-3333-4333-8333-333333333333");
+  await expect(page.getByText("Other Organization").first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "Review departure" })).toHaveCount(0);
+  await organization.selectOption("44444444-4444-4444-8444-444444444444");
+
+  const adminCannotManageRoles = await page.evaluate(async () => fetch("/api/organizations/44444444-4444-4444-8444-444444444444/roles", {
+    headers: { authorization: "Bearer browser-acceptance-member-token" },
+  }).then((response) => response.status));
+  expect(adminCannotManageRoles).toBe(403);
+
+  const departingSessionBefore = await page.evaluate(async () => fetch("/api/organizations/44444444-4444-4444-8444-444444444444/roles", {
+    headers: { authorization: "Bearer departed-member-token" },
+  }).then((response) => response.status));
+  expect(departingSessionBefore).toBe(403);
+  await expect(page.getByRole("heading", { name: "Member access" })).toBeVisible();
+  await page.getByRole("button", { name: "Review departure" }).click();
+  const confirmation = page.getByRole("region", { name: /Remove Departing Member/ });
+  await expect(confirmation).toBeVisible();
+  await expect(confirmation).toBeFocused();
+  await expect(confirmation).toHaveCSS("transform", "none");
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  await page.getByRole("button", { name: "Remove Member" }).click();
+  await expect(page.getByRole("heading", { name: "Departing Member no longer has access" })).toBeVisible();
+  await page.getByRole("link", { name: "Home" }).click();
+  await page.getByRole("link", { name: "Members" }).click();
+  await expect(page.getByRole("heading", { name: "Member access" })).toBeVisible();
+  await expect(page.getByText("Departing Member", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Review departure" })).toHaveCount(0);
+  const departedAuthority = await page.evaluate(async () => fetch("/api/organizations/44444444-4444-4444-8444-444444444444/roles", {
+    headers: { authorization: "Bearer departed-member-token" },
+  }).then((response) => response.status));
+  expect(departedAuthority).toBe(401);
+
+  await page.goto("/app/projects/22222222-2222-4222-8222-222222222222/tasks/STASH-32");
+
+  await expect(page.getByRole("heading", { name: "Restore release ownership" })).toBeVisible();
+  const marker = page.getByRole("status");
+  await expect(marker).toBeVisible();
+  await expect(marker).toContainText("Departed Member — assignment needs attention");
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+
+  await page.getByRole("button", { name: "Assign to me" }).click();
+  await expect(page.getByText("Assigned to you", { exact: true })).toBeVisible();
+  await expect(page.getByText("Departed Member — assignment needs attention", { exact: true })).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByText("Departed Member — assignment needs attention", { exact: true })).toHaveCount(0);
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+});
+
 test("announces and focuses a session failure, then retries by keyboard without reloading", async ({ page }) => {
   await installMemberSession(page);
   let sessionAttempts = 0;

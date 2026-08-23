@@ -118,6 +118,16 @@ describe("built-in password authentication on a running Stash Instance", () => {
     assert.deepEqual(await wrongPassword.json(), await missingAccount.json());
   });
 
+  it("does not treat integration personal tokens as Member sessions", async () => {
+    const database = new ProtocolCompatibleAuthDatabase() as ProtocolCompatibleAuthDatabase & {
+      findPersonalAccessTokenByTokenHash(): Promise<{ id: string; accountId: string }>;
+    };
+    database.findPersonalAccessTokenByTokenHash = async () => ({ id: "integration-token", accountId: "account-1" });
+    const service = new PasswordAuthService(database);
+
+    assert.equal(await service.authenticateBearer("Bearer github-personal-token"), undefined);
+  });
+
   it("performs password-verification work even when the email is unknown", async () => {
     const database = new ProtocolCompatibleAuthDatabase();
     const checkedHashes: string[] = [];

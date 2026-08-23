@@ -65,6 +65,7 @@ export const workflowTemporaryRenameSql = `UPDATE stash_workflow_statuses
   WHERE project_id = $1`;
 const repositoryConnectionSelect = `SELECT connection.id, connection.organization_id, connection.provider, connection.installation_id,
   connection.repository_id, connection.repository_url, connection.created_by_account_id, connection.created_by_attribution,
+  connection.ownership, connection.state,
   ARRAY(SELECT project_id FROM stash_repository_connection_projects link WHERE link.connection_id = connection.id ORDER BY project_id) AS project_ids
   FROM stash_repository_connections connection`;
 const taskPlanningSelect = `SELECT task.*, status.name AS status_name, status.category AS status_category,
@@ -106,7 +107,8 @@ function taskProjectionFromRow(row: any): PortableTaskProjection {
     schema: "stash.task.v1", id: row.id, workspaceId: row.workspace_id, projectId: row.project_id,
     key: row.task_key, ...(row.key_aliases?.length ? { keyAliases: row.key_aliases } : {}), title: row.title,
     status: { id: row.workflow_status_id, name: row.status_name, category: row.status_category },
-    assigneeIds: row.assignee_ids ?? [], priority: row.priority ?? "none", labelNames: row.label_names ?? [],
+    assigneeIds: row.assignee_ids ?? [], ...(row.former_assignee_ids?.length ? { formerAssigneeIds: row.former_assignee_ids } : {}),
+    priority: row.priority ?? "none", labelNames: row.label_names ?? [],
     ...(row.due_date ? { dueDate: typeof row.due_date === "string" ? row.due_date : row.due_date.toISOString().slice(0, 10) } : {}),
     ...(row.estimate === null || row.estimate === undefined ? {} : { estimate: Number(row.estimate) }),
     linkedNoteIds: row.linked_note_ids ?? [], dependencies: row.dependencies ?? [], developmentLinks: row.development_links ?? [],
@@ -114,6 +116,17 @@ function taskProjectionFromRow(row: any): PortableTaskProjection {
     createdAt: new Date(row.created_at).toISOString(),
     createdBy: { localAccountId: row.created_by_account_id, displayName: row.created_by_name },
   };
+}
+
+function formerAssignmentsAfterUpdate(
+  previousFormerAssigneeIds: readonly string[],
+  nextAssigneeIds: readonly string[],
+  assigneesWereUpdated: boolean,
+): string[] {
+  if (!assigneesWereUpdated) return [...previousFormerAssigneeIds];
+  const removedEveryFormerAssignee = previousFormerAssigneeIds.every((id) => !nextAssigneeIds.includes(id));
+  const hasReplacementAssignee = nextAssigneeIds.some((id) => !previousFormerAssigneeIds.includes(id));
+  return removedEveryFormerAssignee && hasReplacementAssignee ? [] : [...previousFormerAssigneeIds];
 }
 
 function taskPlanningReadModelFromRow(row: any): TaskPlanningReadModel {
@@ -1263,12 +1276,18 @@ export class PostgresDatabase implements
       const nextRevision = Number(row.revision) + 1;
       const nextFieldRevisions = { ...(row.field_revisions ?? {}) };
       for (const field of Object.keys(update)) nextFieldRevisions[field] = nextRevision;
+      const nextAssigneeIds = [...new Set(next.assigneeIds ?? [])];
+      const nextFormerAssigneeIds = formerAssignmentsAfterUpdate(
+        row.former_assignee_ids ?? [], nextAssigneeIds, update.assigneeIds !== undefined,
+      );
       await client.query(`UPDATE stash_tasks SET title = $2, workflow_status_id = $3, assignee_ids = $4::jsonb, priority = $5,
         label_names = $6::jsonb, due_date = $7, estimate = $8, linked_note_ids = $9::jsonb,
-        development_links = $10::jsonb, revision = $11, field_revisions = $12::jsonb WHERE id = $1`, [row.id, next.title.trim(), next.status.id,
-        JSON.stringify([...new Set(next.assigneeIds ?? [])]), next.priority ?? "none",
+        development_links = $10::jsonb, revision = $11, field_revisions = $12::jsonb,
+        former_assignee_ids = $13::jsonb WHERE id = $1`, [row.id, next.title.trim(), next.status.id,
+        JSON.stringify(nextAssigneeIds), next.priority ?? "none",
         JSON.stringify([...new Set((next.labelNames ?? []).map((label) => label.trim()))]), next.dueDate ?? null, next.estimate ?? null,
-        JSON.stringify([...new Set(next.linkedNoteIds ?? [])]), JSON.stringify(next.developmentLinks ?? []), nextRevision, JSON.stringify(nextFieldRevisions)]);
+        JSON.stringify([...new Set(next.linkedNoteIds ?? [])]), JSON.stringify(next.developmentLinks ?? []), nextRevision,
+        JSON.stringify(nextFieldRevisions), JSON.stringify(nextFormerAssigneeIds)]);
       const saved = await client.query<any>(taskPlanningSelect, [projectId, taskKey, memberId]);
       const task = taskPlanningReadModelFromRow(saved.rows[0]);
       await this.#recordPortableProjection(client, "Task", task.id, task.schema, taskProjectionFromRow(saved.rows[0]));
@@ -1452,10 +1471,15 @@ export class PostgresDatabase implements
       }
     }
     const current=taskProjectionFromRow(row); const next={...current,...update} as any;
+    const nextAssigneeIds=[...new Set<string>(next.assigneeIds??[])];
+    const nextFormerAssigneeIds=formerAssignmentsAfterUpdate(
+      row.former_assignee_ids??[],nextAssigneeIds,update.assigneeIds!==undefined);
     await client.query(`UPDATE stash_tasks SET title=$2,workflow_status_id=$3,assignee_ids=$4::jsonb,priority=$5,label_names=$6::jsonb,
-      due_date=$7,estimate=$8,linked_note_ids=$9::jsonb,development_links=$10::jsonb WHERE id=$1`,[row.id,next.title,
-      update.statusId??current.status.id,JSON.stringify(next.assigneeIds??[]),next.priority??"none",JSON.stringify(next.labelNames??[]),
-      next.dueDate??null,next.estimate??null,JSON.stringify(next.linkedNoteIds??[]),JSON.stringify(next.developmentLinks??[])]);
+      due_date=$7,estimate=$8,linked_note_ids=$9::jsonb,development_links=$10::jsonb,
+      former_assignee_ids=$11::jsonb WHERE id=$1`,[row.id,next.title,
+      update.statusId??current.status.id,JSON.stringify(nextAssigneeIds),next.priority??"none",JSON.stringify(next.labelNames??[]),
+      next.dueDate??null,next.estimate??null,JSON.stringify(next.linkedNoteIds??[]),JSON.stringify(next.developmentLinks??[]),
+      JSON.stringify(nextFormerAssigneeIds)]);
     return true;
   }
 
@@ -2120,12 +2144,12 @@ export class PostgresDatabase implements
     const client = await this.#pool.connect();
     try {
       await this.#ensureWorkspaceProjectSchema(client);
-      const result = await client.query<{ account_id: string; account_name: string; account_email: string; workspace_id: string; workspace_name: string }>(`
+      const result = await client.query<{ account_id: string; account_name: string; account_email: string; workspace_id: string; workspace_name: string; organization_id: string | null }>(`
         SELECT account.id account_id, account.name account_name, account.email account_email,
-          workspace.id workspace_id, workspace.name workspace_name
+          workspace.id workspace_id, workspace.name workspace_name, workspace.organization_owner_id organization_id
         FROM stash_accounts account
         JOIN LATERAL (
-          SELECT candidate.id, candidate.name
+          SELECT candidate.id, candidate.name, candidate.organization_owner_id
           FROM stash_workspaces candidate
           WHERE (candidate.owner_type='personal' AND candidate.personal_owner_id=account.id)
             OR (candidate.owner_type='organization' AND EXISTS (
@@ -2138,8 +2162,28 @@ export class PostgresDatabase implements
         ) workspace ON true
         WHERE account.id=$1`, [accountId]);
       const row = result.rows[0];
-      return row ? { member: { id: row.account_id, name: row.account_name, email: row.account_email },
-        workspace: { id: row.workspace_id, name: row.workspace_name }, capabilities: [] } : undefined;
+      if (!row) return undefined;
+      const administration = await client.query<{ organization_id: string; organization_name: string; member_id: string;
+        member_name: string; member_email: string; member_role: BuiltInOrganizationRole }>(`
+        SELECT organization.id organization_id, organization.name organization_name,
+          member.id member_id, member.name member_name, member.email member_email, membership.role member_role
+        FROM stash_organization_memberships actor_membership
+        JOIN stash_organizations organization ON organization.id=actor_membership.organization_id
+        JOIN stash_organization_memberships membership ON membership.organization_id=organization.id
+        JOIN stash_accounts member ON member.id=membership.account_id
+        WHERE actor_membership.account_id=$1 AND actor_membership.role IN ('Owner','Admin')
+        ORDER BY organization.id, member.name, member.id`, [accountId]);
+      const organizationAdministrations = [...new Set(administration.rows.map(({ organization_id }) => organization_id))]
+        .map((organizationId) => {
+          const eligibleMembers = administration.rows.filter(({ organization_id }) => organization_id === organizationId);
+          return { organizationId, organizationName: eligibleMembers[0]!.organization_name,
+            members: eligibleMembers.map((member) => ({ id: member.member_id, name: member.member_name,
+              email: member.member_email, role: member.member_role })) };
+        });
+      return { member: { id: row.account_id, name: row.account_name, email: row.account_email },
+        workspace: { id: row.workspace_id, name: row.workspace_name }, capabilities: [],
+        ...(organizationAdministrations.length ? { organizationAdministrations } : {}),
+        ...(row.organization_id ? { activeOrganizationId: row.organization_id } : {}) };
     } finally { client.release(); }
   }
 
@@ -2228,7 +2272,7 @@ export class PostgresDatabase implements
       if (!this.#canManageRepositoryConnections(memberships, actorId)) return { status: "forbidden" as const };
       const existing = await client.query<RepositoryConnectionRow>(`${repositoryConnectionSelect} WHERE organization_id = $1 AND repository_id = $2 FOR UPDATE`, [record.organizationId, record.repositoryId]);
       if (existing.rows[0]) return { status: "existing" as const, record: repositoryConnectionRecord(existing.rows[0]) };
-      await client.query(`INSERT INTO stash_repository_connections (id, organization_id, provider, installation_id, repository_id, repository_url, created_by_account_id, created_by_attribution) VALUES ($1,$2,$3,$4,$5,$6,$7,'recorded')`, [record.id, record.organizationId, record.provider, record.installationId, record.repositoryId, record.repositoryUrl, actorId]);
+      await client.query(`INSERT INTO stash_repository_connections (id, organization_id, provider, installation_id, repository_id, repository_url, created_by_account_id, created_by_attribution, ownership, state) VALUES ($1,$2,$3,$4,$5,$6,$7,'recorded',$8,'active')`, [record.id, record.organizationId, record.provider, record.installationId, record.repositoryId, record.repositoryUrl, actorId, record.ownership ?? "organization"]);
       await this.#recordRepositoryConnectionProjection(client, record, 1);
       return { status: "created" as const, record };
     });
@@ -2243,6 +2287,27 @@ export class PostgresDatabase implements
     return result.rows.map(repositoryConnectionRecord);
   }
 
+  async replaceDegradedRepositoryConnection(actorId: string, organizationId: string, connectionId: string,
+    replacement: import("./repository-connections.js").GitHubRepositoryIdentity) {
+    await this.#ensureRepositoryConnectionSchema();
+    return this.#withTransaction(async (client) => {
+      const memberships = await this.#lockedOrganizationMemberships(client, organizationId);
+      if (!this.#canManageRepositoryConnections(memberships, actorId)) return "forbidden" as const;
+      const repaired = await client.query<RepositoryConnectionRow>(`${repositoryConnectionSelect} WHERE connection.organization_id = $1 AND connection.id = $2 AND connection.state = 'degraded' FOR UPDATE`, [organizationId, connectionId]);
+      if (!repaired.rows[0]) return "not_found" as const;
+      await client.query(`UPDATE stash_repository_connections SET installation_id = $2, repository_id = $3,
+        repository_url = $4, created_by_account_id = $5, created_by_attribution = 'recorded',
+        ownership = 'organization', state = 'active' WHERE id = $1`,
+      [connectionId, replacement.installationId, replacement.repositoryId, replacement.repositoryUrl, actorId]);
+      const refreshed = { ...repositoryConnectionRecord(repaired.rows[0]), ...replacement,
+        createdByMemberId: actorId, createdByAttribution: "recorded" as const,
+        ownership: "organization" as const, state: "active" as const };
+      const revision = await client.query<{ revision: number }>("SELECT COALESCE(MAX(revision),0)+1 AS revision FROM stash_portable_projection_outbox WHERE object_kind='RepositoryConnection' AND object_id=$1", [connectionId]);
+      await this.#recordRepositoryConnectionProjection(client, refreshed, Number(revision.rows[0]!.revision));
+      return "repaired" as const;
+    });
+  }
+
   async resolveTask(memberId: string, projectId: string, taskKey: string) {
     const result = await this.findTaskByKey(memberId, projectId, taskKey);
     return result.status === "found" ? { id: result.task.id, key: result.task.key, title: result.task.title } : undefined;
@@ -2254,7 +2319,7 @@ export class PostgresDatabase implements
       JOIN stash_repository_connection_projects selected ON selected.connection_id = connection.id AND selected.project_id = $2
       JOIN stash_projects project ON project.id = selected.project_id
       JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
-      WHERE connection.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $3)
+      WHERE connection.id = $1 AND connection.state = 'active' AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $3)
         OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $3)))`, [connectionId, projectId, memberId]);
     const row = result.rows[0];
     return row ? { installationId: Number(row.installation_id), repositoryId: row.repository_id, repositoryUrl: row.repository_url } : undefined;
@@ -2309,7 +2374,8 @@ export class PostgresDatabase implements
         SELECT task.task_key AS matched_key WHERE task.task_key = ANY($3::text[])
         UNION SELECT alias.task_key FROM stash_task_key_aliases alias WHERE alias.task_id = task.id AND alias.task_key = ANY($3::text[])
       ) matched ON true
-      WHERE connection.provider='github' AND connection.installation_id=$1 AND connection.repository_id=$2
+      WHERE connection.provider='github' AND connection.state='active'
+        AND connection.installation_id=$1 AND connection.repository_id=$2
       `, [installationId, repositoryId, keys]);
     return result.rows.map((row) => ({ taskId: row.task_id, projectId: row.project_id, organizationId: row.organization_id,
       taskKey: row.task_key, title: row.title, matchedKey: row.matched_key }));
@@ -2558,7 +2624,7 @@ export class PostgresDatabase implements
        FROM stash_repository_connections connection
        JOIN stash_projects project ON project.id = $3
        JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
-       WHERE connection.id = $2 AND connection.organization_id = $1
+       WHERE connection.id = $2 AND connection.organization_id = $1 AND connection.state = 'active'
          AND workspace.owner_type = 'organization' AND workspace.organization_owner_id = $1
        ON CONFLICT DO NOTHING`,
       [organizationId, connectionId, projectId],
@@ -2567,7 +2633,8 @@ export class PostgresDatabase implements
         const existing = await client.query(
       `SELECT 1 FROM stash_repository_connection_projects link
        JOIN stash_repository_connections connection ON connection.id = link.connection_id
-       WHERE connection.organization_id = $1 AND link.connection_id = $2 AND link.project_id = $3`,
+       WHERE connection.organization_id = $1 AND connection.state = 'active'
+         AND link.connection_id = $2 AND link.project_id = $3`,
       [organizationId, connectionId, projectId],
     );
         if (!existing.rowCount) return "not_found" as const;
@@ -2608,20 +2675,37 @@ export class PostgresDatabase implements
     organizationId: string,
     actorId: string,
     accountId: string,
-  ): Promise<"removed" | "member_not_found" | "final_owner" | "forbidden"> {
+  ): Promise<{ status: "removed"; departure: import("./organization-roles.js").MemberDeparture }
+    | "member_not_found" | "final_owner" | "forbidden"> {
     return this.#withTransaction(async (client) => {
       const memberships = await this.#lockedOrganizationMemberships(client, organizationId);
-      if (!this.#canManageRoles(memberships, actorId)) return "forbidden";
+      if (!this.#canManageMembers(memberships, actorId)) return "forbidden";
       const target = memberships.find((membership) => membership.account_id === accountId);
       if (!target) return "member_not_found";
+      const actorRole = memberships.find((membership) => membership.account_id === actorId)?.role;
       if (target.role === "Owner" && this.#isOnlyOwner(memberships, accountId)) {
         return "final_owner";
       }
+      if (actorRole === "Admin" && target.role === "Owner") return "forbidden";
+      await this.#ensureMemberDepartureSchema(client);
+      const affectedTaskIds = await this.#markFormerAssignments(client, organizationId, accountId, actorId);
       await client.query(
         "DELETE FROM stash_organization_memberships WHERE organization_id = $1 AND account_id = $2",
         [organizationId, accountId],
       );
-      return "removed";
+      const { revokedSessions, revokedCredentials, revokedAgentGrants } =
+        await this.#revokeDepartedMemberAuthority(client, organizationId, accountId);
+      const degradedRepositoryConnectionIds = await this.#degradePersonalConnections(client, organizationId, accountId);
+      await this.#recordMemberDepartureAudit(client, { organizationId, actorId, accountId, role: target.role,
+        affectedTaskIds, degradedRepositoryConnectionIds, revokedSessions, revokedCredentials, revokedAgentGrants });
+      return { status: "removed", departure: {
+        memberId: accountId,
+        affectedTaskIds,
+        revokedSessions,
+        revokedCredentials,
+        revokedAgentGrants,
+        degradedRepositoryConnectionIds,
+      } };
     });
   }
 
@@ -2766,6 +2850,14 @@ export class PostgresDatabase implements
     return memberships.some(
       (membership) => membership.account_id === accountId && membership.role === "Owner",
     );
+  }
+
+  #canManageMembers(
+    memberships: ReadonlyArray<{ account_id: string; role: BuiltInOrganizationRole }>,
+    accountId: string,
+  ): boolean {
+    return memberships.some((membership) => membership.account_id === accountId
+      && (membership.role === "Owner" || membership.role === "Admin"));
   }
 
   #canManageRepositoryConnections(
@@ -3125,6 +3217,8 @@ export class PostgresDatabase implements
           repository_url TEXT NOT NULL CHECK (length(repository_url) > 0),
           created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id),
           created_by_attribution TEXT NOT NULL CONSTRAINT stash_repository_connections_creator_attribution_check CHECK (created_by_attribution IN ('recorded', 'inferred-during-upgrade')),
+          ownership TEXT NOT NULL DEFAULT 'organization' CONSTRAINT stash_repository_connections_ownership_check CHECK (ownership IN ('organization','personal')),
+          state TEXT NOT NULL DEFAULT 'active' CONSTRAINT stash_repository_connections_state_check CHECK (state IN ('active','degraded')),
           UNIQUE (organization_id, repository_id)
         );
         CREATE TABLE IF NOT EXISTS stash_repository_connection_projects (
@@ -3136,6 +3230,7 @@ export class PostgresDatabase implements
       await client.query("SELECT pg_advisory_lock(1094218495)");
       await client.query("BEGIN");
       try {
+        await this.#ensureRepositoryConnectionStateColumns(client);
         await client.query(`
           ALTER TABLE stash_repository_connections ADD COLUMN IF NOT EXISTS created_by_account_id UUID REFERENCES stash_accounts(id);
           ALTER TABLE stash_repository_connections ADD COLUMN IF NOT EXISTS created_by_attribution TEXT NOT NULL DEFAULT 'inferred-during-upgrade';
@@ -3423,6 +3518,7 @@ export class PostgresDatabase implements
         after_state JSONB NOT NULL
       );
       ALTER TABLE stash_tasks ADD COLUMN IF NOT EXISTS assignee_ids JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(assignee_ids) = 'array');
+      ALTER TABLE stash_tasks ADD COLUMN IF NOT EXISTS former_assignee_ids JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(former_assignee_ids) = 'array');
       ALTER TABLE stash_tasks ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'none' CHECK (priority IN ('none','low','medium','high','urgent'));
       ALTER TABLE stash_tasks ADD COLUMN IF NOT EXISTS label_names JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(label_names) = 'array');
       ALTER TABLE stash_tasks ADD COLUMN IF NOT EXISTS due_date DATE;
@@ -3745,8 +3841,8 @@ export class PostgresDatabase implements
 
   async #ensurePortableProjectionSchema(client: PoolClient): Promise<void> {
     await client.query("SELECT pg_advisory_lock(1094218495)");
-    try {
-      await client.query(`
+      try {
+        await client.query(`
         CREATE TABLE IF NOT EXISTS stash_portable_projection_outbox (
           object_kind TEXT NOT NULL CONSTRAINT stash_portable_projection_outbox_object_kind_check CHECK (object_kind IN (${portableProjectionObjectKindSql})),
           object_id UUID NOT NULL,
@@ -3815,7 +3911,7 @@ export class PostgresDatabase implements
       repositoryUrl: record.repositoryUrl,
       organization: { localOrganizationId: record.organizationId, displayName: identity.organization_name },
       createdBy: { localAccountId: record.createdByMemberId, displayName: identity.account_name, attribution: record.createdByAttribution },
-      projectIds: record.projectIds,
+      projectIds: record.projectIds, ownership: record.ownership ?? "organization", state: record.state ?? "active",
     };
     await client.query(
       `INSERT INTO stash_portable_projection_outbox (object_kind, object_id, revision, projection_schema, payload)
@@ -3896,10 +3992,12 @@ export class PostgresDatabase implements
       }
       for (const task of state.tasks) {
         await client.query(`INSERT INTO stash_tasks(id,workspace_id,project_id,task_key,workflow_status_id,title,created_by_account_id,created_at,
-          assignee_ids,priority,label_names,due_date,estimate,linked_note_ids,development_links) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11::jsonb,$12,$13,$14::jsonb,$15::jsonb)`,
+          assignee_ids,former_assignee_ids,priority,label_names,due_date,estimate,linked_note_ids,development_links)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11,$12::jsonb,$13,$14,$15::jsonb,$16::jsonb)`,
         [task.id,state.workspace.id,task.projectId,task.key,task.status.id,task.title,accountFor(task.createdBy),task.createdAt,
-          JSON.stringify(task.assigneeIds ?? []),task.priority ?? "none",JSON.stringify(task.labelNames ?? []),task.dueDate ?? null,
-          task.estimate ?? null,JSON.stringify(task.linkedNoteIds ?? []),JSON.stringify(task.developmentLinks ?? [])]);
+          JSON.stringify(task.assigneeIds ?? []),JSON.stringify(task.formerAssigneeIds ?? []),task.priority ?? "none",
+          JSON.stringify(task.labelNames ?? []),task.dueDate ?? null,task.estimate ?? null,
+          JSON.stringify(task.linkedNoteIds ?? []),JSON.stringify(task.developmentLinks ?? [])]);
         for (const noteId of task.sourceNoteIds) await client.query("INSERT INTO stash_task_note_sources(task_id,note_id) VALUES($1,$2)",[task.id,noteId]);
         for (const source of task.sourceBlocks ?? []) await client.query("INSERT INTO stash_task_block_sources(task_id,note_id,block_id) VALUES($1,$2,$3)",[task.id,source.noteId,source.blockId]);
         for (const alias of task.keyAliases ?? []) await client.query("INSERT INTO stash_task_key_aliases(project_id,task_key,task_id) VALUES($1,$2,$3)",[alias.projectId,alias.key,task.id]);
@@ -4241,6 +4339,122 @@ export class PostgresDatabase implements
     `);
   }
 
+  async #ensureMemberDepartureSchema(client: PoolClient): Promise<void> {
+    await this.#ensureWorkspaceProjectSchema(client);
+    await client.query(`CREATE TABLE IF NOT EXISTS stash_agent_grants (
+      id UUID PRIMARY KEY,
+      organization_id UUID NOT NULL REFERENCES stash_organizations(id),
+      project_id UUID REFERENCES stash_projects(id),
+      sponsoring_member_id UUID NOT NULL REFERENCES stash_accounts(id),
+      capabilities JSONB NOT NULL CHECK (jsonb_typeof(capabilities) = 'array'),
+      expires_at TIMESTAMPTZ NOT NULL,
+      confirmation_policy JSONB NOT NULL CHECK (jsonb_typeof(confirmation_policy) = 'object'),
+      revoked_at TIMESTAMPTZ
+    );
+    CREATE TABLE IF NOT EXISTS stash_personal_access_tokens (
+      id UUID PRIMARY KEY,
+      organization_id UUID NOT NULL REFERENCES stash_organizations(id) ON DELETE CASCADE,
+      account_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
+      token_lookup TEXT NOT NULL UNIQUE,
+      token_hash TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      revoked_at TIMESTAMPTZ
+    );
+    CREATE TABLE IF NOT EXISTS stash_operator_audit (
+      id UUID PRIMARY KEY, action TEXT NOT NULL, actor_account_id UUID NOT NULL REFERENCES stash_accounts(id),
+      organization_id UUID NOT NULL REFERENCES stash_organizations(id), target_account_id UUID NOT NULL REFERENCES stash_accounts(id),
+      occurred_at TIMESTAMPTZ NOT NULL, before_state JSONB NOT NULL, after_state JSONB NOT NULL
+    )`);
+  }
+
+  async #markFormerAssignments(client: PoolClient, organizationId: string, accountId: string, actorId: string): Promise<string[]> {
+    const table = await client.query<{ exists: boolean }>("SELECT to_regclass('stash_tasks') IS NOT NULL AS exists");
+    if (!table.rows[0]?.exists) return [];
+    await client.query("ALTER TABLE stash_tasks ADD COLUMN IF NOT EXISTS former_assignee_ids JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(former_assignee_ids) = 'array')");
+    const affected = await client.query<{ id: string }>(`SELECT task.id FROM stash_tasks task
+      JOIN stash_workspaces workspace ON task.workspace_id = workspace.id
+      WHERE workspace.owner_type = 'organization' AND workspace.organization_owner_id = $1
+        AND task.assignee_ids ? $2 ORDER BY task.id FOR UPDATE OF task`, [organizationId, accountId]);
+    const before = new Map<string, TaskPlanningReadModel>();
+    for (const { id } of affected.rows) {
+      const current = await client.query<any>(taskPlanningSelectById, [id, actorId]);
+      if (current.rows[0]) before.set(id, taskPlanningReadModelFromRow(current.rows[0]));
+    }
+    await client.query(`UPDATE stash_tasks task
+      SET former_assignee_ids = CASE WHEN former_assignee_ids ? $2 THEN former_assignee_ids ELSE former_assignee_ids || to_jsonb($2::text) END
+      FROM stash_workspaces workspace WHERE task.workspace_id = workspace.id AND workspace.owner_type = 'organization'
+        AND workspace.organization_owner_id = $1 AND task.assignee_ids ? $2`, [organizationId, accountId]);
+    const ids = affected.rows.map(({ id }) => id).sort();
+    for (const taskId of ids) {
+      const refreshed = await client.query<any>(taskPlanningSelectById, [taskId, actorId]);
+      if (!refreshed.rows[0]) continue;
+      const projection = taskProjectionFromRow(refreshed.rows[0]);
+      await this.#recordPortableProjection(client, "Task", taskId, projection.schema, projection);
+      const previous = before.get(taskId);
+      if (previous) await this.#recordTaskActivity(client, actorId, projection.workspaceId, taskId,
+        "task_departed_assignee_marked", previous, taskPlanningReadModelFromRow(refreshed.rows[0]));
+    }
+    return ids;
+  }
+
+  async #revokeDepartedMemberAuthority(client: PoolClient, organizationId: string, accountId: string) {
+    const authorityTables = await client.query<{ tablename: string }>(`SELECT tablename FROM pg_tables
+      WHERE schemaname = current_schema() AND tablename = ANY($1::text[])`,
+    [["stash_sessions", "stash_personal_access_tokens"]]);
+    const present = new Set(authorityTables.rows.map(({ tablename }) => tablename));
+    const sessions = present.has("stash_sessions") ? await client.query("DELETE FROM stash_sessions WHERE account_id = $1", [accountId]) : { rowCount: 0 };
+    const personalTokens = present.has("stash_personal_access_tokens") ? await client.query(
+      `UPDATE stash_personal_access_tokens SET revoked_at = CURRENT_TIMESTAMP
+       WHERE organization_id = $1 AND account_id = $2 AND revoked_at IS NULL`, [organizationId, accountId]) : { rowCount: 0 };
+    const grants = await client.query(`UPDATE stash_agent_grants SET revoked_at = CURRENT_TIMESTAMP
+      WHERE organization_id = $1 AND sponsoring_member_id = $2 AND revoked_at IS NULL`, [organizationId, accountId]);
+    return { revokedSessions: sessions.rowCount ?? 0,
+      revokedCredentials: personalTokens.rowCount ?? 0,
+      revokedAgentGrants: grants.rowCount ?? 0 };
+  }
+
+  async #degradePersonalConnections(client: PoolClient, organizationId: string, accountId: string): Promise<string[]> {
+    const table = await client.query<{ exists: boolean }>("SELECT to_regclass('stash_repository_connections') IS NOT NULL AS exists");
+    if (!table.rows[0]?.exists) return [];
+    await this.#ensureRepositoryConnectionStateColumns(client);
+    const degraded = await client.query<{ id: string }>(`UPDATE stash_repository_connections SET state = 'degraded'
+      WHERE organization_id = $1 AND created_by_account_id = $2 AND ownership = 'personal' AND state = 'active' RETURNING id`,
+    [organizationId, accountId]);
+    const ids = degraded.rows.map(({ id }) => id).sort();
+    for (const connectionId of ids) {
+      const refreshed = await client.query<RepositoryConnectionRow>(`${repositoryConnectionSelect} WHERE connection.id = $1`, [connectionId]);
+      const record = repositoryConnectionRecord(refreshed.rows[0]!);
+      const revision = await client.query<{ revision: number }>("SELECT COALESCE(MAX(revision),0)+1 AS revision FROM stash_portable_projection_outbox WHERE object_kind='RepositoryConnection' AND object_id=$1", [connectionId]);
+      await this.#recordRepositoryConnectionProjection(client, record, Number(revision.rows[0]!.revision));
+    }
+    return ids;
+  }
+
+  async #ensureRepositoryConnectionStateColumns(client: PoolClient): Promise<void> {
+    await client.query(`ALTER TABLE stash_repository_connections ADD COLUMN IF NOT EXISTS ownership TEXT NOT NULL DEFAULT 'organization';
+      ALTER TABLE stash_repository_connections ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'active';
+      UPDATE stash_repository_connections SET ownership='organization' WHERE ownership NOT IN ('organization','personal');
+      UPDATE stash_repository_connections SET state='active' WHERE state NOT IN ('active','degraded');
+      DO $connection_state_constraints$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='stash_repository_connections'::regclass AND conname='stash_repository_connections_ownership_check') THEN
+          ALTER TABLE stash_repository_connections ADD CONSTRAINT stash_repository_connections_ownership_check CHECK (ownership IN ('organization','personal'));
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='stash_repository_connections'::regclass AND conname='stash_repository_connections_state_check') THEN
+          ALTER TABLE stash_repository_connections ADD CONSTRAINT stash_repository_connections_state_check CHECK (state IN ('active','degraded'));
+        END IF;
+      END $connection_state_constraints$`);
+  }
+
+  async #recordMemberDepartureAudit(client: PoolClient, input: { organizationId: string; actorId: string; accountId: string;
+    role: BuiltInOrganizationRole; affectedTaskIds: string[]; degradedRepositoryConnectionIds: string[];
+    revokedSessions: number; revokedCredentials: number; revokedAgentGrants: number }): Promise<void> {
+    const { organizationId, actorId, accountId, role, ...after } = input;
+    await client.query(`INSERT INTO stash_operator_audit
+      (id, action, actor_account_id, organization_id, target_account_id, occurred_at, before_state, after_state)
+      VALUES ($1,'organization_member_departed',$2,$3,$4,CURRENT_TIMESTAMP,$5::jsonb,$6::jsonb)`,
+    [randomUUID(), actorId, organizationId, accountId, JSON.stringify({ role, active: true }), JSON.stringify({ active: false, ...after })]);
+  }
+
   async #ensureWorkspaceImportSchema(client: PoolClient): Promise<void> {
     await this.#ensureNoteHistorySchema(client);
     await this.#ensureAttachmentSchema(client);
@@ -4563,7 +4777,7 @@ interface MemberLocalizationRow {
   week_starts_on: MemberLocalizationPreferences["weekStartsOn"];
   updated_at: Date | string;
 }
-interface RepositoryConnectionRow { id: string; organization_id: string; provider: "github"; installation_id: string | number; repository_id: string; repository_url: string; created_by_account_id: string; created_by_attribution: "recorded" | "inferred-during-upgrade"; project_ids: string[] }
+interface RepositoryConnectionRow { id: string; organization_id: string; provider: "github"; installation_id: string | number; repository_id: string; repository_url: string; created_by_account_id: string; created_by_attribution: "recorded" | "inferred-during-upgrade"; project_ids: string[]; ownership: "organization" | "personal"; state: "active" | "degraded" }
 function githubSignalFromRow(row: any): GitHubSignal {
   return { id: row.id, deliveryId: row.delivery_id, installationId: Number(row.installation_id), repositoryId: row.repository_id, kind: row.kind,
     providerId: row.provider_id, url: row.url, label: row.label, occurredAt: new Date(row.occurred_at).toISOString(),
@@ -4584,7 +4798,7 @@ function attachmentRecord(row: AttachmentRow): AttachmentRecord {
     createdByMemberId: row.created_by_account_id, createdAt: new Date(row.created_at).toISOString() };
 }
 function repositoryConnectionRecord(row: RepositoryConnectionRow): RepositoryConnectionRecord {
-  return { id: row.id, organizationId: row.organization_id, provider: row.provider, installationId: Number(row.installation_id), repositoryId: row.repository_id, repositoryUrl: row.repository_url, createdByMemberId: row.created_by_account_id, createdByAttribution: row.created_by_attribution, projectIds: row.project_ids };
+  return { id: row.id, organizationId: row.organization_id, provider: row.provider, installationId: Number(row.installation_id), repositoryId: row.repository_id, repositoryUrl: row.repository_url, createdByMemberId: row.created_by_account_id, createdByAttribution: row.created_by_attribution, projectIds: row.project_ids, ownership: row.ownership, state: row.state };
 }
 function developmentArtifactFromUrl(value: string): DevelopmentArtifact[] {
   try {

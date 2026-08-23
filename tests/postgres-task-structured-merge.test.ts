@@ -28,7 +28,7 @@ describe("PostgreSQL structured Task collaboration", { skip: !databaseUrl }, () 
     const owner = await new OwnerBootstrapService(database).bootstrap({ organizationName: "Merge Test", ownerName: "Ada Lovelace",
       ownerEmail: `ada-${randomUUID()}@example.test`, password: "test-password-long-enough" }); assert.ok(owner);
     const workspaces = new WorkspaceProjectService(database);
-    const workspace = await workspaces.createWorkspace(owner.ownerId, { name: "Portable", owner: { type: "personal" } }); assert.equal(workspace.status, "created");
+    const workspace = await workspaces.createWorkspace(owner.ownerId, { name: "Portable", owner: { type: "organization", organizationId: owner.organizationId } }); assert.equal(workspace.status, "created");
     if (workspace.status !== "created") return;
     const project = await workspaces.createProject(owner.ownerId, workspace.workspace.id, { name: "Stash", key: "STASH" }); assert.equal(project.status, "created");
     if (project.status !== "created") return;
@@ -51,6 +51,8 @@ describe("PostgreSQL structured Task collaboration", { skip: !databaseUrl }, () 
     const retryTask = await createTask("Concurrent retry"); const workflowTask = await createTask("Workflow revision");
     const workflowOverlapTask = await createTask("Workflow overlap");
     const boardOverlapTask = await createTask("Board overlap");
+    const reassignedTask = await createTask("Reassign departed Member");
+    const conflictReassignedTask = await createTask("Resolve departed Member assignment conflict");
     const workflowService = new ProjectWorkflowService(database); const workflowResult = await workflowService.find(owner.ownerId, project.project.id);
     assert.equal(workflowResult.status, "found"); if (workflowResult.status !== "found") return;
     const archivedStatus = workflowResult.workflow.statuses.find(({ name }) => name === "Ready")!;
@@ -73,6 +75,34 @@ describe("PostgreSQL structured Task collaboration", { skip: !databaseUrl }, () 
     const taskBase = (key: string, selectedProjectId = project.project.id) => `${instance.url}/api/projects/${selectedProjectId}/tasks/${key}`;
     const concurrentEdit = (key: string, operationId: string, changes: unknown, revision = 1) => fetch(`${taskBase(key)}/edits`, { method: "POST",
       headers: { authorization: "Bearer test", "content-type": "application/json" }, body: JSON.stringify({ operationId, baseRevision: revision, changes }) });
+    const departedAssignments = new Pool({ connectionString: testDatabaseUrl });
+    const replacementId = randomUUID();
+    await departedAssignments.query(`INSERT INTO stash_accounts(id,name,email,password_hash) VALUES($1,'Grace Hopper',$2,'test-hash');
+      INSERT INTO stash_organization_memberships(organization_id,account_id,role) VALUES($3,$1,'Member')`,
+    [replacementId, `grace-${randomUUID()}@example.test`, owner.organizationId]);
+    await departedAssignments.query(`UPDATE stash_tasks SET assignee_ids=$2::jsonb, former_assignee_ids=$2::jsonb
+      WHERE id=ANY($1::uuid[])`, [[reassignedTask.id, conflictReassignedTask.id], JSON.stringify([owner.ownerId])]);
+    await departedAssignments.end();
+    const reassigned = await fetch(taskBase(reassignedTask.key), { method: "PATCH",
+      headers: { authorization: "Bearer test", "content-type": "application/json" }, body: JSON.stringify({ assigneeIds: [] }) });
+    assert.equal(reassigned.status, 200);
+    assert.deepEqual((await reassigned.json() as any).task.formerAssigneeIds, [owner.ownerId]);
+    const replacement = await fetch(taskBase(reassignedTask.key), { method: "PATCH",
+      headers: { authorization: "Bearer test", "content-type": "application/json" }, body: JSON.stringify({ assigneeIds: [replacementId] }) });
+    assert.equal(replacement.status, 200);
+    assert.equal("formerAssigneeIds" in ((await replacement.json() as any).task), false);
+    assert.equal((await concurrentEdit(conflictReassignedTask.key, randomUUID(), { assigneeIds: [owner.ownerId] })).status, 200);
+    const departedConflictResponse = await concurrentEdit(conflictReassignedTask.key, randomUUID(), { assigneeIds: [] });
+    assert.equal(departedConflictResponse.status, 409);
+    const departedConflict = (await departedConflictResponse.json() as any).conflict;
+    const departedResolution = await fetch(`${taskBase(conflictReassignedTask.key)}/conflicts/${departedConflict.id}`, { method: "PUT",
+      headers: { authorization: "Bearer test", "content-type": "application/json" },
+      body: JSON.stringify({ resolution: "apply_contribution", expectedRevision: 2 }) });
+    assert.equal(departedResolution.status, 200);
+    assert.deepEqual((await departedResolution.json() as any).task.formerAssigneeIds, [owner.ownerId]);
+    assert.equal((await concurrentEdit(conflictReassignedTask.key, randomUUID(), { assigneeIds: [replacementId] }, 3)).status, 200);
+    const conflictReplacement = await (await fetch(taskBase(conflictReassignedTask.key), { headers: { authorization: "Bearer test" } })).json() as any;
+    assert.equal("formerAssigneeIds" in conflictReplacement.task, false);
     const activeInProgress = workflowResult.workflow.statuses.find(({ name }) => name === "In Progress")!;
     const boardMove = await fetch(`${instance.url}/api/projects/${project.project.id}/boards/${boardResult.board.id}/tasks/${boardOverlapTask.key}`, {
       method: "PATCH", headers: { authorization: "Bearer test", "content-type": "application/json" }, body: JSON.stringify({ statusId: activeInProgress.id }) });
@@ -179,5 +209,22 @@ describe("PostgreSQL structured Task collaboration", { skip: !databaseUrl }, () 
     const dismissed = await fetch(`${taskBase(workflowOverlapTask.key)}/conflicts/${overlapConflict.id}`, { method: "PUT",
       headers: { authorization: "Bearer test", "content-type": "application/json" }, body: JSON.stringify({ resolution: "keep_current", expectedRevision: overlapRevision }) });
     assert.equal(dismissed.status, 200);
+
+    const departureTask = await createTask("Record departed assignment Activity");
+    assert.equal((await fetch(taskBase(departureTask.key), { method: "PATCH",
+      headers: { authorization: "Bearer test", "content-type": "application/json" },
+      body: JSON.stringify({ assigneeIds: [replacementId] }) })).status, 200);
+    const departure = await database.removeOrganizationMember(owner.organizationId, owner.ownerId, replacementId);
+    assert.equal(typeof departure, "object");
+    const activityProbe = new Pool({ connectionString: testDatabaseUrl });
+    const activity = await activityProbe.query<{ actor_account_id: string; cause: string; before_state: any; after_state: any }>(
+      `SELECT actor_account_id,cause,before_state,after_state FROM stash_workspace_activity
+       WHERE object_id=$1 AND action='task_departed_assignee_marked'`, [departureTask.id]);
+    await activityProbe.end();
+    assert.equal(activity.rowCount, 1);
+    assert.equal(activity.rows[0]!.actor_account_id, owner.ownerId);
+    assert.match(activity.rows[0]!.cause, /member/);
+    assert.deepEqual(activity.rows[0]!.before_state.formerAssigneeIds ?? [], []);
+    assert.deepEqual(activity.rows[0]!.after_state.formerAssigneeIds, [replacementId]);
   });
 });

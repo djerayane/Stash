@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import { Pool } from "pg";
 
 import { createAuthenticationSecretCodec } from "../src/authentication-secrets.js";
+import { AutomationService } from "../src/automations.js";
 import { GitHubSignalService } from "../src/github-signals.js";
 import { startInstance, type RunningInstance } from "../src/instance.js";
 import { NoteService } from "../src/notes.js";
@@ -11,7 +12,6 @@ import { PostgresDatabase } from "../src/postgres-database.js";
 import { RepositoryConnectionService, type GitHubApp } from "../src/repository-connections.js";
 import { TaskService } from "../src/tasks.js";
 import { WorkspaceProjectService } from "../src/workspaces-projects.js";
-import { AutomationService } from "../src/automations.js";
 import { NotificationService, type NotificationDelivery } from "../src/notifications.js";
 
 const databaseUrl = process.env.STASH_TEST_DATABASE_URL;
@@ -129,14 +129,26 @@ describe("PostgreSQL GitHub Signal acceptance", { skip: databaseUrl ? false : "S
       const alpha = await projectTask(ownerA, orgA, "Alpha project"); const beta = await projectTask(ownerB, orgB, "Beta project");
       const github: GitHubApp = { async inspectRepository(input) { return { installationId: input.installationId, repositoryId: "987", repositoryUrl: "https://github.com/acme/stash" }; }, async verifyRepository() {} };
       const connections = new RepositoryConnectionService(database, github);
-      for (const setup of [{ owner: ownerA, org: orgA, installationId: 42, projectId: alpha.projectId }, { owner: ownerB, org: orgB, installationId: 42, projectId: beta.projectId }]) {
-        const connection = await connections.connect(setup.owner, setup.org, { installationId: setup.installationId, owner: "acme", name: "stash" });
+      let departedConnectionId = "";
+      for (const setup of [{ owner: ownerA, org: orgA, installationId: 42, projectId: alpha.projectId, ownership: "personal" as const },
+        { owner: ownerB, org: orgB, installationId: 42, projectId: beta.projectId, ownership: "organization" as const }]) {
+        const connection = await connections.connect(setup.owner, setup.org, { installationId: setup.installationId,
+          owner: "acme", name: "stash", ownership: setup.ownership });
+        if (setup.org === orgA) departedConnectionId = connection.connection.id;
         assert.equal((await connections.attachToProject(setup.owner, setup.org, connection.connection.id, setup.projectId)), "attached");
       }
       await sql.query("INSERT INTO stash_accounts(id,name,email,password_hash) VALUES($1,'Katherine','katherine-signals@example.test','test')", [currentOwnerA]);
       await sql.query("INSERT INTO stash_organization_memberships(organization_id,account_id,role) VALUES($1,$2,'Owner')", [orgA, currentOwnerA]);
-      await sql.query("DELETE FROM stash_organization_memberships WHERE organization_id=$1 AND account_id=$2", [orgA, ownerA]);
-      const secret = "postgres-github-signal-secret"; const signals = new GitHubSignalService(database, secret);
+      const departure = await database.removeOrganizationMember(orgA, currentOwnerA, ownerA);
+      assert.equal(typeof departure, "object");
+      assert.equal(await connections.attachToProject(currentOwnerA, orgA, departedConnectionId, alpha.projectId), "not_found");
+      const targetStatus = await sql.query<{ id: string }>(
+        "SELECT id FROM stash_workflow_statuses WHERE project_id=$1 AND category='started' ORDER BY position LIMIT 1", [alpha.projectId]);
+      const automations = new AutomationService(database);
+      const recipe = await automations.enable(currentOwnerA, alpha.projectId, { trigger: "branch_created",
+        targetStatusId: targetStatus.rows[0]!.id });
+      assert.equal(recipe.trigger, "branch_created");
+      const secret = "postgres-github-signal-secret"; const signals = new GitHubSignalService(database, secret, automations);
       instance = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin", githubSignals: signals,
         memberAccess: { async authenticateBearer(value) { return value === "Bearer alpha" ? { accountId: currentOwnerA, sessionId: "alpha" }
           : value === "Bearer beta" ? { accountId: ownerB, sessionId: "beta" } : undefined; } } });
@@ -146,14 +158,15 @@ describe("PostgreSQL GitHub Signal acceptance", { skip: databaseUrl ? false : "S
       assert.equal((await fetch(`${instance.url}/api/github/webhooks`, { method: "POST", headers, body })).status, 202);
       assert.equal((await fetch(`${instance.url}/api/github/webhooks`, { method: "POST", headers, body })).status, 202);
       const alphaList = await fetch(`${instance.url}/api/projects/${alpha.projectId}/tasks/SHARED-1/development-signals`, { headers: { authorization: "Bearer alpha" } });
-      assert.equal(alphaList.status, 200); assert.equal(((await alphaList.json()) as { signals: unknown[] }).signals.length, 1);
+      assert.equal(alphaList.status, 200); assert.equal(((await alphaList.json()) as { signals: unknown[] }).signals.length, 0);
       const betaList = await fetch(`${instance.url}/api/projects/${beta.projectId}/tasks/SHARED-1/development-signals`, { headers: { authorization: "Bearer beta" } });
       assert.equal(betaList.status, 200); assert.equal(((await betaList.json()) as { signals: unknown[] }).signals.length, 1);
       assert.equal((await fetch(`${instance.url}/api/projects/${alpha.projectId}/tasks/SHARED-1/development-signals`, { headers: { authorization: "Bearer beta" } })).status, 404);
       assert.equal((await sql.query("SELECT COUNT(*)::int AS count FROM stash_github_signals")).rows[0].count, 1);
-      assert.equal((await sql.query("SELECT COUNT(*)::int AS count FROM stash_workspace_activity WHERE object_id=$1 AND cause::text LIKE '%signal%'", [alpha.task.id])).rows[0].count, 1);
+      assert.equal((await sql.query("SELECT COUNT(*)::int AS count FROM stash_workspace_activity WHERE object_id=$1 AND cause::text LIKE '%signal%'", [alpha.task.id])).rows[0].count, 0);
+      assert.equal((await sql.query("SELECT COUNT(*)::int AS count FROM stash_automation_transitions WHERE task_id=$1", [alpha.task.id])).rows[0].count, 0);
       const projection = await sql.query("SELECT payload FROM stash_portable_projection_outbox WHERE object_kind='Task' AND object_id=$1 ORDER BY revision DESC LIMIT 1", [alpha.task.id]);
-      assert.equal(projection.rows[0].payload.developmentLinks.length, 1);
+      assert.equal(projection.rows[0].payload.developmentLinks.length, 0);
     } finally {
       await instance?.close().catch(() => undefined); if (!instance) await database.close().catch(() => undefined); await sql.end();
       await administration.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined); await administration.end();

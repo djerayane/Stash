@@ -33,7 +33,16 @@ const builtInRoleDefinitions: ReadonlyArray<{
   },
 ];
 
-type MembershipMutationResult = "updated" | "removed" | "member_not_found" | "final_owner";
+type MembershipMutationResult = "updated" | "member_not_found" | "final_owner";
+
+export interface MemberDeparture {
+  memberId: string;
+  affectedTaskIds: string[];
+  revokedSessions: number;
+  revokedCredentials: number;
+  revokedAgentGrants: number;
+  degradedRepositoryConnectionIds: string[];
+}
 
 export interface OrganizationRoleRepository {
   organizationRole(
@@ -50,7 +59,8 @@ export interface OrganizationRoleRepository {
     organizationId: string,
     actorId: string,
     accountId: string,
-  ): Promise<Extract<MembershipMutationResult, "removed" | "member_not_found" | "final_owner"> | "forbidden">;
+  ): Promise<{ status: "removed"; departure: MemberDeparture }
+    | Extract<MembershipMutationResult, "member_not_found" | "final_owner"> | "forbidden">;
 }
 
 export class InvalidOrganizationRoleInput extends Error {}

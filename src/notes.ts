@@ -39,6 +39,7 @@ export interface PortableTaskProjection {
   sourceNoteIds: string[]; createdAt: string; createdBy: PortableIdentity;
   sourceBlocks?: TaskSourceBlockReference[];
   assigneeIds?: string[];
+  formerAssigneeIds?: string[];
   priority?: "none" | "low" | "medium" | "high" | "urgent";
   labelNames?: string[];
   dueDate?: string;
