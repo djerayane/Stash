@@ -51,6 +51,8 @@ describe("PostgreSQL structured Task collaboration", { skip: !databaseUrl }, () 
     const retryTask = await createTask("Concurrent retry"); const workflowTask = await createTask("Workflow revision");
     const workflowOverlapTask = await createTask("Workflow overlap");
     const boardOverlapTask = await createTask("Board overlap");
+    const reassignedTask = await createTask("Reassign departed Member");
+    const conflictReassignedTask = await createTask("Resolve departed Member assignment conflict");
     const workflowService = new ProjectWorkflowService(database); const workflowResult = await workflowService.find(owner.ownerId, project.project.id);
     assert.equal(workflowResult.status, "found"); if (workflowResult.status !== "found") return;
     const archivedStatus = workflowResult.workflow.statuses.find(({ name }) => name === "Ready")!;
@@ -73,6 +75,23 @@ describe("PostgreSQL structured Task collaboration", { skip: !databaseUrl }, () 
     const taskBase = (key: string, selectedProjectId = project.project.id) => `${instance.url}/api/projects/${selectedProjectId}/tasks/${key}`;
     const concurrentEdit = (key: string, operationId: string, changes: unknown, revision = 1) => fetch(`${taskBase(key)}/edits`, { method: "POST",
       headers: { authorization: "Bearer test", "content-type": "application/json" }, body: JSON.stringify({ operationId, baseRevision: revision, changes }) });
+    const departedAssignments = new Pool({ connectionString: testDatabaseUrl });
+    await departedAssignments.query(`UPDATE stash_tasks SET assignee_ids=$2::jsonb, former_assignee_ids=$2::jsonb
+      WHERE id=ANY($1::uuid[])`, [[reassignedTask.id, conflictReassignedTask.id], JSON.stringify([owner.ownerId])]);
+    await departedAssignments.end();
+    const reassigned = await fetch(taskBase(reassignedTask.key), { method: "PATCH",
+      headers: { authorization: "Bearer test", "content-type": "application/json" }, body: JSON.stringify({ assigneeIds: [] }) });
+    assert.equal(reassigned.status, 200);
+    assert.equal("formerAssigneeIds" in ((await reassigned.json() as any).task), false);
+    assert.equal((await concurrentEdit(conflictReassignedTask.key, randomUUID(), { assigneeIds: [owner.ownerId] })).status, 200);
+    const departedConflictResponse = await concurrentEdit(conflictReassignedTask.key, randomUUID(), { assigneeIds: [] });
+    assert.equal(departedConflictResponse.status, 409);
+    const departedConflict = (await departedConflictResponse.json() as any).conflict;
+    const departedResolution = await fetch(`${taskBase(conflictReassignedTask.key)}/conflicts/${departedConflict.id}`, { method: "PUT",
+      headers: { authorization: "Bearer test", "content-type": "application/json" },
+      body: JSON.stringify({ resolution: "apply_contribution", expectedRevision: 2 }) });
+    assert.equal(departedResolution.status, 200);
+    assert.equal("formerAssigneeIds" in ((await departedResolution.json() as any).task), false);
     const activeInProgress = workflowResult.workflow.statuses.find(({ name }) => name === "In Progress")!;
     const boardMove = await fetch(`${instance.url}/api/projects/${project.project.id}/boards/${boardResult.board.id}/tasks/${boardOverlapTask.key}`, {
       method: "PATCH", headers: { authorization: "Bearer test", "content-type": "application/json" }, body: JSON.stringify({ statusId: activeInProgress.id }) });

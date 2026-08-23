@@ -1265,12 +1265,17 @@ export class PostgresDatabase implements
       const nextRevision = Number(row.revision) + 1;
       const nextFieldRevisions = { ...(row.field_revisions ?? {}) };
       for (const field of Object.keys(update)) nextFieldRevisions[field] = nextRevision;
+      const nextAssigneeIds = [...new Set(next.assigneeIds ?? [])];
+      const nextFormerAssigneeIds = (row.former_assignee_ids ?? [])
+        .filter((formerAssigneeId: string) => nextAssigneeIds.includes(formerAssigneeId));
       await client.query(`UPDATE stash_tasks SET title = $2, workflow_status_id = $3, assignee_ids = $4::jsonb, priority = $5,
         label_names = $6::jsonb, due_date = $7, estimate = $8, linked_note_ids = $9::jsonb,
-        development_links = $10::jsonb, revision = $11, field_revisions = $12::jsonb WHERE id = $1`, [row.id, next.title.trim(), next.status.id,
-        JSON.stringify([...new Set(next.assigneeIds ?? [])]), next.priority ?? "none",
+        development_links = $10::jsonb, revision = $11, field_revisions = $12::jsonb,
+        former_assignee_ids = $13::jsonb WHERE id = $1`, [row.id, next.title.trim(), next.status.id,
+        JSON.stringify(nextAssigneeIds), next.priority ?? "none",
         JSON.stringify([...new Set((next.labelNames ?? []).map((label) => label.trim()))]), next.dueDate ?? null, next.estimate ?? null,
-        JSON.stringify([...new Set(next.linkedNoteIds ?? [])]), JSON.stringify(next.developmentLinks ?? []), nextRevision, JSON.stringify(nextFieldRevisions)]);
+        JSON.stringify([...new Set(next.linkedNoteIds ?? [])]), JSON.stringify(next.developmentLinks ?? []), nextRevision,
+        JSON.stringify(nextFieldRevisions), JSON.stringify(nextFormerAssigneeIds)]);
       const saved = await client.query<any>(taskPlanningSelect, [projectId, taskKey, memberId]);
       const task = taskPlanningReadModelFromRow(saved.rows[0]);
       await this.#recordPortableProjection(client, "Task", task.id, task.schema, taskProjectionFromRow(saved.rows[0]));
@@ -1454,10 +1459,15 @@ export class PostgresDatabase implements
       }
     }
     const current=taskProjectionFromRow(row); const next={...current,...update} as any;
+    const nextAssigneeIds=[...new Set<string>(next.assigneeIds??[])];
+    const nextFormerAssigneeIds=(row.former_assignee_ids??[])
+      .filter((formerAssigneeId:string)=>nextAssigneeIds.includes(formerAssigneeId));
     await client.query(`UPDATE stash_tasks SET title=$2,workflow_status_id=$3,assignee_ids=$4::jsonb,priority=$5,label_names=$6::jsonb,
-      due_date=$7,estimate=$8,linked_note_ids=$9::jsonb,development_links=$10::jsonb WHERE id=$1`,[row.id,next.title,
-      update.statusId??current.status.id,JSON.stringify(next.assigneeIds??[]),next.priority??"none",JSON.stringify(next.labelNames??[]),
-      next.dueDate??null,next.estimate??null,JSON.stringify(next.linkedNoteIds??[]),JSON.stringify(next.developmentLinks??[])]);
+      due_date=$7,estimate=$8,linked_note_ids=$9::jsonb,development_links=$10::jsonb,
+      former_assignee_ids=$11::jsonb WHERE id=$1`,[row.id,next.title,
+      update.statusId??current.status.id,JSON.stringify(nextAssigneeIds),next.priority??"none",JSON.stringify(next.labelNames??[]),
+      next.dueDate??null,next.estimate??null,JSON.stringify(next.linkedNoteIds??[]),JSON.stringify(next.developmentLinks??[]),
+      JSON.stringify(nextFormerAssigneeIds)]);
     return true;
   }
 
