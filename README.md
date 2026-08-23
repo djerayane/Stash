@@ -115,10 +115,11 @@ be committed. See [the portable projection format](docs/portable-projection.md).
 ## Development and acceptance tests
 
 ```sh
-npm ci
+corepack enable
+pnpm install --frozen-lockfile
 pnpm run check
-npm test
+pnpm run test
 pnpm run build
 ```
 
-Acceptance tests bind a real ephemeral HTTP port and exercise the public protocol. Protocol-compatible database and Member-access fakes provide deterministic ownership, healthy, and recoverable-outage scenarios without bypassing the Instance HTTP boundary. `npm run smoke` targets a running, PostgreSQL-backed Instance and verifies both readiness and the browser surface.
+Acceptance tests bind a real ephemeral HTTP port and exercise the public protocol. Protocol-compatible database and Member-access fakes provide deterministic ownership, healthy, and recoverable-outage scenarios without bypassing the Instance HTTP boundary. `pnpm run smoke` targets a running, PostgreSQL-backed Instance and verifies both readiness and the browser surface.

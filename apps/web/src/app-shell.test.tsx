@@ -1,10 +1,19 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { MemoryRouter, useLocation } from "react-router";
 import { expect, test } from "vitest";
 import { AppShell } from "./app-shell";
 
-test("renders the member workspace navigation", () => {
-  render(<AppShell />);
+function RoutedShell() {
+  const location = useLocation();
+  return <><AppShell /><output data-testid="location">{location.pathname}</output></>;
+}
+
+test("navigates inside the React application without replacing the document", () => {
+  render(<MemoryRouter><RoutedShell /></MemoryRouter>);
   expect(screen.getByRole("navigation", { name: "Workspace" })).toBeInTheDocument();
-  expect(screen.getByRole("link", { name: "Notes" })).toHaveAttribute("href", "/notes");
+  const notes = screen.getByRole("link", { name: "Notes" });
+  fireEvent.click(notes);
+  expect(screen.getByTestId("location")).toHaveTextContent("/notes");
+  expect(notes).toHaveAttribute("aria-current", "page");
   expect(screen.getByRole("link", { name: "Tasks" })).toHaveAttribute("href", "/tasks");
 });

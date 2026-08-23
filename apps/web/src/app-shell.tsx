@@ -1,15 +1,20 @@
 import * as NavigationMenu from "@radix-ui/react-navigation-menu";
+import { Link, NavLink } from "react-router";
 import styles from "./app-shell.module.css";
 
 export function AppShell() {
   return (
     <div className={styles.shell}>
       <header className={styles.header}>
-        <a className={styles.brand} href="/" aria-label="Stash home">Stash</a>
+        <Link className={styles.brand} to="/" aria-label="Stash home">Stash</Link>
         <NavigationMenu.Root aria-label="Workspace">
           <NavigationMenu.List className={styles.navigation}>
-            <NavigationMenu.Item><NavigationMenu.Link className={styles.link} href="/notes">Notes</NavigationMenu.Link></NavigationMenu.Item>
-            <NavigationMenu.Item><NavigationMenu.Link className={styles.link} href="/tasks">Tasks</NavigationMenu.Link></NavigationMenu.Item>
+            <NavigationMenu.Item>
+              <NavigationMenu.Link asChild><NavLink className={styles.link} to="/notes">Notes</NavLink></NavigationMenu.Link>
+            </NavigationMenu.Item>
+            <NavigationMenu.Item>
+              <NavigationMenu.Link asChild><NavLink className={styles.link} to="/tasks">Tasks</NavLink></NavigationMenu.Link>
+            </NavigationMenu.Item>
           </NavigationMenu.List>
         </NavigationMenu.Root>
       </header>
