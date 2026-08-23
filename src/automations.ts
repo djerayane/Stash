@@ -12,8 +12,9 @@ export interface AutomationRepository {
   reverseAutomation(memberId: string, projectId: string, taskKey: string, transitionId: string): Promise<
     { status: "reversed"; transition: AutomationTransition } | "forbidden" | "not_found" | "conflict"
   >;
-  applySignalAutomations?(signal: { id: string; trigger?: AutomationTrigger }, candidates: ReadonlyArray<{ taskId: string; projectId: string; status: "confirmed" | "pending_confirmation" }>): Promise<void>;
-  recordSignalAutomationFailures?(signal: { id: string; trigger: AutomationTrigger }, candidates: ReadonlyArray<AutomationCandidate>): Promise<AutomationFailureNotification[]>;
+  applySignalAutomations?(signal: { id: string; trigger?: AutomationTrigger }, candidates: ReadonlyArray<AutomationCandidate>): Promise<
+    { failures: AutomationFailureNotification[] } | void
+  >;
 }
 
 export interface AutomationCandidate { taskId: string; projectId: string; status: "confirmed" | "pending_confirmation" }
@@ -28,6 +29,7 @@ export class InvalidAutomationInput extends Error {}
 export class AutomationForbidden extends Error {}
 export class AutomationNotFound extends Error {}
 export class AutomationConflict extends Error {}
+export class AutomationExecutionFailed extends Error {}
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const key = /^[A-Z][A-Z0-9]{0,15}-[1-9][0-9]*$/i;
@@ -65,15 +67,11 @@ export class AutomationService {
 
   async applySignal(signal: { id: string; trigger?: AutomationTrigger }, candidates: ReadonlyArray<AutomationCandidate>) {
     if (!signal.trigger) return;
-    try {
-      await this.repository.applySignalAutomations?.(signal, candidates);
-    } catch (error) {
-      const failures = await this.repository.recordSignalAutomationFailures?.({ id: signal.id, trigger: signal.trigger }, candidates) ?? [];
-      for (const failure of failures) {
-        await this.notifications?.notify({ ...failure, trigger: "automation_failure" });
-      }
-      throw error;
+    const result = await this.repository.applySignalAutomations?.(signal, candidates);
+    for (const failure of result?.failures ?? []) {
+      await this.notifications?.notify({ ...failure, trigger: "automation_failure" });
     }
+    if (result?.failures.length) throw new AutomationExecutionFailed("One or more Automation executions failed");
   }
 }
 

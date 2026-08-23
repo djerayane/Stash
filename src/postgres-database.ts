@@ -38,7 +38,7 @@ import type { ActivityCause, ActivityRecord, ActivityRepository, NoteHistoryRevi
 import type { DevelopmentArtifact, GitHubArtifactRepository } from "./github-artifacts.js";
 import type { GitHubSignal, GitHubSignalRepository, SignalCandidate } from "./github-signals.js";
 import { assignmentNotificationInputs, directMentionMemberIds, directMentionNotificationInputs, notificationDeliveryMode, type NotificationDelivery, type NotificationPreferences, type NotificationRepository } from "./notifications.js";
-import type { AutomationFailureNotification, AutomationRecipe, AutomationRepository, AutomationState, AutomationTransition, AutomationTrigger } from "./automations.js";
+import type { AutomationCandidate, AutomationFailureNotification, AutomationRecipe, AutomationRepository, AutomationState, AutomationTransition, AutomationTrigger } from "./automations.js";
 import * as Y from "yjs";
 import { prosemirrorJSONToYDoc, yDocToProsemirrorJSON } from "y-prosemirror";
 import { Schema } from "prosemirror-model";
@@ -2413,21 +2413,24 @@ export class PostgresDatabase implements
     });
   }
 
-  async applySignalAutomations(signal: { id: string; trigger?: AutomationTrigger }, candidates: ReadonlyArray<{ taskId: string; projectId: string; status: "confirmed" | "pending_confirmation" }>) {
-    if (!signal.trigger) return;
-    await this.#withTransaction(async (client) => {
-      await this.#ensureAutomationSchema(client);
-      for (const candidate of candidates.filter(({ status }) => status === "confirmed")) {
+  async applySignalAutomations(signal: { id: string; trigger?: AutomationTrigger }, candidates: ReadonlyArray<AutomationCandidate>) {
+    if (!signal.trigger) return { failures: [] };
+    const triggeredSignal = { id: signal.id, trigger: signal.trigger };
+    const failures: AutomationFailureNotification[] = [];
+    for (const candidate of candidates.filter(({ status }) => status === "confirmed")) {
+      try {
+        await this.#withTransaction(async (client) => {
+          await this.#ensureAutomationSchema(client);
         const result = await client.query<any>(`SELECT recipe.id AS automation_id,recipe.target_status_id,recipe.created_by_account_id,
           task.*,current_status.name AS status_name,current_status.category AS status_category
           FROM stash_automation_recipes recipe JOIN stash_tasks task ON task.id=$1 AND task.project_id=recipe.project_id
           JOIN stash_workflow_statuses current_status ON current_status.id=task.workflow_status_id
-          WHERE recipe.project_id=$2 AND recipe.trigger=$3 AND recipe.enabled=TRUE FOR UPDATE OF task,recipe`, [candidate.taskId, candidate.projectId, signal.trigger]);
-        const row = result.rows[0]; if (!row || row.workflow_status_id === row.target_status_id) continue;
+          WHERE recipe.project_id=$2 AND recipe.trigger=$3 AND recipe.enabled=TRUE FOR UPDATE OF task,recipe`, [candidate.taskId, candidate.projectId, triggeredSignal.trigger]);
+        const row = result.rows[0]; if (!row || row.workflow_status_id === row.target_status_id) return;
         const inserted = await client.query<any>(`INSERT INTO stash_automation_transitions(id,automation_id,signal_id,task_id,project_id,before_status_id,after_status_id,occurred_at)
           VALUES($1,$2,$3,$4,$5,$6,$7,now()) ON CONFLICT(automation_id,signal_id,task_id) DO NOTHING RETURNING id,occurred_at`,
         [randomUUID(), row.automation_id, signal.id, row.id, candidate.projectId, row.workflow_status_id, row.target_status_id]);
-        if (!inserted.rowCount) continue;
+        if (!inserted.rowCount) return;
         const before = taskPlanningReadModelFromRow(row);
         await client.query(`UPDATE stash_tasks SET workflow_status_id=$2,revision=revision+1,
           field_revisions=jsonb_set(field_revisions,'{statusId}',to_jsonb(revision+1),true) WHERE id=$1`, [row.id, row.target_status_id]);
@@ -2435,18 +2438,26 @@ export class PostgresDatabase implements
         await this.#recordPortableProjection(client, "Task", after.id, after.schema, taskProjectionFromRow(saved.rows[0]));
         await this.#recordTaskActivity(client, row.created_by_account_id, row.workspace_id, row.id, "task_status_automated", before, after,
           { kind: "automation", automationId: row.automation_id, signalId: signal.id });
+        });
+      } catch {
+        failures.push(...await this.recordSignalAutomationFailures(triggeredSignal, [candidate]));
       }
-    });
+    }
+    return { failures };
   }
 
-  async recordSignalAutomationFailures(signal: { id: string; trigger: AutomationTrigger }, candidates: ReadonlyArray<{ taskId: string; projectId: string; status: "confirmed" | "pending_confirmation" }>): Promise<AutomationFailureNotification[]> {
+  async recordSignalAutomationFailures(signal: { id: string; trigger: AutomationTrigger }, candidates: ReadonlyArray<AutomationCandidate>): Promise<AutomationFailureNotification[]> {
     return this.#withTransaction(async (client) => {
       await this.#ensureAutomationSchema(client);
       const failures: AutomationFailureNotification[] = [];
       for (const candidate of candidates.filter(({ status }) => status === "confirmed")) {
         const result = await client.query<any>(`SELECT recipe.id AS automation_id,recipe.created_by_account_id,
-          task.id AS task_id,task.workspace_id,task.task_key,task.title
+          task.id AS task_id,task.workspace_id,task.task_key,task.title,
+          (workspace.owner_type='personal' AND workspace.personal_owner_id=recipe.created_by_account_id
+            OR workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+              WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=recipe.created_by_account_id)) AS recipient_has_access
           FROM stash_automation_recipes recipe JOIN stash_tasks task ON task.id=$1 AND task.project_id=recipe.project_id
+          JOIN stash_workspaces workspace ON workspace.id=task.workspace_id
           WHERE recipe.project_id=$2 AND recipe.trigger=$3 AND recipe.enabled=TRUE`, [candidate.taskId, candidate.projectId, signal.trigger]);
         const row = result.rows[0];
         if (!row) continue;
@@ -2468,7 +2479,7 @@ export class PostgresDatabase implements
           activity.workspaceId, row.task_id, activity.action, row.created_by_account_id, JSON.stringify(activity.cause),
           activity.occurredAt, JSON.stringify(activity.before), JSON.stringify(activity.after)]);
         await this.#recordPortableProjection(client, "Activity", activity.id, activity.schema, activity);
-        failures.push({ activity, projectId: candidate.projectId, memberId: row.created_by_account_id,
+        if (row.recipient_has_access) failures.push({ activity, projectId: candidate.projectId, memberId: row.created_by_account_id,
           summary: `Automation failed for ${row.task_key}: ${row.title}` });
       }
       return failures;
