@@ -1,0 +1,80 @@
+export type AutomationTrigger = "branch_created" | "pull_request_completed";
+
+export interface AutomationRecipe {
+  id: string;
+  trigger: AutomationTrigger;
+  targetStatus: { id: string; name: string };
+  enabled: boolean;
+}
+
+export interface AutomationTransition {
+  id: string;
+  automationId: string;
+  signalId: string;
+  before: { id: string; name: string };
+  after: { id: string; name: string };
+  occurredAt: string;
+  reversedAt?: string;
+}
+
+export interface AutomationState { recipes: AutomationRecipe[]; transitions: AutomationTransition[]; availableStatuses: Array<{ id: string; name: string }> }
+
+export interface AutomationRepository {
+  listAutomationState(memberId: string, projectId: string, taskKey: string): Promise<AutomationState | undefined>;
+  enableAutomation(memberId: string, projectId: string, trigger: AutomationTrigger, targetStatusId: string): Promise<
+    { status: "enabled"; recipe: AutomationRecipe } | "forbidden" | "not_found" | "invalid_status"
+  >;
+  reverseAutomation(memberId: string, projectId: string, taskKey: string, transitionId: string): Promise<
+    { status: "reversed"; transition: AutomationTransition } | "forbidden" | "not_found" | "conflict"
+  >;
+  applySignalAutomations?(signal: { id: string; trigger?: AutomationTrigger }, candidates: ReadonlyArray<{ taskId: string; projectId: string; status: "confirmed" | "pending_confirmation" }>): Promise<void>;
+}
+
+export class InvalidAutomationInput extends Error {}
+export class AutomationForbidden extends Error {}
+export class AutomationNotFound extends Error {}
+export class AutomationConflict extends Error {}
+
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const key = /^[A-Z][A-Z0-9]{0,15}-[1-9][0-9]*$/i;
+
+export class AutomationService {
+  constructor(private readonly repository: AutomationRepository) {}
+
+  async list(memberId: string, projectId: string, taskKey: string) {
+    validateProjectAndKey(projectId, taskKey);
+    const state = await this.repository.listAutomationState(memberId, projectId, taskKey.toUpperCase());
+    if (!state) throw new AutomationNotFound();
+    return state;
+  }
+
+  async enable(memberId: string, projectId: string, value: unknown) {
+    if (!uuid.test(projectId) || !record(value) || Object.keys(value).length !== 2
+      || (value.trigger !== "branch_created" && value.trigger !== "pull_request_completed")
+      || typeof value.targetStatusId !== "string" || !uuid.test(value.targetStatusId)) throw new InvalidAutomationInput();
+    const result = await this.repository.enableAutomation(memberId, projectId, value.trigger, value.targetStatusId);
+    if (result === "forbidden") throw new AutomationForbidden();
+    if (result === "not_found") throw new AutomationNotFound();
+    if (result === "invalid_status") throw new InvalidAutomationInput();
+    return result.recipe;
+  }
+
+  async reverse(memberId: string, projectId: string, taskKey: string, transitionId: string) {
+    validateProjectAndKey(projectId, taskKey);
+    if (!uuid.test(transitionId)) throw new InvalidAutomationInput();
+    const result = await this.repository.reverseAutomation(memberId, projectId, taskKey.toUpperCase(), transitionId);
+    if (result === "forbidden") throw new AutomationForbidden();
+    if (result === "not_found") throw new AutomationNotFound();
+    if (result === "conflict") throw new AutomationConflict();
+    return result.transition;
+  }
+
+  async applySignal(signal: { id: string; trigger?: AutomationTrigger }, candidates: ReadonlyArray<{ taskId: string; projectId: string; status: "confirmed" | "pending_confirmation" }>) {
+    if (signal.trigger) await this.repository.applySignalAutomations?.(signal, candidates);
+  }
+}
+
+function validateProjectAndKey(projectId: string, taskKey: string) {
+  if (!uuid.test(projectId) || !key.test(taskKey)) throw new InvalidAutomationInput();
+}
+function record(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value); }

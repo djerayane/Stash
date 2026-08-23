@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router";
 
 import styles from "./development-signals.module.css";
+import { TaskAutomations } from "./task-automations";
 
 interface Signal { readonly id: string; readonly kind: "branch" | "commit" | "pull_request"; readonly url: string; readonly label: string; readonly occurredAt: string }
 interface Suggestion { readonly id: string; readonly taskKey: string; readonly taskTitle: string; readonly matchedKey: string; readonly status: "confirmed" | "pending_confirmation" }
@@ -65,5 +66,6 @@ export function DevelopmentSignalsPage({ projectId, taskKey, fetcher = globalThi
         </div>)}</div>
       </article>)}
     </section> : null}
+    <TaskAutomations projectId={projectId} taskKey={taskKey} fetcher={fetcher} token={token} />
   </div>;
 }

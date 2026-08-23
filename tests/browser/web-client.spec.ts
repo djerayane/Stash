@@ -124,6 +124,7 @@ test("reviews and confirms an ambiguous GitHub Signal by keyboard without reload
   const suggestion = { id: "22222222-2222-4222-8222-222222222222", signalId: "signal-1", taskId: "task-36", projectId, taskKey: "STASH-36", taskTitle: "Receive GitHub development Signals", matchedKey: "OLD-1", status: "pending_confirmation" };
   let confirmed = false; let documentNavigations = 0;
   page.on("framenavigated", (frame) => { if (frame === page.mainFrame()) documentNavigations += 1; });
+  await page.route("**/automations", (route) => route.fulfill({ json: { automation: { recipes: [], transitions: [], availableStatuses: [] } } }));
   await page.route("**/development-signals**", async (route) => {
     if (route.request().method() === "POST") { confirmed = true; await route.fulfill({ json: { suggestion: { ...suggestion, status: "confirmed" } } }); return; }
     await route.fulfill({ json: { signals: [{ signal: { id: "signal-1", kind: "pull_request", url: "https://github.com/acme/stash/pull/42", label: "#42 Shared work", occurredAt: "2026-08-23T08:00:00.000Z" }, suggestions: [{ ...suggestion, status: confirmed ? "confirmed" : "pending_confirmation" }] }] } });
@@ -147,10 +148,32 @@ test("focuses a development Signal load failure and retries by keyboard without 
   await installMemberSession(page);
   const projectId = "11111111-1111-4111-8111-111111111111"; let attempts = 0; let documentNavigations = 0;
   page.on("framenavigated", (frame) => { if (frame === page.mainFrame()) documentNavigations += 1; });
+  await page.route("**/automations", (route) => route.fulfill({ json: { automation: { recipes: [], transitions: [], availableStatuses: [] } } }));
   await page.route("**/development-signals", async (route) => { attempts += 1; await route.fulfill({ status: attempts === 1 ? 503 : 200, json: attempts === 1 ? { message: "Signals are temporarily unavailable." } : { signals: [] } }); });
   await page.goto(`/app/projects/${projectId}/tasks/STASH-36/development`);
   const alert = page.getByRole("alert"); await expect(alert).toBeVisible(); await expect(alert).toBeFocused();
   documentNavigations = 0; await alert.getByRole("button", { name: "Try again" }).focus(); await page.keyboard.press("Enter");
   await expect(page.getByText("No development activity yet")).toBeVisible();
   expect(attempts).toBe(2); expect(documentNavigations).toBe(0);
+});
+
+test("configures and reverses a visible Task status Automation by keyboard without reloading", async ({ page }) => {
+  await installMemberSession(page);
+  const projectId = "11111111-1111-4111-8111-111111111111"; let configured = false; let reversed = false; let navigations = 0;
+  page.on("framenavigated", (frame) => { if (frame === page.mainFrame()) navigations += 1; });
+  await page.route("**/development-signals", (route) => route.fulfill({ json: { signals: [] } }));
+  await page.route("**/automations**", async (route) => {
+    if (route.request().method() === "POST" && route.request().url().endsWith("/automations")) { configured = true; await route.fulfill({ json: { recipe: {} } }); return; }
+    if (route.request().method() === "POST") { reversed = true; await route.fulfill({ json: { transition: {} } }); return; }
+    await route.fulfill({ json: { automation: { availableStatuses: [{ id: "progress", name: "In progress" }],
+      recipes: configured ? [{ id: "recipe", trigger: "branch_created", targetStatus: { id: "progress", name: "In progress" }, enabled: true }] : [],
+      transitions: configured ? [{ id: "transition", automationId: "recipe", signalId: "signal-123", before: { id: "ready", name: "Ready" }, after: { id: "progress", name: "In progress" }, occurredAt: "2026-08-23T09:00:00.000Z", ...(reversed ? { reversedAt: "2026-08-23T10:00:00.000Z" } : {}) }] : [] } } });
+  });
+  await page.goto(`/app/projects/${projectId}/tasks/STASH-37/development`); navigations = 0;
+  await page.getByRole("button", { name: "Configure recipe" }).focus(); await page.keyboard.press("Enter");
+  const dialog = page.getByRole("dialog", { name: "Configure Task status Automation" }); await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "Enable recipe" }).click();
+  await expect(page.getByText("When a branch is created")).toBeVisible();
+  await page.getByRole("button", { name: "Undo status change" }).focus(); await page.keyboard.press("Enter");
+  await expect(page.getByText("Reversed")).toBeVisible(); expect(navigations).toBe(0);
 });

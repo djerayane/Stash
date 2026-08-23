@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 
 import type { DevelopmentArtifactKind } from "./github-artifacts.js";
+import type { AutomationService, AutomationTrigger } from "./automations.js";
 
 export interface GitHubSignal {
   id: string;
@@ -12,6 +13,7 @@ export interface GitHubSignal {
   url: string;
   label: string;
   occurredAt: string;
+  trigger?: AutomationTrigger;
 }
 
 export interface SignalCandidate {
@@ -42,7 +44,7 @@ const taskKey = /\b[A-Z][A-Z0-9]{0,15}-[1-9][0-9]*\b/gi;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export class GitHubSignalService {
-  constructor(private readonly repository: GitHubSignalRepository, private readonly webhookSecret: string) {
+  constructor(private readonly repository: GitHubSignalRepository, private readonly webhookSecret: string, private readonly automations?: AutomationService) {
     if (!webhookSecret) throw new Error("GitHub webhook secret must not be empty");
   }
 
@@ -71,6 +73,7 @@ export class GitHubSignalService {
       };
     });
     await this.repository.receive(parsed.signal, candidates);
+    await this.automations?.applySignal(parsed.signal, candidates);
   }
 
   async list(memberId: string, projectId: string, key: string) {
@@ -104,12 +107,13 @@ function parseEvent(event: string | undefined, deliveryId: string, payload: unkn
     return { signal: signal(deliveryId, installationId, repositoryId, "commit", String(payload.after), githubUrl(payload.repository, `/commit/${payload.after}`), branch), evidence: `${branch} ${message}` };
   }
   if (event === "create" && payload.ref_type === "branch" && typeof payload.ref === "string" && payload.ref.length > 0 && payload.ref.length <= 240) {
-    return { signal: signal(deliveryId, installationId, repositoryId, "branch", payload.ref, githubUrl(payload.repository, `/tree/${encodeURIComponent(payload.ref)}`), payload.ref), evidence: payload.ref };
+    return { signal: { ...signal(deliveryId, installationId, repositoryId, "branch", payload.ref, githubUrl(payload.repository, `/tree/${encodeURIComponent(payload.ref)}`), payload.ref), trigger: "branch_created" }, evidence: payload.ref };
   }
   if (event === "pull_request" && record(payload.pull_request) && positiveId(payload.pull_request.number)
     && typeof payload.pull_request.title === "string" && typeof payload.pull_request.html_url === "string") {
     const pull = payload.pull_request; const title = String(pull.title); const url = String(pull.html_url);
-    return { signal: signal(deliveryId, installationId, repositoryId, "pull_request", String(pull.number), safeGitHubUrl(url), `#${pull.number} ${title}`), evidence: `${title} ${typeof pull.body === "string" ? pull.body : ""}` };
+    const completed = payload.action === "closed" && pull.merged === true;
+    return { signal: { ...signal(deliveryId, installationId, repositoryId, "pull_request", String(pull.number), safeGitHubUrl(url), `#${pull.number} ${title}`), ...(completed ? { trigger: "pull_request_completed" as const } : {}) }, evidence: `${title} ${typeof pull.body === "string" ? pull.body : ""}` };
   }
   throw new InvalidGitHubSignalInput();
 }
