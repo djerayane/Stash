@@ -26,6 +26,7 @@ import { PortableWorkspaceExportService } from "./portable-workspace-export.js";
 import { BoardService } from "./boards.js";
 import { NoteLinkService } from "./note-links.js";
 import { ActivityService } from "./activity.js";
+import { GitHubArtifactService } from "./github-artifacts.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -74,6 +75,7 @@ async function main(): Promise<void> {
     organizationRoles: new OrganizationRoleService(database),
     invitations: new InvitationService(database),
     ...(githubApp ? { repositoryConnections: new RepositoryConnectionService(database, githubApp) } : {}),
+    ...(githubApp ? { githubArtifacts: new GitHubArtifactService(database, githubApp) } : {}),
     notes: new NoteService(database),
     noteLinks: new NoteLinkService(database),
     tasks: new TaskService(database, database),
