@@ -58,13 +58,13 @@ describe("running Stash Instance", () => {
     return { database, baseUrl: instance.url };
   }
 
-  it("serves the browser surface and liveness health", async () => {
+  it("does not synthesize a browser surface when the Vite build is unavailable", async () => {
     const { baseUrl } = await run();
 
     const browser = await fetch(baseUrl);
-    assert.equal(browser.status, 200);
-    assert.match(browser.headers.get("content-type") ?? "", /^text\/html/);
-    assert.match(await browser.text(), /Stash/);
+    assert.equal(browser.status, 404);
+    assert.match(browser.headers.get("content-type") ?? "", /^application\/json/);
+    assert.deepEqual(await browser.json(), { error: "not_found", message: "No Stash surface exists at this path." });
 
     const live = await fetch(`${baseUrl}/health/live`);
     assert.equal(live.status, 200);

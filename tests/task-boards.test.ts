@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
-import { JSDOM } from "jsdom";
 
 import { BoardService, type Board, type BoardRepository, type BoardTask } from "../src/boards.js";
 import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
@@ -65,13 +64,6 @@ const access: MemberAccessResolver = { async authenticateBearer(value) {
   return undefined;
 } };
 
-async function eventually(assertion: () => void) {
-  const deadline = Date.now() + 1_000;
-  while (true) {
-    try { assertion(); return; }
-    catch (error) { if (Date.now() >= deadline) throw error; await new Promise((resolve) => setTimeout(resolve, 5)); }
-  }
-}
 
 describe("Task board views", () => {
   let instance: RunningInstance | undefined;
@@ -96,104 +88,6 @@ describe("Task board views", () => {
     assert.deepEqual((await statusView.json() as any).columns.map((column: any) => [column.name, column.tasks.map((task: BoardTask) => task.key)]), [["Backlog", ["STASH-1"]], ["In Progress", ["STASH-2"]], ["Done", []]]);
     assert.deepEqual((await priorityView.json() as any).columns.filter((column: any) => column.tasks.length).map((column: any) => [column.name, column.tasks.map((task: BoardTask) => task.key)]), [["High", ["STASH-1"]], ["Urgent", ["STASH-2"]]]);
     assert.equal(database.tasks.length, 2);
-  });
-
-  it("serves a keyboard-operable board surface with visible failure feedback", async () => {
-    await run(); const response = await fetch(`${instance!.url}/boards`); const surface = await response.text();
-    assert.equal(response.status, 200); assert.match(surface, /aria-live="polite"/); assert.match(surface, /Move .* to status/);
-    assert.match(surface, /className='visually-hidden'/); assert.match(surface, /htmlFor=select\.id/);
-    assert.match(surface, /button\.disabled=true;select\.disabled=true/);
-    assert.match(surface, /task\.key\+' moved to '\+destinationName\+'\.'/);
-    assert.match(surface, /focusTaskKey:task\.key/); assert.match(surface, /movedCard\?\.focus\(\)/);
-    assert.match(surface, /select\.value=column\.id/); assert.match(surface, /select\.focus\(\)/);
-    assert.match(surface, /prefers-reduced-motion/); assert.match(surface, /gsap\.from/);
-    assert.match(surface, /message\.textContent=options\.announcement\|\|body\.board\.name\+' loaded\.'/);
-    assert.doesNotMatch(surface, /if\(!message\.textContent\)/);
-    assert.match(surface, /boards\.replaceChildren\(\);current=undefined;columns\.replaceChildren\(\);pendingFocusTaskKey=undefined;message\.dataset\.error='false';/);
-    assert.match(surface, /if\(!body\.boards\.length\)\{message\.textContent='No board views exist yet\.';return\}/);
-    assert.match(surface, /body\.columns\.filter\(target=>!target\.archived\)/);
-    assert.match(surface, /read only destination/);
-  });
-
-  it("moves a Task through the keyboard form and preserves an operable recovery path", async () => {
-    const { database, request } = await run();
-    const board = (await (await request("", "POST", { name: "Delivery", groupBy: "status" })).json() as { board: Board }).board;
-    const surface = await (await fetch(`${instance!.url}/boards`)).text();
-    const dom = new JSDOM(surface, { runScripts: "outside-only", url: `${instance!.url}/boards` });
-    const { window } = dom;
-    Object.defineProperties(window, {
-      fetch: { value: (input: string, init?: RequestInit) => fetch(new URL(input, window.location.href), init) },
-      matchMedia: { value: () => ({ matches: true }) },
-      gsap: { value: { from() {} } },
-    });
-    const moduleScript = [...window.document.scripts].find(({ type }) => type === "module")?.textContent;
-    assert.ok(moduleScript); window.eval(moduleScript);
-    const token = window.document.querySelector<HTMLInputElement>("#token")!;
-    const project = window.document.querySelector<HTMLInputElement>("#project")!;
-    token.value = "member"; project.value = projectId;
-    window.document.querySelector<HTMLFormElement>("#connect")!.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
-    await eventually(() => assert.equal(window.document.querySelectorAll(".task").length, 2));
-
-    const sourceCard = [...window.document.querySelectorAll<HTMLElement>(".task")].find(({ dataset }) => dataset.taskKey === "STASH-1")!;
-    const moveForm = sourceCard.querySelector<HTMLFormElement>("form")!;
-    const destination = moveForm.querySelector<HTMLSelectElement>("select")!;
-    destination.value = progressId;
-    moveForm.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
-    await eventually(() => assert.equal(window.document.querySelector("#message")!.textContent, "STASH-1 moved to In Progress."));
-    assert.equal(database.tasks[0]!.status.id, progressId);
-    assert.equal((window.document.activeElement as HTMLElement).dataset.taskKey, "STASH-1");
-
-    const movedCard = window.document.activeElement as HTMLElement;
-    const retryForm = movedCard.querySelector<HTMLFormElement>("form")!;
-    const retrySelect = retryForm.querySelector<HTMLSelectElement>("select")!;
-    retrySelect.value = backlogId; database.fail = true;
-    retryForm.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
-    await eventually(() => assert.equal(window.document.querySelector("#message")!.getAttribute("data-error"), "true"));
-    assert.equal(window.document.querySelector("#message")!.textContent, "The board could not be loaded or saved. Try again.");
-    assert.equal(retrySelect.value, progressId); assert.equal(window.document.activeElement, retrySelect);
-    assert.equal(database.tasks[0]!.status.id, progressId);
-    dom.window.close();
-  });
-
-  it("preserves a committed move when its board refresh fails and reconciles without moving twice", async () => {
-    const { database, request } = await run();
-    await request("", "POST", { name: "Delivery", groupBy: "status" });
-    const surface = await (await fetch(`${instance!.url}/boards`)).text();
-    const dom = new JSDOM(surface, { runScripts: "outside-only", url: `${instance!.url}/boards` });
-    const { window } = dom;
-    Object.defineProperties(window, {
-      fetch: { value: (input: string, init?: RequestInit) => fetch(new URL(input, window.location.href), init) },
-      matchMedia: { value: () => ({ matches: true }) },
-      gsap: { value: { from() {} } },
-    });
-    const moduleScript = [...window.document.scripts].find(({ type }) => type === "module")?.textContent;
-    assert.ok(moduleScript); window.eval(moduleScript);
-    window.document.querySelector<HTMLInputElement>("#token")!.value = "member";
-    window.document.querySelector<HTMLInputElement>("#project")!.value = projectId;
-    window.document.querySelector<HTMLFormElement>("#connect")!.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
-    await eventually(() => assert.equal(window.document.querySelectorAll(".task").length, 2));
-
-    const task = [...window.document.querySelectorAll<HTMLElement>(".task")].find(({ dataset }) => dataset.taskKey === "STASH-1")!;
-    const form = task.querySelector<HTMLFormElement>("form")!;
-    const select = form.querySelector<HTMLSelectElement>("select")!;
-    const button = form.querySelector<HTMLButtonElement>("button")!;
-    select.value = progressId; database.failNextBoardRead = true;
-    form.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
-    await eventually(() => assert.match(window.document.querySelector("#message")!.textContent!, /STASH-1 moved to In Progress.*could not be refreshed/i));
-    assert.equal(database.tasks[0]!.status.id, progressId); assert.equal(database.moveCalls, 1);
-    assert.equal(select.disabled, true); assert.equal(button.disabled, true); assert.equal(select.value, progressId);
-    const refresh = window.document.querySelector<HTMLButtonElement>("#refresh-board")!;
-    assert.equal(window.document.activeElement, refresh); assert.equal(refresh.disabled, false);
-    button.click();
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    assert.equal(database.moveCalls, 1);
-
-    refresh.click();
-    await eventually(() => assert.equal(window.document.querySelector("#message")!.textContent, "Delivery loaded."));
-    assert.equal(database.moveCalls, 1); assert.equal((window.document.activeElement as HTMLElement).dataset.taskKey, "STASH-1");
-    const progressColumn = [...window.document.querySelectorAll<HTMLElement>(".column")].find((column) => column.querySelector("h2")?.textContent?.startsWith("In Progress"));
-    assert.equal(progressColumn?.querySelector<HTMLElement>(".task")?.dataset.taskKey, "STASH-1");
-    dom.window.close();
   });
 
   it("keeps Tasks in an occupied archived status visible without offering that status as a destination", async () => {

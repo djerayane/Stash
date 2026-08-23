@@ -31,9 +31,11 @@ test("the Instance serves the built web client and its SPA routes", async (conte
   assert.match(clientAsset.headers.get("content-type") ?? "", /javascript/);
   assert.equal(await clientAsset.text(), "window.stash = true;");
 
-  const spaRoute = await fetch(`${instance.url}/notes`, { headers: { accept: "text/html" } });
-  assert.equal(spaRoute.status, 200);
-  assert.match(await spaRoute.text(), /Built Stash/);
+  for (const path of ["/notes", "/boards", "/workspaces/11111111-1111-4111-8111-111111111111/notes", "/notes/22222222-2222-4222-8222-222222222222/edit"]) {
+    const spaRoute = await fetch(`${instance.url}${path}`, { headers: { accept: "text/html" } });
+    assert.equal(spaRoute.status, 200, `${path} must be owned by the Vite SPA`);
+    assert.match(await spaRoute.text(), /Built Stash/);
+  }
 
   const missingApi = await fetch(`${instance.url}/api/does-not-exist`, { headers: { accept: "application/json" } });
   assert.equal(missingApi.status, 404);

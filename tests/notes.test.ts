@@ -333,32 +333,6 @@ describe("editing Notes", () => {
     const loaded = await fetch(`${baseUrl}/api/notes/${note.id}`, { headers: { authorization: "Bearer member-ada" } });
     assert.equal(loaded.status, 200);
     assert.equal((await loaded.json() as NoteRecord).document.blocks[0]?.type, "paragraph");
-    const editor = await fetch(`${baseUrl}/notes/${note.id}/edit`);
-    assert.equal(editor.status, 200);
-    const html = await editor.text();
-    assert.match(html, /contenteditable="false"/);
-    assert.match(html, /Loading Note/);
-    assert.match(html, /button\.disabled=false/);
-    assert.match(html, /aria-label="Note editor"/);
-    assert.match(html, />Bold</);
-    assert.match(html, />Undo</);
-    assert.match(html, />Checklist</);
-    assert.match(html, />Code block</);
-    assert.match(html, /dataset\.blockId/);
-    assert.match(html, /linked-tasks/);
-    assert.match(html, /task-links/);
-    assert.match(html, /aria-label.*Linked Tasks/);
-    assert.match(html, /relationshipState===['"]linked['"]/);
-    assert.match(html, /Block relationship needs repair/);
-    assert.match(html, /relationshipState===['"]ambiguous['"]/);
-    assert.match(html, /\/assets\/gsap\.min\.js/);
-    assert.match(html, /prefers-reduced-motion/);
-    assert.match(html, /Checklist state/);
-    const gsap = await fetch(`${baseUrl}/assets/gsap.min.js`);
-    assert.equal(gsap.status, 200);
-    assert.match(await gsap.text(), /GreenSock|gsap/i);
-    assert.match(html, /Your changes remain in the editor/);
-    assert.doesNotMatch(html, /Markdown source/i);
 
     const body = { baseRevision: 1, operations: [{ id: operationId, type: "replace_block", blockKey,
       block: { type: "heading", level: 2, blockKey, id: blockId, content: [{ text: "Release notes", marks: ["bold"] }] } }] };

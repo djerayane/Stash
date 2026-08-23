@@ -14,7 +14,7 @@ The product clients use the architecture fixed by [ADR-0040](docs/adr/0040-stand
 - Repository: pnpm workspaces with focused shared packages.
 - Client testing: Vitest, Testing Library, Playwright, and axe accessibility checks.
 
-The existing operator page and any hand-built HTML or imperative DOM feature surfaces are transitional. Migration occurs behind stable, permission-aware server APIs; a transitional surface is removed only after the React client proves behavioral and permission parity. A Member-facing ticket is not frontend-complete until its behavior exists in the appropriate React or Expo client and passes client acceptance tests. Canonical domain rules and authorization remain server-owned rather than being reimplemented in either client.
+The Vite build is the sole browser application. The server hosts its static assets and returns `index.html` for non-operational HTML deep links; it does not implement Member features with server-rendered HTML or imperative DOM scripts. A Member-facing ticket is not frontend-complete until its behavior exists in the appropriate React or Expo client and passes client acceptance tests. Canonical domain rules and authorization remain server-owned rather than being reimplemented in either client.
 
 ## Run an Instance
 
@@ -175,7 +175,7 @@ Stopping or deleting Redis does not remove durable Stash data. Do not include Re
 
 - `GET /health/live` returns `200` when the application process can serve HTTP. It does not check PostgreSQL.
 - `GET /health/ready` probes PostgreSQL and returns `200` with `{"status":"ready"}` or `503` with a stable `database_unavailable` error. Database details are deliberately not exposed.
-- `GET /` is the browser surface.
+- `GET /` serves `apps/web/dist/index.html`; deployments must build the Vite application before starting Stash.
 - `GET /api/instance` requires `Authorization: Bearer <INSTANCE_ADMIN_TOKEN>`. Missing or invalid authorization returns a visible `401` without echoing the secret.
 - `POST /api/workspaces` requires a Member session and creates either a personal Workspace owned by that Member or an Organization Workspace when the Member belongs to that Organization.
 - `POST /api/workspaces/:workspaceId/projects` requires a Member session and creates a Project only when the Member owns the personal Workspace or belongs to its Organization. Project keys are normalized to uppercase and unique within their Workspace.
@@ -209,4 +209,4 @@ pnpm run test:a11y
 
 The browser and accessibility commands build the Vite client, start a real Stash Instance, and wait on its readiness endpoint before running Playwright. The harness shuts the Instance down automatically and does not use arbitrary delays.
 
-Acceptance tests bind a real ephemeral HTTP port and exercise the public protocol. Protocol-compatible database and Member-access fakes provide deterministic ownership, healthy, and recoverable-outage scenarios without bypassing the Instance HTTP boundary. `pnpm run smoke` targets a running, PostgreSQL-backed Instance and verifies both readiness and the browser surface.
+Acceptance tests bind a real ephemeral HTTP port and exercise the public protocol. Protocol-compatible database and Member-access fakes provide deterministic ownership, healthy, and recoverable-outage scenarios without bypassing the Instance HTTP boundary. `pnpm run smoke` targets a running, PostgreSQL-backed Instance and verifies both readiness and the Vite browser application.

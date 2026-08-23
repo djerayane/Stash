@@ -167,16 +167,4 @@ describe("Note Templates and Decision Notes", () => {
     assert.doesNotMatch(await unavailable.text(), /postgres|private/i);
   });
 
-  it("serves a keyboard-operable template and Decision Notes browser surface", async () => {
-    const { baseUrl } = await run();
-    const response = await fetch(`${baseUrl}/workspaces/${workspaceId}/notes`);
-    assert.equal(response.status, 200);
-    const html = await response.text();
-    assert.match(html, /<title>Notes · Stash<\/title>/);
-    assert.match(html, /data-template="decision"/);
-    assert.match(html, /Decision Notes/);
-    assert.match(html, /aria-live="polite"/);
-    assert.match(html, /prefers-reduced-motion/);
-    assert.match(html, /window\.gsap\.from/);
-  });
 });

@@ -34,7 +34,6 @@
     "@stash/rich-text": "workspace:*",
     "@stash/sync": "workspace:*",
     "@stash/validation": "workspace:*",
-    "gsap": "^3.15.0",
     "nodemailer": "^9.0.5",
     "pg": "^8.16.3",
     "prosemirror-model": "^1.25.11",
@@ -45,11 +44,9 @@
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",
     "@playwright/test": "^1.62.1",
-    "@types/jsdom": "^30.0.0",
     "@types/node": "^24.3.0",
     "@types/nodemailer": "^8.0.1",
     "@types/pg": "^8.15.5",
-    "jsdom": "^29.1.1",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2"
   },
