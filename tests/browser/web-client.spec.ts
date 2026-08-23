@@ -117,3 +117,28 @@ test("announces and focuses a session failure, then retries by keyboard without 
   expect(sessionAttempts).toBe(2);
   expect(documentNavigations).toBe(0);
 });
+
+test("reviews and confirms an ambiguous GitHub Signal by keyboard without reloading", async ({ page }) => {
+  await installMemberSession(page);
+  const projectId = "11111111-1111-4111-8111-111111111111";
+  const suggestion = { id: "22222222-2222-4222-8222-222222222222", signalId: "signal-1", taskId: "task-36", projectId, taskKey: "STASH-36", taskTitle: "Receive GitHub development Signals", matchedKey: "OLD-1", status: "pending_confirmation" };
+  let confirmed = false; let documentNavigations = 0;
+  page.on("framenavigated", (frame) => { if (frame === page.mainFrame()) documentNavigations += 1; });
+  await page.route("**/development-signals**", async (route) => {
+    if (route.request().method() === "POST") { confirmed = true; await route.fulfill({ json: { suggestion: { ...suggestion, status: "confirmed" } } }); return; }
+    await route.fulfill({ json: { signals: [{ signal: { id: "signal-1", kind: "pull_request", url: "https://github.com/acme/stash/pull/42", label: "#42 Shared work", occurredAt: "2026-08-23T08:00:00.000Z" }, suggestions: [{ ...suggestion, status: confirmed ? "confirmed" : "pending_confirmation" }] }] } });
+  });
+  await page.goto(`/app/projects/${projectId}/tasks/STASH-36/development`);
+  await expect(page.getByText("#42 Shared work")).toBeVisible();
+  documentNavigations = 0;
+  await page.getByRole("button", { name: "Review match" }).focus();
+  await page.keyboard.press("Enter");
+  const dialog = page.getByRole("dialog", { name: "Confirm Task relationship" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Cancel" })).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(dialog.getByRole("button", { name: "Confirm relationship" })).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.getByText("Relationship confirmed")).toBeVisible();
+  expect(documentNavigations).toBe(0);
+});

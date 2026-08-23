@@ -36,6 +36,7 @@ import type { Board, BoardRepository, BoardTask } from "./boards.js";
 import type { NoteLinkRecord, NoteLocationRecord, PortableNoteLinkStateProjection, PortableNoteLocationProjection } from "./note-links.js";
 import type { ActivityCause, ActivityRecord, ActivityRepository, NoteHistoryRevision } from "./activity.js";
 import type { DevelopmentArtifact, GitHubArtifactRepository } from "./github-artifacts.js";
+import type { GitHubSignal, GitHubSignalRepository, SignalCandidate } from "./github-signals.js";
 import { assignmentNotificationInputs, directMentionMemberIds, directMentionNotificationInputs, notificationDeliveryMode, type NotificationDelivery, type NotificationPreferences, type NotificationRepository } from "./notifications.js";
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
@@ -127,6 +128,7 @@ export class PostgresDatabase implements
   InvitationRepository,
   RepositoryConnectionRepository,
   GitHubArtifactRepository,
+  GitHubSignalRepository,
   TaskFromBlockRepository,
   TaskPlanningRepository,
   StructuredTaskEditRepository,
@@ -2254,6 +2256,83 @@ export class PostgresDatabase implements
     return (current.task.developmentLinks ?? []).flatMap(({ url }) => developmentArtifactFromUrl(url));
   }
 
+  async matchingTasks(repositoryId: string, keys: string[]) {
+    await this.#ensureGitHubSignalSchema();
+    if (!keys.length) return [];
+    const result = await this.#pool.query<{ task_id: string; project_id: string; task_key: string; title: string; matched_key: string }>(`
+      SELECT DISTINCT task.id AS task_id, task.project_id, task.task_key, task.title, matched.matched_key
+      FROM stash_repository_connections connection
+      JOIN stash_repository_connection_projects link ON link.connection_id = connection.id
+      JOIN stash_tasks task ON task.project_id = link.project_id
+      JOIN LATERAL (
+        SELECT task.task_key AS matched_key WHERE task.task_key = ANY($2::text[])
+        UNION SELECT alias.task_key FROM stash_task_key_aliases alias WHERE alias.task_id = task.id AND alias.task_key = ANY($2::text[])
+      ) matched ON true
+      WHERE connection.provider = 'github' AND connection.repository_id = $1`, [repositoryId, keys]);
+    return result.rows.map((row) => ({ taskId: row.task_id, projectId: row.project_id, taskKey: row.task_key, title: row.title, matchedKey: row.matched_key }));
+  }
+
+  async receive(signal: GitHubSignal, candidates: SignalCandidate[]) {
+    await this.#ensureGitHubSignalSchema();
+    await this.#withTransaction(async (client) => {
+      const inserted = await client.query(`INSERT INTO stash_github_signals
+        (id, delivery_id, repository_id, kind, provider_id, url, label, occurred_at)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (delivery_id) DO NOTHING`,
+      [signal.id, signal.deliveryId, signal.repositoryId, signal.kind, signal.providerId, signal.url, signal.label, signal.occurredAt]);
+      if (!inserted.rowCount) return;
+      for (const candidate of candidates) {
+        await client.query(`INSERT INTO stash_github_signal_suggestions
+          (id, signal_id, task_id, project_id, task_key, task_title, matched_key, status)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, [candidate.id, signal.id, candidate.taskId, candidate.projectId, candidate.taskKey, candidate.taskTitle, candidate.matchedKey, candidate.status]);
+        if (candidate.status === "confirmed") await this.#linkSignalArtifact(client, candidate.taskId, signal);
+      }
+    });
+  }
+
+  async list(memberId: string, projectId: string, taskKey: string) {
+    await this.#ensureGitHubSignalSchema();
+    const visible = await this.findTaskByKey(memberId, projectId, taskKey);
+    if (visible.status !== "found") return undefined;
+    const result = await this.#pool.query<any>(`SELECT signal.*, suggestion.id AS suggestion_id, suggestion.task_id,
+      suggestion.project_id, suggestion.task_key, suggestion.task_title, suggestion.matched_key, suggestion.status
+      FROM stash_github_signal_suggestions suggestion JOIN stash_github_signals signal ON signal.id = suggestion.signal_id
+      WHERE suggestion.task_id = $1 ORDER BY signal.occurred_at DESC, suggestion.id`, [visible.task.id]);
+    const grouped = new Map<string, { signal: GitHubSignal; suggestions: SignalCandidate[] }>();
+    for (const row of result.rows) {
+      const entry = grouped.get(row.id) ?? { signal: githubSignalFromRow(row), suggestions: [] };
+      entry.suggestions.push({ id: row.suggestion_id, signalId: row.id, taskId: row.task_id, projectId: row.project_id, taskKey: row.task_key, taskTitle: row.task_title, matchedKey: row.matched_key, status: row.status });
+      grouped.set(row.id, entry);
+    }
+    return [...grouped.values()];
+  }
+
+  async confirm(memberId: string, projectId: string, taskKey: string, suggestionId: string) {
+    await this.#ensureGitHubSignalSchema();
+    if (!await this.canLinkArtifact(memberId, projectId, taskKey)) return "forbidden" as const;
+    return this.#withTransaction(async (client) => {
+      const result = await client.query<any>(`SELECT suggestion.*, signal.kind, signal.provider_id, signal.url, signal.label,
+        signal.delivery_id, signal.repository_id, signal.occurred_at
+        FROM stash_github_signal_suggestions suggestion JOIN stash_github_signals signal ON signal.id = suggestion.signal_id
+        JOIN stash_tasks task ON task.id = suggestion.task_id
+        WHERE suggestion.id=$1 AND suggestion.project_id=$2 AND (suggestion.task_key=$3 OR task.task_key=$3) FOR UPDATE OF suggestion`, [suggestionId, projectId, taskKey]);
+      const row = result.rows[0]; if (!row) return "not_found" as const;
+      await client.query("UPDATE stash_github_signal_suggestions SET status='confirmed', confirmed_by_account_id=$2, confirmed_at=NOW() WHERE id=$1", [suggestionId, memberId]);
+      await this.#linkSignalArtifact(client, row.task_id, githubSignalFromRow(row));
+      return "confirmed" as const;
+    });
+  }
+
+  async #linkSignalArtifact(client: PoolClient, taskId: string, signal: GitHubSignal) {
+    const task = await client.query<any>("SELECT development_links, revision, field_revisions FROM stash_tasks WHERE id=$1 FOR UPDATE", [taskId]);
+    const row = task.rows[0]; if (!row) return;
+    const links = row.development_links ?? [];
+    if (links.some((link: { url: string }) => link.url === signal.url)) return;
+    const revision = Number(row.revision) + 1;
+    await client.query(`UPDATE stash_tasks SET development_links=$2::jsonb, revision=$3,
+      field_revisions=jsonb_set(field_revisions,'{developmentLinks}',to_jsonb($3::int),true) WHERE id=$1`,
+    [taskId, JSON.stringify([...links, { provider: "github", kind: signal.kind, url: signal.url }]), revision]);
+  }
+
   async attachRepositoryConnectionToProject(actorId: string, organizationId: string, connectionId: string, projectId: string) {
     await this.#ensureRepositoryConnectionSchema();
     return this.#withTransaction(async (client) => {
@@ -2903,6 +2982,37 @@ export class PostgresDatabase implements
       await client.query("SELECT pg_advisory_unlock(1094218495)").catch(() => undefined);
       client.release();
     }
+  }
+
+  async #ensureGitHubSignalSchema(): Promise<void> {
+    await this.#ensureRepositoryConnectionSchema();
+    await this.#ensureNoteSchemaForPool();
+    await this.#pool.query(`
+      CREATE TABLE IF NOT EXISTS stash_github_signals (
+        id UUID PRIMARY KEY,
+        delivery_id TEXT NOT NULL UNIQUE,
+        repository_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('branch','commit','pull_request')),
+        provider_id TEXT NOT NULL,
+        url TEXT NOT NULL,
+        label TEXT NOT NULL,
+        occurred_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS stash_github_signal_suggestions (
+        id UUID PRIMARY KEY,
+        signal_id UUID NOT NULL REFERENCES stash_github_signals(id) ON DELETE CASCADE,
+        task_id UUID NOT NULL REFERENCES stash_tasks(id) ON DELETE CASCADE,
+        project_id UUID NOT NULL REFERENCES stash_projects(id) ON DELETE CASCADE,
+        task_key TEXT NOT NULL,
+        task_title TEXT NOT NULL,
+        matched_key TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('confirmed','pending_confirmation')),
+        confirmed_by_account_id UUID REFERENCES stash_accounts(id),
+        confirmed_at TIMESTAMPTZ,
+        UNIQUE(signal_id, task_id, matched_key)
+      );
+      CREATE INDEX IF NOT EXISTS stash_github_signal_suggestions_task_idx ON stash_github_signal_suggestions(task_id);
+    `);
   }
 
   async #ensureWorkspaceProjectSchema(client: PoolClient): Promise<void> {
@@ -4108,6 +4218,10 @@ interface MemberLocalizationRow {
   updated_at: Date | string;
 }
 interface RepositoryConnectionRow { id: string; organization_id: string; provider: "github"; installation_id: string | number; repository_id: string; repository_url: string; created_by_account_id: string; created_by_attribution: "recorded" | "inferred-during-upgrade"; project_ids: string[] }
+function githubSignalFromRow(row: any): GitHubSignal {
+  return { id: row.id, deliveryId: row.delivery_id, repositoryId: row.repository_id, kind: row.kind,
+    providerId: row.provider_id, url: row.url, label: row.label, occurredAt: new Date(row.occurred_at).toISOString() };
+}
 interface AttachmentRow { id: string; workspace_id: string; filename: string; content_type: string; byte_size: string | number; relative_path: string; storage_key: string; source: "upload" | "paste"; created_by_account_id: string; created_at: Date | string }
 function attachmentRecord(row: AttachmentRow): AttachmentRecord {
   return { id: row.id, workspaceId: row.workspace_id, filename: row.filename, contentType: row.content_type,

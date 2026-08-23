@@ -55,6 +55,8 @@ import { activityRoutes } from "./activity-routes.js";
 import type { ActivityService } from "./activity.js";
 import { githubArtifactRoutes } from "./github-artifact-routes.js";
 import type { GitHubArtifactService } from "./github-artifacts.js";
+import { githubSignalRoutes, githubWebhookRoute } from "./github-signal-routes.js";
+import type { GitHubSignalService } from "./github-signals.js";
 import { publicDomainApiRoute } from "./public-domain-api.js";
 import { instanceBackupRoute } from "./instance-backup-routes.js";
 import type { InstanceBackupService } from "./instance-backup.js";
@@ -110,6 +112,7 @@ export interface InstanceOptions {
   noteLinks?: NoteLinkService;
   activities?: ActivityService;
   githubArtifacts?: GitHubArtifactService;
+  githubSignals?: GitHubSignalService;
   webClientRoot?: string;
   instanceBackups?: InstanceBackupService;
   instanceBackupRoot?: string;
@@ -211,6 +214,7 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
     ...(options.notifications ? [notificationRoutes(options.notifications, memberAccess)] : []),
     ...(options.repositoryConnections ? [repositoryConnectionRoutes(options.repositoryConnections, memberAccess)] : []),
     ...(options.githubArtifacts ? [githubArtifactRoutes(options.githubArtifacts, memberAccess)] : []),
+    ...(options.githubSignals ? [githubSignalRoutes(options.githubSignals, memberAccess)] : []),
   ] : [];
   const applicationRoutes = [
     boardSurfaceRoute(),
@@ -238,7 +242,10 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
       ? [mobileCaptureRoutes(options.mobileCaptures, (options.memberAccess ?? options.passwordAuth)!)]
       : []),
   ];
-  const routes = [publicDomainApiRoute(publicDomainRoutes), ...applicationRoutes];
+  const routes = [
+    ...(options.githubSignals ? [githubWebhookRoute(options.githubSignals)] : []),
+    publicDomainApiRoute(publicDomainRoutes), ...applicationRoutes,
+  ];
 
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://stash.invalid");
