@@ -14,7 +14,7 @@ The product clients use the architecture fixed by [ADR-0040](docs/adr/0040-stand
 - Repository: pnpm workspaces with focused shared packages.
 - Client testing: Vitest, Testing Library, Playwright, and axe accessibility checks.
 
-The existing operator page and any hand-built HTML or imperative DOM feature surfaces are transitional. A Member-facing ticket is not frontend-complete until its behavior exists in the appropriate React or Expo client and passes client acceptance tests.
+The existing operator page and any hand-built HTML or imperative DOM feature surfaces are transitional. Migration occurs behind stable, permission-aware server APIs; a transitional surface is removed only after the React client proves behavioral and permission parity. A Member-facing ticket is not frontend-complete until its behavior exists in the appropriate React or Expo client and passes client acceptance tests. Canonical domain rules and authorization remain server-owned rather than being reimplemented in either client.
 
 ## Run an Instance
 
