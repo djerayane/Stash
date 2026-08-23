@@ -3383,6 +3383,25 @@ export class PostgresDatabase implements
         JOIN stash_accounts actor ON actor.id=history.actor_account_id JOIN stash_notes note ON note.id=history.note_id
         WHERE history.workspace_id=$1 AND ($2::boolean OR note.project_id=ANY($3::uuid[]))
         ORDER BY history.note_id,history.revision`, [workspaceId, permission.member, guestProjectIds]);
+      const durableObjects = await client.query<{ object_kind: string; object_id: string; projection_schema: string; payload: unknown }>(
+        `SELECT DISTINCT ON (projection.object_kind, projection.object_id)
+           projection.object_kind,projection.object_id,projection.projection_schema,projection.payload
+         FROM stash_portable_projection_outbox projection
+         WHERE projection.object_kind IN ('Project','Workflow','GuestProjectAccess','RepositoryConnection','Discussion','DiscussionWorkLink')
+           AND (
+             (projection.object_kind='Project' AND projection.payload->>'workspaceId'=$1
+               AND ($2::boolean OR projection.object_id=ANY($3::uuid[])))
+             OR (projection.object_kind IN ('Workflow','GuestProjectAccess')
+               AND (projection.payload->>'projectId')::uuid IN (SELECT id FROM stash_projects WHERE workspace_id=$1)
+               AND ($2::boolean OR (projection.payload->>'projectId')::uuid=ANY($3::uuid[])))
+             OR (projection.object_kind IN ('Discussion','DiscussionWorkLink') AND projection.payload->>'workspaceId'=$1
+               AND $2::boolean)
+             OR (projection.object_kind='RepositoryConnection' AND $2::boolean AND EXISTS (
+               SELECT 1 FROM jsonb_array_elements_text(projection.payload->'projectIds') project_id
+               WHERE project_id::uuid IN (SELECT id FROM stash_projects WHERE workspace_id=$1)))
+           )
+         ORDER BY projection.object_kind,projection.object_id,projection.revision DESC`,
+        [workspaceId, permission.member, guestProjectIds]);
       if (notes.rows.some(({ payload }) => !payload) || tasks.rows.some(({ payload }) => !payload)
         || boards.rows.some(({ payload }) => !payload)
         || noteLocations.rows.some(({ payload }) => !payload) || noteLinks.rows.some(({ payload }) => !payload)
@@ -3412,6 +3431,8 @@ export class PostgresDatabase implements
         noteHistory: histories.rows.map((row): NoteHistoryRevision => ({ noteId: row.note_id, workspaceId: row.workspace_id,
           revision: Number(row.revision), content: row.content, document: row.document, recordedAt: new Date(row.recorded_at).toISOString(),
           actor: { localAccountId: row.actor_account_id, displayName: row.actor_name }, cause: this.#parseActivityCause(row.cause) })),
+        durableObjects: durableObjects.rows.map((row) => ({ kind: row.object_kind, id: row.object_id,
+          schema: row.projection_schema, payload: row.payload })),
       } };
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
