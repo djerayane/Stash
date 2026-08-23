@@ -51,5 +51,5 @@ export function useSessionState(fetcher: typeof fetch = globalThis.fetch): Sessi
   if (!stored || query.data === "anonymous") return { status: "anonymous" };
   if (query.isPending) return { status: "loading" };
   if (query.isError) return { status: "error", message: "The Instance could not be reached.", retry: () => { void query.refetch(); } };
-  return { status: "authenticated", member: query.data.member, workspace: query.data.workspace, capabilities: query.data.capabilities };
+  return { status: "authenticated", token: stored.token, member: query.data.member, workspace: query.data.workspace, capabilities: query.data.capabilities };
 }

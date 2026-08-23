@@ -34,6 +34,7 @@ import { InstanceBackupService } from "./instance-backup.js";
 import { PostgresLocalInstanceBackupSource } from "./instance-backup-system.js";
 import { NotificationService } from "./notifications.js";
 import { AutomationService } from "./automations.js";
+import { NoteCollaborationService } from "./note-collaboration.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -93,6 +94,7 @@ async function main(): Promise<void> {
     ...(githubWebhookSecret ? { githubSignals: new GitHubSignalService(database, githubWebhookSecret, automations) } : {}),
     automations,
     notes: new NoteService(database),
+    noteCollaboration: new NoteCollaborationService(database),
     noteLinks: new NoteLinkService(database),
     tasks: new TaskService(database, database),
     projectWorkflows: new ProjectWorkflowService(database),

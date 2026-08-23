@@ -39,6 +39,10 @@ import type { DevelopmentArtifact, GitHubArtifactRepository } from "./github-art
 import type { GitHubSignal, GitHubSignalRepository, SignalCandidate } from "./github-signals.js";
 import { assignmentNotificationInputs, directMentionMemberIds, directMentionNotificationInputs, notificationDeliveryMode, type NotificationDelivery, type NotificationPreferences, type NotificationRepository } from "./notifications.js";
 import type { AutomationRecipe, AutomationRepository, AutomationState, AutomationTransition, AutomationTrigger } from "./automations.js";
+import * as Y from "yjs";
+import { prosemirrorJSONToYDoc } from "y-prosemirror";
+import { Schema } from "prosemirror-model";
+import type { CollaborationSnapshot, NoteCollaborationRepository } from "./note-collaboration.js";
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
@@ -116,6 +120,34 @@ function boardFromRow(row: any): Board {
     groupBy: row.group_by, createdAt: new Date(row.created_at).toISOString() };
 }
 
+const collaborationSchema = new Schema({
+  nodes: {
+    doc: { content: "block+" }, text: { group: "inline" }, paragraph: { group: "block", content: "inline*", attrs: { blockKey: { default: null }, blockId: { default: null } } },
+    heading: { group: "block", content: "inline*", attrs: { level: { default: 1 }, blockKey: { default: null }, blockId: { default: null } } },
+    codeBlock: { group: "block", content: "text*", marks: "", code: true, attrs: { language: { default: null }, blockKey: { default: null }, blockId: { default: null } } },
+    blockquote: { group: "block", content: "block+", attrs: { blockKey: { default: null }, blockId: { default: null } } },
+    bulletList: { group: "block", content: "listItem+", attrs: { blockKey: { default: null }, blockId: { default: null } } },
+    listItem: { content: "paragraph block*" }, taskList: { group: "block", content: "taskItem+", attrs: { blockKey: { default: null }, blockId: { default: null } } },
+    taskItem: { content: "paragraph block*", attrs: { checked: { default: false } } },
+  },
+  marks: { bold: {}, italic: {}, code: { code: true }, link: { attrs: { href: {} }, inclusive: false } },
+});
+
+export function collaborativeDocumentFromRichText(document: import("./rich-text.js").RichTextDocument): Y.Doc {
+  const inline = (spans: import("./rich-text.js").RichTextSpan[]) => spans.map((span) => ({ type: "text", text: span.text,
+    ...(span.marks?.length || span.href ? { marks: [...(span.marks ?? []).map((type) => ({ type })), ...(span.href ? [{ type: "link", attrs: { href: span.href } }] : [])] } : {}) }));
+  const content = document.blocks.map((block) => {
+    const attrs = { blockKey: block.blockKey ?? null, blockId: block.id ?? null };
+    if (block.type === "heading") return { type: "heading", attrs: { ...attrs, level: block.level }, content: inline(block.content) };
+    if (block.type === "code") return { type: "codeBlock", attrs: { ...attrs, language: block.language ?? null }, content: [{ type: "text", text: block.text }] };
+    if (block.type === "quote") return { type: "blockquote", attrs, content: [{ type: "paragraph", content: inline(block.content) }] };
+    if (block.type === "bullet") return { type: "bulletList", attrs, content: [{ type: "listItem", content: [{ type: "paragraph", content: inline(block.content) }] }] };
+    if (block.type === "check") return { type: "taskList", attrs, content: [{ type: "taskItem", attrs: { checked: block.checked }, content: [{ type: "paragraph", content: inline(block.content) }] }] };
+    return { type: "paragraph", attrs, content: inline(block.content) };
+  });
+  return prosemirrorJSONToYDoc(collaborationSchema, { type: "doc", content }, "default");
+}
+
 export class PostgresDatabase implements
   DatabaseProbe,
   OwnerBootstrapRepository,
@@ -143,7 +175,8 @@ export class PostgresDatabase implements
   BoardRepository,
   ActivityRepository,
   NotificationRepository,
-  AutomationRepository
+  AutomationRepository,
+  NoteCollaborationRepository
 {
   readonly #pool: Pool;
   readonly #authenticationSecrets: AuthenticationSecretCodec;
@@ -4276,6 +4309,71 @@ export class PostgresDatabase implements
       VALUES($1,$2,$3,$4,$5,$6,'member',$7,$8::jsonb,$9::jsonb)`,[activity.id,workspaceId,kind,objectId,action,memberId,
       activity.occurredAt,JSON.stringify(activity.before),JSON.stringify(activity.after)]);
     await this.#recordPortableProjection(client,"Activity",activity.id,activity.schema,activity);
+  }
+
+  async loadNoteCollaboration(memberId: string, noteId: string): Promise<CollaborationSnapshot | undefined> {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureCollaborationSchema(client);
+      if (!await this.#canEditCollaborativeNote(client, memberId, noteId)) return undefined;
+      let row = (await client.query<any>(`SELECT note_id,sequence,update,updated_at,updated_by_account_id
+        FROM stash_note_collaboration WHERE note_id=$1`, [noteId])).rows[0];
+      if (!row) row = await this.#seedNoteCollaboration(client, noteId);
+      return { noteId: row.note_id, sequence: Number(row.sequence), update: new Uint8Array(row.update),
+        updatedAt: new Date(row.updated_at).toISOString(), updatedByMemberId: row.updated_by_account_id };
+    });
+  }
+
+  async appendNoteCollaboration(memberId: string, noteId: string, update: Uint8Array): Promise<CollaborationSnapshot | undefined> {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureCollaborationSchema(client);
+      if (!await this.#canEditCollaborativeNote(client, memberId, noteId)) return undefined;
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`note-collaboration:${noteId}`]);
+      let current = (await client.query<any>("SELECT sequence,update FROM stash_note_collaboration WHERE note_id=$1 FOR UPDATE", [noteId])).rows[0];
+      if (!current) current = await this.#seedNoteCollaboration(client, noteId);
+      const document = new Y.Doc();
+      if (current) Y.applyUpdate(document, new Uint8Array(current.update));
+      Y.applyUpdate(document, update);
+      const merged = Y.encodeStateAsUpdate(document); document.destroy();
+      const row = (await client.query<any>(`INSERT INTO stash_note_collaboration(note_id,sequence,update,updated_by_account_id)
+        VALUES($1,$2,$3,$4) ON CONFLICT(note_id) DO UPDATE SET sequence=EXCLUDED.sequence,update=EXCLUDED.update,
+        updated_by_account_id=EXCLUDED.updated_by_account_id,updated_at=now()
+        RETURNING note_id,sequence,update,updated_at,updated_by_account_id`,
+      [noteId, Number(current?.sequence ?? 0) + 1, Buffer.from(merged), memberId])).rows[0];
+      await client.query(`INSERT INTO stash_note_collaboration_activity(note_id,sequence,actor_account_id,update_bytes)
+        VALUES($1,$2,$3,$4)`, [noteId, row.sequence, memberId, update.byteLength]);
+      return { noteId: row.note_id, sequence: Number(row.sequence), update: new Uint8Array(row.update),
+        updatedAt: new Date(row.updated_at).toISOString(), updatedByMemberId: row.updated_by_account_id };
+    });
+  }
+
+  async #canEditCollaborativeNote(client: PoolClient, memberId: string, noteId: string): Promise<boolean> {
+    const result = await client.query(`SELECT 1 FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id=note.workspace_id
+      WHERE note.id=$1 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
+      (workspace.owner_type='organization' AND EXISTS(SELECT 1 FROM stash_organization_memberships membership
+        WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2)))`, [noteId, memberId]);
+    return Boolean(result.rowCount);
+  }
+
+  async #seedNoteCollaboration(client: PoolClient, noteId: string): Promise<any> {
+    const note = (await client.query<any>("SELECT document,created_by_account_id,created_at FROM stash_notes WHERE id=$1", [noteId])).rows[0];
+    if (!note) throw new Error("note_not_found");
+    const document = collaborativeDocumentFromRichText(note.document);
+    const update = Y.encodeStateAsUpdate(document); document.destroy();
+    return (await client.query<any>(`INSERT INTO stash_note_collaboration(note_id,sequence,update,updated_by_account_id,updated_at)
+      VALUES($1,0,$2,$3,$4) ON CONFLICT(note_id) DO UPDATE SET note_id=EXCLUDED.note_id
+      RETURNING note_id,sequence,update,updated_at,updated_by_account_id`,
+    [noteId, Buffer.from(update), note.created_by_account_id, note.created_at])).rows[0];
+  }
+
+  async #ensureCollaborationSchema(client: PoolClient): Promise<void> {
+    await this.#ensureNoteSchema(client);
+    await client.query(`CREATE TABLE IF NOT EXISTS stash_note_collaboration(
+      note_id uuid PRIMARY KEY REFERENCES stash_notes(id) ON DELETE CASCADE,sequence bigint NOT NULL CHECK(sequence>=0),
+      update bytea NOT NULL,updated_by_account_id uuid NOT NULL REFERENCES stash_accounts(id),updated_at timestamptz NOT NULL DEFAULT now())`);
+    await client.query(`CREATE TABLE IF NOT EXISTS stash_note_collaboration_activity(
+      note_id uuid NOT NULL REFERENCES stash_notes(id) ON DELETE CASCADE,sequence bigint NOT NULL,
+      actor_account_id uuid NOT NULL REFERENCES stash_accounts(id),update_bytes integer NOT NULL CHECK(update_bytes>0),
+      occurred_at timestamptz NOT NULL DEFAULT now(),PRIMARY KEY(note_id,sequence))`);
   }
 }
 
