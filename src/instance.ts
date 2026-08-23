@@ -11,8 +11,7 @@ import { diagnosticsAdminRoute, diagnosticsSchemaRoute } from "./diagnostics-rou
 import { createDiagnostics, type Diagnostics } from "./diagnostics.js";
 import { json, requireInstanceAdministrator } from "./http-routing.js";
 import { instanceAdminRoute } from "./instance-route.js";
-import { noteEditorRoute, noteLibraryRoute, noteRoutes } from "./note-routes.js";
-import { noteEditorAssetRoute } from "./note-editor-assets.js";
+import { noteRoutes } from "./note-routes.js";
 import type { NoteService } from "./notes.js";
 import type { OwnerBootstrapService } from "./owner-bootstrap.js";
 import { organizationRoleRoutes } from "./organization-role-routes.js";
@@ -48,7 +47,6 @@ import { portableWorkspaceImportRoute } from "./portable-workspace-import-route.
 import type { PortableWorkspaceImportService } from "./portable-workspace-import.js";
 import { boardRoutes } from "./board-routes.js";
 import type { BoardService } from "./boards.js";
-import { boardSurfaceRoute } from "./board-surface.js";
 import { noteLinkRoutes } from "./note-link-routes.js";
 import type { NoteLinkService } from "./note-links.js";
 import { activityRoutes } from "./activity-routes.js";
@@ -145,21 +143,6 @@ export interface InstanceOptions {
   instanceUpgrades?: InstanceUpgradeService;
 }
 
-const browserSurface = `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Stash</title>
-    <style>
-      :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
-      body { display: grid; min-height: 100vh; margin: 0; place-items: center; }
-      main { max-width: 38rem; padding: 2rem; }
-    </style>
-  </head>
-  <body><main><h1>Stash</h1><p>This Instance is running.</p></main></body>
-</html>`;
-
 const webContentTypes: Record<string, string> = {
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
@@ -249,10 +232,6 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
       { ...(options.notes ? { notes: options.notes } : {}), ...(options.tasks ? { tasks: options.tasks } : {}) })] : []),
   ] : [];
   const applicationRoutes = [
-    boardSurfaceRoute(),
-    noteEditorAssetRoute(),
-    noteEditorRoute(),
-    noteLibraryRoute(),
     ...(options.oidcManagement && options.passwordAuth ? [oidcManagementRoute(options.oidcManagement, options.passwordAuth)] : []),
     ...(options.oidcAuth && oidcCallbackOrigin ? [oidcAuthRoute(options.oidcAuth, oidcCallbackOrigin)] : []),
     ...(options.accountRecovery && options.passwordAuth ? [accountRecoveryRoute(options.accountRecovery, {
@@ -301,12 +280,6 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
 
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://stash.invalid");
-
-    if (request.method === "GET" && url.pathname === "/" && !options.webClientRoot) {
-      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      response.end(browserSurface);
-      return;
-    }
 
     if (request.method === "GET" && url.pathname === "/health/live") {
       json(response, 200, { status: "ok" });

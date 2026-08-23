@@ -8,6 +8,6 @@ The mobile application uses Expo and React Native. It shares domain types, API c
 
 Client unit and integration tests use Vitest and Testing Library. Browser acceptance uses Playwright against a running Stash Instance, with axe checks and explicit keyboard, focus, error-recovery, and reduced-motion coverage. Server packages may retain focused server-side tests, but server protocol tests do not substitute for browser acceptance of a Member-facing capability.
 
-Migration proceeds incrementally behind stable API boundaries. Transitional server-rendered surfaces remain available until the React application proves behavioral and permission parity through browser acceptance; only then may the corresponding transitional code be deleted.
+Migration proceeded incrementally behind stable API boundaries. React browser acceptance now covers the replaced behavior, so the Vite build is the only browser surface and the server retains only its asset host, SPA fallback, APIs, health/operational endpoints, and intentionally non-UI protocols.
 
 This decision supersedes any implementation direction inferred from the initial minimal operator page. ADR-0013 continues to define web and mobile as the primary clients; this ADR fixes their implementation architecture.
