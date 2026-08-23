@@ -34,6 +34,7 @@ import type { PortableWorkspaceExportRepository, PortableWorkspaceExportSnapshot
 import type { Board, BoardRepository, BoardTask } from "./boards.js";
 import type { NoteLinkRecord, NoteLocationRecord, PortableNoteLinkStateProjection, PortableNoteLocationProjection } from "./note-links.js";
 import type { ActivityCause, ActivityRecord, ActivityRepository, NoteHistoryRevision } from "./activity.js";
+import type { DevelopmentArtifact, GitHubArtifactRepository } from "./github-artifacts.js";
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
@@ -123,6 +124,7 @@ export class PostgresDatabase implements
   MemberLocalizationRepository,
   InvitationRepository,
   RepositoryConnectionRepository,
+  GitHubArtifactRepository,
   TaskFromBlockRepository,
   TaskPlanningRepository,
   StructuredTaskEditRepository,
@@ -2049,6 +2051,38 @@ export class PostgresDatabase implements
     return result.rows.map(repositoryConnectionRecord);
   }
 
+  async resolveTask(memberId: string, projectId: string, taskKey: string) {
+    const result = await this.findTaskByKey(memberId, projectId, taskKey);
+    return result.status === "found" ? { id: result.task.id, key: result.task.key, title: result.task.title } : undefined;
+  }
+
+  async resolveConnection(memberId: string, projectId: string, connectionId: string) {
+    await this.#ensureRepositoryConnectionSchema();
+    const result = await this.#pool.query<RepositoryConnectionRow>(`${repositoryConnectionSelect}
+      JOIN stash_repository_connection_projects selected ON selected.connection_id = connection.id AND selected.project_id = $2
+      JOIN stash_projects project ON project.id = selected.project_id
+      JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
+      WHERE connection.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $3)
+        OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $3)))`, [connectionId, projectId, memberId]);
+    const row = result.rows[0];
+    return row ? { installationId: Number(row.installation_id), repositoryId: row.repository_id, repositoryUrl: row.repository_url } : undefined;
+  }
+
+  async linkArtifact(memberId: string, projectId: string, taskKey: string, artifact: DevelopmentArtifact) {
+    const current = await this.findTaskByKey(memberId, projectId, taskKey);
+    if (current.status !== "found") return "forbidden" as const;
+    const links = current.task.developmentLinks ?? [];
+    const updated = await this.updateTaskByKey(memberId, projectId, taskKey, { developmentLinks: links.some(({ url }) => url === artifact.url)
+      ? links : [...links, { provider: "github", kind: artifact.kind, url: artifact.url }] });
+    return updated.status === "updated" ? "linked" as const : "forbidden" as const;
+  }
+
+  async listArtifacts(memberId: string, projectId: string, taskKey: string) {
+    const current = await this.findTaskByKey(memberId, projectId, taskKey);
+    if (current.status !== "found") return undefined;
+    return (current.task.developmentLinks ?? []).flatMap(({ url }) => developmentArtifactFromUrl(url));
+  }
+
   async attachRepositoryConnectionToProject(actorId: string, organizationId: string, connectionId: string, projectId: string) {
     await this.#ensureRepositoryConnectionSchema();
     return this.#withTransaction(async (client) => {
@@ -3546,6 +3580,14 @@ function attachmentRecord(row: AttachmentRow): AttachmentRecord {
 }
 function repositoryConnectionRecord(row: RepositoryConnectionRow): RepositoryConnectionRecord {
   return { id: row.id, organizationId: row.organization_id, provider: row.provider, installationId: Number(row.installation_id), repositoryId: row.repository_id, repositoryUrl: row.repository_url, createdByMemberId: row.created_by_account_id, createdByAttribution: row.created_by_attribution, projectIds: row.project_ids };
+}
+function developmentArtifactFromUrl(value: string): DevelopmentArtifact[] {
+  try {
+    const url = new URL(value); if (url.protocol !== "https:" || url.hostname !== "github.com") return [];
+    const match = url.pathname.match(/^\/[^/]+\/[^/]+\/(tree|commit|pull)\/(.+)$/); if (!match) return [];
+    const kind = match[1] === "tree" ? "branch" : match[1] === "commit" ? "commit" : "pull_request";
+    const label = decodeURIComponent(match[2]!); return [{ kind, providerId: label, label, url: value }];
+  } catch { return []; }
 }
 
 function triageObjectKind(result: NoteTriageResult): "Task" | "NoteLink" | "Note" {

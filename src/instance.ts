@@ -49,6 +49,8 @@ import { noteLinkRoutes } from "./note-link-routes.js";
 import type { NoteLinkService } from "./note-links.js";
 import { activityRoutes } from "./activity-routes.js";
 import type { ActivityService } from "./activity.js";
+import { githubArtifactRoutes } from "./github-artifact-routes.js";
+import type { GitHubArtifactService } from "./github-artifacts.js";
 
 export interface DatabaseProbe {
   verifyConnection(): Promise<void>;
@@ -90,6 +92,7 @@ export interface InstanceOptions {
   boards?: BoardService;
   noteLinks?: NoteLinkService;
   activities?: ActivityService;
+  githubArtifacts?: GitHubArtifactService;
 }
 
 const browserSurface = `<!doctype html>
@@ -196,6 +199,8 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
     ...(options.repositoryConnections && (options.memberAccess ?? options.passwordAuth)
       ? [repositoryConnectionRoutes(options.repositoryConnections, (options.memberAccess ?? options.passwordAuth)!)]
       : []),
+    ...(options.githubArtifacts && (options.memberAccess ?? options.passwordAuth)
+      ? [githubArtifactRoutes(options.githubArtifacts, (options.memberAccess ?? options.passwordAuth)!)] : []),
   ];
 
   const server = createServer(async (request, response) => {
