@@ -37,7 +37,7 @@ const taskKeySchema = { type: "string", pattern: "^[A-Za-z][A-Za-z0-9-]{1,19}-[1
 const toolSchemas: Record<AgentGrantCapability, object> = {
   "note.read": { type: "object", additionalProperties: false, properties: { noteId: uuidSchema }, required: ["noteId"] },
   "note.write": { type: "object", additionalProperties: false, properties: { workspaceId: uuidSchema, projectId: uuidSchema,
-    input: { type: "object", additionalProperties: false, properties: { content: { type: "string" }, templateId: { type: "string" }, projectId: uuidSchema,
+    input: { type: "object", additionalProperties: false, properties: { content: { type: "string" }, templateId: { type: "string" },
       tags: { type: "array", items: { type: "string" } }, reminder: { type: "object", additionalProperties: false, properties: { at: { type: "string" } }, required: ["at"] } } } }, required: ["workspaceId", "input"] },
   "task.read": { type: "object", additionalProperties: false, properties: { projectId: uuidSchema, taskKey: taskKeySchema }, required: ["projectId", "taskKey"] },
   "task.write": { type: "object", additionalProperties: false, properties: { projectId: uuidSchema, taskKey: taskKeySchema,
@@ -86,18 +86,19 @@ function matchesSchema(schema: JsonSchema, value: unknown): boolean {
 }
 function plain(value: unknown): value is Record<string, unknown> { return Boolean(value && typeof value === "object" && !Array.isArray(value)); }
 function validProjectScope(grant: AgentGrant, capability: string, args: unknown): boolean { if (!grant.projectId || capability === "note.read") return true; if (!args || typeof args !== "object") return false;
-  const input = args as any; return input.projectId === grant.projectId || input.input?.projectId === grant.projectId; }
+  return (args as { projectId?: unknown }).projectId === grant.projectId; }
 async function executeDirect(grant: AgentGrant, capability: string, args: unknown, domain: McpDomainServices): Promise<unknown> {
   if (!args || typeof args !== "object") throw new Error("invalid"); const input = args as any;
   const cause = { kind: "agent" as const, agentGrantId: grant.id, sponsoringMemberId: grant.sponsoringMemberId, agentName: grant.name };
   if (capability === "note.read") { const note = await domain.notes?.get(grant.sponsoringMemberId, input.noteId); if (grant.projectId && note?.projectId !== grant.projectId) return undefined; return note; }
-  if (capability === "note.write") return domain.notes?.capture(grant.sponsoringMemberId, input.workspaceId, input.input, cause);
+  if (capability === "note.write") return domain.notes?.capture(grant.sponsoringMemberId, input.workspaceId,
+    { ...input.input, ...(input.projectId ? { projectId: input.projectId } : {}) }, cause);
   if (capability === "task.read") return domain.tasks?.findByKey(grant.sponsoringMemberId, input.projectId, input.taskKey);
   if (capability === "task.write") return domain.tasks?.updateByKey(grant.sponsoringMemberId, input.projectId, input.taskKey, input.input, cause);
   throw new Error("unsupported");
 }
 function targetFrom(value: unknown): { workspaceId?: string; projectId?: string } { if (!value || typeof value !== "object") return {};
   const item = value as any; return { ...(typeof item.workspaceId === "string" ? { workspaceId: item.workspaceId } : {}),
-    ...(typeof item.projectId === "string" ? { projectId: item.projectId } : typeof item.input?.projectId === "string" ? { projectId: item.input.projectId } : {}) }; }
+    ...(typeof item.projectId === "string" ? { projectId: item.projectId } : {}) }; }
 function rpc(response: Parameters<typeof json>[0], id: string | number | null, result?: object, error?: object) { json(response, 200, { jsonrpc: "2.0", id, ...(result ? { result } : {}), ...(error ? { error } : {}) }); }
 function isRequest(value: unknown): value is { jsonrpc: "2.0"; id: string | number; method: string; params?: unknown } { return Boolean(value && typeof value === "object" && (value as any).jsonrpc === "2.0" && ["string", "number"].includes(typeof (value as any).id) && typeof (value as any).method === "string"); }

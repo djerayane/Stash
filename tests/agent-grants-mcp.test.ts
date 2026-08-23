@@ -71,13 +71,30 @@ describe("Agent Grants and MCP", () => {
 
   it("applies Direct writes through the sponsoring Member domain service and enforces Project scope before effects", async () => {
     const repository = await run(); const projectId = "44444444-4444-4444-8444-444444444444"; const { body } = await issue([{ capability: "note.write", mode: "direct" }], "member-session", projectId);
-    const call = (requestedProjectId: string, workspaceId = "55555555-5555-4555-8555-555555555555") => fetch(`${instance!.url}/mcp`, { method: "POST", headers: { authorization: `Bearer ${body.token}`, "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "stash.note.write", arguments: { projectId: requestedProjectId, workspaceId, input: { content: "Agent contribution", projectId: requestedProjectId } } } }) });
+    const call = (requestedProjectId: string, workspaceId = "55555555-5555-4555-8555-555555555555", nestedProjectId?: string) => fetch(`${instance!.url}/mcp`, { method: "POST", headers: { authorization: `Bearer ${body.token}`, "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "stash.note.write", arguments: { projectId: requestedProjectId, workspaceId, input: { content: "Agent contribution", ...(nestedProjectId ? { projectId: nestedProjectId } : {}) } } } }) });
+    assert.equal((await (await call(projectId, undefined, "66666666-6666-4666-8666-666666666666")).json() as any).error.code, -32602); assert.equal(repository.directWrites.length, 0);
     assert.equal((await (await call("66666666-6666-4666-8666-666666666666")).json() as any).error.code, -32003); assert.equal(repository.directWrites.length, 0);
     assert.equal((await (await call(projectId, "77777777-7777-4777-8777-777777777777")).json() as any).error.code, -32003); assert.equal(repository.directWrites.length, 0);
+    const omitted = await fetch(`${instance!.url}/mcp`, { method: "POST", headers: { authorization: `Bearer ${body.token}`, "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "stash.note.write", arguments: { workspaceId: "55555555-5555-4555-8555-555555555555", input: { content: "Workspace-wide attempt" } } } }) });
+    assert.equal((await omitted.json() as any).error.code, -32003); assert.equal(repository.directWrites.length, 0);
     const accepted = await call(projectId); assert.equal((await accepted.json() as any).result.structuredContent.result.status, "created");
     const cause = { kind: "agent", agentGrantId: body.grant.id, sponsoringMemberId: "member", agentName: "Planning assistant" };
     assert.deepEqual(repository.directWrites[0], { memberId: "member", workspaceId: "55555555-5555-4555-8555-555555555555", input: { content: "Agent contribution", projectId }, cause });
     assert.deepEqual(repository.activities, [{ actor: "member", cause }]); assert.deepEqual(repository.operatorAudit, [{ action: "agent_note_created", actor: "member", cause }]);
+  });
+
+  it("uses one authoritative Project for scoped Proposals without side effects", async () => {
+    const repository = await run(); const projectId = "44444444-4444-4444-8444-444444444444"; const { body } = await issue([{ capability: "note.write", mode: "propose" }], "member-session", projectId);
+    const invoke = (argumentsValue: unknown) => fetch(`${instance!.url}/mcp`, { method: "POST", headers: { authorization: `Bearer ${body.token}`, "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "stash.note.write", arguments: argumentsValue } }) });
+    const mismatch = await invoke({ projectId, workspaceId: "55555555-5555-4555-8555-555555555555", input: { content: "Mismatch", projectId: "66666666-6666-4666-8666-666666666666" } });
+    assert.equal((await mismatch.json() as any).error.code, -32602); assert.equal(repository.proposals.length, 0); assert.equal(repository.directWrites.length, 0);
+    const crossProject = await invoke({ projectId: "66666666-6666-4666-8666-666666666666", workspaceId: "55555555-5555-4555-8555-555555555555", input: { content: "Cross Project" } });
+    assert.equal((await crossProject.json() as any).error.code, -32003); assert.equal(repository.proposals.length, 0);
+    const omitted = await invoke({ workspaceId: "55555555-5555-4555-8555-555555555555", input: { content: "No Project" } });
+    assert.equal((await omitted.json() as any).error.code, -32003); assert.equal(repository.proposals.length, 0);
+    const accepted = await invoke({ projectId, workspaceId: "55555555-5555-4555-8555-555555555555", input: { content: "Review this" } });
+    assert.equal((await accepted.json() as any).result.structuredContent.status, "pending"); assert.equal(repository.proposals.length, 1);
+    assert.deepEqual(repository.proposals[0]?.input, { projectId, workspaceId: "55555555-5555-4555-8555-555555555555", input: { content: "Review this" } }); assert.equal(repository.directWrites.length, 0);
   });
 
   it("enforces sponsorship, validation, expiry, and immediate revocation without leaking credentials", async () => {
