@@ -22,7 +22,11 @@ test("the approved clients and focused shared packages form a pnpm workspace", a
   const rootPackage = await json("package.json");
   assert.match(String(rootPackage.packageManager), /^pnpm@/);
   assert.deepEqual(Object.keys(rootPackage.scripts as object).filter((name) => ["build", "check", "test"].includes(name)).sort(), ["build", "check", "test"]);
-  assert.match(String((rootPackage.scripts as Record<string, string>).pretest), /@stash\/sync.*build/, "tests must build their generated sync runtime from a clean checkout");
+  assert.equal(
+    (rootPackage.scripts as Record<string, string>).pretest,
+    "pnpm --filter @stash/sync... build",
+    "tests must build the sync runtime and its transitive workspace dependencies from a clean checkout",
+  );
 
   const readme = await readFile(new URL("README.md", root), "utf8");
   assert.doesNotMatch(readme, /\bnpm (?:ci|install|run|test)\b|package-lock\.json/);

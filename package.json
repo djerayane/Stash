@@ -12,7 +12,7 @@
     "check": "pnpm run check:server && pnpm --recursive --if-present check",
     "check:server": "tsc --noEmit",
     "start": "node dist/main.js",
-    "pretest": "pnpm --filter @stash/sync build",
+    "pretest": "pnpm --filter @stash/sync... build",
     "test": "pnpm run test:server && pnpm --recursive --if-present test",
     "test:unit": "pnpm --filter @stash/web exec vitest run --exclude '**/*.integration.test.*'",
     "test:integration": "pnpm --filter @stash/web run test:integration",
