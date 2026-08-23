@@ -43,6 +43,9 @@ export class InvalidPortableWorkspaceImport extends Error {}
 export class PortableWorkspaceImportTooLarge extends Error {}
 export class UnsupportedPortableWorkspaceImport extends Error {}
 
+/** Every published schema remains listed here and covered by import acceptance tests. */
+export const publishedPortableWorkspaceExportSchemas = ["stash.portable-workspace-export.v1"] as const;
+
 interface Entry { path: string; content: Buffer }
 interface Manifest { schema: string; workspace: unknown; files: Array<{ path: string; bytes: number; sha256: string }> }
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -384,7 +387,8 @@ export class PortableWorkspaceImportService {
     const entries = unzipStored(archive, this.limits); const files = new Map(entries.map((entry) => [entry.path, entry.content]));
     const manifestContent = files.get("manifest.json"); if (!manifestContent) throw new InvalidPortableWorkspaceImport("missing_manifest");
     let manifest: Manifest; try { manifest = JSON.parse(manifestContent.toString("utf8")) as Manifest; } catch { throw new InvalidPortableWorkspaceImport("invalid_manifest"); }
-    if (!object(manifest) || manifest.schema !== "stash.portable-workspace-export.v1" || !Array.isArray(manifest.files)) throw new UnsupportedPortableWorkspaceImport("unsupported_schema");
+    if (!object(manifest) || typeof manifest.schema !== "string" || !(publishedPortableWorkspaceExportSchemas as readonly string[]).includes(manifest.schema)
+      || !Array.isArray(manifest.files)) throw new UnsupportedPortableWorkspaceImport("unsupported_schema");
     const declared = new Set<string>();
     for (const entry of manifest.files) {
       if (!object(entry) || typeof entry.path !== "string" || !safePath(entry.path) || entry.path === "manifest.json"

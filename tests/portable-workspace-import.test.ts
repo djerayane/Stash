@@ -9,7 +9,7 @@ import { Pool } from "pg";
 
 import { startInstance } from "../src/instance.js";
 import { PortableWorkspaceExportService, type PortableWorkspaceExportSnapshot } from "../src/portable-workspace-export.js";
-import { PortableWorkspaceImportService, type PortableWorkspaceImportBundle, type PortableWorkspaceImportReport, type PortableWorkspaceImportRepository } from "../src/portable-workspace-import.js";
+import { PortableWorkspaceImportService, publishedPortableWorkspaceExportSchemas, type PortableWorkspaceImportBundle, type PortableWorkspaceImportReport, type PortableWorkspaceImportRepository } from "../src/portable-workspace-import.js";
 import { LocalAttachmentStorage } from "../src/attachments.js";
 import { PostgresDatabase } from "../src/postgres-database.js";
 import { createAuthenticationSecretCodec } from "../src/authentication-secrets.js";
@@ -83,6 +83,9 @@ function storedFiles(archive: Buffer): Map<string, Buffer> {
 }
 
 describe("Portable Workspace import", () => {
+  it("keeps every published Portable Workspace Export schema in the compatibility registry", () => {
+    assert.deepEqual(publishedPortableWorkspaceExportSchemas, ["stash.portable-workspace-export.v1"]);
+  });
   it("round-trips canonical semantics and Attachment bytes through a running Instance, preserving missing people as Identity Stubs", async () => {
     const repository = new ImportMemory(); const database = { async verifyConnection() {}, async close() {} };
     const instance = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin",
