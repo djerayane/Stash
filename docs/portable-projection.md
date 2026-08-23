@@ -100,6 +100,21 @@ New statuses receive their identity at the domain boundary. Each successful repl
 projection revisions in the same transaction, ensuring Task Markdown metadata reflects renamed or
 recategorized statuses without changing Task-to-status references.
 
+## `stash.board.v1`
+
+A Board is a persisted Project view over canonical Tasks, never a container that owns Task copies.
+Its projection records the stable Board and Project identities, display name, supported grouping
+(`status` or `priority`), and creation time. Portable Workspace Exports write each visible projection
+as deterministic JSON at `boards/<board-id>.json`; checksums and ZIP/ZIP64 preflight treat these
+entries exactly like the other exported files. Project Guests receive only Boards for Projects
+explicitly shared with them.
+
+Moving a Task through a status-grouped Board changes its canonical Workflow status and advances the
+Task revision plus the `statusId` field revision in the same locked transaction. Consequently, a
+stale structured status contribution is preserved as a conflict rather than overwriting the Board
+move. Priority-grouped Boards are read-only views; clients receive an explicit unsupported-group
+response instead of an implied Task mutation.
+
 The outbox envelope stores `object_kind`, `object_id`, `revision`, `projection_schema`, the JSON
 `payload`, creation time, and processing `state`. Consumers select the format using
 `projection_schema`; they must not infer a payload version from the database table layout.

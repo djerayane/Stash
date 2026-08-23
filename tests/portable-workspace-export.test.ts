@@ -20,6 +20,7 @@ import {
 import type { MemberAccessResolver } from "../src/workspaces-projects.js";
 import { WorkspaceProjectService } from "../src/workspaces-projects.js";
 import { TaskService } from "../src/tasks.js";
+import { BoardService } from "../src/boards.js";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const secretWorkspaceId = "99999999-9999-4999-8999-999999999999";
@@ -37,6 +38,8 @@ const snapshot: PortableWorkspaceExportSnapshot = {
     linkedNoteIds: ["22222222-2222-4222-8222-222222222222"], labelNames: ["hardware"], priority: "high", dueDate: "2026-02-05", estimate: 3,
     dependencies: [{ taskId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", type: "depends_on" }],
     developmentLinks: [{ provider: "github", kind: "pull_request", url: "https://github.example/p/7" }], createdAt: "2026-01-03T00:00:00.000Z", createdBy: actor }],
+  boards: [{ schema: "stash.board.v1", id: "12121212-1212-4212-8212-121212121212", projectId: "33333333-3333-4333-8333-333333333333",
+    name: "Delivery", groupBy: "status", createdAt: "2026-01-03T01:00:00.000Z" }],
   attachments: [{ projection: { schema: "stash.attachment.v1", id: "44444444-4444-4444-8444-444444444444", workspaceId,
     filename: "design v2.png", contentType: "image/png", size: 7, relativePath: "./attachments/44444444-4444-4444-8444-444444444444/design%20v2.png", source: "upload", createdAt: "2026-01-04T00:00:00.000Z", createdBy: actor }, content: Buffer.from([0, 1, 2, 3, 255, 4, 5]) }],
 };
@@ -78,7 +81,8 @@ describe("readable Portable Workspace Export", () => {
     assert.match(first.headers.get("content-disposition") ?? "", /stash-workspace-11111111.*\.zip/);
     const archive = Buffer.from(await first.arrayBuffer()); const files = unzipStored(archive);
     assert.deepEqual([...files.keys()], [
-      "README.md", "attachments/44444444-4444-4444-8444-444444444444/design%20v2.png", "manifest.json",
+      "README.md", "attachments/44444444-4444-4444-8444-444444444444/design%20v2.png",
+      "boards/12121212-1212-4212-8212-121212121212.json", "manifest.json",
       "notes/22222222-2222-4222-8222-222222222222.md", "tasks/LAB-7--55555555-5555-4555-8555-555555555555.md",
     ]);
     assert.deepEqual(files.get("attachments/44444444-4444-4444-8444-444444444444/design%20v2.png"), snapshot.attachments[0]!.content);
@@ -90,6 +94,7 @@ describe("readable Portable Workspace Export", () => {
       const separator = line.indexOf(": "); return [line.slice(0, separator), JSON.parse(line.slice(separator + 2)) as unknown];
     }));
     assert.deepEqual(taskMetadata, snapshot.tasks[0]);
+    assert.deepEqual(JSON.parse(files.get("boards/12121212-1212-4212-8212-121212121212.json")!.toString()), snapshot.boards[0]);
     const manifest = JSON.parse(files.get("manifest.json")!.toString()) as { schema: string; workspace: object; files: Array<{ path: string; sha256: string; bytes: number }> };
     assert.equal(manifest.schema, "stash.portable-workspace-export.v1"); assert.deepEqual(manifest.workspace, snapshot.workspace);
     assert.equal(manifest.files.some(({ path }) => path === "manifest.json"), false);
@@ -138,8 +143,8 @@ describe("readable Portable Workspace Export", () => {
     const { archive } = outcome; const classicEnd = archive.length - 22; const locator = classicEnd - 20; const zip64End = locator - 56;
     assert.equal(archive.readUInt32LE(classicEnd), 0x06054b50); assert.equal(archive.readUInt16LE(classicEnd + 8), 0xffff);
     assert.equal(archive.readUInt32LE(locator), 0x07064b50); assert.equal(Number(archive.readBigUInt64LE(locator + 8)), zip64End);
-    assert.equal(archive.readUInt32LE(zip64End), 0x06064b50); assert.equal(archive.readBigUInt64LE(zip64End + 24), 65_536n);
-    assert.equal(archive.readBigUInt64LE(zip64End + 32), 65_536n);
+    assert.equal(archive.readUInt32LE(zip64End), 0x06064b50); assert.equal(archive.readBigUInt64LE(zip64End + 24), 65_537n);
+    assert.equal(archive.readBigUInt64LE(zip64End + 32), 65_537n);
     const directoryOffset = Number(archive.readBigUInt64LE(zip64End + 48));
     assert.equal(archive.readUInt32LE(directoryOffset), 0x02014b50);
   });
@@ -185,6 +190,10 @@ describe("PostgreSQL readable export wiring", { skip: postgresUrl ? false : "STA
         { projectId: firstProject.project.id, title: "Visible Task" });
       await tasks.createFromBlock(ownerId, privateNote.note.id, privateBlockKey,
         { projectId: secondProject.project.id, title: "Private Task" });
+      const boards = new BoardService(database);
+      const visibleBoard = await boards.create(ownerId, firstProject.project.id, { name: "Visible board", groupBy: "status" });
+      const privateBoard = await boards.create(ownerId, secondProject.project.id, { name: "Private board", groupBy: "priority" });
+      assert.equal(visibleBoard.status, "created"); assert.equal(privateBoard.status, "created");
       const setup = new Pool({ connectionString: `${connectionString}${separator}options=-csearch_path%3D${schema}` });
       await setup.query("INSERT INTO stash_accounts (id,name,email,password_hash) VALUES ($1,'Grace','grace@example.test','test')", [guestId]);
       await setup.query("INSERT INTO stash_project_guests (project_id,account_id) VALUES ($1,$2)", [firstProject.project.id, guestId]);
@@ -197,10 +206,13 @@ describe("PostgreSQL readable export wiring", { skip: postgresUrl ? false : "STA
         { headers: { authorization: "Bearer owner" } })).arrayBuffer()));
       assert.equal([...ownerFiles.keys()].filter((path) => path.startsWith("notes/")).length, 2);
       assert.equal([...ownerFiles.keys()].filter((path) => path.startsWith("tasks/")).length, 2);
+      assert.equal([...ownerFiles.keys()].filter((path) => path.startsWith("boards/")).length, 2);
       const guestFiles = unzipStored(Buffer.from(await (await fetch(`${running.url}/api/workspaces/${createdWorkspace.workspace.id}/export`,
         { headers: { authorization: "Bearer guest" } })).arrayBuffer()));
       assert.equal([...guestFiles.keys()].filter((path) => path.startsWith("notes/")).length, 1);
       assert.equal([...guestFiles.keys()].filter((path) => path.startsWith("tasks/")).length, 1);
+      assert.equal([...guestFiles.keys()].filter((path) => path.startsWith("boards/")).length, 1);
+      assert.equal([...guestFiles.values()].some((value) => value.includes("Private board")), false);
       assert.equal([...guestFiles.values()].some((value) => value.includes("Private roadmap")), false);
       assert.deepEqual(guestFiles.get(uploaded.record.relativePath.slice(2)), Buffer.from([9, 8, 7, 6]));
       const corrupt = new Pool({ connectionString: `${connectionString}${separator}options=-csearch_path%3D${schema}` });

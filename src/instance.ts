@@ -42,6 +42,9 @@ import { projectWorkflowRoutes } from "./project-workflow-routes.js";
 import type { ProjectWorkflowService } from "./project-workflows.js";
 import { portableWorkspaceExportRoute } from "./portable-workspace-export-route.js";
 import type { PortableWorkspaceExportService } from "./portable-workspace-export.js";
+import { boardRoutes } from "./board-routes.js";
+import type { BoardService } from "./boards.js";
+import { boardSurfaceRoute } from "./board-surface.js";
 
 export interface DatabaseProbe {
   verifyConnection(): Promise<void>;
@@ -80,6 +83,7 @@ export interface InstanceOptions {
   discussions?: DiscussionService;
   projectWorkflows?: ProjectWorkflowService;
   portableWorkspaceExports?: PortableWorkspaceExportService;
+  boards?: BoardService;
 }
 
 const browserSurface = `<!doctype html>
@@ -124,6 +128,7 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
   diagnostics.record({ kind: "instance_started", occurredAt: new Date().toISOString() });
   const acceleration = options.acceleration ?? createOptionalRedisAcceleration();
   const routes = [
+    boardSurfaceRoute(),
     noteEditorAssetRoute(),
     noteEditorRoute(),
     ...(options.memberLocalization && (options.memberAccess ?? options.passwordAuth)
@@ -166,6 +171,8 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
     ...(options.projectWorkflows && (options.memberAccess ?? options.passwordAuth)
       ? [projectWorkflowRoutes(options.projectWorkflows, (options.memberAccess ?? options.passwordAuth)!)]
       : []),
+    ...(options.boards && (options.memberAccess ?? options.passwordAuth)
+      ? [boardRoutes(options.boards, (options.memberAccess ?? options.passwordAuth)!)] : []),
     ...(options.attachments && (options.memberAccess ?? options.passwordAuth)
       ? [attachmentRoutes(options.attachments, (options.memberAccess ?? options.passwordAuth)!)] : []),
     ...(options.mobileCaptures && (options.memberAccess ?? options.passwordAuth)
