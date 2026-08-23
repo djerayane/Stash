@@ -16,7 +16,7 @@ export type ActivityCause =
   | { readonly kind: "member"; readonly restorationOfRevision?: number; readonly automationId?: string; readonly signalId?: string }
   | { readonly kind: "automation"; readonly automationId: string; readonly signalId?: string }
   | { readonly kind: "signal"; readonly signalId: string }
-  | { readonly kind: "agent"; readonly agentGrantId: string; readonly sponsoringMemberId: string }
+  | { readonly kind: "agent"; readonly agentGrantId: string; readonly sponsoringMemberId: string; readonly agentName?: string }
   | { readonly kind: "migration"; readonly source: "existing_note" };
 export interface ActivityRecord {
   readonly schema: "stash.activity.v1";

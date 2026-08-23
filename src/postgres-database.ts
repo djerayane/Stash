@@ -444,6 +444,7 @@ export class PostgresDatabase implements
     memberId: string,
     note: NoteRecord,
     projection: PortableNoteProjection,
+    cause: ActivityCause = { kind: "member" },
   ): Promise<"created" | "workspace_forbidden" | "project_forbidden"> {
     return this.#withTransaction(async (client) => {
       await this.#ensureNoteSchema(client);
@@ -486,7 +487,8 @@ export class PostgresDatabase implements
       );
       await this.#recordInitialNoteLocation(client, note.id, note.workspaceId);
       await this.#recordPortableProjection(client, "Note", note.id, "stash.note.v1", projection);
-      await this.#recordNoteRevisionAndActivity(client, memberId, undefined, note, "note_created", { kind: "member" });
+      await this.#recordNoteRevisionAndActivity(client, memberId, undefined, note, "note_created", cause);
+      if (cause.kind === "agent") await this.#recordAgentExecutionAudit(client, memberId, note.workspaceId, "agent_note_created", note.id, cause);
       return "created";
     });
   }
@@ -1297,7 +1299,7 @@ export class PostgresDatabase implements
     });
   }
 
-  async updateTaskByKey(memberId: string, projectId: string, taskKey: string, update: TaskPlanningUpdate) {
+  async updateTaskByKey(memberId: string, projectId: string, taskKey: string, update: TaskPlanningUpdate, cause: ActivityCause = { kind: "member" }) {
     return this.#withTransaction(async (client) => {
       await this.#ensureNoteSchema(client);
       await this.#ensureInvitationSchema(client);
@@ -1376,7 +1378,8 @@ export class PostgresDatabase implements
       const task = taskPlanningReadModelFromRow(saved.rows[0]);
       await this.#recordPortableProjection(client, "Task", task.id, task.schema, taskProjectionFromRow(saved.rows[0]));
       const beforeTask = taskPlanningReadModelFromRow(row);
-      const activity = await this.#recordTaskActivity(client, memberId, task.workspaceId, task.id, "task_planning_updated", beforeTask, task);
+      const activity = await this.#recordTaskActivity(client, memberId, task.workspaceId, task.id, "task_planning_updated", beforeTask, task, cause);
+      if (cause.kind === "agent") await this.#recordAgentExecutionAudit(client, memberId, task.workspaceId, "agent_task_updated", task.id, cause);
       await this.#recordAssignmentNotifications(client, projectId, activity, beforeTask, task);
       for (const affectedId of (row.affected_dependency_task_ids ?? []).filter((id: string) => id !== task.id)) {
         const affectedBefore = await client.query<any>(taskPlanningSelectById, [affectedId, memberId]);
@@ -4792,6 +4795,20 @@ export class PostgresDatabase implements
       (id, action, actor_account_id, organization_id, target_account_id, occurred_at, before_state, after_state)
       VALUES ($1,'organization_member_departed',$2,$3,$4,CURRENT_TIMESTAMP,$5::jsonb,$6::jsonb)`,
     [randomUUID(), actorId, organizationId, accountId, JSON.stringify({ role, active: true }), JSON.stringify({ active: false, ...after })]);
+  }
+
+  async #recordAgentExecutionAudit(client: PoolClient, memberId: string, workspaceId: string, action: string,
+    objectId: string, cause: Extract<ActivityCause, { kind: "agent" }>): Promise<void> {
+    await this.#ensureMemberDepartureSchema(client);
+    const organization = await client.query<{ organization_id: string }>(
+      "SELECT organization_owner_id organization_id FROM stash_workspaces WHERE id=$1 AND owner_type='organization'", [workspaceId]);
+    if (!organization.rows[0]) return;
+    await client.query(`INSERT INTO stash_operator_audit
+      (id,action,actor_account_id,organization_id,target_account_id,occurred_at,before_state,after_state)
+      VALUES ($1,$2,$3,$4,$3,CURRENT_TIMESTAMP,$5::jsonb,$6::jsonb)`, [randomUUID(), action, memberId,
+      organization.rows[0].organization_id, JSON.stringify({ authority: "agent_grant", agentGrantId: cause.agentGrantId,
+        sponsoringMemberId: cause.sponsoringMemberId, agentName: cause.agentName ?? null }),
+      JSON.stringify({ objectId, cause: "mcp_direct", attributed: true })]);
   }
 
   async #ensureWorkspaceImportSchema(client: PoolClient): Promise<void> {

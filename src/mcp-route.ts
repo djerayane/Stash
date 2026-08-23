@@ -55,10 +55,11 @@ function validProjectScope(grant: AgentGrant, capability: string, args: unknown)
   const input = args as any; return input.projectId === grant.projectId || input.input?.projectId === grant.projectId; }
 async function executeDirect(grant: AgentGrant, capability: string, args: unknown, domain: McpDomainServices): Promise<unknown> {
   if (!args || typeof args !== "object") throw new Error("invalid"); const input = args as any;
+  const cause = { kind: "agent" as const, agentGrantId: grant.id, sponsoringMemberId: grant.sponsoringMemberId, agentName: grant.name };
   if (capability === "note.read") { const note = await domain.notes?.get(grant.sponsoringMemberId, input.noteId); if (grant.projectId && note?.projectId !== grant.projectId) return undefined; return note; }
-  if (capability === "note.write") return domain.notes?.capture(grant.sponsoringMemberId, input.workspaceId, input.input);
+  if (capability === "note.write") return domain.notes?.capture(grant.sponsoringMemberId, input.workspaceId, input.input, cause);
   if (capability === "task.read") return domain.tasks?.findByKey(grant.sponsoringMemberId, input.projectId, input.taskKey);
-  if (capability === "task.write") return domain.tasks?.updateByKey(grant.sponsoringMemberId, input.projectId, input.taskKey, input.input);
+  if (capability === "task.write") return domain.tasks?.updateByKey(grant.sponsoringMemberId, input.projectId, input.taskKey, input.input, cause);
   throw new Error("unsupported");
 }
 function targetFrom(value: unknown): { workspaceId?: string; projectId?: string } { if (!value || typeof value !== "object") return {};

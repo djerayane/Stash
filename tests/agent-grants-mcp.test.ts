@@ -9,6 +9,8 @@ class RepositoryFake implements AgentGrantRepository {
   grants: StoredAgentGrant[] = [];
   proposals: import("../src/agent-grants.js").AgentProposal[] = [];
   directWrites: unknown[] = [];
+  activities: unknown[] = [];
+  operatorAudit: unknown[] = [];
   async createAgentGrant(actorId: string, grant: StoredAgentGrant) { if (actorId !== "member" || grant.organizationId !== organizationId) return "forbidden" as const; this.grants.push(grant); return "created" as const; }
   async listAgentGrants(actorId: string, organization: string) { return actorId === "member" && organization === organizationId ? this.grants.map(({ tokenLookup: _, tokenHash: __, ...grant }) => grant) : undefined; }
   async revokeAgentGrant(actorId: string, organization: string, id: string) { const grant = this.grants.find((candidate) => candidate.id === id && candidate.organizationId === organization); if (!grant) return "not_found" as const; if (grant.sponsoringMemberId !== actorId) return "forbidden" as const; grant.revokedAt ??= new Date().toISOString(); return "revoked" as const; }
@@ -27,7 +29,9 @@ describe("Agent Grants and MCP", () => {
   async function run(enabled = true) { const repository = new RepositoryFake(); const service = new AgentGrantService(repository, () => new Date("2026-08-23T10:00:00.000Z"));
     instance = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin", memberAccess: access, agentGrants: service, mcpEnabled: enabled,
       notes: { async get(memberId: string, noteId: string) { return memberId === "member" && noteId === "22222222-2222-4222-8222-222222222222" ? { id: noteId, workspaceId: "55555555-5555-4555-8555-555555555555", content: "Authorized context" } : undefined; },
-        async capture(memberId: string, workspaceId: string, input: unknown) { repository.directWrites.push({ memberId, workspaceId, input }); return { status: "created", note: { id: "33333333-3333-4333-8333-333333333333" } }; } } as any }); return repository; }
+        async capture(memberId: string, workspaceId: string, input: unknown, cause: unknown) { repository.directWrites.push({ memberId, workspaceId, input, cause });
+          repository.activities.push({ actor: memberId, cause }); repository.operatorAudit.push({ action: "agent_note_created", actor: memberId, cause });
+          return { status: "created", note: { id: "33333333-3333-4333-8333-333333333333" } }; } } as any }); return repository; }
   async function issue(scopes: Array<{ capability: string; mode: "direct" | "propose" | "deny" }>, session = "member-session", projectId?: string) {
     const response = await fetch(`${instance!.url}/api/v1/organizations/${organizationId}/agent-grants`, { method: "POST", headers: { authorization: `Bearer ${session}`, "content-type": "application/json" },
       body: JSON.stringify({ organizationId, ...(projectId ? { projectId } : {}), name: "Planning assistant", expiresAt: "2026-09-01T10:00:00.000Z", scopes }) });
@@ -61,7 +65,10 @@ describe("Agent Grants and MCP", () => {
     const call = (requestedProjectId: string, workspaceId = "55555555-5555-4555-8555-555555555555") => fetch(`${instance!.url}/mcp`, { method: "POST", headers: { authorization: `Bearer ${body.token}`, "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "stash.note.write", arguments: { projectId: requestedProjectId, workspaceId, input: { content: "Agent contribution", projectId: requestedProjectId } } } }) });
     assert.equal((await (await call("66666666-6666-4666-8666-666666666666")).json() as any).error.code, -32003); assert.equal(repository.directWrites.length, 0);
     assert.equal((await (await call(projectId, "77777777-7777-4777-8777-777777777777")).json() as any).error.code, -32003); assert.equal(repository.directWrites.length, 0);
-    const accepted = await call(projectId); assert.equal((await accepted.json() as any).result.structuredContent.result.status, "created"); assert.deepEqual(repository.directWrites[0], { memberId: "member", workspaceId: "55555555-5555-4555-8555-555555555555", input: { content: "Agent contribution", projectId } });
+    const accepted = await call(projectId); assert.equal((await accepted.json() as any).result.structuredContent.result.status, "created");
+    const cause = { kind: "agent", agentGrantId: body.grant.id, sponsoringMemberId: "member", agentName: "Planning assistant" };
+    assert.deepEqual(repository.directWrites[0], { memberId: "member", workspaceId: "55555555-5555-4555-8555-555555555555", input: { content: "Agent contribution", projectId }, cause });
+    assert.deepEqual(repository.activities, [{ actor: "member", cause }]); assert.deepEqual(repository.operatorAudit, [{ action: "agent_note_created", actor: "member", cause }]);
   });
 
   it("enforces sponsorship, validation, expiry, and immediate revocation without leaking credentials", async () => {
