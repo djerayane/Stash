@@ -77,6 +77,11 @@ export interface ClientSessionPrincipal {
   member: { id: string; name: string; email: string };
   workspace: { id: string; name: string };
   capabilities: string[];
+  organizationAdministration?: {
+    organizationId: string;
+    organizationName: string;
+    members: Array<{ id: string; name: string; email: string; role: "Owner" | "Admin" | "Member" }>;
+  };
 }
 
 export interface RunningInstance {

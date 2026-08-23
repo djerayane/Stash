@@ -2162,8 +2162,27 @@ export class PostgresDatabase implements
         ) workspace ON true
         WHERE account.id=$1`, [accountId]);
       const row = result.rows[0];
-      return row ? { member: { id: row.account_id, name: row.account_name, email: row.account_email },
-        workspace: { id: row.workspace_id, name: row.workspace_name }, capabilities: [] } : undefined;
+      if (!row) return undefined;
+      const administration = await client.query<{ organization_id: string; organization_name: string; member_id: string;
+        member_name: string; member_email: string; member_role: BuiltInOrganizationRole }>(`
+        SELECT organization.id organization_id, organization.name organization_name,
+          member.id member_id, member.name member_name, member.email member_email, membership.role member_role
+        FROM stash_organization_memberships actor_membership
+        JOIN stash_organizations organization ON organization.id=actor_membership.organization_id
+        JOIN stash_organization_memberships membership ON membership.organization_id=organization.id
+        JOIN stash_accounts member ON member.id=membership.account_id
+        WHERE actor_membership.account_id=$1 AND actor_membership.role='Owner'
+        ORDER BY organization.id, member.name, member.id`, [accountId]);
+      const administeredOrganizationId = administration.rows[0]?.organization_id;
+      const eligibleMembers = administration.rows.filter(({ organization_id }) => organization_id === administeredOrganizationId);
+      return { member: { id: row.account_id, name: row.account_name, email: row.account_email },
+        workspace: { id: row.workspace_id, name: row.workspace_name }, capabilities: [],
+        ...(administeredOrganizationId ? { organizationAdministration: {
+          organizationId: administeredOrganizationId,
+          organizationName: eligibleMembers[0]!.organization_name,
+          members: eligibleMembers.map((member) => ({ id: member.member_id, name: member.member_name,
+            email: member.member_email, role: member.member_role })),
+        } } : {}) };
     } finally { client.release(); }
   }
 
@@ -2863,17 +2882,6 @@ export class PostgresDatabase implements
       "SELECT * FROM stash_sessions WHERE token_lookup = $1", [this.#authenticationSecrets.blindIndex(hash)],
     );
     return result.rows[0] ? this.#sessionRecord(result.rows[0]) : undefined;
-  }
-
-  async findPersonalAccessTokenByTokenHash(hash: string): Promise<{ id: string; accountId: string } | undefined> {
-    const table = await this.#pool.query<{ exists: boolean }>("SELECT to_regclass('stash_personal_access_tokens') IS NOT NULL AS exists");
-    if (!table.rows[0]?.exists) return undefined;
-    const result = await this.#pool.query<{ id: string; account_id: string }>(
-      `SELECT id, account_id FROM stash_personal_access_tokens
-       WHERE token_lookup = $1 AND revoked_at IS NULL AND expires_at > CURRENT_TIMESTAMP`,
-      [this.#authenticationSecrets.blindIndex(hash)],
-    );
-    return result.rows[0] ? { id: result.rows[0].id, accountId: result.rows[0].account_id } : undefined;
   }
 
   async listSessions(accountId: string): Promise<SessionRecord[]> {

@@ -6,6 +6,7 @@ import * as Y from "yjs";
 import { collaborativeDocumentFromRichText, richTextFromCollaborativeDocument } from "../src/postgres-database.js";
 import { richTextToMarkdown } from "../src/rich-text.js";
 import { TaskService, type TaskPlanningReadModel, type TaskPlanningUpdate } from "../src/tasks.js";
+import { OrganizationRoleService, type BuiltInOrganizationRole } from "../src/organization-roles.js";
 
 const noteId = "99999999-9999-4999-8999-999999999999";
 const secondNoteId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -52,12 +53,32 @@ const collaborationRepository = {
 
 const projectId = "22222222-2222-4222-8222-222222222222";
 const browserMemberId = "11111111-1111-4111-8111-111111111111";
+const organizationId = "44444444-4444-4444-8444-444444444444";
+const departedMemberId = "55555555-5555-4555-8555-555555555555";
+const activeTokens = new Map([["browser-acceptance-member-token", browserMemberId], ["browser-acceptance-second-member-token", "browser-second-member"],
+  ["browser-acceptance-guest-token", "browser-guest"], ["departed-member-token", departedMemberId]]);
 let task: TaskPlanningReadModel = {
   schema: "stash.task.v1", id: "32323232-3232-4232-8232-323232323232", workspaceId: "browser-workspace", projectId,
   key: "STASH-32", title: "Restore release ownership", status: { id: "ready", name: "Ready", category: "unstarted" },
-  assigneeIds: ["departed-member"], formerAssigneeIds: ["departed-member"], priority: "high", labelNames: [], linkedNoteIds: [],
+  assigneeIds: [departedMemberId], priority: "high", labelNames: [], linkedNoteIds: [],
   dependencies: [], developmentLinks: [], sourceNoteIds: [], createdAt: "2026-08-23T00:00:00.000Z",
   createdBy: { localAccountId: "browser-member", displayName: "Browser Member" }, revision: 1, dependencyWarnings: [],
+};
+const memberships = new Map<string, BuiltInOrganizationRole>([[browserMemberId, "Owner"], [departedMemberId, "Member"]]);
+const organizationRoleRepository = {
+  async organizationRole(requestedOrganizationId: string, accountId: string) {
+    return requestedOrganizationId === organizationId ? memberships.get(accountId) : undefined;
+  },
+  async assignBuiltInRole() { return "forbidden" as const; },
+  async removeOrganizationMember(requestedOrganizationId: string, actorId: string, accountId: string) {
+    if (requestedOrganizationId !== organizationId || memberships.get(actorId) !== "Owner") return "forbidden" as const;
+    if (!memberships.has(accountId)) return "member_not_found" as const;
+    memberships.delete(accountId);
+    activeTokens.delete("departed-member-token");
+    task = { ...task, formerAssigneeIds: (task.assigneeIds ?? []).includes(accountId) ? [accountId] : [], revision: task.revision + 1 };
+    return { status: "removed" as const, departure: { memberId: accountId, affectedTaskIds: [task.id],
+      revokedSessions: 1, revokedCredentials: 1, revokedAgentGrants: 1, degradedRepositoryConnectionIds: [] } };
+  },
 };
 const taskRepository = {
   async findTaskByKey(memberId: string, requestedProjectId: string, taskKey: string) {
@@ -80,20 +101,24 @@ const taskRepository = {
 
 const instance = await startInstance({
   database: { async verifyConnection() {}, async close() {}, async resolveClientSessionPrincipal(accountId: string) {
-    return [browserMemberId, "browser-second-member", "browser-guest"].includes(accountId) ? { member: { id: accountId,
+    if (![browserMemberId, "browser-second-member", "browser-guest"].includes(accountId)) return undefined;
+    return { member: { id: accountId,
       name: accountId === browserMemberId ? "Browser Member" : accountId === "browser-second-member" ? "Second Browser Member" : "Browser Guest",
       email: accountId === browserMemberId ? "member@stash.test" : `${accountId}@stash.test` },
-      workspace: { id: "browser-workspace", name: "Acceptance Workspace" }, capabilities: [] } : undefined;
+      workspace: { id: "browser-workspace", name: "Acceptance Workspace" }, capabilities: [], ...(accountId === browserMemberId ? {
+      organizationAdministration: { organizationId, organizationName: "Acceptance Organization", members: [
+        { id: browserMemberId, name: "Browser Member", email: "member@stash.test", role: "Owner" as const },
+        { id: departedMemberId, name: "Departing Member", email: "departing@stash.test", role: "Member" as const },
+      ] } } : {}) };
   } },
   host: "127.0.0.1",
   port: Number.parseInt(process.env.STASH_BROWSER_PORT ?? "4173", 10),
   instanceAdminToken: "browser-acceptance-admin-token",
   memberAccess: {
     async authenticateBearer(authorization) {
-      if (authorization === "Bearer browser-acceptance-member-token") return { accountId: browserMemberId, sessionId: "browser-session" };
-      if (authorization === "Bearer browser-acceptance-second-member-token") return { accountId: "browser-second-member", sessionId: "browser-second-session" };
-      if (authorization === "Bearer browser-acceptance-guest-token") return { accountId: "browser-guest", sessionId: "browser-guest-session" };
-      return undefined;
+      const token = authorization?.replace(/^Bearer /, "");
+      const accountId = token ? activeTokens.get(token) : undefined;
+      return accountId ? { accountId, sessionId: `session-${accountId}` } : undefined;
     },
   },
   notes: { async get(memberId: string, requestedNoteId: string) { if (![browserMemberId, "browser-second-member", "browser-guest"].includes(memberId) || !collaborations.has(requestedNoteId)) return undefined;
@@ -109,6 +134,7 @@ const instance = await startInstance({
     tags: [], createdByMemberId: memberId, createdAt: new Date(0).toISOString(),
   }; } } as any,
   noteCollaboration: new NoteCollaborationService(collaborationRepository),
+  organizationRoles: new OrganizationRoleService(organizationRoleRepository),
   tasks: new TaskService(taskRepository, { async findPortableMemberIdentity() { return undefined; } }),
   webClientRoot: fileURLToPath(new URL("../apps/web/dist", import.meta.url)),
 });

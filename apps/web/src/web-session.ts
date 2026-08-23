@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import type { SessionState } from "./app-shell";
+import type { OrganizationAdministration } from "./member-administration";
 
 interface StoredSession {
   readonly token: string;
@@ -10,6 +11,7 @@ interface ClientSessionResponse {
   readonly member: { readonly id: string; readonly name: string; readonly email: string };
   readonly workspace: { readonly id: string; readonly name: string };
   readonly capabilities: readonly string[];
+  readonly organizationAdministration?: OrganizationAdministration;
 }
 
 const storageKey = "stash.member-session";
@@ -30,7 +32,17 @@ function isClientSessionResponse(value: unknown): value is ClientSessionResponse
   return session.authenticated === true && typeof session.member?.id === "string" && typeof session.member.name === "string"
     && typeof session.member.email === "string" && typeof session.workspace?.id === "string"
     && typeof session.workspace.name === "string" && Array.isArray(session.capabilities)
-    && session.capabilities.every((capability) => typeof capability === "string");
+    && session.capabilities.every((capability) => typeof capability === "string")
+    && (session.organizationAdministration === undefined || isOrganizationAdministration(session.organizationAdministration));
+}
+
+function isOrganizationAdministration(value: unknown): value is OrganizationAdministration {
+  if (!value || typeof value !== "object") return false;
+  const administration = value as Partial<OrganizationAdministration>;
+  return typeof administration.organizationId === "string" && typeof administration.organizationName === "string"
+    && Array.isArray(administration.members) && administration.members.every((member) => member && typeof member === "object"
+      && typeof member.id === "string" && typeof member.name === "string" && typeof member.email === "string"
+      && ["Owner", "Admin", "Member"].includes(member.role));
 }
 
 export function useSessionState(fetcher: typeof fetch = globalThis.fetch): SessionState {
@@ -51,5 +63,6 @@ export function useSessionState(fetcher: typeof fetch = globalThis.fetch): Sessi
   if (!stored || query.data === "anonymous") return { status: "anonymous" };
   if (query.isPending) return { status: "loading" };
   if (query.isError) return { status: "error", message: "The Instance could not be reached.", retry: () => { void query.refetch(); } };
-  return { status: "authenticated", token: stored.token, member: query.data.member, workspace: query.data.workspace, capabilities: query.data.capabilities };
+  return { status: "authenticated", token: stored.token, member: query.data.member, workspace: query.data.workspace,
+    capabilities: query.data.capabilities, organizationAdministration: query.data.organizationAdministration };
 }

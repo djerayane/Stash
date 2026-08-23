@@ -7,12 +7,13 @@ import styles from "./app-shell.module.css";
 import { DevelopmentSignalsRoute } from "./development-signals";
 import { NoteEditor } from "./note-editor";
 import { TaskDetailPage } from "./task-detail";
+import { MemberAdministrationPage, type OrganizationAdministration } from "./member-administration";
 
 export type SessionState =
   | { readonly status: "loading" }
   | { readonly status: "anonymous" }
   | { readonly status: "error"; readonly message: string; readonly retry?: () => void }
-  | { readonly status: "authenticated"; readonly token?: string; readonly member: { readonly id: string; readonly name: string; readonly email: string }; readonly workspace: { readonly name: string }; readonly capabilities: readonly string[] };
+  | { readonly status: "authenticated"; readonly token?: string; readonly member: { readonly id: string; readonly name: string; readonly email: string }; readonly workspace: { readonly name: string }; readonly capabilities: readonly string[]; readonly organizationAdministration?: OrganizationAdministration };
 
 interface AppShellProps { readonly session?: SessionState }
 
@@ -44,6 +45,7 @@ function Icon({ name }: { readonly name: string }) {
     note: <><path d="M6 3h9l3 3v15H6z" /><path d="M14 3v5h5M9 12h6M9 16h6" /></>,
     task: <><rect x="4" y="4" width="16" height="16" rx="2" /><path d="m8 12 2.5 2.5L16 9" /></>,
     pulse: <path d="M3 12h4l2-6 4 12 2-6h6" />,
+    members: <><circle cx="9" cy="8" r="3" /><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 4a3 3 0 0 1 0 6M17 14a5 5 0 0 1 4 5" /></>,
     plus: <path d="M12 5v14M5 12h14" />,
     search: <><circle cx="11" cy="11" r="6" /><path d="m16 16 4 4" /></>,
   };
@@ -130,6 +132,7 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
       <div className={styles.workspaceIdentity}><span className={styles.workspaceMonogram} aria-hidden="true">{initials(workspaceName, "PW")}</span><span><strong>{workspaceName}</strong><small>Workspace</small></span></div>
       <NavigationMenu.Root className={styles.navigationRoot} orientation="vertical" aria-label="Workspace"><NavigationMenu.List className={styles.navigation}>
         {navigation.map((item) => <NavigationMenu.Item key={item.to}><NavigationMenu.Link asChild><NavLink className={styles.navLink} end={item.to === "/app"} to={item.to}><Icon name={item.icon} />{item.label}</NavLink></NavigationMenu.Link></NavigationMenu.Item>)}
+        {session.organizationAdministration ? <NavigationMenu.Item><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/members"><Icon name="members" />Members</NavLink></NavigationMenu.Link></NavigationMenu.Item> : null}
       </NavigationMenu.List></NavigationMenu.Root>
       <div className={styles.sidebarFooter}><span className={styles.avatar} aria-hidden="true">{initials(memberName, "M")}</span><span><strong>{memberName}</strong><small>{memberEmail}</small></span></div>
     </aside>
@@ -145,6 +148,7 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
           <Route path="/app/tasks" element={<PlaceholderPage workspaceName={workspaceName} title="Tasks" description="Actionable work connected to the thinking that shaped it." action="New task" />} />
           <Route path="/app/projects/:projectId/tasks/:taskKey/development" element={<DevelopmentSignalsRoute />} />
           <Route path="/app/projects/:projectId/tasks/:taskKey" element={<TaskDetailPage memberId={session.member.id} token={session.token} />} />
+          <Route path="/app/settings/members" element={<MemberAdministrationPage administration={session.organizationAdministration} currentMemberId={session.member.id} token={session.token} />} />
           <Route path="/app/activity" element={<PlaceholderPage workspaceName={workspaceName} title="Activity" description="Meaningful changes, explained without unnecessary noise." action="Filter" />} />
           <Route path="*" element={<PlaceholderPage workspaceName={workspaceName} title="Not found" description="This Workspace route does not exist." action="Go home" actionTo="/app" />} />
         </Routes>

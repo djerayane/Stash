@@ -59,7 +59,7 @@
   .shell { grid-template-columns: 1fr; padding-bottom: 4.5rem; }
   .sidebar { min-height: auto; position: fixed; z-index: 15; inset: auto 0 0; display: block; padding: .45rem .5rem max(.45rem, env(safe-area-inset-bottom)); border: 0; border-top: 1px solid var(--stash-color-sidebar-border); }
   .brand, .workspaceIdentity, .sidebarFooter { display: none; }
-  .navigation { grid-template-columns: repeat(4, 1fr); }
+  .navigation { grid-template-columns: repeat(auto-fit, minmax(3.5rem, 1fr)); }
   .navLink { flex-direction: column; gap: .25rem; padding: .45rem .25rem; font-size: .64rem; }
   .navLink:hover { transform: none; }
   .topbar { min-height: 4rem; }

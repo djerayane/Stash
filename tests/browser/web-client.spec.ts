@@ -88,10 +88,30 @@ test("removes functional motion under the Member's reduced-motion preference", a
   await expect(pageContent).toHaveCSS("opacity", "1");
 });
 
-test("marks a departed Task assignee until reassignment and keeps the flow accessible", async ({ page }) => {
+test("removes a Member, revokes authority, and keeps former assignment repair accessible", async ({ page }) => {
   await installMemberSession(page);
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/app/settings/members");
+
+  const departingSessionBefore = await page.evaluate(async () => fetch("/api/organizations/44444444-4444-4444-8444-444444444444/roles", {
+    headers: { authorization: "Bearer departed-member-token" },
+  }).then((response) => response.status));
+  expect(departingSessionBefore).toBe(403);
+  await expect(page.getByRole("heading", { name: "Member access" })).toBeVisible();
+  await page.getByRole("button", { name: "Review departure" }).click();
+  const confirmation = page.getByRole("region", { name: /Remove Departing Member/ });
+  await expect(confirmation).toBeVisible();
+  await expect(confirmation).toBeFocused();
+  await expect(confirmation).toHaveCSS("transform", "none");
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  await page.getByRole("button", { name: "Remove Member" }).click();
+  await expect(page.getByRole("heading", { name: "Departing Member no longer has access" })).toBeVisible();
+  const departedAuthority = await page.evaluate(async () => fetch("/api/organizations/44444444-4444-4444-8444-444444444444/roles", {
+    headers: { authorization: "Bearer departed-member-token" },
+  }).then((response) => response.status));
+  expect(departedAuthority).toBe(401);
+
   await page.goto("/app/projects/22222222-2222-4222-8222-222222222222/tasks/STASH-32");
 
   await expect(page.getByRole("heading", { name: "Restore release ownership" })).toBeVisible();
@@ -99,14 +119,6 @@ test("marks a departed Task assignee until reassignment and keeps the flow acces
   await expect(marker).toBeVisible();
   await expect(marker).toContainText("Departed Member — assignment needs attention");
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
-
-  const unassigned = await page.evaluate(async () => fetch(location.pathname.replace(/^\/app/, "/api"), {
-    method: "PATCH", headers: { authorization: "Bearer browser-acceptance-member-token", "content-type": "application/json" },
-    body: JSON.stringify({ assigneeIds: [] }),
-  }).then((response) => response.json()));
-  expect(unassigned.task.formerAssigneeIds).toEqual(["departed-member"]);
-  await page.reload();
-  await expect(page.getByText("Departed Member — assignment needs attention", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "Assign to me" }).click();
   await expect(page.getByText("Assigned to you", { exact: true })).toBeVisible();
