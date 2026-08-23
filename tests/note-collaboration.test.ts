@@ -84,6 +84,39 @@ describe("self-hosted Note collaboration", () => {
       assert.match(markdown, new RegExp(contribution));
   });
 
+  it("preserves nested list contributions and their stable identities in canonical Markdown", () => {
+    const source = { type: "doc", content: [{ type: "bulletList", content: [
+      { type: "listItem", attrs: { blockKey: "11111111-1111-4111-8111-111111111111", blockId: "21111111-1111-4111-8111-111111111111" }, content: [
+        { type: "paragraph", content: [{ type: "text", text: "Parent contribution" }] },
+        { type: "taskList", content: [{ type: "taskItem", attrs: { checked: true, blockKey: "22222222-2222-4222-8222-222222222222", blockId: "32222222-2222-4222-8222-222222222222" }, content: [
+          { type: "paragraph", content: [{ type: "text", text: "Nested contribution" }] },
+          { type: "bulletList", content: [{ type: "listItem", attrs: { blockKey: "33333333-3333-4333-8333-333333333333", blockId: "43333333-3333-4333-8333-333333333333" }, content: [
+            { type: "paragraph", content: [{ type: "text", text: "Deep contribution" }] },
+          ] }] },
+        ] }] },
+      ] },
+    ] }] };
+    const materialized = proseMirrorToRichText(source);
+    assert.deepEqual(materialized.blocks.map((block) => [block.type, block.blockKey, block.id]), [
+      ["bullet", "11111111-1111-4111-8111-111111111111", "21111111-1111-4111-8111-111111111111"],
+      ["check", "22222222-2222-4222-8222-222222222222", "32222222-2222-4222-8222-222222222222"],
+      ["bullet", "33333333-3333-4333-8333-333333333333", "43333333-3333-4333-8333-333333333333"],
+    ]);
+    const markdown = proseMirrorToMarkdown(source);
+    for (const contribution of ["Parent contribution", "Nested contribution", "Deep contribution"])
+      assert.match(markdown, new RegExp(contribution));
+    for (const identifier of ["21111111-1111-4111-8111-111111111111", "32222222-2222-4222-8222-222222222222", "43333333-3333-4333-8333-333333333333"])
+      assert.match(markdown, new RegExp(`stash-block:${identifier}`));
+  });
+
+  it("accepts an empty code block as a normal collaborative editing state", () => {
+    const document = collaborativeDocumentFromRichText({ type: "doc", blocks: [{ type: "code", text: "",
+      blockKey: "11111111-1111-4111-8111-111111111111" }] });
+    assert.deepEqual(validatedRichTextFromCollaborativeDocument(document), { type: "doc", blocks: [{ type: "code", text: "",
+      blockKey: "11111111-1111-4111-8111-111111111111" }] });
+    document.destroy();
+  });
+
   it("round-trips expressive blocks into portable Markdown without losing stable identity", () => {
     const source: RichTextDocument = { type: "doc", blocks: [
       { type: "callout", kind: "note", blockKey: "11111111-1111-4111-8111-111111111111", content: [{ text: "Remember this" }] },

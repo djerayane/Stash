@@ -39,7 +39,7 @@ export function isRichTextDocument(value: unknown): value is RichTextDocument {
       || identifiers.has(block.id))) return false;
     if (typeof block.id === "string") identifiers.add(block.id);
     if (block.type === "code") {
-      return typeof block.text === "string" && block.text.length > 0
+      return typeof block.text === "string"
         && (block.language === undefined || (typeof block.language === "string" && safeCodeLanguage.test(block.language)))
         && (block.blockKey === undefined || typeof block.blockKey === "string" && uuid.test(block.blockKey))
         && Object.keys(block).every((key) => ["type", "blockKey", "id", "text", "language"].includes(key));

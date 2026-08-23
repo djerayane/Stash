@@ -4,6 +4,7 @@ import { expect, test } from "@playwright/test";
 const noteId = "99999999-9999-4999-8999-999999999999";
 const secondNoteId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const richNoteId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const emptyCodeNoteId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 const memberSession = JSON.stringify({ token: "browser-acceptance-member-token" });
 
 test.beforeEach(async ({ page }) => {
@@ -51,19 +52,34 @@ test("preserves every checklist item and callout paragraph with stable identitie
   await editor.click(); await page.keyboard.press("ControlOrMeta+End"); await page.keyboard.press("Enter");
   await page.getByRole("button", { name: "Checklist" }).click();
   await page.keyboard.type("First acceptance item"); await page.keyboard.press("Enter"); await page.keyboard.type("Second acceptance item");
+  await page.keyboard.press("Enter"); await page.keyboard.type("Nested acceptance item"); await page.keyboard.press("Tab");
+  await expect(editor.locator("li li").filter({ hasText: "Nested acceptance item" })).toBeVisible();
   await page.keyboard.press("ControlOrMeta+End"); await page.keyboard.press("Enter");
   await page.getByRole("button", { name: "Insert callout" }).click();
   await page.keyboard.press("End"); await page.keyboard.press("Enter"); await page.keyboard.type("Second callout paragraph");
   await persisted; await expect(page.getByRole("status")).toHaveText("All changes saved");
-  const authoredItems = editor.locator("li[data-block-key]").filter({ hasText: /First acceptance item|Second acceptance item/ });
+  const authoredItems = editor.locator("li[data-block-key]").filter({ hasText: /First acceptance item|Second acceptance item|Nested acceptance item/ });
   const itemKeys = await authoredItems.evaluateAll((items) => items.map((item) => item.getAttribute("data-block-key")));
-  expect(itemKeys).toHaveLength(2); expect(new Set(itemKeys).size).toBe(2);
+  expect(itemKeys).toHaveLength(3); expect(new Set(itemKeys).size).toBe(3);
   const calloutParagraphKeys = await editor.locator("[data-callout] p[data-block-key]").evaluateAll((items) => items.map((item) => item.getAttribute("data-block-key")));
   expect(calloutParagraphKeys).toHaveLength(2); expect(new Set(calloutParagraphKeys).size).toBe(2);
   await page.reload();
   await expect(page.getByRole("textbox", { name: "Note content" })).toContainText("First acceptance item");
   await expect(page.getByRole("textbox", { name: "Note content" })).toContainText("Second acceptance item");
+  await expect(page.getByRole("textbox", { name: "Note content" }).locator("li li").filter({ hasText: "Nested acceptance item" })).toBeVisible();
   await expect(page.getByRole("textbox", { name: "Note content" })).toContainText("Second callout paragraph");
+});
+
+test("persists an empty code block as a normal editing state", async ({ page }) => {
+  await page.goto(`/app/notes/${emptyCodeNoteId}`);
+  const editor = page.getByRole("textbox", { name: "Note content" });
+  await editor.click(); await page.keyboard.press("ControlOrMeta+A"); await page.keyboard.press("Backspace");
+  const persisted = page.waitForResponse((response) => response.request().method() === "POST" && response.url().includes(`/api/notes/${emptyCodeNoteId}/collaboration`));
+  await page.getByRole("button", { name: "Code block" }).click();
+  await expect(editor.locator("pre")).toBeVisible();
+  await persisted; await expect(page.getByRole("status")).toHaveText("All changes saved");
+  await page.reload();
+  await expect(page.getByRole("textbox", { name: "Note content" }).locator("pre")).toBeVisible();
 });
 
 test("two real editors merge concurrent contributions without changing linked Block identity", async ({ browser }) => {

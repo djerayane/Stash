@@ -47,19 +47,27 @@ export function proseMirrorToRichText(source: ProseMirrorNode): RichTextDocument
   };
   const identity = (node: ProseMirrorNode) => ({ ...(typeof node.attrs?.blockKey === "string" && node.attrs.blockKey ? { blockKey: node.attrs.blockKey } : {}),
     ...(typeof node.attrs?.blockId === "string" && node.attrs.blockId ? { id: node.attrs.blockId } : {}) });
-  const blocks = (source.content ?? []).flatMap((node): RichTextBlock[] => {
+  const listItems = (node: ProseMirrorNode, type: "bullet" | "check"): RichTextBlock[] => (node.content ?? []).flatMap((item) => {
+    const [paragraph, ...descendants] = item.content ?? [];
+    const current: RichTextBlock = type === "check"
+      ? { type, checked: Boolean(item.attrs?.checked), ...identity(item), content: readInline(paragraph?.content) }
+      : { type, ...identity(item), content: readInline(paragraph?.content) };
+    return [current, ...descendants.flatMap(convertNode)];
+  });
+  function convertNode(node: ProseMirrorNode): RichTextBlock[] {
     if (node.type === "heading") return [{ type: "heading", level: [1, 2, 3].includes(Number(node.attrs?.level)) ? Number(node.attrs?.level) as 1 | 2 | 3 : 1, ...identity(node), content: readInline(node.content) }];
     if (node.type === "codeBlock") return [{ type: "code", ...identity(node), ...(typeof node.attrs?.language === "string" && node.attrs.language ? { language: node.attrs.language } : {}), text: (node.content ?? []).map((child) => child.text ?? "").join("") }];
     if (node.type === "blockquote") return (node.content ?? []).map((child) => ({ type: "quote" as const, ...identity(child), content: readInline(child.content) }));
-    if (node.type === "bulletList") return (node.content ?? []).map((item) => ({ type: "bullet" as const, ...identity(item), content: readInline(item.content?.[0]?.content) }));
-    if (node.type === "taskList") return (node.content ?? []).map((item) => ({ type: "check" as const, checked: Boolean(item.attrs?.checked), ...identity(item), content: readInline(item.content?.[0]?.content) }));
+    if (node.type === "bulletList") return listItems(node, "bullet");
+    if (node.type === "taskList") return listItems(node, "check");
     if (node.type === "callout") { const kind = ["note", "tip", "warning"].includes(String(node.attrs?.kind)) ? node.attrs?.kind as "note" | "tip" | "warning" : "note";
       return (node.content ?? []).map((child, index) => ({ type: "callout" as const, kind, ...identity(index === 0 ? node : child), content: readInline(child.content) })); }
     if (node.type === "workspaceAttachment") return [{ type: "attachment", ...identity(node), href: String(node.attrs?.href ?? ""), label: String(node.attrs?.label ?? "Attachment") }];
     if (node.type === "image") return [{ type: "image", ...identity(node), src: String(node.attrs?.src ?? ""), alt: String(node.attrs?.alt ?? ""), ...(typeof node.attrs?.title === "string" && node.attrs.title ? { title: node.attrs.title } : {}) }];
     if (node.type === "table") return [{ type: "table", ...identity(node), rows: (node.content ?? []).map((row) => (row.content ?? []).map((cell) => ({ header: cell.type === "tableHeader", content: readInline(cell.content?.[0]?.content) }))) }];
     return [{ type: "paragraph", ...identity(node), content: readInline(node.content) }];
-  });
+  }
+  const blocks = (source.content ?? []).flatMap(convertNode);
   return { type: "doc", blocks: blocks.length ? blocks : [{ type: "paragraph", content: [{ text: "" }] }] };
 }
 
