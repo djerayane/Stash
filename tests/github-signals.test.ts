@@ -11,6 +11,7 @@ import {
 import { startInstance, type RunningInstance } from "../src/instance.js";
 
 const projectId = "11111111-1111-4111-8111-111111111111";
+const organizationId = "33333333-3333-4333-8333-333333333333";
 const secret = "github-webhook-secret";
 
 class RepositoryFake implements GitHubSignalRepository {
@@ -22,11 +23,11 @@ class RepositoryFake implements GitHubSignalRepository {
   async matchingTasks(installationId: number, repositoryId: string, keys: string[]) {
     if (installationId !== 42 || repositoryId !== "987") return [];
     return keys.flatMap((key) => key === "STASH-36"
-      ? [{ taskId: "task-36", projectId, taskKey: key, title: "Receive GitHub development Signals", matchedKey: key }]
+      ? [{ taskId: "task-36", projectId, organizationId, taskKey: key, title: "Receive GitHub development Signals", matchedKey: key }]
       : key === "OLD-1"
         ? [
-          { taskId: "task-36", projectId, taskKey: "STASH-36", title: "Receive GitHub development Signals", matchedKey: key },
-          { taskId: "task-other", projectId, taskKey: "STASH-99", title: "Another matching Task", matchedKey: key },
+          { taskId: "task-36", projectId, organizationId, taskKey: "STASH-36", title: "Receive GitHub development Signals", matchedKey: key },
+          { taskId: "task-other", projectId, organizationId, taskKey: "STASH-99", title: "Another matching Task", matchedKey: key },
         ]
         : []);
   }

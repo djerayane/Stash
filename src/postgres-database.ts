@@ -2249,23 +2249,19 @@ export class PostgresDatabase implements
   async matchingTasks(installationId: number, repositoryId: string, keys: string[]) {
     await this.#ensureGitHubSignalSchema();
     if (!keys.length) return [];
-    const result = await this.#pool.query<{ task_id: string; project_id: string; task_key: string; title: string; matched_key: string }>(`
-      WITH eligible_connections AS (
-        SELECT connection.* FROM stash_repository_connections connection
-        WHERE connection.provider='github' AND connection.installation_id=$1 AND connection.repository_id=$2
-          AND 1 = (SELECT COUNT(DISTINCT candidate.organization_id) FROM stash_repository_connections candidate
-            WHERE candidate.provider='github' AND candidate.installation_id=$1 AND candidate.repository_id=$2)
-      )
-      SELECT DISTINCT task.id AS task_id, task.project_id, task.task_key, task.title, matched.matched_key
-      FROM eligible_connections connection
+    const result = await this.#pool.query<{ task_id: string; project_id: string; organization_id: string; task_key: string; title: string; matched_key: string }>(`
+      SELECT DISTINCT task.id AS task_id, task.project_id, connection.organization_id, task.task_key, task.title, matched.matched_key
+      FROM stash_repository_connections connection
       JOIN stash_repository_connection_projects link ON link.connection_id = connection.id
       JOIN stash_tasks task ON task.project_id = link.project_id
       JOIN LATERAL (
         SELECT task.task_key AS matched_key WHERE task.task_key = ANY($3::text[])
         UNION SELECT alias.task_key FROM stash_task_key_aliases alias WHERE alias.task_id = task.id AND alias.task_key = ANY($3::text[])
       ) matched ON true
+      WHERE connection.provider='github' AND connection.installation_id=$1 AND connection.repository_id=$2
       `, [installationId, repositoryId, keys]);
-    return result.rows.map((row) => ({ taskId: row.task_id, projectId: row.project_id, taskKey: row.task_key, title: row.title, matchedKey: row.matched_key }));
+    return result.rows.map((row) => ({ taskId: row.task_id, projectId: row.project_id, organizationId: row.organization_id,
+      taskKey: row.task_key, title: row.title, matchedKey: row.matched_key }));
   }
 
   async receive(signal: GitHubSignal, candidates: SignalCandidate[]) {
@@ -2278,9 +2274,9 @@ export class PostgresDatabase implements
       if (!inserted.rowCount) return;
       for (const candidate of candidates) {
         await client.query(`INSERT INTO stash_github_signal_suggestions
-          (id, signal_id, task_id, project_id, task_key, task_title, matched_key, status)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, [candidate.id, signal.id, candidate.taskId, candidate.projectId, candidate.taskKey, candidate.taskTitle, candidate.matchedKey, candidate.status]);
-        if (candidate.status === "confirmed") await this.#linkSignalArtifact(client, candidate.taskId, signal);
+          (id, signal_id, task_id, project_id, organization_id, task_key, task_title, matched_key, status)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [candidate.id, signal.id, candidate.taskId, candidate.projectId, candidate.organizationId, candidate.taskKey, candidate.taskTitle, candidate.matchedKey, candidate.status]);
+        if (candidate.status === "confirmed") await this.#linkSignalArtifact(client, candidate.taskId, signal, undefined, candidate.organizationId);
       }
     });
   }
@@ -2290,13 +2286,13 @@ export class PostgresDatabase implements
     const visible = await this.findTaskByKey(memberId, projectId, taskKey);
     if (visible.status !== "found") return undefined;
     const result = await this.#pool.query<any>(`SELECT signal.*, suggestion.id AS suggestion_id, suggestion.task_id,
-      suggestion.project_id, suggestion.task_key, suggestion.task_title, suggestion.matched_key, suggestion.status
+      suggestion.project_id, suggestion.organization_id, suggestion.task_key, suggestion.task_title, suggestion.matched_key, suggestion.status
       FROM stash_github_signal_suggestions suggestion JOIN stash_github_signals signal ON signal.id = suggestion.signal_id
       WHERE suggestion.task_id = $1 ORDER BY signal.occurred_at DESC, suggestion.id`, [visible.task.id]);
     const grouped = new Map<string, { signal: GitHubSignal; suggestions: SignalCandidate[] }>();
     for (const row of result.rows) {
       const entry = grouped.get(row.id) ?? { signal: githubSignalFromRow(row), suggestions: [] };
-      entry.suggestions.push({ id: row.suggestion_id, signalId: row.id, taskId: row.task_id, projectId: row.project_id, taskKey: row.task_key, taskTitle: row.task_title, matchedKey: row.matched_key, status: row.status });
+      entry.suggestions.push({ id: row.suggestion_id, signalId: row.id, taskId: row.task_id, projectId: row.project_id, organizationId: row.organization_id, taskKey: row.task_key, taskTitle: row.task_title, matchedKey: row.matched_key, status: row.status });
       grouped.set(row.id, entry);
     }
     return [...grouped.values()];
@@ -2318,10 +2314,10 @@ export class PostgresDatabase implements
     });
   }
 
-  async #linkSignalArtifact(client: PoolClient, taskId: string, signal: GitHubSignal, confirmingMemberId?: string) {
+  async #linkSignalArtifact(client: PoolClient, taskId: string, signal: GitHubSignal, confirmingMemberId?: string, organizationId?: string) {
     const actor = confirmingMemberId ? { id: confirmingMemberId, cause: { kind: "member" } as ActivityCause }
-      : (await client.query<{ id: string }>(`SELECT created_by_account_id AS id FROM stash_repository_connections
-        WHERE installation_id=$1 AND repository_id=$2 ORDER BY id LIMIT 1`, [signal.installationId, signal.repositoryId])).rows[0];
+      : (await client.query<{ id: string }>(`SELECT membership.account_id AS id FROM stash_organization_memberships membership
+        WHERE membership.organization_id=$1 AND membership.role='Owner' ORDER BY membership.account_id LIMIT 1`, [organizationId])).rows[0];
     if (!actor) return;
     const task = await client.query<any>(`${taskPlanningSelectById} FOR UPDATE OF task`, [taskId, actor.id]);
     const row = task.rows[0]; if (!row) return;
@@ -3014,6 +3010,7 @@ export class PostgresDatabase implements
         signal_id UUID NOT NULL REFERENCES stash_github_signals(id) ON DELETE CASCADE,
         task_id UUID NOT NULL REFERENCES stash_tasks(id) ON DELETE CASCADE,
         project_id UUID NOT NULL REFERENCES stash_projects(id) ON DELETE CASCADE,
+        organization_id UUID NOT NULL REFERENCES stash_organizations(id) ON DELETE CASCADE,
         task_key TEXT NOT NULL,
         task_title TEXT NOT NULL,
         matched_key TEXT NOT NULL,

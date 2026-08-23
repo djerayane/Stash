@@ -19,6 +19,7 @@ export interface SignalCandidate {
   signalId: string;
   taskId: string;
   projectId: string;
+  organizationId: string;
   taskKey: string;
   taskTitle: string;
   matchedKey: string;
@@ -26,7 +27,7 @@ export interface SignalCandidate {
 }
 
 export interface GitHubSignalRepository {
-  matchingTasks(installationId: number, repositoryId: string, keys: string[]): Promise<Array<{ taskId: string; projectId: string; taskKey: string; title: string; matchedKey: string }>>;
+  matchingTasks(installationId: number, repositoryId: string, keys: string[]): Promise<Array<{ taskId: string; projectId: string; organizationId: string; taskKey: string; title: string; matchedKey: string }>>;
   receive(signal: GitHubSignal, candidates: SignalCandidate[]): Promise<void>;
   list(memberId: string, projectId: string, taskKey: string): Promise<Array<{ signal: GitHubSignal; suggestions: SignalCandidate[] }> | undefined>;
   confirm(memberId: string, projectId: string, taskKey: string, suggestionId: string): Promise<"confirmed" | "forbidden" | "not_found">;
@@ -59,13 +60,14 @@ export class GitHubSignalService {
     const parsed = parseEvent(event, deliveryId, payload);
     const keys = [...new Set((parsed.evidence.match(taskKey) ?? []).map((value) => value.toUpperCase()))];
     const matches = keys.length ? await this.repository.matchingTasks(parsed.signal.installationId, parsed.signal.repositoryId, keys) : [];
-    const counts = new Map(keys.map((key) => [key, matches.filter((match) => match.matchedKey === key).length]));
+    const counts = new Map(matches.map((match) => [`${match.organizationId}:${match.matchedKey}`,
+      matches.filter((candidate) => candidate.organizationId === match.organizationId && candidate.matchedKey === match.matchedKey).length]));
     const candidates = matches.map((match) => {
       const matchedKey = match.matchedKey;
       return {
-        id: randomUUID(), signalId: parsed.signal.id, taskId: match.taskId, projectId: match.projectId,
+        id: randomUUID(), signalId: parsed.signal.id, taskId: match.taskId, projectId: match.projectId, organizationId: match.organizationId,
         taskKey: match.taskKey, taskTitle: match.title, matchedKey,
-        status: (counts.get(matchedKey) === 1 ? "confirmed" : "pending_confirmation") as SignalCandidate["status"],
+        status: (counts.get(`${match.organizationId}:${matchedKey}`) === 1 ? "confirmed" : "pending_confirmation") as SignalCandidate["status"],
       };
     });
     await this.repository.receive(parsed.signal, candidates);
