@@ -6,11 +6,17 @@ export interface RichTextSpan {
   href?: string;
 }
 
+export interface RichTextTableCell { header: boolean; content: RichTextSpan[] }
+
 export type RichTextBlock =
   | { type: "paragraph" | "quote" | "bullet"; blockKey?: string; id?: string; content: RichTextSpan[] }
   | { type: "heading"; level: 1 | 2 | 3; blockKey?: string; id?: string; content: RichTextSpan[] }
   | { type: "check"; checked: boolean; blockKey?: string; id?: string; content: RichTextSpan[] }
-  | { type: "code"; language?: string; blockKey?: string; id?: string; text: string };
+  | { type: "code"; language?: string; blockKey?: string; id?: string; text: string }
+  | { type: "callout"; kind: "note" | "tip" | "warning"; blockKey?: string; id?: string; content: RichTextSpan[] }
+  | { type: "attachment"; href: string; label: string; blockKey?: string; id?: string }
+  | { type: "image"; src: string; alt: string; title?: string; blockKey?: string; id?: string }
+  | { type: "table"; rows: RichTextTableCell[][]; blockKey?: string; id?: string };
 
 export interface RichTextDocument {
   type: "doc";
@@ -53,6 +59,23 @@ export function isRichTextDocument(value: unknown): value is RichTextDocument {
         && (block.blockKey === undefined || typeof block.blockKey === "string" && uuid.test(block.blockKey))
         && Object.keys(block).every((key) => ["type", "blockKey", "id", "text", "language"].includes(key));
     }
+    if (block.type === "callout") return ["note", "tip", "warning"].includes(String(block.kind)) && validContent(block.content)
+      && (block.blockKey === undefined || typeof block.blockKey === "string" && uuid.test(block.blockKey))
+      && Object.keys(block).every((key) => ["type", "kind", "blockKey", "id", "content"].includes(key));
+    if (block.type === "attachment") return typeof block.href === "string" && /^\.\/attachments\/[^\s<>]+$/.test(block.href)
+      && typeof block.label === "string" && block.label.length > 0
+      && (block.blockKey === undefined || typeof block.blockKey === "string" && uuid.test(block.blockKey))
+      && Object.keys(block).every((key) => ["type", "href", "label", "blockKey", "id"].includes(key));
+    if (block.type === "image") return typeof block.src === "string" && safeLink.test(block.src) && typeof block.alt === "string"
+      && (block.title === undefined || typeof block.title === "string")
+      && (block.blockKey === undefined || typeof block.blockKey === "string" && uuid.test(block.blockKey))
+      && Object.keys(block).every((key) => ["type", "src", "alt", "title", "blockKey", "id"].includes(key));
+    if (block.type === "table") { const rows = block.rows; return Array.isArray(rows) && rows.length > 0
+      && rows.every((row) => Array.isArray(row) && row.length > 0 && row.every((cell) => plainObject(cell)
+        && typeof cell.header === "boolean" && validContent(cell.content) && Object.keys(cell).every((key) => ["header", "content"].includes(key))))
+      && rows.every((row) => row.length === rows[0]!.length)
+      && (block.blockKey === undefined || typeof block.blockKey === "string" && uuid.test(block.blockKey))
+      && Object.keys(block).every((key) => ["type", "rows", "blockKey", "id"].includes(key)); }
     if (!["paragraph", "quote", "bullet", "heading", "check"].includes(block.type)
       || !validContent(block.content)) return false;
     if (block.type === "heading" && ![1, 2, 3].includes(Number(block.level))) return false;
@@ -90,6 +113,15 @@ export function richTextToMarkdown(document: RichTextDocument): string {
       const longestRun = Math.max(0, ...(block.text.match(/`+/g) ?? []).map((run) => run.length));
       const fence = "`".repeat(Math.max(3, longestRun + 1));
       return `${fence}${block.language ?? ""}\n${block.text}\n${fence}${identity}`;
+    }
+    if (block.type === "callout") return `> [!${block.kind.toUpperCase()}]\n${block.content.map(renderSpan).join("").split("\n").map((line) => `> ${line}`).join("\n")}${identity}`;
+    if (block.type === "attachment") return `[${escapeMarkdownText(block.label)}](<${block.href}>)${identity}`;
+    if (block.type === "image") return `![${escapeMarkdownText(block.alt)}](<${block.src}>${block.title ? ` \"${block.title.replaceAll('"', '\\"')}\"` : ""})${identity}`;
+    if (block.type === "table") {
+      const renderCell = (cell: RichTextTableCell) => cell.content.map(renderSpan).join("").replaceAll("|", "\\|");
+      const rows = block.rows.map((row) => `| ${row.map(renderCell).join(" | ")} |`);
+      rows.splice(1, 0, `| ${block.rows[0]!.map(() => "---").join(" | ")} |`);
+      return `${rows.join("\n")}${identity}`;
     }
     const content = block.content.map(renderSpan).join("");
     const markdown = block.type === "heading" ? `${"#".repeat(block.level)} ${content}`
@@ -134,8 +166,7 @@ function parseInline(text: string): RichTextSpan[] {
 }
 
 export function markdownToRichText(markdown: string): RichTextDocument {
-  if (!markdown.trim() || /^\s*\|.*\|/m.test(markdown) || /!\[[^\]]*\]\(/.test(markdown)
-    || /^:::|^> \[!/m.test(markdown)) throw new UnsupportedMarkdown("Unsupported Markdown construct");
+  if (!markdown.trim() || /^:::/m.test(markdown)) throw new UnsupportedMarkdown("Unsupported Markdown construct");
   const chunks = markdown.trim().split(/\n\n+/);
   const blocks: RichTextBlock[] = [];
   for (let index = 0; index < chunks.length; index += 1) {
@@ -145,6 +176,21 @@ export function markdownToRichText(markdown: string): RichTextDocument {
     const id = identity?.[1];
     const code = chunk.match(/^(`{3,})([a-z0-9_+.-]*)\n([\s\S]*)\n\1$/i);
     if (code) { blocks.push({ type: "code", text: code[3]!, ...(code[2] ? { language: code[2] } : {}), ...(id ? { id } : {}) }); continue; }
+    const callout = chunk.match(/^> \[!(NOTE|TIP|WARNING)\]\n((?:> ?.*(?:\n|$))+)/i);
+    if (callout) { blocks.push({ type: "callout", kind: callout[1]!.toLowerCase() as "note" | "tip" | "warning",
+      content: parseInline(callout[2]!.replace(/^> ?/gm, "").trimEnd()), ...(id ? { id } : {}) }); continue; }
+    const attachment = chunk.match(/^\[([^\]]+)\]\(<(\.\/attachments\/[^\s<>]+)>\)$/);
+    if (attachment) { blocks.push({ type: "attachment", label: attachment[1]!, href: attachment[2]!, ...(id ? { id } : {}) }); continue; }
+    const image = chunk.match(/^!\[([^\]]*)\]\(<([^>]+)>(?: "((?:\\"|[^"])*)")?\)$/);
+    if (image) { blocks.push({ type: "image", alt: image[1]!, src: image[2]!, ...(image[3] ? { title: image[3].replaceAll('\\"', '"') } : {}),
+      ...(id ? { id } : {}) }); continue; }
+    const tableLines = chunk.split("\n");
+    if (tableLines.length >= 2 && /^\|.*\|$/.test(tableLines[0]!) && /^\|(?:\s*:?-+:?\s*\|)+$/.test(tableLines[1]!)) {
+      const cells = (line: string) => line.slice(1, -1).split(/(?<!\\)\|/).map((cell) => parseInline(cell.trim().replaceAll("\\|", "|")));
+      const rows = [tableLines[0]!, ...tableLines.slice(2)].map((line, row) => cells(line).map((content) => ({ header: row === 0, content })));
+      if (!rows.length || rows.some((row) => row.length !== rows[0]!.length)) throw new UnsupportedMarkdown("Malformed table");
+      blocks.push({ type: "table", rows, ...(id ? { id } : {}) }); continue;
+    }
     let type: "paragraph" | "quote" | "bullet" | "heading" | "check" = "paragraph";
     let level: 1 | 2 | 3 | undefined; let checked = false;
     const heading = chunk.match(/^(#{1,3}) (.*)$/s);

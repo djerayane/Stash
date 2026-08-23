@@ -13,11 +13,16 @@ export interface ProjectSummary {
 
 export type RichTextMark = "bold" | "italic" | "code";
 export interface RichTextSpan { text: string; marks?: RichTextMark[]; href?: string }
+export interface RichTextTableCell { header: boolean; content: RichTextSpan[] }
 export type RichTextBlock =
   | { type: "paragraph" | "quote" | "bullet"; blockKey?: string; id?: string; content: RichTextSpan[] }
   | { type: "heading"; level: 1 | 2 | 3; blockKey?: string; id?: string; content: RichTextSpan[] }
   | { type: "check"; checked: boolean; blockKey?: string; id?: string; content: RichTextSpan[] }
-  | { type: "code"; language?: string; blockKey?: string; id?: string; text: string };
+  | { type: "code"; language?: string; blockKey?: string; id?: string; text: string }
+  | { type: "callout"; kind: "note" | "tip" | "warning"; blockKey?: string; id?: string; content: RichTextSpan[] }
+  | { type: "attachment"; href: string; label: string; blockKey?: string; id?: string }
+  | { type: "image"; src: string; alt: string; title?: string; blockKey?: string; id?: string }
+  | { type: "table"; rows: RichTextTableCell[][]; blockKey?: string; id?: string };
 export type NoteEditOperation =
   | { id: string; type: "replace_block"; blockKey: string; block: RichTextBlock }
   | { id: string; type: "insert_block"; blockKey: string; afterBlockKey: string | null; block: RichTextBlock }

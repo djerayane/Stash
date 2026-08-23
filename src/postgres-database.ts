@@ -40,7 +40,7 @@ import type { GitHubSignal, GitHubSignalRepository, SignalCandidate } from "./gi
 import { assignmentNotificationInputs, directMentionMemberIds, directMentionNotificationInputs, notificationDeliveryMode, type NotificationDelivery, type NotificationPreferences, type NotificationRepository } from "./notifications.js";
 import type { AutomationRecipe, AutomationRepository, AutomationState, AutomationTransition, AutomationTrigger } from "./automations.js";
 import * as Y from "yjs";
-import { prosemirrorJSONToYDoc } from "y-prosemirror";
+import { prosemirrorJSONToYDoc, yDocToProsemirrorJSON } from "y-prosemirror";
 import { Schema } from "prosemirror-model";
 import type { CollaborationSnapshot, NoteCollaborationRepository } from "./note-collaboration.js";
 
@@ -129,6 +129,13 @@ const collaborationSchema = new Schema({
     bulletList: { group: "block", content: "listItem+", attrs: { blockKey: { default: null }, blockId: { default: null } } },
     listItem: { content: "paragraph block*" }, taskList: { group: "block", content: "taskItem+", attrs: { blockKey: { default: null }, blockId: { default: null } } },
     taskItem: { content: "paragraph block*", attrs: { checked: { default: false } } },
+    callout: { group: "block", content: "paragraph", attrs: { blockKey: { default: null }, blockId: { default: null }, kind: { default: "note" } } },
+    workspaceAttachment: { group: "block", atom: true, attrs: { blockKey: { default: null }, blockId: { default: null }, href: {}, label: {} } },
+    image: { group: "block", atom: true, attrs: { blockKey: { default: null }, blockId: { default: null }, src: {}, alt: { default: "" }, title: { default: null } } },
+    table: { group: "block", content: "tableRow+", tableRole: "table", attrs: { blockKey: { default: null }, blockId: { default: null } } },
+    tableRow: { content: "(tableCell|tableHeader)+", tableRole: "row" },
+    tableCell: { content: "paragraph", tableRole: "cell", attrs: { colspan: { default: 1 }, rowspan: { default: 1 }, colwidth: { default: null } } },
+    tableHeader: { content: "paragraph", tableRole: "header_cell", attrs: { colspan: { default: 1 }, rowspan: { default: 1 }, colwidth: { default: null } } },
   },
   marks: { bold: {}, italic: {}, code: { code: true }, link: { attrs: { href: {} }, inclusive: false } },
 });
@@ -143,9 +150,46 @@ export function collaborativeDocumentFromRichText(document: import("./rich-text.
     if (block.type === "quote") return { type: "blockquote", attrs, content: [{ type: "paragraph", content: inline(block.content) }] };
     if (block.type === "bullet") return { type: "bulletList", attrs, content: [{ type: "listItem", content: [{ type: "paragraph", content: inline(block.content) }] }] };
     if (block.type === "check") return { type: "taskList", attrs, content: [{ type: "taskItem", attrs: { checked: block.checked }, content: [{ type: "paragraph", content: inline(block.content) }] }] };
+    if (block.type === "callout") return { type: "callout", attrs: { ...attrs, kind: block.kind }, content: [{ type: "paragraph", content: inline(block.content) }] };
+    if (block.type === "attachment") return { type: "workspaceAttachment", attrs: { ...attrs, href: block.href, label: block.label } };
+    if (block.type === "image") return { type: "image", attrs: { ...attrs, src: block.src, alt: block.alt, title: block.title ?? null } };
+    if (block.type === "table") return { type: "table", attrs, content: block.rows.map((row) => ({ type: "tableRow",
+      content: row.map((cell) => ({ type: cell.header ? "tableHeader" : "tableCell", content: [{ type: "paragraph", content: inline(cell.content) }] })) })) };
     return { type: "paragraph", attrs, content: inline(block.content) };
   });
   return prosemirrorJSONToYDoc(collaborationSchema, { type: "doc", content }, "default");
+}
+
+export function richTextFromCollaborativeDocument(document: Y.Doc): import("./rich-text.js").RichTextDocument {
+  const source = yDocToProsemirrorJSON(document, "default") as any;
+  const inline = (nodes: any[] | undefined): import("./rich-text.js").RichTextSpan[] => {
+    const spans = (nodes ?? []).filter(({ type }) => type === "text").map((node) => {
+      const marks = (node.marks ?? []).map(({ type }: { type: string }) => type).filter((type: string) => ["bold", "italic", "code"].includes(type));
+      const link = (node.marks ?? []).find(({ type }: { type: string }) => type === "link");
+      return { text: node.text ?? "", ...(marks.length ? { marks } : {}), ...(link?.attrs?.href ? { href: link.attrs.href } : {}) };
+    });
+    return spans.length ? spans : [{ text: "" }];
+  };
+  const identity = (node: any) => ({ ...(node.attrs?.blockKey ? { blockKey: node.attrs.blockKey } : {}),
+    ...(node.attrs?.blockId ? { id: node.attrs.blockId } : {}) });
+  const blocks = (source.content ?? []).map((node: any): import("./rich-text.js").RichTextBlock => {
+    if (node.type === "heading") return { type: "heading", level: node.attrs?.level ?? 1, ...identity(node), content: inline(node.content) };
+    if (node.type === "codeBlock") return { type: "code", ...identity(node), ...(node.attrs?.language ? { language: node.attrs.language } : {}),
+      text: (node.content ?? []).map(({ text }: { text?: string }) => text ?? "").join("") };
+    if (node.type === "blockquote") return { type: "quote", ...identity(node), content: inline(node.content?.[0]?.content) };
+    if (node.type === "bulletList") return { type: "bullet", ...identity(node), content: inline(node.content?.[0]?.content?.[0]?.content) };
+    if (node.type === "taskList") return { type: "check", checked: Boolean(node.content?.[0]?.attrs?.checked), ...identity(node),
+      content: inline(node.content?.[0]?.content?.[0]?.content) };
+    if (node.type === "callout") return { type: "callout", kind: ["note", "tip", "warning"].includes(node.attrs?.kind) ? node.attrs.kind : "note",
+      ...identity(node), content: inline(node.content?.[0]?.content) };
+    if (node.type === "workspaceAttachment") return { type: "attachment", ...identity(node), href: node.attrs?.href ?? "", label: node.attrs?.label ?? "Attachment" };
+    if (node.type === "image") return { type: "image", ...identity(node), src: node.attrs?.src ?? "", alt: node.attrs?.alt ?? "",
+      ...(node.attrs?.title ? { title: node.attrs.title } : {}) };
+    if (node.type === "table") return { type: "table", ...identity(node), rows: (node.content ?? []).map((row: any) =>
+      (row.content ?? []).map((cell: any) => ({ header: cell.type === "tableHeader", content: inline(cell.content?.[0]?.content) }))) };
+    return { type: "paragraph", ...identity(node), content: inline(node.content) };
+  });
+  return { type: "doc", blocks: blocks.length ? blocks : [{ type: "paragraph", content: [{ text: "" }] }] };
 }
 
 export class PostgresDatabase implements
@@ -1569,13 +1613,11 @@ export class PostgresDatabase implements
 
   async findNoteForMember(memberId: string, noteId: string): Promise<NoteRecord | undefined> {
     await this.#ensureNoteSchemaForPool();
+    if (await this.#authorizeNote(this.#pool, memberId, noteId) === "none") return undefined;
     const result = await this.#pool.query<{
       id: string; workspace_id: string; project_id: string | null; content: string; document: NoteRecord["document"];
       revision: number; tags: string[]; reminder_at: Date | null; created_by_account_id: string; created_at: Date;
-    }>(`SELECT note.* FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id = note.workspace_id
-       WHERE note.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2)
-       OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
-       WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)))`, [noteId, memberId]);
+    }>("SELECT * FROM stash_notes WHERE id=$1", [noteId]);
     const row = result.rows[0];
     return row ? {
       id: row.id, workspaceId: row.workspace_id, content: row.content, document: row.document, revision: row.revision,
@@ -4314,7 +4356,7 @@ export class PostgresDatabase implements
   async loadNoteCollaboration(memberId: string, noteId: string): Promise<CollaborationSnapshot | undefined> {
     return this.#withTransaction(async (client) => {
       await this.#ensureCollaborationSchema(client);
-      if (!await this.#canEditCollaborativeNote(client, memberId, noteId)) return undefined;
+      if (await this.#authorizeNote(client, memberId, noteId) === "none") return undefined;
       let row = (await client.query<any>(`SELECT note_id,sequence,update,updated_at,updated_by_account_id
         FROM stash_note_collaboration WHERE note_id=$1`, [noteId])).rows[0];
       if (!row) row = await this.#seedNoteCollaboration(client, noteId);
@@ -4325,15 +4367,30 @@ export class PostgresDatabase implements
 
   async appendNoteCollaboration(memberId: string, noteId: string, update: Uint8Array): Promise<CollaborationSnapshot | undefined> {
     return this.#withTransaction(async (client) => {
-      await this.#ensureCollaborationSchema(client);
-      if (!await this.#canEditCollaborativeNote(client, memberId, noteId)) return undefined;
+      await this.#ensureCollaborationSchema(client); await this.#ensureNoteHistorySchema(client);
+      if (await this.#authorizeNote(client, memberId, noteId) !== "edit") return undefined;
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`note-collaboration:${noteId}`]);
-      let current = (await client.query<any>("SELECT sequence,update FROM stash_note_collaboration WHERE note_id=$1 FOR UPDATE", [noteId])).rows[0];
+      const noteRow = (await client.query<any>(`SELECT note.*, creator.name AS creator_name FROM stash_notes note
+        JOIN stash_accounts creator ON creator.id=note.created_by_account_id WHERE note.id=$1 FOR UPDATE OF note`, [noteId])).rows[0];
+      if (!noteRow) return undefined;
+      const before = this.#noteFromRow(noteRow);
+      let current = (await client.query<any>(`SELECT note_id,sequence,update,updated_at,updated_by_account_id
+        FROM stash_note_collaboration WHERE note_id=$1 FOR UPDATE`, [noteId])).rows[0];
       if (!current) current = await this.#seedNoteCollaboration(client, noteId);
       const document = new Y.Doc();
       if (current) Y.applyUpdate(document, new Uint8Array(current.update));
+      const beforeUpdate = Y.encodeStateAsUpdate(document);
       Y.applyUpdate(document, update);
-      const merged = Y.encodeStateAsUpdate(document); document.destroy();
+      const merged = Y.encodeStateAsUpdate(document);
+      if (Buffer.from(beforeUpdate).equals(Buffer.from(merged))) {
+        document.destroy();
+        return { noteId: current.note_id, sequence: Number(current.sequence), update: new Uint8Array(current.update),
+          updatedAt: new Date(current.updated_at).toISOString(), updatedByMemberId: current.updated_by_account_id };
+      }
+      const canonicalDocument = richTextFromCollaborativeDocument(document); document.destroy();
+      const note: NoteRecord = { ...before, document: canonicalDocument, content: richTextToMarkdown(canonicalDocument), revision: before.revision + 1 };
+      await client.query("UPDATE stash_notes SET content=$2,document=$3::jsonb,revision=$4 WHERE id=$1",
+        [noteId, note.content, JSON.stringify(note.document), note.revision]);
       const row = (await client.query<any>(`INSERT INTO stash_note_collaboration(note_id,sequence,update,updated_by_account_id)
         VALUES($1,$2,$3,$4) ON CONFLICT(note_id) DO UPDATE SET sequence=EXCLUDED.sequence,update=EXCLUDED.update,
         updated_by_account_id=EXCLUDED.updated_by_account_id,updated_at=now()
@@ -4341,17 +4398,29 @@ export class PostgresDatabase implements
       [noteId, Number(current?.sequence ?? 0) + 1, Buffer.from(merged), memberId])).rows[0];
       await client.query(`INSERT INTO stash_note_collaboration_activity(note_id,sequence,actor_account_id,update_bytes)
         VALUES($1,$2,$3,$4)`, [noteId, row.sequence, memberId, update.byteLength]);
+      const projection: PortableNoteProjection = { schema: "stash.note.v1", id: note.id, workspaceId: note.workspaceId,
+        content: note.content, tags: note.tags, createdAt: note.createdAt,
+        createdBy: { localAccountId: before.createdByMemberId, displayName: noteRow.creator_name },
+        ...(note.projectId ? { projectId: note.projectId } : {}), ...(note.reminder ? { reminder: note.reminder } : {}) };
+      await this.#recordPortableProjection(client, "Note", note.id, projection.schema, projection);
+      await this.#recordNoteRevisionAndActivity(client, memberId, before, note, "note_edited", { kind: "member" });
       return { noteId: row.note_id, sequence: Number(row.sequence), update: new Uint8Array(row.update),
         updatedAt: new Date(row.updated_at).toISOString(), updatedByMemberId: row.updated_by_account_id };
     });
   }
 
-  async #canEditCollaborativeNote(client: PoolClient, memberId: string, noteId: string): Promise<boolean> {
-    const result = await client.query(`SELECT 1 FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id=note.workspace_id
-      WHERE note.id=$1 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
-      (workspace.owner_type='organization' AND EXISTS(SELECT 1 FROM stash_organization_memberships membership
-        WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2)))`, [noteId, memberId]);
-    return Boolean(result.rowCount);
+  async #authorizeNote(client: Pool | PoolClient, memberId: string, noteId: string): Promise<"edit" | "read" | "none"> {
+    const result = await client.query<{ can_edit: boolean; can_read: boolean }>(`SELECT
+      ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
+       (workspace.owner_type='organization' AND EXISTS(SELECT 1 FROM stash_organization_memberships membership
+         WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2))) AS can_edit,
+      ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
+       (workspace.owner_type='organization' AND EXISTS(SELECT 1 FROM stash_organization_memberships membership
+         WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2)) OR
+       (note.project_id IS NOT NULL AND EXISTS(SELECT 1 FROM stash_project_guests guest
+         WHERE guest.project_id=note.project_id AND guest.account_id=$2))) AS can_read
+      FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id=note.workspace_id WHERE note.id=$1`, [noteId, memberId]);
+    return result.rows[0]?.can_edit ? "edit" : result.rows[0]?.can_read ? "read" : "none";
   }
 
   async #seedNoteCollaboration(client: PoolClient, noteId: string): Promise<any> {

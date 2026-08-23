@@ -21,8 +21,19 @@ describe("portable rich-text Markdown", () => {
   });
 
   it("surfaces unsupported downstream constructs instead of discarding them", () => {
-    for (const markdown of ["| A | B |\n| - | - |", "![image](photo.png)", "> [!NOTE]\n> callout", ":::callout\ntext"])
+    for (const markdown of [":::callout\ntext"])
       assert.throws(() => markdownToRichText(markdown), UnsupportedMarkdown);
+  });
+
+  it("round-trips portable callouts, attachments, images, and tables", () => {
+    const document: RichTextDocument = { type: "doc", blocks: [
+      { type: "callout", kind: "note", content: [{ text: "Remember this" }] },
+      { type: "attachment", href: "./attachments/asset/spec%20sheet.pdf", label: "Spec sheet" },
+      { type: "image", src: "./attachments/image/diagram.png", alt: "Diagram", title: "Architecture" },
+      { type: "table", rows: [[{ header: true, content: [{ text: "Owner" }] }, { header: true, content: [{ text: "State" }] }],
+        [{ header: false, content: [{ text: "Ada" }] }, { header: false, content: [{ text: "Ready" }] }]] },
+    ] };
+    assert.deepEqual(markdownToRichText(richTextToMarkdown(document)), document);
   });
 
   it("round-trips mixed and nested inline content without delimiter guessing", () => {
