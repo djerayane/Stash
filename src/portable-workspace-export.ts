@@ -26,7 +26,11 @@ export interface PortableWorkspaceExportSnapshot {
   noteLinks: Array<PortableNoteLinkProjection | PortableNoteLinkStateProjection>;
   activities?: ActivityRecord[];
   noteHistory?: NoteHistoryRevision[];
+  /** Versioned projections for durable semantics without a dedicated readable file. */
+  durableObjects?: PortableDurableObject[];
 }
+
+export interface PortableDurableObject { kind: string; id: string; schema: string; payload: unknown }
 
 export interface PortableWorkspaceExportRepository {
   readExportSnapshot(memberId: string, workspaceId: string): Promise<
@@ -124,6 +128,19 @@ function zip(entries: ArchiveEntry[]): Buffer {
   return Buffer.concat([...locals, directory, end]);
 }
 
+export interface PortableWorkspaceCanonicalState {
+  workspace: PortableWorkspaceProjection;
+  notes: PortableNoteProjection[];
+  tasks: PortableTaskProjection[];
+  boards: Board[];
+  attachments: PortableAttachmentProjection[];
+  noteLocations: PortableNoteLocationProjection[];
+  noteLinks: Array<PortableNoteLinkProjection | PortableNoteLinkStateProjection>;
+  activities: ActivityRecord[];
+  noteHistory: NoteHistoryRevision[];
+  durableObjects: PortableDurableObject[];
+}
+
 function attachmentPath(projection: PortableAttachmentProjection): string {
   const path = projection.relativePath.replace(/^\.\//, "");
   const expected = `attachments/${projection.id}/`;
@@ -157,7 +174,7 @@ export class PortableWorkspaceExportService {
       || snapshot.noteHistory?.some((revision) => revision.workspaceId !== workspaceId)) {
       throw new Error("inconsistent_export_snapshot");
     }
-    const readme = "# Stash Portable Workspace Export\n\nFormat: `stash.portable-workspace-export.v1`\n\nNotes and Tasks are readable Markdown. Board view configurations are deterministic JSON in `boards/`. Stable Note locations and links are deterministic JSON under `relationships/`, and links are also readable relative Markdown in their source Notes. `manifest.json` contains the Workspace identity, file checksums, and the schemas needed by importers. Attachment paths and bytes are preserved exactly.\n";
+    const readme = "# Stash Portable Workspace Export\n\nFormat: `stash.portable-workspace-export.v1`\n\nNotes and Tasks are readable Markdown. Board view configurations are deterministic JSON in `boards/`. Stable Note locations and links are deterministic JSON under `relationships/`, and links are also readable relative Markdown in their source Notes. `objects/workspace.json` is the canonical lossless reconstruction document, including durable projections that have no readable file. `manifest.json` contains the Workspace identity and file checksums. Attachment paths and bytes are preserved exactly. Instance secrets are never part of this format.\n";
     const locationByNote = new Map(snapshot.noteLocations.map((location) => [location.noteId, location]));
     if (locationByNote.size !== snapshot.notes.length || snapshot.notes.some((note) => !locationByNote.has(note.id)))
       throw new Error("inconsistent_note_locations");
@@ -175,6 +192,21 @@ export class PortableWorkspaceExportService {
       ...(snapshot.activities ? [{ path: "activity.json", text: stableJson(snapshot.activities) }] : []),
       ...(snapshot.noteHistory ? [{ path: "note-history.json", text: stableJson(snapshot.noteHistory) }] : []),
     ];
+    // Readable Markdown is for people; this canonical document is the versioned,
+    // lossless reconstruction seam. Importers never need to scrape presentation text.
+    const canonical: PortableWorkspaceCanonicalState = {
+      workspace: snapshot.workspace,
+      notes: snapshot.notes,
+      tasks: snapshot.tasks,
+      boards: snapshot.boards,
+      attachments: snapshot.attachments.map(({ projection }) => projection),
+      noteLocations: snapshot.noteLocations,
+      noteLinks: snapshot.noteLinks,
+      activities: snapshot.activities ?? [],
+      noteHistory: snapshot.noteHistory ?? [],
+      durableObjects: snapshot.durableObjects ?? [],
+    };
+    const canonicalText = stableJson(canonical);
     const planned = [
       { path: "README.md", bytes: Buffer.byteLength(readme) },
       ...snapshot.attachments.map(({ projection }) => ({ path: attachmentPath(projection), bytes: projection.size })),
@@ -183,6 +215,7 @@ export class PortableWorkspaceExportService {
       ...boardTexts.map(({ path, text }) => ({ path, bytes: Buffer.byteLength(text) })),
       ...relationshipTexts.map(({ path, text }) => ({ path, bytes: Buffer.byteLength(text) })),
       ...durableState.map(({ path, text }) => ({ path, bytes: Buffer.byteLength(text) })),
+      { path: "objects/workspace.json", bytes: Buffer.byteLength(canonicalText) },
     ].sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
     const seen = new Set<string>();
     if (planned.some(({ path, bytes }) => !isSafeArchivePath(path) || !Number.isSafeInteger(bytes) || bytes < 0 || seen.has(path) || !seen.add(path)))
@@ -206,6 +239,7 @@ export class PortableWorkspaceExportService {
       ...boardTexts.map(({ path, text }) => ({ path, content: Buffer.from(text) })),
       ...relationshipTexts.map(({ path, text }) => ({ path, content: Buffer.from(text) })),
       ...durableState.map(({ path, text }) => ({ path, content: Buffer.from(text) })),
+      { path: "objects/workspace.json", content: Buffer.from(canonicalText) },
     ].sort(comparePaths);
     const manifestFiles: ManifestEntry[] = files.map(({ path, content }) => ({ path, bytes: content.length, sha256: createHash("sha256").update(content).digest("hex") }));
     files.push({ path: "manifest.json", content: Buffer.from(stableJson({ schema: "stash.portable-workspace-export.v1", workspace: snapshot.workspace, files: manifestFiles })) });

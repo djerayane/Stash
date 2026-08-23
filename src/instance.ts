@@ -42,6 +42,8 @@ import { projectWorkflowRoutes } from "./project-workflow-routes.js";
 import type { ProjectWorkflowService } from "./project-workflows.js";
 import { portableWorkspaceExportRoute } from "./portable-workspace-export-route.js";
 import type { PortableWorkspaceExportService } from "./portable-workspace-export.js";
+import { portableWorkspaceImportRoute } from "./portable-workspace-import-route.js";
+import type { PortableWorkspaceImportService } from "./portable-workspace-import.js";
 import { boardRoutes } from "./board-routes.js";
 import type { BoardService } from "./boards.js";
 import { boardSurfaceRoute } from "./board-surface.js";
@@ -90,6 +92,7 @@ export interface InstanceOptions {
   discussions?: DiscussionService;
   projectWorkflows?: ProjectWorkflowService;
   portableWorkspaceExports?: PortableWorkspaceExportService;
+  portableWorkspaceImports?: PortableWorkspaceImportService;
   boards?: BoardService;
   noteLinks?: NoteLinkService;
   activities?: ActivityService;
@@ -173,6 +176,8 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
       options.instanceAdminToken,
       ownerBootstrapRoute(options.ownerBootstrap),
     ),
+    ...(options.portableWorkspaceImports
+      ? [requireInstanceAdministrator(options.instanceAdminToken, portableWorkspaceImportRoute(options.portableWorkspaceImports))] : []),
     ...publicDomainRoutes,
     ...(options.mobileCaptures && (options.memberAccess ?? options.passwordAuth)
       ? [mobileCaptureRoutes(options.mobileCaptures, (options.memberAccess ?? options.passwordAuth)!)]

@@ -23,6 +23,7 @@ import { MobileCaptureService } from "./mobile-captures.js";
 import { DiscussionService } from "./discussions.js";
 import { ProjectWorkflowService } from "./project-workflows.js";
 import { PortableWorkspaceExportService } from "./portable-workspace-export.js";
+import { PortableWorkspaceImportService } from "./portable-workspace-import.js";
 import { BoardService } from "./boards.js";
 import { NoteLinkService } from "./note-links.js";
 import { ActivityService } from "./activity.js";
@@ -83,6 +84,7 @@ async function main(): Promise<void> {
     boards: new BoardService(database),
     attachments: new AttachmentService(database, attachmentStorage),
     portableWorkspaceExports: new PortableWorkspaceExportService(database, attachmentStorage),
+    portableWorkspaceImports: new PortableWorkspaceImportService(database, attachmentStorage),
     mobileCaptures: new MobileCaptureService(database),
     discussions: new DiscussionService(database),
     activities: new ActivityService(database),

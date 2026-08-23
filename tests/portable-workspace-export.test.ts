@@ -102,7 +102,7 @@ describe("readable Portable Workspace Export", () => {
     assert.deepEqual([...files.keys()], [
       "README.md", "activity.json", "attachments/44444444-4444-4444-8444-444444444444/design%20v2.png",
       "boards/12121212-1212-4212-8212-121212121212.json", "decisions/decision.md", "manifest.json",
-      "note-history.json", "notes/engine.md", "relationships/note-links.json",
+      "note-history.json", "notes/engine.md", "objects/workspace.json", "relationships/note-links.json",
       "relationships/note-locations.json", "tasks/LAB-7--55555555-5555-4555-8555-555555555555.md",
     ]);
     assert.deepEqual(JSON.parse(files.get("activity.json")!.toString()), snapshot.activities);
@@ -179,8 +179,8 @@ describe("readable Portable Workspace Export", () => {
     const { archive } = outcome; const classicEnd = archive.length - 22; const locator = classicEnd - 20; const zip64End = locator - 56;
     assert.equal(archive.readUInt32LE(classicEnd), 0x06054b50); assert.equal(archive.readUInt16LE(classicEnd + 8), 0xffff);
     assert.equal(archive.readUInt32LE(locator), 0x07064b50); assert.equal(Number(archive.readBigUInt64LE(locator + 8)), zip64End);
-    assert.equal(archive.readUInt32LE(zip64End), 0x06064b50); assert.equal(archive.readBigUInt64LE(zip64End + 24), 65_539n);
-    assert.equal(archive.readBigUInt64LE(zip64End + 32), 65_539n);
+    assert.equal(archive.readUInt32LE(zip64End), 0x06064b50); assert.equal(archive.readBigUInt64LE(zip64End + 24), 65_540n);
+    assert.equal(archive.readBigUInt64LE(zip64End + 32), 65_540n);
     const directoryOffset = Number(archive.readBigUInt64LE(zip64End + 48));
     assert.equal(archive.readUInt32LE(directoryOffset), 0x02014b50);
   });
