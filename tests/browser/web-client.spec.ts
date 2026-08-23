@@ -44,6 +44,31 @@ test("supports keyboard navigation and focuses changed route content", async ({ 
   await expect(page.getByRole("main")).toBeFocused();
 });
 
+test("configures followed Project notifications by keyboard without accessibility violations", async ({ page }) => {
+  await installMemberSession(page);
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const projectId = "11111111-1111-4111-8111-111111111111";
+  let activity = "followed"; let followed = false;
+  await page.route(`**/api/projects/${projectId}/notification-settings`, async (route) => {
+    if (route.request().method() === "PUT") activity = (await route.request().postDataJSON()).activity;
+    await route.fulfill({ json: { settings: { activity, digest: "off" } } });
+  });
+  await page.route(`**/api/projects/${projectId}/follow`, async (route) => {
+    if (route.request().method() === "PUT") followed = (await route.request().postDataJSON()).followed;
+    await route.fulfill({ json: { followed } });
+  });
+  await page.goto(`/app/projects/${projectId}/notifications`);
+  await expect(page.getByRole("heading", { name: "Choose what reaches you." })).toBeVisible();
+  const all = page.getByRole("radio", { name: /All Project Activity/ });
+  await all.focus(); await page.keyboard.press("Space");
+  await expect(all).toBeChecked();
+  const follow = page.getByRole("checkbox", { name: /Follow this Project/ });
+  await follow.focus(); await page.keyboard.press("Space");
+  await expect(follow).toBeChecked();
+  await expect(page.getByText("Preferences saved.")).toBeVisible();
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+});
+
 test("keeps unavailable actions non-interactive and navigates every available shell action", async ({ page }) => {
   await installMemberSession(page);
   await page.goto("/app/tasks");

@@ -2025,6 +2025,43 @@ export class PostgresDatabase implements
     return result.rowCount ? preferences : undefined;
   }
 
+  async getProjectFollow(memberId: string, projectId: string) {
+    await this.#ensureNotificationSchema();
+    const result = await this.#pool.query<{ followed: boolean }>(`SELECT EXISTS (
+      SELECT 1 FROM stash_project_follows follow WHERE follow.member_id=$1 AND follow.project_id=project.id
+    ) AS followed FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
+      WHERE project.id=$2 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$1) OR
+        (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$1)))`, [memberId, projectId]);
+    return result.rows[0]?.followed;
+  }
+
+  async saveProjectFollow(memberId: string, projectId: string, followed: boolean) {
+    await this.#ensureNotificationSchema();
+    const visible = await this.#pool.query(`SELECT 1 FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
+      WHERE project.id=$2 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$1) OR
+        (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$1)))`, [memberId, projectId]);
+    if (!visible.rowCount) return undefined;
+    if (followed) await this.#pool.query(`INSERT INTO stash_project_follows(member_id,project_id,followed_at)
+      VALUES($1,$2,CURRENT_TIMESTAMP) ON CONFLICT(member_id,project_id) DO NOTHING`, [memberId, projectId]);
+    else await this.#pool.query("DELETE FROM stash_project_follows WHERE member_id=$1 AND project_id=$2", [memberId, projectId]);
+    return followed;
+  }
+
+  async listProjectNotificationAudience(projectId: string, actorId: string) {
+    await this.#ensureNotificationSchema();
+    const result = await this.#pool.query<{ member_id: string; followed: boolean }>(`SELECT account.id AS member_id,
+      (follow.member_id IS NOT NULL) AS followed FROM stash_projects project
+      JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
+      JOIN stash_accounts account ON (workspace.owner_type='personal' AND account.id=workspace.personal_owner_id) OR
+        (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=account.id))
+      LEFT JOIN stash_project_follows follow ON follow.project_id=project.id AND follow.member_id=account.id
+      WHERE project.id=$1 AND account.id<>$2 ORDER BY account.id`, [projectId, actorId]);
+    return result.rows.map((row) => ({ memberId: row.member_id, followed: row.followed }));
+  }
+
   async claimDigestNotifications(memberId: string, cadence: "daily" | "weekly", since: string, until: string, claimedAt: string) {
     await this.#ensureNotificationSchema();
     const result = await this.#pool.query<any>(`UPDATE stash_notifications notification SET digested_at=$5
@@ -3402,6 +3439,12 @@ export class PostgresDatabase implements
           (quiet_start IS NOT NULL AND quiet_end IS NOT NULL AND quiet_time_zone IS NOT NULL)),
         PRIMARY KEY (member_id,project_id)
       );
+      CREATE TABLE IF NOT EXISTS stash_project_follows (
+        member_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
+        project_id UUID NOT NULL REFERENCES stash_projects(id) ON DELETE CASCADE,
+        followed_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (member_id,project_id)
+      );
       CREATE TABLE IF NOT EXISTS stash_notifications (
         id UUID PRIMARY KEY,
         member_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
@@ -4534,6 +4577,36 @@ export class PostgresDatabase implements
       VALUES ($1,$2,'Task',$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb)`, [activity.id, activity.workspaceId, activity.object.id, activity.action,
       activity.actor.localAccountId, JSON.stringify(activity.cause), activity.occurredAt, JSON.stringify(activity.before), JSON.stringify(activity.after)]);
     await this.#recordPortableProjection(client, "Activity", activity.id, activity.schema, activity);
+    if (activity.action !== "automation_execution_failed" && JSON.stringify(activity.before) !== JSON.stringify(activity.after)) {
+      await this.#recordFollowedProjectNotifications(client, activity);
+    }
+  }
+
+  async #recordFollowedProjectNotifications(client: PoolClient, activity: ActivityRecord): Promise<void> {
+    await this.#ensureNotificationSchema(client);
+    const scope = await client.query<any>(`SELECT task.project_id, account.id AS member_id,
+      COALESCE(preference.activity,'followed') AS activity_preference, COALESCE(preference.digest,'off') AS digest,
+      preference.quiet_start, preference.quiet_end, preference.quiet_time_zone
+      FROM stash_tasks task JOIN stash_projects project ON project.id=task.project_id
+      JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
+      JOIN stash_accounts account ON (workspace.owner_type='personal' AND account.id=workspace.personal_owner_id) OR
+        (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=account.id))
+      LEFT JOIN stash_notification_preferences preference ON preference.project_id=project.id AND preference.member_id=account.id
+      LEFT JOIN stash_project_follows follow ON follow.project_id=project.id AND follow.member_id=account.id
+      WHERE task.id=$1 AND account.id<>$2 AND COALESCE(preference.activity,'followed')<>'muted'
+        AND (COALESCE(preference.activity,'followed')='all' OR follow.member_id IS NOT NULL)
+      ORDER BY account.id`, [activity.object.id, activity.actor.localAccountId]);
+    for (const recipient of scope.rows) {
+      const preferences: NotificationPreferences = { activity: recipient.activity_preference, digest: recipient.digest,
+        ...(recipient.quiet_start ? { quietHours: { start: recipient.quiet_start, end: recipient.quiet_end, timeZone: recipient.quiet_time_zone } } : {}) };
+      await client.query(`INSERT INTO stash_notifications
+        (id,member_id,workspace_id,project_id,trigger,summary,activity,created_at,delivery)
+        VALUES($1,$2,$3,$4,'followed_change',$5,$6::jsonb,$7,$8)
+        ON CONFLICT(member_id,activity_id,trigger) DO NOTHING`, [randomUUID(), recipient.member_id, activity.workspaceId,
+        recipient.project_id, `${activity.actor.displayName} changed a Task in this Project`, JSON.stringify(activity), activity.occurredAt,
+        notificationDeliveryMode(new Date(activity.occurredAt), preferences)]);
+    }
   }
 
   async #recordAssignmentNotifications(client: PoolClient, projectId: string, activity: ActivityRecord,
@@ -4624,6 +4697,7 @@ export class PostgresDatabase implements
       VALUES($1,$2,$3,$4,$5,$6,'member',$7,$8::jsonb,$9::jsonb)`,[activity.id,workspaceId,kind,objectId,action,memberId,
       activity.occurredAt,JSON.stringify(activity.before),JSON.stringify(activity.after)]);
     await this.#recordPortableProjection(client,"Activity",activity.id,activity.schema,activity);
+    if (kind === "Task") await this.#recordFollowedProjectNotifications(client, activity);
   }
 
   async loadNoteCollaboration(memberId: string, noteId: string): Promise<CollaborationSnapshot | undefined> {

@@ -34,6 +34,9 @@ export interface NotificationRepository {
   getNotificationPreferences(memberId: string, projectId: string): Promise<NotificationPreferences | undefined>;
   saveNotificationPreferences(memberId: string, projectId: string, preferences: NotificationPreferences): Promise<NotificationPreferences | undefined>;
   claimDigestNotifications(memberId: string, cadence: Exclude<DigestCadence, "off">, since: string, until: string, claimedAt: string): Promise<NotificationDelivery[]>;
+  getProjectFollow?(memberId: string, projectId: string): Promise<boolean | undefined>;
+  saveProjectFollow?(memberId: string, projectId: string, followed: boolean): Promise<boolean | undefined>;
+  listProjectNotificationAudience?(projectId: string, actorId: string): Promise<{ memberId: string; followed: boolean }[]>;
 }
 
 export class InvalidNotificationInput extends Error {}
@@ -95,6 +98,34 @@ export class NotificationService {
       createdAt: now.toISOString(), delivery: notificationDeliveryMode(now, preferences),
     };
     return { status: "created" as const, notification: await this.repository.saveNotification(delivery) };
+  }
+
+  async publishProjectActivity(projectId: string, activity: ActivityRecord, summary: string) {
+    if (!uuid.test(projectId) || !summary.trim() || summary.length > 500) throw new InvalidNotificationInput();
+    if (!this.repository.listProjectNotificationAudience) throw new Error("project_follow_repository_unavailable");
+    const audience = await this.repository.listProjectNotificationAudience(projectId, activity.actor.localAccountId);
+    let created = 0; let suppressed = 0;
+    for (const recipient of audience) {
+      const outcome = await this.notify({ activity, projectId, memberId: recipient.memberId, trigger: "followed_change",
+        summary, followed: recipient.followed });
+      if (outcome.status === "created") created += 1; else suppressed += 1;
+    }
+    return { created, suppressed };
+  }
+
+  async getProjectFollow(memberId: string, projectId: string) {
+    if (!uuid.test(projectId)) throw new InvalidNotificationInput();
+    if (!this.repository.getProjectFollow) throw new Error("project_follow_repository_unavailable");
+    const followed = await this.repository.getProjectFollow(memberId, projectId);
+    return followed === undefined ? { status: "not_found" as const } : { status: "found" as const, followed };
+  }
+
+  async setProjectFollow(memberId: string, projectId: string, value: unknown) {
+    if (!uuid.test(projectId) || value === null || typeof value !== "object" || Array.isArray(value)
+      || typeof (value as { followed?: unknown }).followed !== "boolean" || Object.keys(value).length !== 1) throw new InvalidNotificationInput();
+    if (!this.repository.saveProjectFollow) throw new Error("project_follow_repository_unavailable");
+    const followed = await this.repository.saveProjectFollow(memberId, projectId, (value as { followed: boolean }).followed);
+    return followed === undefined ? { status: "not_found" as const } : { status: "saved" as const, followed };
   }
 
   async list(memberId: string, unreadOnly: boolean) {

@@ -6,7 +6,7 @@ export function notificationRoutes(service: NotificationService, memberAccess: M
   return {
     matches: (request, url) => request.method === "GET" && (url.pathname === "/api/notifications" || url.pathname === "/api/notifications/digest")
       || request.method === "POST" && /^\/api\/notifications\/[^/]+\/read$/.test(url.pathname)
-      || ["GET", "PUT"].includes(request.method ?? "") && /^\/api\/projects\/[^/]+\/notification-settings$/.test(url.pathname),
+      || ["GET", "PUT"].includes(request.method ?? "") && /^\/api\/projects\/[^/]+\/(?:notification-settings|follow)$/.test(url.pathname),
     async handle(request, response, url) {
       const access = await memberAccess.authenticateBearer(request.headers.authorization);
       if (!access) { json(response, 401, { error: "unauthorized", message: "A valid Member session is required." }); return true; }
@@ -25,6 +25,13 @@ export function notificationRoutes(service: NotificationService, memberAccess: M
           return true;
         }
         const projectId = decodeURIComponent(parts[3]!);
+        if (parts[4] === "follow") {
+          const result = request.method === "GET" ? await service.getProjectFollow(access.accountId, projectId)
+            : await service.setProjectFollow(access.accountId, projectId, await readJson(request));
+          if (result.status === "found" || result.status === "saved") json(response, 200, { followed: result.followed });
+          else json(response, 404, { error: "project_not_found", message: "This Project follow setting is unavailable." });
+          return true;
+        }
         if (request.method === "GET") {
           const result = await service.getPreferences(access.accountId, projectId);
           if (result.status === "found") json(response, 200, { settings: result.preferences });
