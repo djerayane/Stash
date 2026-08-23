@@ -11,7 +11,8 @@ interface ClientSessionResponse {
   readonly member: { readonly id: string; readonly name: string; readonly email: string };
   readonly workspace: { readonly id: string; readonly name: string };
   readonly capabilities: readonly string[];
-  readonly organizationAdministration?: OrganizationAdministration;
+  readonly organizationAdministrations?: readonly OrganizationAdministration[];
+  readonly activeOrganizationId?: string;
 }
 
 const storageKey = "stash.member-session";
@@ -33,7 +34,9 @@ function isClientSessionResponse(value: unknown): value is ClientSessionResponse
     && typeof session.member.email === "string" && typeof session.workspace?.id === "string"
     && typeof session.workspace.name === "string" && Array.isArray(session.capabilities)
     && session.capabilities.every((capability) => typeof capability === "string")
-    && (session.organizationAdministration === undefined || isOrganizationAdministration(session.organizationAdministration));
+    && (session.organizationAdministrations === undefined || Array.isArray(session.organizationAdministrations)
+      && session.organizationAdministrations.every(isOrganizationAdministration))
+    && (session.activeOrganizationId === undefined || typeof session.activeOrganizationId === "string");
 }
 
 function isOrganizationAdministration(value: unknown): value is OrganizationAdministration {
@@ -64,5 +67,6 @@ export function useSessionState(fetcher: typeof fetch = globalThis.fetch): Sessi
   if (query.isPending) return { status: "loading" };
   if (query.isError) return { status: "error", message: "The Instance could not be reached.", retry: () => { void query.refetch(); } };
   return { status: "authenticated", token: stored.token, member: query.data.member, workspace: query.data.workspace,
-    capabilities: query.data.capabilities, organizationAdministration: query.data.organizationAdministration };
+    capabilities: query.data.capabilities, organizationAdministrations: query.data.organizationAdministrations,
+    activeOrganizationId: query.data.activeOrganizationId };
 }

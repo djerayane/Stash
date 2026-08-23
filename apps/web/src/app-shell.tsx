@@ -13,7 +13,7 @@ export type SessionState =
   | { readonly status: "loading" }
   | { readonly status: "anonymous" }
   | { readonly status: "error"; readonly message: string; readonly retry?: () => void }
-  | { readonly status: "authenticated"; readonly token?: string; readonly member: { readonly id: string; readonly name: string; readonly email: string }; readonly workspace: { readonly name: string }; readonly capabilities: readonly string[]; readonly organizationAdministration?: OrganizationAdministration };
+  | { readonly status: "authenticated"; readonly token?: string; readonly member: { readonly id: string; readonly name: string; readonly email: string }; readonly workspace: { readonly name: string }; readonly capabilities: readonly string[]; readonly organizationAdministrations?: readonly OrganizationAdministration[]; readonly activeOrganizationId?: string };
 
 interface AppShellProps { readonly session?: SessionState }
 
@@ -132,7 +132,7 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
       <div className={styles.workspaceIdentity}><span className={styles.workspaceMonogram} aria-hidden="true">{initials(workspaceName, "PW")}</span><span><strong>{workspaceName}</strong><small>Workspace</small></span></div>
       <NavigationMenu.Root className={styles.navigationRoot} orientation="vertical" aria-label="Workspace"><NavigationMenu.List className={styles.navigation}>
         {navigation.map((item) => <NavigationMenu.Item key={item.to}><NavigationMenu.Link asChild><NavLink className={styles.navLink} end={item.to === "/app"} to={item.to}><Icon name={item.icon} />{item.label}</NavLink></NavigationMenu.Link></NavigationMenu.Item>)}
-        {session.organizationAdministration ? <NavigationMenu.Item><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/members"><Icon name="members" />Members</NavLink></NavigationMenu.Link></NavigationMenu.Item> : null}
+        {session.organizationAdministrations?.length ? <NavigationMenu.Item><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/members"><Icon name="members" />Members</NavLink></NavigationMenu.Link></NavigationMenu.Item> : null}
       </NavigationMenu.List></NavigationMenu.Root>
       <div className={styles.sidebarFooter}><span className={styles.avatar} aria-hidden="true">{initials(memberName, "M")}</span><span><strong>{memberName}</strong><small>{memberEmail}</small></span></div>
     </aside>
@@ -148,7 +148,7 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
           <Route path="/app/tasks" element={<PlaceholderPage workspaceName={workspaceName} title="Tasks" description="Actionable work connected to the thinking that shaped it." action="New task" />} />
           <Route path="/app/projects/:projectId/tasks/:taskKey/development" element={<DevelopmentSignalsRoute />} />
           <Route path="/app/projects/:projectId/tasks/:taskKey" element={<TaskDetailPage memberId={session.member.id} token={session.token} />} />
-          <Route path="/app/settings/members" element={<MemberAdministrationPage administration={session.organizationAdministration} currentMemberId={session.member.id} token={session.token} />} />
+          <Route path="/app/settings/members" element={<MemberAdministrationPage administrations={session.organizationAdministrations} activeOrganizationId={session.activeOrganizationId} currentMemberId={session.member.id} token={session.token} />} />
           <Route path="/app/activity" element={<PlaceholderPage workspaceName={workspaceName} title="Activity" description="Meaningful changes, explained without unnecessary noise." action="Filter" />} />
           <Route path="*" element={<PlaceholderPage workspaceName={workspaceName} title="Not found" description="This Workspace route does not exist." action="Go home" actionTo="/app" />} />
         </Routes>

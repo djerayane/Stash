@@ -2144,12 +2144,12 @@ export class PostgresDatabase implements
     const client = await this.#pool.connect();
     try {
       await this.#ensureWorkspaceProjectSchema(client);
-      const result = await client.query<{ account_id: string; account_name: string; account_email: string; workspace_id: string; workspace_name: string }>(`
+      const result = await client.query<{ account_id: string; account_name: string; account_email: string; workspace_id: string; workspace_name: string; organization_id: string | null }>(`
         SELECT account.id account_id, account.name account_name, account.email account_email,
-          workspace.id workspace_id, workspace.name workspace_name
+          workspace.id workspace_id, workspace.name workspace_name, workspace.organization_owner_id organization_id
         FROM stash_accounts account
         JOIN LATERAL (
-          SELECT candidate.id, candidate.name
+          SELECT candidate.id, candidate.name, candidate.organization_owner_id
           FROM stash_workspaces candidate
           WHERE (candidate.owner_type='personal' AND candidate.personal_owner_id=account.id)
             OR (candidate.owner_type='organization' AND EXISTS (
@@ -2173,16 +2173,17 @@ export class PostgresDatabase implements
         JOIN stash_accounts member ON member.id=membership.account_id
         WHERE actor_membership.account_id=$1 AND actor_membership.role IN ('Owner','Admin')
         ORDER BY organization.id, member.name, member.id`, [accountId]);
-      const administeredOrganizationId = administration.rows[0]?.organization_id;
-      const eligibleMembers = administration.rows.filter(({ organization_id }) => organization_id === administeredOrganizationId);
+      const organizationAdministrations = [...new Set(administration.rows.map(({ organization_id }) => organization_id))]
+        .map((organizationId) => {
+          const eligibleMembers = administration.rows.filter(({ organization_id }) => organization_id === organizationId);
+          return { organizationId, organizationName: eligibleMembers[0]!.organization_name,
+            members: eligibleMembers.map((member) => ({ id: member.member_id, name: member.member_name,
+              email: member.member_email, role: member.member_role })) };
+        });
       return { member: { id: row.account_id, name: row.account_name, email: row.account_email },
         workspace: { id: row.workspace_id, name: row.workspace_name }, capabilities: [],
-        ...(administeredOrganizationId ? { organizationAdministration: {
-          organizationId: administeredOrganizationId,
-          organizationName: eligibleMembers[0]!.organization_name,
-          members: eligibleMembers.map((member) => ({ id: member.member_id, name: member.member_name,
-            email: member.member_email, role: member.member_role })),
-        } } : {}) };
+        ...(organizationAdministrations.length ? { organizationAdministrations } : {}),
+        ...(row.organization_id ? { activeOrganizationId: row.organization_id } : {}) };
     } finally { client.release(); }
   }
 
@@ -4366,16 +4367,28 @@ export class PostgresDatabase implements
     const table = await client.query<{ exists: boolean }>("SELECT to_regclass('stash_tasks') IS NOT NULL AS exists");
     if (!table.rows[0]?.exists) return [];
     await client.query("ALTER TABLE stash_tasks ADD COLUMN IF NOT EXISTS former_assignee_ids JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(former_assignee_ids) = 'array')");
-    const affected = await client.query<{ id: string }>(`UPDATE stash_tasks task
+    const affected = await client.query<{ id: string }>(`SELECT task.id FROM stash_tasks task
+      JOIN stash_workspaces workspace ON task.workspace_id = workspace.id
+      WHERE workspace.owner_type = 'organization' AND workspace.organization_owner_id = $1
+        AND task.assignee_ids ? $2 ORDER BY task.id FOR UPDATE OF task`, [organizationId, accountId]);
+    const before = new Map<string, TaskPlanningReadModel>();
+    for (const { id } of affected.rows) {
+      const current = await client.query<any>(taskPlanningSelectById, [id, actorId]);
+      if (current.rows[0]) before.set(id, taskPlanningReadModelFromRow(current.rows[0]));
+    }
+    await client.query(`UPDATE stash_tasks task
       SET former_assignee_ids = CASE WHEN former_assignee_ids ? $2 THEN former_assignee_ids ELSE former_assignee_ids || to_jsonb($2::text) END
       FROM stash_workspaces workspace WHERE task.workspace_id = workspace.id AND workspace.owner_type = 'organization'
-        AND workspace.organization_owner_id = $1 AND task.assignee_ids ? $2 RETURNING task.id`, [organizationId, accountId]);
+        AND workspace.organization_owner_id = $1 AND task.assignee_ids ? $2`, [organizationId, accountId]);
     const ids = affected.rows.map(({ id }) => id).sort();
     for (const taskId of ids) {
       const refreshed = await client.query<any>(taskPlanningSelectById, [taskId, actorId]);
       if (!refreshed.rows[0]) continue;
       const projection = taskProjectionFromRow(refreshed.rows[0]);
       await this.#recordPortableProjection(client, "Task", taskId, projection.schema, projection);
+      const previous = before.get(taskId);
+      if (previous) await this.#recordTaskActivity(client, actorId, projection.workspaceId, taskId,
+        "task_departed_assignee_marked", previous, taskPlanningReadModelFromRow(refreshed.rows[0]));
     }
     return ids;
   }

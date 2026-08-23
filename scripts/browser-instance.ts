@@ -54,6 +54,7 @@ const collaborationRepository = {
 const projectId = "22222222-2222-4222-8222-222222222222";
 const browserMemberId = "11111111-1111-4111-8111-111111111111";
 const organizationId = "44444444-4444-4444-8444-444444444444";
+const otherOrganizationId = "33333333-3333-4333-8333-333333333333";
 const departedMemberId = "55555555-5555-4555-8555-555555555555";
 const activeTokens = new Map([["browser-acceptance-member-token", browserMemberId], ["browser-acceptance-second-member-token", "browser-second-member"],
   ["browser-acceptance-guest-token", "browser-guest"], ["departed-member-token", departedMemberId]]);
@@ -107,10 +108,13 @@ const instance = await startInstance({
       name: accountId === browserMemberId ? "Browser Member" : accountId === "browser-second-member" ? "Second Browser Member" : "Browser Guest",
       email: accountId === browserMemberId ? "member@stash.test" : `${accountId}@stash.test` },
       workspace: { id: "browser-workspace", name: "Acceptance Workspace" }, capabilities: [], ...(accountId === browserMemberId ? {
-      organizationAdministration: { organizationId, organizationName: "Acceptance Organization", members: [
+      activeOrganizationId: organizationId, organizationAdministrations: [
+      { organizationId: otherOrganizationId, organizationName: "Other Organization", members: [
+        { id: browserMemberId, name: "Browser Member", email: "member@stash.test", role: "Admin" as const },
+      ] }, { organizationId, organizationName: "Acceptance Organization", members: [
         { id: browserMemberId, name: "Browser Member", email: "member@stash.test", role: "Admin" as const },
         { id: departedMemberId, name: "Departing Member", email: "departing@stash.test", role: "Member" as const },
-      ] } } : {}) };
+      ] }] } : {}) };
   } },
   host: "127.0.0.1",
   port: Number.parseInt(process.env.STASH_BROWSER_PORT ?? "4173", 10),

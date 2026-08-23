@@ -209,5 +209,22 @@ describe("PostgreSQL structured Task collaboration", { skip: !databaseUrl }, () 
     const dismissed = await fetch(`${taskBase(workflowOverlapTask.key)}/conflicts/${overlapConflict.id}`, { method: "PUT",
       headers: { authorization: "Bearer test", "content-type": "application/json" }, body: JSON.stringify({ resolution: "keep_current", expectedRevision: overlapRevision }) });
     assert.equal(dismissed.status, 200);
+
+    const departureTask = await createTask("Record departed assignment Activity");
+    assert.equal((await fetch(taskBase(departureTask.key), { method: "PATCH",
+      headers: { authorization: "Bearer test", "content-type": "application/json" },
+      body: JSON.stringify({ assigneeIds: [replacementId] }) })).status, 200);
+    const departure = await database.removeOrganizationMember(owner.organizationId, owner.ownerId, replacementId);
+    assert.equal(typeof departure, "object");
+    const activityProbe = new Pool({ connectionString: testDatabaseUrl });
+    const activity = await activityProbe.query<{ actor_account_id: string; cause: string; before_state: any; after_state: any }>(
+      `SELECT actor_account_id,cause,before_state,after_state FROM stash_workspace_activity
+       WHERE object_id=$1 AND action='task_departed_assignee_marked'`, [departureTask.id]);
+    await activityProbe.end();
+    assert.equal(activity.rowCount, 1);
+    assert.equal(activity.rows[0]!.actor_account_id, owner.ownerId);
+    assert.match(activity.rows[0]!.cause, /member/);
+    assert.deepEqual(activity.rows[0]!.before_state.formerAssigneeIds ?? [], []);
+    assert.deepEqual(activity.rows[0]!.after_state.formerAssigneeIds, [replacementId]);
   });
 });

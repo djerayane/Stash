@@ -11,8 +11,14 @@ export interface OrganizationAdministration {
   readonly members: ReadonlyArray<{ readonly id: string; readonly name: string; readonly email: string; readonly role: "Owner" | "Admin" | "Member" }>;
 }
 
-export function MemberAdministrationPage({ administration, currentMemberId, token }:
-  { readonly administration?: OrganizationAdministration; readonly currentMemberId?: string; readonly token?: string }) {
+export function MemberAdministrationPage({ administrations, activeOrganizationId, currentMemberId, token }:
+  { readonly administrations?: readonly OrganizationAdministration[]; readonly activeOrganizationId?: string;
+    readonly currentMemberId?: string; readonly token?: string }) {
+  const [selectedOrganizationId, setSelectedOrganizationId] = useState(() =>
+    administrations?.some(({ organizationId }) => organizationId === activeOrganizationId)
+      ? activeOrganizationId : administrations?.[0]?.organizationId);
+  const administration = administrations?.find(({ organizationId }) => organizationId === selectedOrganizationId);
+  const availableAdministrations = administrations ?? [];
   const [candidate, setCandidate] = useState<OrganizationAdministration["members"][number]>();
   const [departed, setDeparted] = useState<OrganizationAdministration["members"][number]>();
   const confirmationRef = useRef<HTMLDivElement>(null);
@@ -39,6 +45,11 @@ export function MemberAdministrationPage({ administration, currentMemberId, toke
   return <article className={styles.page} aria-labelledby="members-title">
     <header className={styles.header}><p className={styles.kicker}>{administration.organizationName}</p><h1 id="members-title">Member access</h1>
       <p>End Organization access without erasing the work and decisions a person contributed.</p></header>
+    {availableAdministrations.length > 1 ? <label className={styles.organizationPicker}>Organization
+      <select value={administration.organizationId} onChange={(event) => {
+        removal.reset(); setCandidate(undefined); setDeparted(undefined); setSelectedOrganizationId(event.target.value);
+      }}>{availableAdministrations.map((organization) => <option key={organization.organizationId} value={organization.organizationId}>{organization.organizationName}</option>)}</select>
+    </label> : null}
     {departed ? <section className={styles.completion} aria-live="polite" aria-labelledby="departure-complete">
       <div><h2 id="departure-complete">{departed.name} no longer has access</h2><p>Sessions, personal credentials, Agent Grants, and personal Repository Connections were revoked. Historical attribution remains intact.</p></div>
       <Link className={styles.taskLink} to="/app/tasks">Review Tasks</Link>
