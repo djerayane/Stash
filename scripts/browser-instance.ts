@@ -7,6 +7,13 @@ const instance = await startInstance({
   host: "127.0.0.1",
   port: Number.parseInt(process.env.STASH_BROWSER_PORT ?? "4173", 10),
   instanceAdminToken: "browser-acceptance-admin-token",
+  memberAccess: {
+    async authenticateBearer(authorization) {
+      return authorization === "Bearer browser-acceptance-member-token"
+        ? { accountId: "browser-member", sessionId: "browser-session" }
+        : undefined;
+    },
+  },
   webClientRoot: fileURLToPath(new URL("../apps/web/dist", import.meta.url)),
 });
 

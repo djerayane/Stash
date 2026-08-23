@@ -4,40 +4,48 @@ import { MemoryRouter } from "react-router";
 import { expect, test, vi } from "vitest";
 import { AppShell } from "./app-shell";
 
-function renderShell(fetcher: typeof fetch, canManageSettings = false) {
+function renderShell(fetcher: typeof fetch) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
-      <MemoryRouter><AppShell fetcher={fetcher} canManageSettings={canManageSettings} /></MemoryRouter>
+      <MemoryRouter><AppShell fetcher={fetcher} /></MemoryRouter>
     </QueryClientProvider>,
   );
 }
 
 test("recovers from an unavailable Instance and moves focus to the error", async () => {
-  const fetcher = vi.fn<typeof fetch>()
-    .mockResolvedValueOnce(new Response(JSON.stringify({ status: "unavailable" }), { status: 503 }))
-    .mockResolvedValueOnce(new Response(JSON.stringify({ status: "ready" }), { status: 200 }));
+  let healthAttempts = 0;
+  const fetcher = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+    if (String(input).endsWith("/api/client-session")) return new Response("{}", { status: 401 });
+    healthAttempts += 1;
+    return new Response(JSON.stringify({ status: healthAttempts === 1 ? "unavailable" : "ready" }), {
+      status: healthAttempts === 1 ? 503 : 200,
+    });
+  });
 
   renderShell(fetcher);
   const alert = await screen.findByRole("alert");
   expect(alert).toHaveFocus();
   fireEvent.click(screen.getByRole("button", { name: "Try again" }));
   await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Instance ready"));
-  expect(fetcher).toHaveBeenCalledTimes(2);
+  expect(healthAttempts).toBe(2);
 });
 
 test("does not render administrator navigation without the required permission", async () => {
-  const ready = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ status: "ready" }), { status: 200 }));
-  const { rerender } = renderShell(ready, false);
+  const denied = vi.fn<typeof fetch>().mockImplementation(async (input) => new Response(JSON.stringify(
+    String(input).endsWith("/api/client-session") ? { authenticated: true, permissions: [] } : { status: "ready" },
+  ), { status: 200 }));
+  const { unmount } = renderShell(denied);
   await screen.findByText("Instance ready");
   expect(screen.queryByRole("link", { name: "Administration" })).not.toBeInTheDocument();
 
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  rerender(
-    <QueryClientProvider client={client}>
-      <MemoryRouter><AppShell fetcher={ready} canManageSettings /></MemoryRouter>
-    </QueryClientProvider>,
-  );
+  unmount();
+  const allowed = vi.fn<typeof fetch>().mockImplementation(async (input) => new Response(JSON.stringify(
+    String(input).endsWith("/api/client-session")
+      ? { authenticated: true, permissions: ["instance:manage"] }
+      : { status: "ready" },
+  ), { status: 200 }));
+  renderShell(allowed);
   await screen.findByText("Instance ready");
-  expect(screen.getByRole("link", { name: "Administration" })).toHaveAttribute("href", "/settings/instance");
+  expect(await screen.findByRole("link", { name: "Administration" })).toHaveAttribute("href", "/settings/instance");
 });

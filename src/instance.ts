@@ -126,6 +126,12 @@ const webContentTypes: Record<string, string> = {
   ".woff2": "font/woff2",
 };
 
+const operationalNamespaces = ["/api", "/health", "/mcp"];
+
+function isOperationalPath(pathname: string): boolean {
+  return operationalNamespaces.some((namespace) => pathname === namespace || pathname.startsWith(`${namespace}/`));
+}
+
 async function readWebClientFile(root: string, pathname: string): Promise<{ body: Buffer; contentType: string } | undefined> {
   const normalizedRoot = resolve(root);
   let relativePath: string;
@@ -242,11 +248,25 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
       return;
     }
 
+    if (request.method === "GET" && url.pathname === "/api/client-session") {
+      if (request.headers.authorization === `Bearer ${options.instanceAdminToken}`) {
+        json(response, 200, { authenticated: true, permissions: ["instance:manage"] });
+        return;
+      }
+      const member = await memberAccess?.authenticateBearer(request.headers.authorization);
+      if (member) {
+        json(response, 200, { authenticated: true, permissions: [] });
+        return;
+      }
+      json(response, 401, { error: "unauthorized", message: "Authentication is required." });
+      return;
+    }
+
     for (const route of routes) {
       if (route.matches(request, url) && await route.handle(request, response, url)) return;
     }
 
-    if (request.method === "GET" && options.webClientRoot) {
+    if (request.method === "GET" && options.webClientRoot && !isOperationalPath(url.pathname)) {
       const requested = await readWebClientFile(options.webClientRoot, url.pathname);
       const acceptsHtml = (request.headers.accept ?? "").includes("text/html");
       const webFile = requested ?? (acceptsHtml ? await readWebClientFile(options.webClientRoot, "/") : undefined);

@@ -6,7 +6,6 @@ import styles from "./app-shell.module.css";
 
 interface AppShellProps {
   fetcher?: typeof fetch;
-  canManageSettings?: boolean;
 }
 
 function InstanceStatus({ fetcher = globalThis.fetch }: Pick<AppShellProps, "fetcher">) {
@@ -37,7 +36,18 @@ function InstanceStatus({ fetcher = globalThis.fetch }: Pick<AppShellProps, "fet
   return <p className={styles.instanceStatus} role="status">{readiness.isSuccess ? "Instance ready" : "Checking Instance"}</p>;
 }
 
-export function AppShell({ fetcher, canManageSettings = false }: AppShellProps = {}) {
+export function AppShell({ fetcher = globalThis.fetch }: AppShellProps = {}) {
+  const clientSession = useQuery({
+    queryKey: ["client-session"],
+    retry: false,
+    queryFn: async () => {
+      const response = await fetcher("/api/client-session", { credentials: "include" });
+      if (!response.ok) return { permissions: [] as string[] };
+      return response.json() as Promise<{ permissions: string[] }>;
+    },
+  });
+  const canManageSettings = clientSession.data?.permissions.includes("instance:manage") ?? false;
+
   return (
     <div className={styles.shell}>
       <header className={styles.header}>

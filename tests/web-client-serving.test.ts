@@ -37,4 +37,14 @@ test("the Instance serves the built web client and its SPA routes", async (conte
 
   const missingApi = await fetch(`${instance.url}/api/does-not-exist`, { headers: { accept: "application/json" } });
   assert.equal(missingApi.status, 404);
+
+  for (const path of ["/api/does-not-exist", "/health/does-not-exist", "/mcp/does-not-exist"]) {
+    const operational = await fetch(`${instance.url}${path}`, { headers: { accept: "text/html" } });
+    assert.equal(operational.status, 404, `${path} must never fall through to the SPA`);
+    assert.match(operational.headers.get("content-type") ?? "", /^application\/json/);
+    assert.deepEqual(await operational.json(), {
+      error: "not_found",
+      message: "No Stash surface exists at this path.",
+    });
+  }
 });
