@@ -6,6 +6,7 @@ export function noteLinkRoutes(service: NoteLinkService, access: MemberAccessRes
   return {
     matches: (request, url) => (request.method === "PUT" && /^\/api\/notes\/[^/]+\/location$/.test(url.pathname))
       || (["GET", "POST"].includes(request.method ?? "") && /^\/api\/notes\/[^/]+\/links$/.test(url.pathname))
+      || (request.method === "POST" && /^\/api\/notes\/[^/]+\/links\/import$/.test(url.pathname))
       || (request.method === "PUT" && /^\/api\/notes\/[^/]+\/links\/[^/]+\/repair$/.test(url.pathname)),
     async handle(request, response, url) {
       const member = await access.authenticateBearer(request.headers.authorization);
@@ -19,6 +20,13 @@ export function noteLinkRoutes(service: NoteLinkService, access: MemberAccessRes
           else if (result.status === "changed") json(response, 409, { error: "note_changed", message: "The Note location changed. Reload before moving it.", location: result.location });
           else if (result.status === "path_conflict") json(response, 409, { error: result.status, message: "That path or permanent alias already belongs to another Note." });
           else json(response, 404, { error: "note_not_found", message: "This Note is unavailable." });
+          return true;
+        }
+        if (url.pathname.endsWith("/import")) {
+          const result = await service.importUnresolved(member.accountId, noteId, await readJson(request));
+          if (result.status === "created") json(response, 201, { link: result.link });
+          else json(response, 404, { error: result.status, message: result.status === "candidate_not_found"
+            ? "One or more candidate Notes are unavailable." : "This Note is unavailable." });
           return true;
         }
         if (url.pathname.endsWith("/repair")) {

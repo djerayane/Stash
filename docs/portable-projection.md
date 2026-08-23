@@ -215,11 +215,17 @@ never reused for another Note.
 ```
 
 A Note link stores `sourceNoteId` and `targetNoteId` as its durable relationship and projects a
-normal relative Markdown link from the Notes' current paths. An unresolved imported link retains
-its last readable target path. If that path names several visible Notes, Stash reports all visible
-candidates and requires an explicit repair; it never selects by filename. Broken and ambiguous
-states reveal no inaccessible Note or candidate. Repair and move requests use expected revisions,
-so concurrent changes are returned for review rather than overwritten.
+normal relative Markdown link from the Notes' current paths. Portable Workspace Exports write each
+Note at its current `path` and append its resolved links with a stable identity comment, so the link
+remains both readable outside Stash and reconstructable after another move.
+
+An unresolved imported link omits `targetNoteId`, retains its last readable `targetPath`, and stores
+the stable `candidateNoteIds` reported by the importer. No candidates is a broken link; one or more
+is an ambiguous repair state even when only one candidate remains available, because Stash never
+promotes a candidate without confirmation. Candidate identities must already belong to the same
+accessible Workspace. Broken and ambiguous states reveal no inaccessible Note or candidate. Repair
+and move requests use expected revisions, so concurrent changes are returned for review rather than
+overwritten.
 
 ```json
 {

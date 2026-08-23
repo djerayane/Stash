@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { posix } from "node:path";
 
 import type { AttachmentStorage, PortableAttachmentProjection } from "./attachments.js";
 import type { PortableNoteProjection, PortableTaskProjection } from "./notes.js";
@@ -52,11 +53,24 @@ function metadata(properties: Record<string, unknown>): string {
   return Object.entries(properties).map(([key, value]) => `${key}: ${typeof value === "string" ? JSON.stringify(value) : JSON.stringify(stable(value))}`).join("\n");
 }
 
-function noteMarkdown(note: PortableNoteProjection): string {
+function markdownPath(from: string, to: string): string {
+  const relative = posix.relative(posix.dirname(from), to);
+  const rooted = relative.startsWith(".") ? relative : `./${relative}`;
+  return rooted.split("/").map((part) => encodeURIComponent(part)).join("/");
+}
+
+function noteMarkdown(note: PortableNoteProjection, path: string,
+  links: Array<PortableNoteLinkProjection | PortableNoteLinkStateProjection>, locations: Map<string, PortableNoteLocationProjection>): string {
   const { content, ...properties } = note;
-  // Notes live one directory below the archive root; make root-relative Attachment links remain valid.
-  const portableContent = content.replaceAll("(<./attachments/", "(<../attachments/");
-  return `---\n${metadata(properties)}\n---\n\n${portableContent.trimEnd()}\n`;
+  const attachmentPrefix = markdownPath(path, "attachments/_").slice(0, -1);
+  const portableContent = content.replaceAll("(<./attachments/", `(<${attachmentPrefix}`);
+  const readableLinks = links.flatMap((link) => {
+    if (!link.targetNoteId) return [];
+    const target = locations.get(link.targetNoteId); if (!target) return [];
+    const label = "label" in link ? link.label : "Note";
+    return [`[${label}](${markdownPath(path, target.path)})\n<!-- stash-note-link:${link.id}:${link.targetNoteId} -->`];
+  });
+  return `---\n${metadata(properties)}\n---\n\n${portableContent.trimEnd()}${readableLinks.length ? `\n\n## Linked Notes\n\n${readableLinks.join("\n")}` : ""}\n`;
 }
 
 function taskMarkdown(task: PortableTaskProjection): string {
@@ -138,8 +152,14 @@ export class PortableWorkspaceExportService {
       || snapshot.noteLinks.some((link) => link.workspaceId !== workspaceId)) {
       throw new Error("inconsistent_export_snapshot");
     }
-    const readme = "# Stash Portable Workspace Export\n\nFormat: `stash.portable-workspace-export.v1`\n\nNotes and Tasks are readable Markdown. Board view configurations are deterministic JSON in `boards/`. Stable Note locations and links are deterministic JSON under `relationships/`. `manifest.json` contains the Workspace identity, file checksums, and the schemas needed by importers. Attachment paths and bytes are preserved exactly.\n";
-    const noteTexts = snapshot.notes.map((note) => ({ path: `notes/${note.id}.md`, text: noteMarkdown(note) }));
+    const readme = "# Stash Portable Workspace Export\n\nFormat: `stash.portable-workspace-export.v1`\n\nNotes and Tasks are readable Markdown. Board view configurations are deterministic JSON in `boards/`. Stable Note locations and links are deterministic JSON under `relationships/`, and links are also readable relative Markdown in their source Notes. `manifest.json` contains the Workspace identity, file checksums, and the schemas needed by importers. Attachment paths and bytes are preserved exactly.\n";
+    const locationByNote = new Map(snapshot.noteLocations.map((location) => [location.noteId, location]));
+    if (locationByNote.size !== snapshot.notes.length || snapshot.notes.some((note) => !locationByNote.has(note.id)))
+      throw new Error("inconsistent_note_locations");
+    const linksBySource = new Map<string, Array<PortableNoteLinkProjection | PortableNoteLinkStateProjection>>();
+    for (const link of snapshot.noteLinks) linksBySource.set(link.sourceNoteId, [...(linksBySource.get(link.sourceNoteId) ?? []), link]);
+    const noteTexts = snapshot.notes.map((note) => ({ path: locationByNote.get(note.id)!.path,
+      text: noteMarkdown(note, locationByNote.get(note.id)!.path, linksBySource.get(note.id) ?? [], locationByNote) }));
     const taskTexts = snapshot.tasks.map((task) => ({ path: `tasks/${task.key}--${task.id}.md`, text: taskMarkdown(task) }));
     const boardTexts = snapshot.boards.map((board) => ({ path: `boards/${board.id}.json`, text: stableJson(board) }));
     const relationshipTexts = [

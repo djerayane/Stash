@@ -1509,6 +1509,28 @@ export class PostgresDatabase implements
     });
   }
 
+  async createImportedNoteLink(memberId: string, link: NoteLinkRecord, _projection: PortableNoteLinkStateProjection) {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureNoteSchema(client);
+      const source = await client.query<any>(`SELECT note.workspace_id FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id=note.workspace_id
+        WHERE note.id=$1 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR EXISTS
+          (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2))`,
+      [link.sourceNoteId, memberId]);
+      if (!source.rows[0]) return { status: "source_not_found" as const };
+      const candidateIds = link.candidateNoteIds ?? [];
+      const candidates = candidateIds.length ? await client.query<{ id: string }>(
+        "SELECT id FROM stash_notes WHERE workspace_id=$1 AND id=ANY($2::uuid[]) ORDER BY id", [source.rows[0].workspace_id, candidateIds]) : { rows: [] };
+      if (candidates.rows.length !== candidateIds.length) return { status: "candidate_not_found" as const };
+      const saved: NoteLinkRecord = { ...link, workspaceId: source.rows[0].workspace_id };
+      await client.query(`INSERT INTO stash_note_links(id,workspace_id,source_note_id,target_note_id,target_path,candidate_note_ids,label,revision)
+        VALUES($1,$2,$3,NULL,$4,$5::uuid[],$6,1)`,
+      [saved.id, saved.workspaceId, saved.sourceNoteId, saved.targetPath, candidateIds, saved.label]);
+      const projection: PortableNoteLinkStateProjection = { schema: "stash.note-link.v2", ...saved };
+      await this.#recordPortableProjection(client, "NoteLink", saved.id, projection.schema, projection);
+      return { status: "created" as const, link: saved };
+    });
+  }
+
   async listNoteLinks(memberId: string, sourceNoteId: string) {
     const client = await this.#pool.connect();
     try {
@@ -1524,20 +1546,19 @@ export class PostgresDatabase implements
         FROM stash_note_links link LEFT JOIN stash_notes target ON target.id=link.target_note_id WHERE link.source_note_id=$1 ORDER BY link.id`, [sourceNoteId]);
       const links: any[] = [];
       for (const row of rows.rows) {
-        const link = { id: row.id, workspaceId: row.workspace_id, sourceNoteId: row.source_note_id,
-          targetNoteId: row.target_note_id ?? "00000000-0000-4000-8000-000000000000", label: row.label, revision: row.revision,
-        };
+        const link: NoteLinkRecord = { id: row.id, workspaceId: row.workspace_id, sourceNoteId: row.source_note_id,
+          ...(row.target_note_id ? { targetNoteId: row.target_note_id } : {}), ...(row.target_path ? { targetPath: row.target_path } : {}),
+          ...(row.candidate_note_ids?.length ? { candidateNoteIds: row.candidate_note_ids } : {}), label: row.label, revision: row.revision };
         if (row.target_note_id && row.portable_path) { links.push({ link, state: "resolved", target: { noteId: row.target_note_id,
           workspaceId: row.workspace_id, path: row.portable_path, aliases: row.aliases ?? [], revision: row.location_revision } }); continue; }
         const candidates = await client.query<any>(`SELECT DISTINCT note.id,note.workspace_id,note.portable_path,note.location_revision FROM stash_notes note
-          LEFT JOIN stash_note_path_aliases alias ON alias.note_id=note.id WHERE note.workspace_id=$1 AND (note.portable_path=$2 OR alias.path=$2)
+          WHERE note.workspace_id=$1 AND note.id=ANY($2::uuid[])
           AND ((EXISTS(SELECT 1 FROM stash_workspaces workspace WHERE workspace.id=note.workspace_id AND workspace.owner_type='personal' AND workspace.personal_owner_id=$3))
             OR EXISTS(SELECT 1 FROM stash_workspaces workspace JOIN stash_organization_memberships membership ON membership.organization_id=workspace.organization_owner_id
-              WHERE workspace.id=note.workspace_id AND membership.account_id=$3))`, [row.workspace_id, row.target_path, memberId]);
+              WHERE workspace.id=note.workspace_id AND membership.account_id=$3))`, [row.workspace_id, row.candidate_note_ids ?? [], memberId]);
         const visible = candidates.rows.map((candidate) => ({ noteId: candidate.id, workspaceId: candidate.workspace_id,
           path: candidate.portable_path, aliases: [], revision: candidate.location_revision }));
-        links.push(visible.length === 1 ? { link, state: "resolved", target: visible[0] }
-          : visible.length > 1 ? { link, state: "ambiguous", candidates: visible } : { link, state: "broken" });
+        links.push(visible.length ? { link, state: "ambiguous", candidates: visible } : { link, state: "broken" });
       }
       return { status: "found" as const, source: { noteId: sourceNoteId, workspaceId: source.rows[0].workspace_id,
         path: source.rows[0].portable_path, aliases: source.rows[0].aliases ?? [], revision: source.rows[0].location_revision }, links };
@@ -1555,12 +1576,14 @@ export class PostgresDatabase implements
         FOR UPDATE OF link`, [linkId, sourceNoteId, memberId]);
       const row = found.rows[0]; if (!row) return { status: "not_found" as const };
       const current: NoteLinkRecord = { id: row.id, workspaceId: row.workspace_id, sourceNoteId: row.source_note_id,
-        targetNoteId: row.target_note_id ?? "00000000-0000-4000-8000-000000000000", label: row.label, revision: row.revision };
+        ...(row.target_note_id ? { targetNoteId: row.target_note_id } : {}), ...(row.target_path ? { targetPath: row.target_path } : {}),
+        ...(row.candidate_note_ids?.length ? { candidateNoteIds: row.candidate_note_ids } : {}), label: row.label, revision: row.revision };
       if (current.revision !== expectedRevision) return { status: "changed" as const, link: current };
       const target = await client.query<any>(`SELECT portable_path FROM stash_notes WHERE id=$1 AND workspace_id=$2`, [targetNoteId, current.workspaceId]);
       if (!target.rowCount) return { status: "target_not_found" as const };
-      const repaired = { ...current, targetNoteId, revision: current.revision + 1 };
-      await client.query("UPDATE stash_note_links SET target_note_id=$2,target_path=$3,revision=revision+1 WHERE id=$1", [linkId, targetNoteId, target.rows[0].portable_path]);
+      const { targetPath: _, candidateNoteIds: __, ...stable } = current;
+      const repaired = { ...stable, targetNoteId, revision: current.revision + 1 };
+      await client.query("UPDATE stash_note_links SET target_note_id=$2,target_path=$3,candidate_note_ids='{}'::uuid[],revision=revision+1 WHERE id=$1", [linkId, targetNoteId, target.rows[0].portable_path]);
       const projection: PortableNoteLinkStateProjection = { schema: "stash.note-link.v2", ...repaired };
       await this.#recordPortableProjection(client, "NoteLink", linkId, projection.schema, projection);
       return { status: "repaired" as const, link: repaired };
@@ -2584,6 +2607,7 @@ export class PostgresDatabase implements
       );
       ALTER TABLE stash_note_links ALTER COLUMN target_note_id DROP NOT NULL;
       ALTER TABLE stash_note_links ADD COLUMN IF NOT EXISTS target_path TEXT;
+      ALTER TABLE stash_note_links ADD COLUMN IF NOT EXISTS candidate_note_ids UUID[] NOT NULL DEFAULT '{}';
       ALTER TABLE stash_note_links ADD COLUMN IF NOT EXISTS label TEXT NOT NULL DEFAULT 'Note';
       ALTER TABLE stash_note_links ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0);
       UPDATE stash_note_links link SET target_path=note.portable_path FROM stash_notes note

@@ -13,9 +13,11 @@ export interface NoteLinkRecord {
   id: string;
   workspaceId: string;
   sourceNoteId: string;
-  targetNoteId: string;
+  targetNoteId?: string;
   label: string;
   revision: number;
+  targetPath?: string;
+  candidateNoteIds?: string[];
 }
 
 export interface PortableNoteLocationProjection extends NoteLocationRecord { schema: "stash.note-location.v1" }
@@ -32,6 +34,8 @@ export interface NoteLinkRepository {
     | { status: "not_found" } | { status: "path_conflict" }>;
   createNoteLink(memberId: string, link: NoteLinkRecord, projection: PortableNoteLinkStateProjection): Promise<
     { status: "created"; link: NoteLinkRecord } | { status: "source_not_found" | "target_not_found" | "already_linked" }>;
+  createImportedNoteLink(memberId: string, link: NoteLinkRecord, projection: PortableNoteLinkStateProjection): Promise<
+    { status: "created"; link: NoteLinkRecord } | { status: "source_not_found" | "candidate_not_found" }>;
   listNoteLinks(memberId: string, sourceNoteId: string): Promise<
     { status: "found"; source: NoteLocationRecord; links: NoteLinkResolution[] } | { status: "not_found" }>;
   repairNoteLink(memberId: string, sourceNoteId: string, linkId: string, targetNoteId: string, expectedRevision: number,
@@ -91,6 +95,17 @@ export class NoteLinkService {
     const record: NoteLinkRecord = { id: randomUUID(), workspaceId: "", sourceNoteId, targetNoteId: value.targetNoteId,
       label: value.label === undefined ? "Note" : label(value.label), revision: 1 };
     return this.repository.createNoteLink(memberId, record, { schema: "stash.note-link.v2", ...record });
+  }
+
+  async importUnresolved(memberId: string, sourceNoteId: string, value: unknown) {
+    if (!uuid.test(sourceNoteId) || !plainObject(value) || !Array.isArray(value.candidateNoteIds)
+      || value.candidateNoteIds.length > 100 || value.candidateNoteIds.some((id) => typeof id !== "string" || !uuid.test(id))
+      || new Set(value.candidateNoteIds).size !== value.candidateNoteIds.length
+      || !Object.keys(value).every((key) => ["targetPath", "candidateNoteIds", "label"].includes(key))) throw new InvalidNoteLinkInput();
+    const record: NoteLinkRecord = { id: randomUUID(), workspaceId: "", sourceNoteId,
+      targetPath: portablePath(value.targetPath),
+      candidateNoteIds: [...value.candidateNoteIds] as string[], label: value.label === undefined ? "Note" : label(value.label), revision: 1 };
+    return this.repository.createImportedNoteLink(memberId, record, { schema: "stash.note-link.v2", ...record });
   }
 
   async list(memberId: string, sourceNoteId: string) {

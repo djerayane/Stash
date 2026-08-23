@@ -43,17 +43,27 @@ class ProtocolCompatibleNoteLinks implements DatabaseProbe, NoteLinkRepository {
     return { status: "moved" as const, location: moved };
   }
   async createNoteLink(memberId: string, link: NoteLinkRecord, projection: PortableNoteLinkStateProjection) {
-    const source = this.locations.get(link.sourceNoteId); const target = this.locations.get(link.targetNoteId);
+    const source = this.locations.get(link.sourceNoteId); const target = link.targetNoteId ? this.locations.get(link.targetNoteId) : undefined;
     if (memberId !== "ada" || !source) return { status: "source_not_found" as const };
     if (!target || target.workspaceId !== source.workspaceId) return { status: "target_not_found" as const };
     if (this.projectionFailure) throw new Error("projection unavailable");
     const saved = { ...link, workspaceId: source.workspaceId };
     this.links.set(link.id, saved); this.projections.push({ ...projection, workspaceId: source.workspaceId }); return { status: "created" as const, link: saved };
   }
+  async createImportedNoteLink(memberId: string, link: NoteLinkRecord, projection: PortableNoteLinkStateProjection) {
+    const source = this.locations.get(link.sourceNoteId);
+    if (memberId !== "ada" || !source) return { status: "source_not_found" as const };
+    if ((link.candidateNoteIds ?? []).some((id) => this.locations.get(id)?.workspaceId !== source.workspaceId))
+      return { status: "candidate_not_found" as const };
+    const saved = { ...link, workspaceId: source.workspaceId }; this.links.set(saved.id, saved);
+    this.projections.push({ ...projection, workspaceId: source.workspaceId }); return { status: "created" as const, link: saved };
+  }
   async listNoteLinks(memberId: string, sourceNoteId: string) {
     if (memberId !== "ada" || !this.locations.has(sourceNoteId)) return { status: "not_found" as const };
     return { status: "found" as const, source: this.locations.get(sourceNoteId)!, links: [...this.links.values()].filter((link) => link.sourceNoteId === sourceNoteId).map((link) => {
-      const target = this.locations.get(link.targetNoteId);
+      const target = link.targetNoteId ? this.locations.get(link.targetNoteId) : undefined;
+      if (!link.targetNoteId) { const candidates = (link.candidateNoteIds ?? []).flatMap((id) => this.locations.get(id) ?? []);
+        return candidates.length ? { link, state: "ambiguous" as const, candidates } : { link, state: "broken" as const }; }
       return this.ambiguousTarget ? { link, state: "ambiguous" as const, candidates: [target!, this.locations.get(replacementId)!] }
         : target ? { link, state: "resolved" as const, target } : { link, state: "broken" as const };
     }) };
@@ -115,6 +125,20 @@ describe("durable Note links", () => {
 
     const forbidden = await fetch(`${base}/api/notes/${sourceId}/links`, { headers: { authorization: "Bearer member-mallory" } });
     assert.equal(forbidden.status, 404); assert.deepEqual(await forbidden.json(), { error: "note_not_found", message: "This Note is unavailable." });
+  });
+
+  it("persists imported unresolved paths and requires explicit candidate repair", async () => {
+    const { base } = await run();
+    const imported = await request(base, `/api/notes/${sourceId}/links/import`, { method: "POST", body: JSON.stringify({
+      targetPath: "legacy/design.md", candidateNoteIds: [targetId, replacementId], label: "Imported design",
+    }) });
+    assert.equal(imported.status, 201); const link = (await imported.json() as any).link;
+    const listed = await request(base, `/api/notes/${sourceId}/links`); const body = await listed.json() as any;
+    assert.equal(body.links[0].state, "ambiguous"); assert.equal(body.links[0].targetPath, "legacy/design.md");
+    assert.deepEqual(body.links[0].candidates.map(({ noteId }: any) => noteId), [targetId, replacementId]);
+    const repaired = await request(base, `/api/notes/${sourceId}/links/${link.id}/repair`, { method: "PUT",
+      body: JSON.stringify({ targetNoteId: targetId, expectedRevision: 1 }) });
+    assert.equal(repaired.status, 200); assert.equal((await repaired.json() as any).link.targetNoteId, targetId);
   });
 
   it("rejects unsafe paths and stale concurrent moves and rolls back when projection recording fails", async () => {
