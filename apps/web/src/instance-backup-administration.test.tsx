@@ -42,3 +42,11 @@ test("requires the exact backup name and makes a failed restore recoverable", as
   expect(await screen.findByRole("alert")).toHaveTextContent("pre-restore state was preserved");
   expect(screen.getByRole("alert")).toHaveFocus();
 });
+
+test("focuses a recoverable backup-list failure", async () => {
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ message: "Backup storage is temporarily unavailable." }, { status: 503 }));
+  renderPage(fetcher);
+  expect(await screen.findByRole("alert")).toHaveTextContent("temporarily unavailable");
+  expect(screen.getByRole("alert")).toHaveFocus();
+  expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
+});

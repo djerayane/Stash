@@ -38,7 +38,8 @@ export function InstanceBackupAdministration({ fetcher = fetch }: { readonly fet
     return { backup, dryRun };
   }, onSuccess: ({ backup, dryRun }) => { if (dryRun) setVerified(backup.name); else { setSelected(undefined); setConfirmation(""); } },
   onError: () => { setSelected(undefined); setConfirmation(""); } });
-  useEffect(() => { if (operation.isSuccess || operation.isError) feedbackRef.current?.focus(); }, [operation.isSuccess, operation.isError]);
+  useEffect(() => { if (backups.isError || operation.isSuccess || operation.isError) feedbackRef.current?.focus(); },
+    [backups.isError, operation.isSuccess, operation.isError]);
   useGSAP(() => { if (!backups.data?.length || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
     gsap.from(`.${styles.backup}`, { opacity: 0, y: 12, duration: .4, stagger: .06, ease: "power2.out", clearProps: "all" });
   }, { scope: pageRef, dependencies: [backups.data?.length] });
