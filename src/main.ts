@@ -33,6 +33,7 @@ import { fileURLToPath } from "node:url";
 import { InstanceBackupService } from "./instance-backup.js";
 import { PostgresLocalInstanceBackupSource } from "./instance-backup-system.js";
 import { NotificationService } from "./notifications.js";
+import { AutomationService } from "./automations.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -57,6 +58,7 @@ async function main(): Promise<void> {
   }
 
   const passwordAuth = new PasswordAuthService(database);
+  const automations = new AutomationService(database);
   const attachmentStoragePath = process.env.ATTACHMENT_STORAGE_PATH?.trim() || "/var/lib/stash/attachments";
   const attachmentStorage = new LocalAttachmentStorage(attachmentStoragePath);
   const githubAppId = process.env.GITHUB_APP_ID?.trim();
@@ -88,7 +90,8 @@ async function main(): Promise<void> {
     invitations: new InvitationService(database),
     ...(githubApp ? { repositoryConnections: new RepositoryConnectionService(database, githubApp) } : {}),
     ...(githubApp ? { githubArtifacts: new GitHubArtifactService(database, githubApp) } : {}),
-    ...(githubWebhookSecret ? { githubSignals: new GitHubSignalService(database, githubWebhookSecret) } : {}),
+    ...(githubWebhookSecret ? { githubSignals: new GitHubSignalService(database, githubWebhookSecret, automations) } : {}),
+    automations,
     notes: new NoteService(database),
     noteLinks: new NoteLinkService(database),
     tasks: new TaskService(database, database),

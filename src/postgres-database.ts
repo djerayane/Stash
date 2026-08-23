@@ -38,6 +38,7 @@ import type { ActivityCause, ActivityRecord, ActivityRepository, NoteHistoryRevi
 import type { DevelopmentArtifact, GitHubArtifactRepository } from "./github-artifacts.js";
 import type { GitHubSignal, GitHubSignalRepository, SignalCandidate } from "./github-signals.js";
 import { assignmentNotificationInputs, directMentionMemberIds, directMentionNotificationInputs, notificationDeliveryMode, type NotificationDelivery, type NotificationPreferences, type NotificationRepository } from "./notifications.js";
+import type { AutomationRecipe, AutomationRepository, AutomationState, AutomationTransition, AutomationTrigger } from "./automations.js";
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
@@ -141,7 +142,8 @@ export class PostgresDatabase implements
   PortableWorkspaceImportRepository,
   BoardRepository,
   ActivityRepository,
-  NotificationRepository
+  NotificationRepository,
+  AutomationRepository
 {
   readonly #pool: Pool;
   readonly #authenticationSecrets: AuthenticationSecretCodec;
@@ -2268,9 +2270,9 @@ export class PostgresDatabase implements
     await this.#ensureGitHubSignalSchema();
     await this.#withTransaction(async (client) => {
       const inserted = await client.query(`INSERT INTO stash_github_signals
-        (id, delivery_id, installation_id, repository_id, kind, provider_id, url, label, occurred_at)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (delivery_id) DO NOTHING`,
-      [signal.id, signal.deliveryId, signal.installationId, signal.repositoryId, signal.kind, signal.providerId, signal.url, signal.label, signal.occurredAt]);
+        (id, delivery_id, installation_id, repository_id, kind, provider_id, url, label, occurred_at, automation_trigger)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (delivery_id) DO NOTHING`,
+      [signal.id, signal.deliveryId, signal.installationId, signal.repositoryId, signal.kind, signal.providerId, signal.url, signal.label, signal.occurredAt, signal.trigger ?? null]);
       if (!inserted.rowCount) return;
       for (const candidate of candidates) {
         await client.query(`INSERT INTO stash_github_signal_suggestions
@@ -2311,6 +2313,90 @@ export class PostgresDatabase implements
       await client.query("UPDATE stash_github_signal_suggestions SET status='confirmed', confirmed_by_account_id=$2, confirmed_at=NOW() WHERE id=$1", [suggestionId, memberId]);
       await this.#linkSignalArtifact(client, row.task_id, githubSignalFromRow(row), memberId);
       return "confirmed" as const;
+    });
+  }
+
+  async listAutomationState(memberId: string, projectId: string, taskKey: string): Promise<AutomationState | undefined> {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureAutomationSchema(client);
+      const visible = await client.query<any>(taskPlanningSelect, [projectId, taskKey, memberId]);
+      const task = visible.rows[0]; if (!task) return undefined;
+      const recipes = await client.query<any>(`SELECT recipe.*, status.name AS target_status_name FROM stash_automation_recipes recipe
+        JOIN stash_workflow_statuses status ON status.id=recipe.target_status_id WHERE recipe.project_id=$1 ORDER BY recipe.created_at,recipe.id`, [projectId]);
+      const transitions = await client.query<any>(`SELECT transition.*, before_status.name AS before_status_name, after_status.name AS after_status_name
+        FROM stash_automation_transitions transition JOIN stash_workflow_statuses before_status ON before_status.id=transition.before_status_id
+        JOIN stash_workflow_statuses after_status ON after_status.id=transition.after_status_id WHERE transition.task_id=$1 ORDER BY transition.occurred_at DESC`, [task.id]);
+      const statuses = await client.query<{ id: string; name: string }>("SELECT id,name FROM stash_workflow_statuses WHERE project_id=$1 AND archived=FALSE ORDER BY position", [projectId]);
+      return { recipes: recipes.rows.map(automationRecipeFromRow), transitions: transitions.rows.map(automationTransitionFromRow), availableStatuses: statuses.rows };
+    });
+  }
+
+  async enableAutomation(memberId: string, projectId: string, trigger: AutomationTrigger, targetStatusId: string) {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureAutomationSchema(client);
+      const access = await this.#findProjectWorkflowAccess(client, memberId, projectId, true);
+      if (access === "forbidden") return "forbidden" as const;
+      if (access === "not_found") return "not_found" as const;
+      const status = await client.query<{ name: string }>("SELECT name FROM stash_workflow_statuses WHERE id=$1 AND project_id=$2 AND archived=FALSE", [targetStatusId, projectId]);
+      if (!status.rowCount) return "invalid_status" as const;
+      const id = randomUUID();
+      const result = await client.query<any>(`INSERT INTO stash_automation_recipes(id,project_id,trigger,target_status_id,created_by_account_id,created_at)
+        VALUES($1,$2,$3,$4,$5,now()) ON CONFLICT(project_id,trigger) DO UPDATE SET target_status_id=EXCLUDED.target_status_id,enabled=TRUE
+        RETURNING *`, [id, projectId, trigger, targetStatusId, memberId]);
+      return { status: "enabled" as const, recipe: automationRecipeFromRow({ ...result.rows[0], target_status_name: status.rows[0]!.name }) };
+    });
+  }
+
+  async reverseAutomation(memberId: string, projectId: string, taskKey: string, transitionId: string) {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureAutomationSchema(client);
+      const access = await this.#findProjectWorkflowAccess(client, memberId, projectId, true);
+      if (access === "forbidden") return "forbidden" as const;
+      if (access === "not_found") return "not_found" as const;
+      const result = await client.query<any>(`SELECT transition.*, before_status.name AS before_status_name, after_status.name AS after_status_name,
+        task.workflow_status_id,task.workspace_id FROM stash_automation_transitions transition JOIN stash_tasks task ON task.id=transition.task_id
+        JOIN stash_workflow_statuses before_status ON before_status.id=transition.before_status_id JOIN stash_workflow_statuses after_status ON after_status.id=transition.after_status_id
+        WHERE transition.id=$1 AND transition.project_id=$2 AND task.task_key=$3 FOR UPDATE OF transition,task`, [transitionId, projectId, taskKey]);
+      const row = result.rows[0]; if (!row) return "not_found" as const;
+      if (row.reversed_at) return { status: "reversed" as const, transition: automationTransitionFromRow(row) };
+      if (row.workflow_status_id !== row.after_status_id) return "conflict" as const;
+      const before = await client.query<any>(taskPlanningSelectById, [row.task_id, memberId]);
+      await client.query(`UPDATE stash_tasks SET workflow_status_id=$2,revision=revision+1,
+        field_revisions=jsonb_set(field_revisions,'{statusId}',to_jsonb(revision+1),true) WHERE id=$1`, [row.task_id, row.before_status_id]);
+      const reversedAt = new Date().toISOString();
+      await client.query("UPDATE stash_automation_transitions SET reversed_at=$2,reversed_by_account_id=$3 WHERE id=$1", [transitionId, reversedAt, memberId]);
+      const saved = await client.query<any>(taskPlanningSelectById, [row.task_id, memberId]);
+      const after = taskPlanningReadModelFromRow(saved.rows[0]);
+      await this.#recordPortableProjection(client, "Task", after.id, after.schema, taskProjectionFromRow(saved.rows[0]));
+      await this.#recordTaskActivity(client, memberId, row.workspace_id, row.task_id, "automation_status_transition_reversed", taskPlanningReadModelFromRow(before.rows[0]), after,
+        { kind: "member", automationId: row.automation_id, signalId: row.signal_id });
+      return { status: "reversed" as const, transition: automationTransitionFromRow({ ...row, reversed_at: reversedAt }) };
+    });
+  }
+
+  async applySignalAutomations(signal: { id: string; trigger?: AutomationTrigger }, candidates: ReadonlyArray<{ taskId: string; projectId: string; status: "confirmed" | "pending_confirmation" }>) {
+    if (!signal.trigger) return;
+    await this.#withTransaction(async (client) => {
+      await this.#ensureAutomationSchema(client);
+      for (const candidate of candidates.filter(({ status }) => status === "confirmed")) {
+        const result = await client.query<any>(`SELECT recipe.id AS automation_id,recipe.target_status_id,recipe.created_by_account_id,
+          task.*,current_status.name AS status_name,current_status.category AS status_category
+          FROM stash_automation_recipes recipe JOIN stash_tasks task ON task.id=$1 AND task.project_id=recipe.project_id
+          JOIN stash_workflow_statuses current_status ON current_status.id=task.workflow_status_id
+          WHERE recipe.project_id=$2 AND recipe.trigger=$3 AND recipe.enabled=TRUE FOR UPDATE OF task,recipe`, [candidate.taskId, candidate.projectId, signal.trigger]);
+        const row = result.rows[0]; if (!row || row.workflow_status_id === row.target_status_id) continue;
+        const inserted = await client.query<any>(`INSERT INTO stash_automation_transitions(id,automation_id,signal_id,task_id,project_id,before_status_id,after_status_id,occurred_at)
+          VALUES($1,$2,$3,$4,$5,$6,$7,now()) ON CONFLICT(automation_id,signal_id,task_id) DO NOTHING RETURNING id,occurred_at`,
+        [randomUUID(), row.automation_id, signal.id, row.id, candidate.projectId, row.workflow_status_id, row.target_status_id]);
+        if (!inserted.rowCount) continue;
+        const before = taskPlanningReadModelFromRow(row);
+        await client.query(`UPDATE stash_tasks SET workflow_status_id=$2,revision=revision+1,
+          field_revisions=jsonb_set(field_revisions,'{statusId}',to_jsonb(revision+1),true) WHERE id=$1`, [row.id, row.target_status_id]);
+        const saved = await client.query<any>(taskPlanningSelectById, [row.id, row.created_by_account_id]); const after = taskPlanningReadModelFromRow(saved.rows[0]);
+        await this.#recordPortableProjection(client, "Task", after.id, after.schema, taskProjectionFromRow(saved.rows[0]));
+        await this.#recordTaskActivity(client, row.created_by_account_id, row.workspace_id, row.id, "task_status_automated", before, after,
+          { kind: "automation", automationId: row.automation_id, signalId: signal.id });
+      }
     });
   }
 
@@ -3020,6 +3106,29 @@ export class PostgresDatabase implements
         UNIQUE(signal_id, task_id, matched_key)
       );
       CREATE INDEX IF NOT EXISTS stash_github_signal_suggestions_task_idx ON stash_github_signal_suggestions(task_id);
+      ALTER TABLE stash_github_signals ADD COLUMN IF NOT EXISTS automation_trigger TEXT CHECK (automation_trigger IN ('branch_created','pull_request_completed'));
+    `);
+  }
+
+  async #ensureAutomationSchema(client: PoolClient): Promise<void> {
+    await this.#ensureNoteSchema(client);
+    await this.#ensureGitHubSignalSchema();
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS stash_automation_recipes (
+        id UUID PRIMARY KEY, project_id UUID NOT NULL REFERENCES stash_projects(id) ON DELETE CASCADE,
+        trigger TEXT NOT NULL CHECK(trigger IN ('branch_created','pull_request_completed')),
+        target_status_id UUID NOT NULL REFERENCES stash_workflow_statuses(id), enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id), created_at TIMESTAMPTZ NOT NULL,
+        UNIQUE(project_id,trigger)
+      );
+      CREATE TABLE IF NOT EXISTS stash_automation_transitions (
+        id UUID PRIMARY KEY, automation_id UUID NOT NULL REFERENCES stash_automation_recipes(id) ON DELETE CASCADE,
+        signal_id UUID NOT NULL REFERENCES stash_github_signals(id) ON DELETE CASCADE,
+        task_id UUID NOT NULL REFERENCES stash_tasks(id) ON DELETE CASCADE, project_id UUID NOT NULL REFERENCES stash_projects(id) ON DELETE CASCADE,
+        before_status_id UUID NOT NULL REFERENCES stash_workflow_statuses(id), after_status_id UUID NOT NULL REFERENCES stash_workflow_statuses(id),
+        occurred_at TIMESTAMPTZ NOT NULL, reversed_at TIMESTAMPTZ, reversed_by_account_id UUID REFERENCES stash_accounts(id),
+        UNIQUE(automation_id,signal_id,task_id)
+      );
     `);
   }
 
@@ -4228,7 +4337,16 @@ interface MemberLocalizationRow {
 interface RepositoryConnectionRow { id: string; organization_id: string; provider: "github"; installation_id: string | number; repository_id: string; repository_url: string; created_by_account_id: string; created_by_attribution: "recorded" | "inferred-during-upgrade"; project_ids: string[] }
 function githubSignalFromRow(row: any): GitHubSignal {
   return { id: row.id, deliveryId: row.delivery_id, installationId: Number(row.installation_id), repositoryId: row.repository_id, kind: row.kind,
-    providerId: row.provider_id, url: row.url, label: row.label, occurredAt: new Date(row.occurred_at).toISOString() };
+    providerId: row.provider_id, url: row.url, label: row.label, occurredAt: new Date(row.occurred_at).toISOString(),
+    ...(row.automation_trigger ? { trigger: row.automation_trigger } : {}) };
+}
+function automationRecipeFromRow(row: any): AutomationRecipe {
+  return { id: row.id, trigger: row.trigger, targetStatus: { id: row.target_status_id, name: row.target_status_name }, enabled: row.enabled };
+}
+function automationTransitionFromRow(row: any): AutomationTransition {
+  return { id: row.id, automationId: row.automation_id, signalId: row.signal_id,
+    before: { id: row.before_status_id, name: row.before_status_name }, after: { id: row.after_status_id, name: row.after_status_name },
+    occurredAt: new Date(row.occurred_at).toISOString(), ...(row.reversed_at ? { reversedAt: new Date(row.reversed_at).toISOString() } : {}) };
 }
 interface AttachmentRow { id: string; workspace_id: string; filename: string; content_type: string; byte_size: string | number; relative_path: string; storage_key: string; source: "upload" | "paste"; created_by_account_id: string; created_at: Date | string }
 function attachmentRecord(row: AttachmentRow): AttachmentRecord {

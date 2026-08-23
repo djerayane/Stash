@@ -62,6 +62,8 @@ import { instanceBackupRoute } from "./instance-backup-routes.js";
 import type { InstanceBackupService } from "./instance-backup.js";
 import { notificationRoutes } from "./notification-routes.js";
 import type { NotificationService } from "./notifications.js";
+import { automationRoutes } from "./automation-routes.js";
+import type { AutomationService } from "./automations.js";
 
 export interface DatabaseProbe {
   verifyConnection(): Promise<void>;
@@ -117,6 +119,7 @@ export interface InstanceOptions {
   instanceBackups?: InstanceBackupService;
   instanceBackupRoot?: string;
   notifications?: NotificationService;
+  automations?: AutomationService;
 }
 
 const browserSurface = `<!doctype html>
@@ -215,6 +218,7 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
     ...(options.repositoryConnections ? [repositoryConnectionRoutes(options.repositoryConnections, memberAccess)] : []),
     ...(options.githubArtifacts ? [githubArtifactRoutes(options.githubArtifacts, memberAccess)] : []),
     ...(options.githubSignals ? [githubSignalRoutes(options.githubSignals, memberAccess)] : []),
+    ...(options.automations ? [automationRoutes(options.automations, memberAccess)] : []),
   ] : [];
   const applicationRoutes = [
     boardSurfaceRoute(),

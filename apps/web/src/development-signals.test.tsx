@@ -16,10 +16,12 @@ function renderPage(fetcher: typeof fetch) {
 
 describe("development Signals", () => {
   it("shows activity and confirms an ambiguous suggestion without reloading", async () => {
-    const fetcher = vi.fn<typeof fetch>()
-      .mockResolvedValueOnce(Response.json({ signals: [{ signal, suggestions: [suggestion] }] }))
-      .mockResolvedValueOnce(Response.json({ suggestion: { ...suggestion, status: "confirmed" } }))
-      .mockResolvedValueOnce(Response.json({ signals: [{ signal, suggestions: [{ ...suggestion, status: "confirmed" }] }] }));
+    let confirmed = false;
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      if (String(input).endsWith("/automations")) return Response.json({ automation: { recipes: [], transitions: [], availableStatuses: [] } });
+      if (init?.method === "POST") { confirmed = true; return Response.json({ suggestion: { ...suggestion, status: "confirmed" } }); }
+      return Response.json({ signals: [{ signal, suggestions: [{ ...suggestion, status: confirmed ? "confirmed" : "pending_confirmation" }] }] });
+    });
     renderPage(fetcher);
     expect(await screen.findByRole("heading", { name: "Development Signals" })).toBeVisible();
     expect(await screen.findByText("#42 Shared work")).toBeVisible();
@@ -27,13 +29,16 @@ describe("development Signals", () => {
     expect(screen.getByRole("dialog", { name: "Confirm Task relationship" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Confirm relationship" }));
     await waitFor(() => expect(screen.getByText("Relationship confirmed")).toBeVisible());
-    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(fetcher.mock.calls.filter(([input]) => String(input).includes("development-signals")).length).toBe(3);
   });
 
   it("keeps recoverable loading failures visible and retryable", async () => {
-    const fetcher = vi.fn<typeof fetch>()
-      .mockResolvedValueOnce(Response.json({ message: "Signals are temporarily unavailable." }, { status: 503 }))
-      .mockResolvedValueOnce(Response.json({ signals: [] }));
+    let attempts = 0;
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      if (String(input).endsWith("/automations")) return Response.json({ automation: { recipes: [], transitions: [], availableStatuses: [] } });
+      attempts += 1;
+      return attempts === 1 ? Response.json({ message: "Signals are temporarily unavailable." }, { status: 503 }) : Response.json({ signals: [] });
+    });
     renderPage(fetcher);
     expect(await screen.findByRole("alert")).toHaveTextContent("Signals are temporarily unavailable.");
     expect(screen.getByRole("alert")).toHaveFocus();
