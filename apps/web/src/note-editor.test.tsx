@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { NoteEditor } from "./note-editor";
+import { applyAcknowledgedUpdate, NoteEditor } from "./note-editor";
 
 const emptyUpdate = () => btoa(String.fromCharCode(...Y.encodeStateAsUpdate(new Y.Doc())));
 const storage = new Map<string, string>();
@@ -10,6 +10,18 @@ beforeEach(() => {
   storage.clear();
   vi.stubGlobal("localStorage", { getItem: (key: string) => storage.get(key) ?? null,
     setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+});
+
+it("does not acknowledge an unsent local contribution when an older server snapshot is polled", () => {
+  const server = new Y.Doc(); server.getText("note").insert(0, "Published");
+  const published = Y.encodeStateAsUpdate(server);
+  const local = new Y.Doc(); let acknowledged = applyAcknowledgedUpdate(local, published);
+  local.getText("note").insert(local.getText("note").length, " plus offline work");
+  acknowledged = applyAcknowledgedUpdate(local, published);
+  const stillPending = Y.encodeStateAsUpdate(local, acknowledged);
+  const restoredServer = new Y.Doc(); Y.applyUpdate(restoredServer, published); Y.applyUpdate(restoredServer, stillPending);
+  expect(restoredServer.getText("note").toString()).toBe("Published plus offline work");
+  expect(stillPending.byteLength).toBeGreaterThan(2);
 });
 
 it("loads an authorized collaborative Note and exposes keyboard-operable rich-text controls", async () => {

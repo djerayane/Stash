@@ -9,9 +9,13 @@ import { EditorContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useGSAP } from "@gsap/react";
+import gsap from "gsap";
 import * as Y from "yjs";
 import { toTiptap, type NoteDocument } from "./note-document";
 import styles from "./note-editor.module.css";
+
+gsap.registerPlugin(useGSAP);
 
 interface Note { id: string; content: string; document: NoteDocument; revision: number }
 interface Snapshot { sequence: number; update: string; updatedAt: string; updatedByMemberId: string }
@@ -28,10 +32,23 @@ const BlockIdentity = Extension.create({
 const decode = (value: string) => Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
 const encode = (value: Uint8Array) => btoa(String.fromCharCode(...value));
 
+export function applyAcknowledgedUpdate(localDocument: Y.Doc, update: Uint8Array): Uint8Array {
+  const acknowledgedDocument = new Y.Doc();
+  Y.applyUpdate(acknowledgedDocument, update);
+  const acknowledgedVector = Y.encodeStateVector(acknowledgedDocument);
+  Y.applyUpdate(localDocument, update);
+  acknowledgedDocument.destroy();
+  return acknowledgedVector;
+}
+
 export function NoteEditor({ noteId, fetcher = globalThis.fetch, token = localStorage.getItem("stash.memberToken") ?? "" }: NoteEditorProps) {
   const [status, setStatus] = useState("Loading collaborative document");
   const [error, setError] = useState("");
   const persistedVector = useRef<Uint8Array>(new Uint8Array());
+  const layoutRef = useRef<HTMLElement>(null);
+  const toolbarRef = useRef<HTMLDivElement>(null);
+  const asideRef = useRef<HTMLElement>(null);
+  const statusRef = useRef<HTMLParagraphElement>(null);
   const headers = useMemo(() => ({ authorization: `Bearer ${token}` }), [token]);
   const ydoc = useMemo(() => new Y.Doc(), [noteId]);
   const note = useQuery({ queryKey: ["note", noteId], queryFn: async () => {
@@ -44,8 +61,7 @@ export function NoteEditor({ noteId, fetcher = globalThis.fetch, token = localSt
   }});
 
   if (collaboration.data && persistedVector.current.byteLength === 0) {
-    Y.applyUpdate(ydoc, decode(collaboration.data.update));
-    persistedVector.current = Y.encodeStateVector(ydoc);
+    persistedVector.current = applyAcknowledgedUpdate(ydoc, decode(collaboration.data.update));
     try {
       const pending = localStorage.getItem(`stash.pending-note-update:${noteId}`);
       if (pending) Y.applyUpdate(ydoc, decode(pending));
@@ -56,6 +72,17 @@ export function NoteEditor({ noteId, fetcher = globalThis.fetch, token = localSt
     StarterKit.configure({ undoRedo: false, link: false }), BlockIdentity, TaskList, TaskItem.configure({ nested: true }), Image, Link.configure({ openOnClick: false }),
     TableKit, Collaboration.configure({ document: ydoc }),
   ], content: undefined, editorProps: { attributes: { "aria-label": "Note content", role: "textbox", "aria-multiline": "true" } } }, [ydoc]);
+
+  useGSAP(() => {
+    if (!toolbarRef.current || !asideRef.current || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+    gsap.fromTo(toolbarRef.current, { y: -10, opacity: 0 }, { y: 0, opacity: 1, duration: .34, ease: "power2.out" });
+    gsap.fromTo(asideRef.current, { x: 14, opacity: 0 }, { x: 0, opacity: 1, duration: .42, ease: "power2.out" });
+  }, { scope: layoutRef });
+
+  useGSAP(() => {
+    if (!statusRef.current || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+    gsap.fromTo(statusRef.current, { opacity: .35, y: 3 }, { opacity: 1, y: 0, duration: .24, ease: "power1.out" });
+  }, { scope: layoutRef, dependencies: [status], revertOnUpdate: true });
 
   useEffect(() => {
     if (!editor || !note.data || !collaboration.data) return;
@@ -73,8 +100,9 @@ export function NoteEditor({ noteId, fetcher = globalThis.fetch, token = localSt
       const response = await fetcher(`/api/notes/${encodeURIComponent(noteId)}/collaboration`, { method: "POST",
         headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify({ update: encode(update) }) });
       if (!response.ok) throw new Error("The Instance rejected this update.");
-      const snapshot = await response.json() as Snapshot; Y.applyUpdate(ydoc, decode(snapshot.update));
-      persistedVector.current = Y.encodeStateVector(ydoc); localStorage.removeItem(key); setStatus("All changes saved"); setError("");
+      const snapshot = await response.json() as Snapshot;
+      persistedVector.current = applyAcknowledgedUpdate(ydoc, decode(snapshot.update));
+      localStorage.removeItem(key); setStatus("All changes saved"); setError("");
     } catch (cause) { setStatus("Changes kept on this device"); setError(cause instanceof Error ? cause.message : "The update could not be saved."); }
   }, [fetcher, headers, noteId, ydoc]);
 
@@ -85,16 +113,16 @@ export function NoteEditor({ noteId, fetcher = globalThis.fetch, token = localSt
     if (!collaboration.data) return;
     const refresh = window.setInterval(() => { void fetcher(`/api/notes/${encodeURIComponent(noteId)}/collaboration`, { headers })
       .then(async (response) => { if (!response.ok) return; const snapshot = await response.json() as Snapshot;
-        Y.applyUpdate(ydoc, decode(snapshot.update)); persistedVector.current = Y.encodeStateVector(ydoc); })
+        persistedVector.current = applyAcknowledgedUpdate(ydoc, decode(snapshot.update)); })
       .catch(() => undefined); }, 2_000);
     return () => clearInterval(refresh);
   }, [collaboration.data, fetcher, headers, noteId, ydoc]);
 
   if (note.isError || collaboration.isError) return <div role="alert" className={styles.error}>The Note editor is unavailable. <button onClick={() => { void note.refetch(); void collaboration.refetch(); }}>Try again</button></div>;
-  return <main className={styles.layout} aria-busy={!editor || !note.data || !collaboration.data}>
+  return <main ref={layoutRef} className={styles.layout} aria-busy={!editor || !note.data || !collaboration.data}>
     <article className={styles.document}>
       <header className={styles.header}><p className={styles.kicker}>Collaborative Note</p><h1 className={styles.title}>{note.data?.content.split("\n")[0] || "Untitled Note"}</h1></header>
-      <div className={styles.toolbar} role="toolbar" aria-label="Text formatting">
+      <div ref={toolbarRef} className={styles.toolbar} role="toolbar" aria-label="Text formatting">
         <button type="button" aria-label="Bold" aria-pressed={editor?.isActive("bold") ?? false} onClick={() => editor?.chain().focus().toggleBold().run()}>B</button>
         <button type="button" aria-label="Italic" aria-pressed={editor?.isActive("italic") ?? false} onClick={() => editor?.chain().focus().toggleItalic().run()}>I</button>
         <button type="button" aria-label="Heading" aria-pressed={editor?.isActive("heading", { level: 2 }) ?? false} onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()}>H2</button>
@@ -109,7 +137,7 @@ export function NoteEditor({ noteId, fetcher = globalThis.fetch, token = localSt
       </div>
       <div className={styles.editor}><EditorContent editor={editor} /></div>
     </article>
-    <aside className={styles.aside} aria-label="Collaboration status"><h2>Collaboration</h2><p className={styles.status} role="status">{status}</p>
+    <aside ref={asideRef} className={styles.aside} aria-label="Collaboration status"><h2>Collaboration</h2><p ref={statusRef} className={styles.status} role="status">{status}</p>
       {error ? <><p className={styles.error} role="alert">{error}</p><button className={styles.retry} type="button" onClick={() => void synchronize()}>Retry saving</button></> : null}
       <p>Changes merge with contributions from other Members. Offline work remains on this device until the Instance accepts it.</p>
     </aside>
