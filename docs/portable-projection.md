@@ -196,6 +196,12 @@ The Note row and its `stash.note.v1` outbox event commit in one transaction. A c
 reports the projection as `recorded` only after both writes succeed; it does not claim that a full
 Portable Workspace Export has already been generated.
 
+Templates are optional creation-time suggestions, not durable Note types. The built-in Decision
+template supplies editable Markdown starter content and the ordinary `decision` tag. A Member may
+replace the starter content and add properties before creation. Decision Notes are discovered by
+filtering active, permission-visible Notes by that tag, so the resulting `stash.note.v1` projection
+remains understandable and editable without Template support.
+
 ## `stash.note-location.v1` and `stash.note-link.v2`
 
 Every Note has a Workspace-relative Markdown `path` and a stable Note identity. Moving or renaming a

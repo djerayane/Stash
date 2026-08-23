@@ -9,7 +9,7 @@ import { diagnosticsAdminRoute, diagnosticsSchemaRoute } from "./diagnostics-rou
 import { createDiagnostics, type Diagnostics } from "./diagnostics.js";
 import { json, requireInstanceAdministrator } from "./http-routing.js";
 import { instanceAdminRoute } from "./instance-route.js";
-import { noteEditorRoute, noteRoutes } from "./note-routes.js";
+import { noteEditorRoute, noteLibraryRoute, noteRoutes } from "./note-routes.js";
 import { noteEditorAssetRoute } from "./note-editor-assets.js";
 import type { NoteService } from "./notes.js";
 import type { OwnerBootstrapService } from "./owner-bootstrap.js";
@@ -137,6 +137,7 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
     boardSurfaceRoute(),
     noteEditorAssetRoute(),
     noteEditorRoute(),
+    noteLibraryRoute(),
     ...(options.memberLocalization && (options.memberAccess ?? options.passwordAuth)
       ? [memberLocalizationRoutes(options.memberLocalization, (options.memberAccess ?? options.passwordAuth)!)]
       : []),
