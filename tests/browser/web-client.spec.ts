@@ -94,6 +94,11 @@ test("removes a Member, revokes authority, and keeps former assignment repair ac
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/app/settings/members");
 
+  const adminCannotManageRoles = await page.evaluate(async () => fetch("/api/organizations/44444444-4444-4444-8444-444444444444/roles", {
+    headers: { authorization: "Bearer browser-acceptance-member-token" },
+  }).then((response) => response.status));
+  expect(adminCannotManageRoles).toBe(403);
+
   const departingSessionBefore = await page.evaluate(async () => fetch("/api/organizations/44444444-4444-4444-8444-444444444444/roles", {
     headers: { authorization: "Bearer departed-member-token" },
   }).then((response) => response.status));

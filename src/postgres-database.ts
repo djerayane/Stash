@@ -2171,7 +2171,7 @@ export class PostgresDatabase implements
         JOIN stash_organizations organization ON organization.id=actor_membership.organization_id
         JOIN stash_organization_memberships membership ON membership.organization_id=organization.id
         JOIN stash_accounts member ON member.id=membership.account_id
-        WHERE actor_membership.account_id=$1 AND actor_membership.role='Owner'
+        WHERE actor_membership.account_id=$1 AND actor_membership.role IN ('Owner','Admin')
         ORDER BY organization.id, member.name, member.id`, [accountId]);
       const administeredOrganizationId = administration.rows[0]?.organization_id;
       const eligibleMembers = administration.rows.filter(({ organization_id }) => organization_id === administeredOrganizationId);
@@ -2676,12 +2676,14 @@ export class PostgresDatabase implements
     | "member_not_found" | "final_owner" | "forbidden"> {
     return this.#withTransaction(async (client) => {
       const memberships = await this.#lockedOrganizationMemberships(client, organizationId);
-      if (!this.#canManageRoles(memberships, actorId)) return "forbidden";
+      if (!this.#canManageMembers(memberships, actorId)) return "forbidden";
       const target = memberships.find((membership) => membership.account_id === accountId);
       if (!target) return "member_not_found";
+      const actorRole = memberships.find((membership) => membership.account_id === actorId)?.role;
       if (target.role === "Owner" && this.#isOnlyOwner(memberships, accountId)) {
         return "final_owner";
       }
+      if (actorRole === "Admin" && target.role === "Owner") return "forbidden";
       await this.#ensureMemberDepartureSchema(client);
       const affectedTaskIds = await this.#markFormerAssignments(client, organizationId, accountId, actorId);
       await client.query(
@@ -2845,6 +2847,14 @@ export class PostgresDatabase implements
     return memberships.some(
       (membership) => membership.account_id === accountId && membership.role === "Owner",
     );
+  }
+
+  #canManageMembers(
+    memberships: ReadonlyArray<{ account_id: string; role: BuiltInOrganizationRole }>,
+    accountId: string,
+  ): boolean {
+    return memberships.some((membership) => membership.account_id === accountId
+      && (membership.role === "Owner" || membership.role === "Admin"));
   }
 
   #canManageRepositoryConnections(

@@ -64,15 +64,16 @@ let task: TaskPlanningReadModel = {
   dependencies: [], developmentLinks: [], sourceNoteIds: [], createdAt: "2026-08-23T00:00:00.000Z",
   createdBy: { localAccountId: "browser-member", displayName: "Browser Member" }, revision: 1, dependencyWarnings: [],
 };
-const memberships = new Map<string, BuiltInOrganizationRole>([[browserMemberId, "Owner"], [departedMemberId, "Member"]]);
+const memberships = new Map<string, BuiltInOrganizationRole>([[browserMemberId, "Admin"], [departedMemberId, "Member"]]);
 const organizationRoleRepository = {
   async organizationRole(requestedOrganizationId: string, accountId: string) {
     return requestedOrganizationId === organizationId ? memberships.get(accountId) : undefined;
   },
   async assignBuiltInRole() { return "forbidden" as const; },
   async removeOrganizationMember(requestedOrganizationId: string, actorId: string, accountId: string) {
-    if (requestedOrganizationId !== organizationId || memberships.get(actorId) !== "Owner") return "forbidden" as const;
+    if (requestedOrganizationId !== organizationId || !["Owner", "Admin"].includes(memberships.get(actorId)!)) return "forbidden" as const;
     if (!memberships.has(accountId)) return "member_not_found" as const;
+    if (memberships.get(actorId) === "Admin" && memberships.get(accountId) === "Owner") return "forbidden" as const;
     memberships.delete(accountId);
     activeTokens.delete("departed-member-token");
     task = { ...task, formerAssigneeIds: (task.assigneeIds ?? []).includes(accountId) ? [accountId] : [], revision: task.revision + 1 };
@@ -107,7 +108,7 @@ const instance = await startInstance({
       email: accountId === browserMemberId ? "member@stash.test" : `${accountId}@stash.test` },
       workspace: { id: "browser-workspace", name: "Acceptance Workspace" }, capabilities: [], ...(accountId === browserMemberId ? {
       organizationAdministration: { organizationId, organizationName: "Acceptance Organization", members: [
-        { id: browserMemberId, name: "Browser Member", email: "member@stash.test", role: "Owner" as const },
+        { id: browserMemberId, name: "Browser Member", email: "member@stash.test", role: "Admin" as const },
         { id: departedMemberId, name: "Departing Member", email: "departing@stash.test", role: "Member" as const },
       ] } } : {}) };
   } },

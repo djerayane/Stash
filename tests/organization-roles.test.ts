@@ -64,12 +64,13 @@ class ProtocolCompatibleDatabase implements DatabaseProbe, OrganizationRoleRepos
   async removeOrganizationMember(orgId: string, actorId: string, accountId: string) {
     if (this.failure) throw this.failure;
     const members = this.memberships.get(orgId);
-    if (members?.get(actorId) !== "Owner") return "forbidden" as const;
+    if (!(["Owner", "Admin"] as BuiltInOrganizationRole[]).includes(members?.get(actorId)!)) return "forbidden" as const;
     if (!members?.has(accountId)) return "member_not_found" as const;
     if (members.get(accountId) === "Owner"
       && [...members.values()].filter((candidate) => candidate === "Owner").length === 1) {
       return "final_owner" as const;
     }
+    if (members.get(actorId) === "Admin" && members.get(accountId) === "Owner") return "forbidden" as const;
     members.delete(accountId);
     this.activeSessions.delete(accountId);
     this.personalTokens.delete(accountId);
@@ -229,6 +230,29 @@ describe("managing built-in Organization Roles", () => {
     assert.equal(departedSession.status, 401);
     const departedPersonalToken = await request(baseUrl, `/api/organizations/${organizationId}/roles`, `personal-${linusId}`);
     assert.equal(departedPersonalToken.status, 401);
+  });
+
+  it("allows an Admin to remove a Member without granting built-in Role authority", async () => {
+    const { baseUrl, database } = await run();
+
+    const roleChange = await request(baseUrl, `/api/organizations/${organizationId}/members/${linusId}/role`, `member-${graceId}`, {
+      method: "PUT", body: JSON.stringify({ role: "Admin" }),
+    });
+    assert.equal(roleChange.status, 403);
+
+    database.memberships.get(organizationId)!.set(margaretId, "Owner");
+    const ownerRemoval = await request(baseUrl, `/api/organizations/${organizationId}/members/${adaId}`, `member-${graceId}`, {
+      method: "DELETE",
+    });
+    assert.equal(ownerRemoval.status, 403);
+
+    const removed = await request(baseUrl, `/api/organizations/${organizationId}/members/${linusId}`, `member-${graceId}`, {
+      method: "DELETE",
+    });
+    assert.equal(removed.status, 200);
+    assert.equal(database.memberships.get(organizationId)?.has(linusId), false);
+    assert.equal(database.activeSessions.has(linusId), false);
+    assert.deepEqual(database.operatorAudit, [{ actorId: graceId, memberId: linusId, action: "organization_member_departed" }]);
   });
 
   it("invalidates sessions without deleting account recovery material when a Member belongs elsewhere", async () => {
