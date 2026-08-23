@@ -48,6 +48,16 @@ import { proseMirrorToRichText, richTextToProseMirror } from "@stash/rich-text";
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
 const authenticationKeyCheckLockId = 795_541_992;
+interface FailedAutomationRun {
+  automationId: string;
+  configuringMemberId: string;
+  configuringMemberName: string;
+  workspaceId: string;
+  projectId: string;
+  taskId: string;
+  taskKey: string;
+  taskTitle: string;
+}
 const portableProjectionObjectKinds = ["Workspace", "Project", "Workflow", "Board", "Note", "NoteLocation", "NoteLink", "Task", "GuestProjectAccess", "RepositoryConnection", "Attachment", "Discussion", "DiscussionWorkLink", "Activity"] as const;
 const portableProjectionObjectKindSql = portableProjectionObjectKinds.map((kind) => `'${kind}'`).join(", ");
 export const workflowTemporaryRenameSql = `UPDATE stash_workflow_statuses
@@ -2421,20 +2431,25 @@ export class PostgresDatabase implements
     let failed = false;
     for (const candidate of candidates.filter(({ status }) => status === "confirmed")) {
       const existingFailures = await this.#existingSignalAutomationFailureNotifications(signal.id, candidate);
-      if (existingFailures.length) {
+      if (existingFailures.found) {
         failed = true;
-        notifications.push(...existingFailures);
+        notifications.push(...existingFailures.notifications);
         continue;
       }
+      let failedRun: FailedAutomationRun | undefined;
       try {
         await this.#withTransaction(async (client) => {
           await this.#ensureAutomationSchema(client);
         const result = await client.query<any>(`SELECT recipe.id AS automation_id,recipe.target_status_id,recipe.created_by_account_id,
-          task.*,current_status.name AS status_name,current_status.category AS status_category
+          configurer.name AS created_by_name,task.*,current_status.name AS status_name,current_status.category AS status_category
           FROM stash_automation_recipes recipe JOIN stash_tasks task ON task.id=$1 AND task.project_id=recipe.project_id
           JOIN stash_workflow_statuses current_status ON current_status.id=task.workflow_status_id
+          JOIN stash_accounts configurer ON configurer.id=recipe.created_by_account_id
           WHERE recipe.project_id=$2 AND recipe.trigger=$3 AND recipe.enabled=TRUE FOR UPDATE OF task,recipe`, [candidate.taskId, candidate.projectId, triggeredSignal.trigger]);
         const row = result.rows[0]; if (!row || row.workflow_status_id === row.target_status_id) return;
+        failedRun = { automationId: row.automation_id, configuringMemberId: row.created_by_account_id,
+          configuringMemberName: row.created_by_name, workspaceId: row.workspace_id, projectId: candidate.projectId,
+          taskId: row.id, taskKey: row.task_key, taskTitle: row.title };
         const inserted = await client.query<any>(`INSERT INTO stash_automation_transitions(id,automation_id,signal_id,task_id,project_id,before_status_id,after_status_id,occurred_at)
           VALUES($1,$2,$3,$4,$5,$6,$7,now()) ON CONFLICT(automation_id,signal_id,task_id) DO NOTHING RETURNING id,occurred_at`,
         [randomUUID(), row.automation_id, signal.id, row.id, candidate.projectId, row.workflow_status_id, row.target_status_id]);
@@ -2447,33 +2462,25 @@ export class PostgresDatabase implements
         await this.#recordTaskActivity(client, row.created_by_account_id, row.workspace_id, row.id, "task_status_automated", before, after,
           { kind: "automation", automationId: row.automation_id, signalId: signal.id });
         });
-      } catch {
+      } catch (error) {
+        if (!failedRun) throw error;
         failed = true;
-        notifications.push(...await this.recordSignalAutomationFailures(triggeredSignal, [candidate]));
+        const notification = await this.#recordSignalAutomationFailure(triggeredSignal.id, failedRun);
+        if (notification) notifications.push(notification);
       }
     }
     return { failed, notifications };
   }
 
-  async recordSignalAutomationFailures(signal: { id: string; trigger: AutomationTrigger }, candidates: ReadonlyArray<AutomationCandidate>): Promise<AutomationFailureNotification[]> {
+  async #recordSignalAutomationFailure(signalId: string, run: FailedAutomationRun): Promise<AutomationFailureNotification | undefined> {
     return this.#withTransaction(async (client) => {
       await this.#ensureAutomationSchema(client);
-      const failures: AutomationFailureNotification[] = [];
-      for (const candidate of candidates.filter(({ status }) => status === "confirmed")) {
-        const result = await client.query<any>(`SELECT recipe.id AS automation_id,recipe.created_by_account_id,
-          task.id AS task_id,task.workspace_id,task.task_key,task.title
-          FROM stash_automation_recipes recipe JOIN stash_tasks task ON task.id=$1 AND task.project_id=recipe.project_id
-          WHERE recipe.project_id=$2 AND recipe.trigger=$3 AND recipe.enabled=TRUE`, [candidate.taskId, candidate.projectId, signal.trigger]);
-        const row = result.rows[0];
-        if (!row) continue;
-        const actor = await client.query<{ name: string }>("SELECT name FROM stash_accounts WHERE id=$1", [row.created_by_account_id]);
-        if (!actor.rows[0]) continue;
-        const activity: ActivityRecord = { schema: "stash.activity.v1", id: randomUUID(), workspaceId: row.workspace_id,
-          object: { kind: "Task", id: row.task_id }, action: "automation_execution_failed",
-          actor: { localAccountId: row.created_by_account_id, displayName: actor.rows[0].name },
-          cause: { kind: "automation", automationId: row.automation_id, signalId: signal.id },
+        const activity: ActivityRecord = { schema: "stash.activity.v1", id: randomUUID(), workspaceId: run.workspaceId,
+          object: { kind: "Task", id: run.taskId }, action: "automation_execution_failed",
+          actor: { localAccountId: run.configuringMemberId, displayName: run.configuringMemberName },
+          cause: { kind: "automation", automationId: run.automationId, signalId },
           occurredAt: new Date().toISOString(), before: { status: "running" }, after: { status: "failed" } };
-        const summary = `Automation failed for ${row.task_key}: ${row.title}`;
+        const summary = `Automation failed for ${run.taskKey}: ${run.taskTitle}`;
         const stored = await client.query<{ activity: ActivityRecord; recipient_member_id: string; summary: string; created: boolean }>(`WITH attempted AS (
           INSERT INTO stash_automation_failures(id,automation_id,signal_id,task_id,project_id,occurred_at,activity,recipient_member_id,summary)
           VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9) ON CONFLICT(automation_id,signal_id,task_id) DO NOTHING
@@ -2481,18 +2488,18 @@ export class PostgresDatabase implements
         ) SELECT * FROM attempted UNION ALL
           SELECT failure.activity,failure.recipient_member_id,failure.summary,FALSE AS created FROM stash_automation_failures failure
           WHERE failure.automation_id=$2 AND failure.signal_id=$3 AND failure.task_id=$4 AND NOT EXISTS(SELECT 1 FROM attempted)`,
-        [activity.id, row.automation_id, signal.id, row.task_id, candidate.projectId, activity.occurredAt, JSON.stringify(activity), row.created_by_account_id, summary]);
+        [activity.id, run.automationId, signalId, run.taskId, run.projectId, activity.occurredAt, JSON.stringify(activity), run.configuringMemberId, summary]);
         const failure = stored.rows[0]!;
         if (failure.created) await this.#persistTaskActivity(client, failure.activity);
-        if (await this.#canReceiveProjectNotification(client, failure.recipient_member_id, candidate.projectId, failure.activity.workspaceId)) {
-          failures.push({ activity: failure.activity, projectId: candidate.projectId, memberId: failure.recipient_member_id, summary: failure.summary });
-        }
-      }
-      return failures;
+        return await this.#canReceiveProjectNotification(client, failure.recipient_member_id, run.projectId, failure.activity.workspaceId)
+          ? { activity: failure.activity, projectId: run.projectId, memberId: failure.recipient_member_id, summary: failure.summary }
+          : undefined;
     });
   }
 
-  async #existingSignalAutomationFailureNotifications(signalId: string, candidate: AutomationCandidate): Promise<AutomationFailureNotification[]> {
+  async #existingSignalAutomationFailureNotifications(signalId: string, candidate: AutomationCandidate): Promise<
+    { found: boolean; notifications: AutomationFailureNotification[] }
+  > {
     return this.#withTransaction(async (client) => {
       await this.#ensureAutomationSchema(client);
       const stored = await client.query<{ activity: ActivityRecord; recipient_member_id: string; summary: string }>(`SELECT activity,recipient_member_id,summary
@@ -2503,7 +2510,7 @@ export class PostgresDatabase implements
           notifications.push({ activity: failure.activity, projectId: candidate.projectId, memberId: failure.recipient_member_id, summary: failure.summary });
         }
       }
-      return notifications;
+      return { found: Boolean(stored.rowCount), notifications };
     });
   }
 
