@@ -91,3 +91,28 @@ test("@a11y exposes email recovery and OpenID Connect errors without losing inpu
   await page.getByRole("button", { name: "OpenID Connect" }).click(); await page.getByRole("textbox", { name: "Organization ID" }).fill("not-configured");
   await page.getByRole("button", { name: "Continue with OpenID Connect" }).click(); await expect(page.getByRole("alert")).toContainText("invalid or expired");
 });
+
+test("creates a Task from a Note Block and preserves the durable relationship while planning", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await authenticate(page); await page.goto("/app/notes/99999999-9999-4999-8999-999999999999");
+  const editor = page.getByRole("textbox", { name: "Note content" }); await editor.getByText("Preserve this linked Block").click();
+  await page.getByRole("button", { name: "Create Task from current Block" }).press("Enter");
+  await page.getByRole("combobox", { name: "Project" }).selectOption("22222222-2222-4222-8222-222222222222");
+  await page.getByRole("textbox", { name: "Task title" }).fill("Ship linked release plan"); await page.getByRole("button", { name: "Create linked Task" }).click();
+  const relationship = page.getByRole("link", { name: /STASH-32 · Ship linked release plan/ }); await expect(relationship).toBeVisible(); await expect(page.getByText("Ready · linked")).toBeVisible(); await relationship.click();
+  await expect(page.getByRole("heading", { name: "Ship linked release plan" })).toBeVisible(); await expect(page.getByRole("link", { name: /Note 99999999/ })).toBeVisible();
+  let planningAttempts = 0;
+  await page.route("**/api/projects/22222222-2222-4222-8222-222222222222/tasks/STASH-32", async (route) => {
+    if (route.request().method() === "PATCH" && planningAttempts++ === 0) {
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Planning is temporarily unavailable." }) });
+      return;
+    }
+    await route.continue();
+  });
+  const plannedTitle = page.getByRole("textbox", { name: "Title" });
+  await plannedTitle.fill("Ship the durable plan"); await page.getByRole("button", { name: "Save Task plan" }).press("Enter");
+  await expect(page.getByRole("alert")).toContainText("temporarily unavailable"); await expect(plannedTitle).toHaveValue("Ship the durable plan");
+  await page.getByRole("button", { name: "Save Task plan" }).press("Enter"); await expect(page.getByRole("heading", { name: "Ship the durable plan" })).toBeVisible();
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  await plannedTitle.fill("Restore release ownership"); await page.getByRole("button", { name: "Save Task plan" }).press("Enter");
+});

@@ -15,6 +15,9 @@
 .clearButton:disabled { cursor: wait; opacity: .65; transform: none; }
 .feedback { margin-top: var(--stash-space-4); color: var(--stash-color-muted); }
 .error { color: var(--stash-color-ink); background: var(--stash-color-error-soft); padding: var(--stash-space-4); border-left: 3px solid var(--stash-color-accent); }
+.planningForm { display: grid; gap: var(--stash-space-3); }
+.planningForm label { display: grid; gap: var(--stash-space-2); color: var(--stash-color-muted); font-size: .78rem; font-weight: 700; }
+.planningForm input, .planningForm select { min-height: 2.7rem; padding: .6rem .7rem; color: var(--stash-color-ink); background: var(--stash-color-canvas); border: 1px solid var(--stash-border-strong); }
 @media (max-width: 760px) {
   .taskHeader, .assignmentPanel { grid-template-columns: 1fr; }
   .departedMarker { align-items: stretch; flex-direction: column; }

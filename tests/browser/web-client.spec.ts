@@ -25,6 +25,23 @@ test("restores an anonymous deep link after authentication", async ({ page }) =>
   await expect(page.getByText("Forged Workspace")).toHaveCount(0);
 });
 
+test("completes an OIDC browser callback and restores a safe deep link", async ({ page }) => {
+  await page.goto("/app/tasks?assigned=me");
+  await page.evaluate(() => sessionStorage.setItem("stash.oidc-return-to", "/app/tasks?assigned=me"));
+  await page.goto("/api/auth/oidc/44444444-4444-4444-8444-444444444444/callback?code=browser-code&state=browser-state");
+  await expect(page).toHaveURL(/\/app\/tasks\?assigned=me$/);
+  await expect(page.getByRole("heading", { name: "Tasks", exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("stash.member-session"))).toBe(JSON.stringify({ token: "browser-acceptance-member-token" }));
+});
+
+test("rejects an external destination during an OIDC browser callback", async ({ page }) => {
+  await page.goto("/sign-in");
+  await page.evaluate(() => sessionStorage.setItem("stash.oidc-return-to", "https://evil.example/steal"));
+  await page.goto("/api/auth/oidc/44444444-4444-4444-8444-444444444444/callback?code=browser-code&state=browser-state");
+  await expect(page).toHaveURL(/\/app$/);
+  await expect(page.getByRole("heading", { name: "Good morning." })).toBeVisible();
+});
+
 test("rejects the Instance Administrator credential from the Member shell", async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem("stash.member-session", JSON.stringify({ token: "browser-acceptance-admin-token",
     member: { name: "Forged administrator", email: "admin@evil.test" }, workspace: { name: "Forged Workspace" } })));
@@ -96,7 +113,7 @@ test("configures followed Project notifications by keyboard without accessibilit
   const alert = page.getByRole("alert"); await expect(alert).toBeFocused();
   await page.getByRole("button", { name: "Try again" }).focus(); await page.keyboard.press("Enter");
   await expect(page.getByRole("heading", { name: "Choose what reaches you." })).toBeVisible();
-  await expect(page.locator("form")).toHaveCSS("transform", "none");
+  await expect(page.getByRole("region", { name: "Choose what reaches you." }).locator("form")).toHaveCSS("transform", "none");
   const all = page.getByRole("radio", { name: /All Project Activity/ });
   await all.focus(); await page.keyboard.press("Space");
   await expect(all).toBeChecked();

@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useState } from "react";
 import { MemoryRouter, useLocation } from "react-router";
 import { afterEach, expect, test, vi } from "vitest";
-import { AppShell, displayLabel, initials, type SessionState } from "./app-shell";
+import { AppShell, completeOidcBrowserCallback, displayLabel, initials, type SessionState } from "./app-shell";
 
 const member: SessionState = {
   status: "authenticated",
@@ -33,6 +33,14 @@ function AuthTransitionHarness() {
 }
 
 afterEach(() => vi.restoreAllMocks());
+
+test("persists an OIDC callback token and restores only safe application destinations", () => {
+  const storage = { setItem: vi.fn() };
+  expect(completeOidcBrowserCallback("#token=oidc-token", "/app/tasks?assigned=me", storage)).toBe("/app/tasks?assigned=me");
+  expect(storage.setItem).toHaveBeenCalledWith("stash.member-session", JSON.stringify({ token: "oidc-token" }));
+  expect(completeOidcBrowserCallback("#token=second-token", "https://evil.example/steal", storage)).toBe("/app");
+  expect(() => completeOidcBrowserCallback("#error=invalid_oidc_request", "/app", storage)).toThrow("OpenID Connect sign-in could not be completed.");
+});
 
 test("protects deep links and retains the intended destination", async () => {
   const client = new QueryClient();

@@ -234,6 +234,21 @@ describe("optional OpenID Connect authentication on a running Stash Instance", (
     assert.equal(local.status, 422);
   });
 
+  it("hands browser callbacks to the React client without placing the token in a query string", async () => {
+    const { baseUrl, provider } = await run();
+    const start = await fetch(`${baseUrl}/api/auth/oidc/${organizationId}`);
+    const { authorizationUrl } = await start.json() as { authorizationUrl: string };
+    const authorize = new URL(authorizationUrl);
+    provider.expectedNonce = authorize.searchParams.get("nonce")!;
+    const callback = await fetch(`${baseUrl}/api/auth/oidc/${organizationId}/callback?code=browser-code&state=${authorize.searchParams.get("state")}`, {
+      headers: { accept: "text/html" }, redirect: "manual",
+    });
+    assert.equal(callback.status, 303);
+    const location = callback.headers.get("location")!;
+    assert.match(location, /^\/auth\/oidc\/callback#token=/);
+    assert.doesNotMatch(location, /[?&]token=/);
+  });
+
   it("rejects replayed state, unmapped identities, and provider failures without exposing secrets", async () => {
     const { baseUrl, database, provider } = await run();
     const begin = async () => {

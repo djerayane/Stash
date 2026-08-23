@@ -75,6 +75,7 @@ let task: TaskPlanningReadModel = {
   dependencies: [], developmentLinks: [], sourceNoteIds: [], createdAt: "2026-08-23T00:00:00.000Z",
   createdBy: { localAccountId: "browser-member", displayName: "Browser Member" }, revision: 1, dependencyWarnings: [],
 };
+let browserTaskLinked = false;
 const memberships = new Map<string, BuiltInOrganizationRole>([[browserMemberId, "Admin"], [departedMemberId, "Member"]]);
 const pendingImportedIdentities = new Map([["77777777-7777-4777-8777-777777777777", { importId: "66666666-6666-4666-8666-666666666666", workspaceId: "browser-workspace", workspaceName: "Imported Atlas", sourceAccountId: "77777777-7777-4777-8777-777777777777", displayName: "Grace Hopper" }]]);
 const organizationRoleRepository = {
@@ -94,6 +95,9 @@ const organizationRoleRepository = {
   },
 };
 const taskRepository = {
+  async createTaskFromBlock(memberId: string, requestedNoteId: string, requestedBlockKey: string, draft: { projectId: string; title: string }) { if (memberId !== browserMemberId || requestedNoteId !== noteId || requestedBlockKey !== "77777777-7777-4777-8777-777777777777" || draft.projectId !== projectId) return { status: "block_not_found" as const }; task = { ...task, title: draft.title }; browserTaskLinked = true; return { status: "created" as const, task, sourceBlock: { noteId, blockId: "66666666-6666-4666-8666-666666666666" } }; },
+  async listLinkedTasks(memberId: string, requestedNoteId: string) { return memberId === browserMemberId && requestedNoteId === noteId ? { status: "found" as const, tasks: browserTaskLinked ? [{ id: task.id, key: task.key, title: task.title, projectId, status: task.status, sourceBlock: { noteId, blockId: "66666666-6666-4666-8666-666666666666" }, relationshipState: "linked" as const }] : [] } : { status: "note_not_found" as const }; },
+  async listTaskSourceBlocks(memberId: string, requestedTaskId: string) { return memberId === browserMemberId && requestedTaskId === task.id ? { status: "found" as const, sourceBlocks: browserTaskLinked ? [{ noteId, blockId: "66666666-6666-4666-8666-666666666666", state: "linked" as const }] : [] } : { status: "task_not_found" as const }; },
   async findTaskByKey(memberId: string, requestedProjectId: string, taskKey: string) {
     return memberId === browserMemberId && requestedProjectId === projectId && taskKey === task.key
       ? { status: "found" as const, task } : { status: "not_found" as const };
@@ -106,8 +110,12 @@ const taskRepository = {
     const reassigned = requestedAssigneeIds !== undefined
       && formerAssigneeIds.every((id) => !assigneeIds.includes(id))
       && assigneeIds.some((id) => !formerAssigneeIds.includes(id));
-    const { formerAssigneeIds: _previousFormerAssignees, ...currentTask } = task;
-    task = { ...currentTask, assigneeIds, ...(!reassigned && formerAssigneeIds.length ? { formerAssigneeIds } : {}), revision: task.revision + 1 };
+    const { formerAssigneeIds: _previousFormerAssignees, dueDate: _previousDueDate, estimate: _previousEstimate, ...currentTask } = task;
+    const { dueDate, estimate, statusId: _statusId, ...portableUpdate } = update;
+    task = { ...currentTask, ...portableUpdate, assigneeIds,
+      ...(dueDate !== null && dueDate !== undefined ? { dueDate } : {}),
+      ...(estimate !== null && estimate !== undefined ? { estimate } : {}),
+      ...(!reassigned && formerAssigneeIds.length ? { formerAssigneeIds } : {}), revision: task.revision + 1 };
     return { status: "updated" as const, task };
   },
 };
@@ -134,7 +142,13 @@ const instance = await startInstance({
   instanceAdminToken: "browser-acceptance-admin-token",
   passwordAuth: { authenticateBearer: async (authorization: string | undefined) => { const accountId = activeTokens.get(authorization?.replace(/^Bearer /, "") || ""); return accountId ? { accountId, sessionId: `session-${accountId}` } : undefined; }, signIn: async () => { throw new Error("invalid_credentials"); } } as any,
   accountRecovery: { async authenticationOptions() { return { challenge: "cHJvb2Y", rpId: "127.0.0.1", userVerification: "required", allowCredentials: [] }; }, async signInWithPasskey() { return { token: "browser-acceptance-member-token" }; }, async signInWithRecoveryCode() { return { token: "browser-acceptance-member-token" }; }, async requestEmailRecovery() { throw new EmailRecoveryUnavailable(); }, async signInWithEmailRecovery() { return { token: "browser-acceptance-member-token" }; } } as any,
-  oidcAuth: { async begin() { throw new InvalidOidcRequest(); }, async complete() { throw new InvalidOidcRequest(); } } as any,
+  oidcAuth: {
+    async begin() { throw new InvalidOidcRequest(); },
+    async complete(_organizationId: string, code: string | null, state: string | null) {
+      if (code !== "browser-code" || state !== "browser-state") throw new InvalidOidcRequest();
+      return { token: "browser-acceptance-member-token", member: { email: "member@example.test" } };
+    },
+  } as any,
   oidcCallbackOrigin: "http://127.0.0.1:4173",
   allowInsecureOidcCallbackOriginForTest: true,
   memberAccess: {
@@ -172,7 +186,7 @@ const instance = await startInstance({
       pendingImportedIdentities.delete(input.sourceAccountId); return { status: "mapped" as const };
     },
   },
-  tasks: new TaskService(taskRepository, { async findPortableMemberIdentity() { return undefined; } }),
+  tasks: new TaskService(taskRepository, { async findPortableMemberIdentity(memberId: string) { return memberId === browserMemberId ? { localAccountId: memberId, displayName: "Browser Member" } : undefined; } }),
   boards: { async list() { return { status: "found", boards: [{ id: browserBoardId, name: "Delivery" }] }; }, async read() { return { status: "found", board: { id: browserBoardId, name: "Delivery" }, columns: [{ id: "ready", name: "Ready", archived: false, tasks: [{ id: task.id, key: task.key, title: task.title }] }, { id: "done", name: "Done", archived: false, tasks: [] }] }; }, async move(_memberId: string, _projectId: string, _boardId: string, _taskKey: string, value: { statusId: string }) { browserBoardStatus = value.statusId; return { status: "moved", task: { ...task, status: { id: value.statusId, name: value.statusId === "done" ? "Done" : "Ready" } } }; } } as any,
   discussions: { async listForNote() { return { status: "found", discussions: browserDiscussions }; }, async listForTask() { return { status: "found", discussions: browserDiscussions }; }, async create(_memberId: string, value: any) { const discussion = { id: crypto.randomUUID(), workspaceId: browserWorkspaceId, target: value.target, createdAt: new Date().toISOString(), messages: [{ id: crypto.randomUUID(), content: value.message, author: { displayName: "Browser Member" }, createdAt: new Date().toISOString() }] }; browserDiscussions = [...browserDiscussions, discussion]; return { status: "created", discussion, projection: {} }; }, async reply(_memberId: string, id: string, value: any) { const discussion = browserDiscussions.find((item) => item.id === id); discussion.messages.push({ id: crypto.randomUUID(), content: value.content, author: { displayName: "Browser Member" }, createdAt: new Date().toISOString() }); return { status: "updated", discussion, projection: {} }; }, async resolve(_memberId: string, id: string) { const discussion = browserDiscussions.find((item) => item.id === id); discussion.resolvedAt = new Date().toISOString(); return { status: "resolved", discussion, projection: {} }; }, async createWork() { return { status: "created", work: { kind: "note" }, activity: {}, projections: [] }; } } as any,
   activities: { async listWorkspace() { return { status: "found", activities: [{ id: "abababab-abab-4bab-8bab-abababababa6", summary: "Release plan updated", actor: { name: "Browser Member" }, occurredAt: new Date(0).toISOString() }] }; } } as any,

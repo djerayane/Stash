@@ -27,6 +27,15 @@ export function resolveReturnTo(search: string): string {
   return candidate === "/app" || candidate.startsWith("/app/") || candidate.startsWith("/app?") ? candidate : "/app";
 }
 
+interface TokenStorage { setItem(key: string, value: string): void }
+
+export function completeOidcBrowserCallback(fragment: string, returnTo: string | null, storage: TokenStorage): string {
+  const token = new URLSearchParams(fragment.startsWith("#") ? fragment.slice(1) : fragment).get("token");
+  if (!token) throw new Error("OpenID Connect sign-in could not be completed.");
+  storage.setItem("stash.member-session", JSON.stringify({ token }));
+  return resolveReturnTo(new URLSearchParams({ returnTo: returnTo ?? "/app" }).toString());
+}
+
 const navigation = [
   { to: "/app", label: "Home", icon: "home" },
   { to: "/app/inbox", label: "Inbox", icon: "inbox" },
@@ -91,7 +100,7 @@ function SignIn({ returnTo }: { readonly returnTo: string }) {
     if (method === "recovery") { complete(await post("/api/auth/recovery-code-sessions", { email, code })); return; }
     if (method === "email") { await post("/api/auth/email-recovery", { email }); return; }
     if (method === "emailToken") { complete(await post("/api/auth/email-recovery-sessions", { token: code })); return; }
-    if (method === "oidc") { const response = await fetch(`/api/auth/oidc/${encodeURIComponent(organizationId)}`); const body = await response.json() as { authorizationUrl?: string; message?: string }; if (!response.ok || !body.authorizationUrl) throw new Error(body.message || "OpenID Connect is unavailable."); window.location.assign(body.authorizationUrl); return; }
+    if (method === "oidc") { const response = await fetch(`/api/auth/oidc/${encodeURIComponent(organizationId)}`); const body = await response.json() as { authorizationUrl?: string; message?: string }; if (!response.ok || !body.authorizationUrl) throw new Error(body.message || "OpenID Connect is unavailable."); sessionStorage.setItem("stash.oidc-return-to", returnTo); window.location.assign(body.authorizationUrl); return; }
     if (method === "passkey") { const options = await post("/api/auth/passkey-sessions/options", { email }) as Record<string, unknown>; const parser = (PublicKeyCredential as unknown as { parseRequestOptionsFromJSON?: (value: unknown) => PublicKeyCredentialRequestOptions }).parseRequestOptionsFromJSON; const credential = await navigator.credentials.get({ publicKey: parser ? parser(options) : options as unknown as PublicKeyCredentialRequestOptions }); if (!credential) throw new Error("Passkey sign-in was cancelled."); const serializable = "toJSON" in credential && typeof credential.toJSON === "function" ? credential.toJSON() : credential; complete(await post("/api/auth/passkey-sessions", serializable)); return; }
     const response = await fetch("/api/auth/sessions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email, password }) });
     const body = await response.json() as { token?: string; message?: string };
@@ -107,6 +116,24 @@ function SignIn({ returnTo }: { readonly returnTo: string }) {
       <form className={styles.signInForm} onSubmit={(event) => { event.preventDefault(); signIn.mutate(); }}>{method !== "oidc" && method !== "emailToken" ? <label>Email<input autoComplete="email" required type="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label> : method === "oidc" ? <label>Organization ID<input required value={organizationId} onChange={(event) => setOrganizationId(event.target.value)} /></label> : null}{method === "password" ? <label>Password<input autoComplete="current-password" minLength={12} required type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label> : method === "recovery" ? <label>Recovery code<input autoComplete="one-time-code" required value={code} onChange={(event) => setCode(event.target.value)} /></label> : method === "emailToken" ? <label>Email recovery token<input autoComplete="one-time-code" required value={code} onChange={(event) => setCode(event.target.value)} /></label> : null}<button className={styles.primaryButton} disabled={signIn.isPending} type="submit">{signIn.isPending ? "Working…" : method === "email" ? "Send recovery email" : method === "oidc" ? "Continue with OpenID Connect" : "Sign in"}</button>{method === "email" && signIn.isSuccess ? <p className={styles.authenticationNotice} role="status">If the account exists, recovery instructions have been queued.</p> : null}{signIn.isError ? <p className={styles.authenticationNotice} role="alert">{signIn.error.message}</p> : null}</form>
     </section>
   </main>;
+}
+
+function OidcCallback() {
+  const handled = useRef(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    if (handled.current) return;
+    handled.current = true;
+    try {
+      const destination = completeOidcBrowserCallback(window.location.hash, sessionStorage.getItem("stash.oidc-return-to"), localStorage);
+      sessionStorage.removeItem("stash.oidc-return-to");
+      window.location.replace(destination);
+    } catch (cause) {
+      window.history.replaceState(null, "", "/auth/oidc/callback");
+      setError(cause instanceof Error ? cause.message : "OpenID Connect sign-in could not be completed.");
+    }
+  }, []);
+  return <main className={styles.stateScreen}><div aria-live="assertive" role={error ? "alert" : "status"}><p className={styles.kicker}>OpenID Connect</p><h1>{error ? "Sign-in interrupted" : "Completing sign-in"}</h1><p>{error || "Restoring your Workspace."}</p>{error ? <Link className={styles.primaryButton} to="/sign-in">Return to sign in</Link> : null}</div></main>;
 }
 
 function EmptyHome() {
@@ -194,6 +221,7 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
 
 export function AppShell({ session = { status: "loading" } }: AppShellProps) {
   const location = useLocation();
+  if (location.pathname === "/auth/oidc/callback") return <OidcCallback />;
   if (session.status === "loading" || session.status === "error") return <StateScreen state={session} />;
   if (session.status === "anonymous") {
     if (location.pathname === "/sign-in") return <SignIn returnTo={resolveReturnTo(location.search)} />;
