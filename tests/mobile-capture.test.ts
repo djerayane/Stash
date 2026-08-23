@@ -10,6 +10,7 @@ import {
   type MobileCapture,
   type MobileCaptureOptions,
   type MobileCapturePairing,
+  type MobileSyncMutation,
 } from "../src/mobile-capture-client.js";
 import {
   MobileCaptureService,
@@ -34,6 +35,7 @@ const projectId = "22222222-2222-4222-8222-222222222222";
 class MemoryEncryptedStore implements EncryptedMobileCaptureStore {
   pairing: MobileCapturePairing | undefined;
   captures: MobileCapture[] = [];
+  mutations: MobileSyncMutation[] = [];
   options = new Map<string, { projects: { id: string; name: string }[]; tags: string[];
     reminders: { id: string; label: string; offsetMinutes: number }[] }>();
 
@@ -44,6 +46,11 @@ class MemoryEncryptedStore implements EncryptedMobileCaptureStore {
     this.captures = [...this.captures.filter(({ id }) => id !== capture.id), structuredClone(capture)];
   }
   async removeCapture(id: string) { this.captures = this.captures.filter((capture) => capture.id !== id); }
+  async listMutations() { return structuredClone(this.mutations); }
+  async saveMutation(mutation: MobileSyncMutation) {
+    this.mutations = [...this.mutations.filter(({ id }) => id !== mutation.id), structuredClone(mutation)];
+  }
+  async removeMutation(id: string) { this.mutations = this.mutations.filter((mutation) => mutation.id !== id); }
   async loadOptions(scope: string) { return structuredClone(this.options.get(scope) ?? { projects: [], tags: [], reminders: [] }); }
   async saveOptions(scope: string, options: { projects: { id: string; name: string }[]; tags: string[];
     reminders: { id: string; label: string; offsetMinutes: number }[] }) { this.options.set(scope, structuredClone(options)); }
@@ -200,6 +207,20 @@ describe("offline mobile capture synchronization", () => {
       [{ id: "22222222-2222-4222-8222-222222222222", payload }]);
     assert.deepEqual(replay, original, "restart reuses the durable delivery identity before native acknowledgement");
     await restartedStore.acknowledgeNativeShares(fingerprint);
+  });
+
+  it("encrypts pending edits and restores their stable identities after restart", async () => {
+    const repository = new RecordingCiphertextRepository();
+    const firstStore = new EncryptedStateMobileCaptureStore(repository, testCipher);
+    const mutation: MobileSyncMutation = {
+      id: "11111111-1111-4111-8111-111111111111", kind: "task_edit", projectId,
+      taskKey: "WEB-12", baseRevision: 3, changes: { title: "Private offline plan" }, attempts: 0,
+      origin: { instanceUrl: "https://stash.example", workspaceId, memberId: "ada" },
+    };
+    await firstStore.saveMutation(mutation);
+    assert.doesNotMatch([...repository.ciphertext.values()].join(" "), /Private offline plan|WEB-12/);
+    const restartedStore = new EncryptedStateMobileCaptureStore(repository, testCipher);
+    assert.deepEqual(await restartedStore.listMutations(), [mutation]);
   });
 
   it("reruns a serialized drain when B is staged while A is awaiting a failed write", async () => {
@@ -995,5 +1016,62 @@ describe("offline mobile capture synchronization", () => {
     resolveSync(new Response(JSON.stringify({ status: "created" }), { status: 201 }));
     await refresh;
     assert.deepEqual(await first, { status: "synced", count: 1 });
+  });
+
+  it("retries an offline Note edit with one stable operation identity", async () => {
+    const store = new MemoryEncryptedStore();
+    store.pairing = { instanceUrl: "https://stash.example", memberToken: "member-ada", workspaceId, memberId: "ada" };
+    const noteId = "44444444-4444-4444-8444-444444444444";
+    const operation = { id: "55555555-5555-4555-8555-555555555555", type: "delete_block" as const,
+      blockKey: "66666666-6666-4666-8666-666666666666" };
+    const requests: { url: string; body: unknown }[] = [];
+    let online = false;
+    const client = new MobileCaptureClient(store, async (input, init) => {
+      requests.push({ url: String(input), body: JSON.parse(String(init?.body)) });
+      if (!online) throw new TypeError("offline");
+      return new Response(JSON.stringify({ revision: 2 }), { status: 200 });
+    });
+    await client.queueNoteEdit(noteId, 1, [operation]);
+
+    assert.deepEqual(await client.sync(), { status: "offline", count: 0 });
+    assert.equal((await client.pendingMutations()).length, 1);
+    online = true;
+    assert.deepEqual(await client.sync(), { status: "synced", count: 1 });
+    assert.deepEqual(requests.map(({ url }) => url), [
+      `https://stash.example/api/notes/${noteId}`,
+      `https://stash.example/api/notes/${noteId}`,
+    ]);
+    assert.deepEqual(requests[0]?.body, requests[1]?.body);
+    assert.deepEqual(await client.pendingMutations(), []);
+  });
+
+  it("removes server-preserved Note and Task conflicts while reporting each contribution", async () => {
+    const store = new MemoryEncryptedStore();
+    store.pairing = { instanceUrl: "https://stash.example", memberToken: "member-ada", workspaceId, memberId: "ada" };
+    const client = new MobileCaptureClient(store, async (input) => String(input).includes("/api/notes/")
+      ? new Response(JSON.stringify({ error: "revision_conflict", conflictId: "77777777-7777-4777-8777-777777777777" }), { status: 409 })
+      : new Response(JSON.stringify({ error: "task_edit_conflict", conflict: { id: "88888888-8888-4888-8888-888888888888" } }), { status: 409 }));
+    await client.queueNoteEdit("44444444-4444-4444-8444-444444444444", 1,
+      [{ id: "55555555-5555-4555-8555-555555555555", type: "delete_block", blockKey: "66666666-6666-4666-8666-666666666666" }]);
+    await client.queueTaskEdit(projectId, "WEB-12", 3, { priority: "urgent" }, "99999999-9999-4999-8999-999999999999");
+
+    assert.deepEqual(await client.sync(), { status: "attention_required", count: 2, error: "conflicts_preserved" });
+    assert.deepEqual(await client.pendingMutations(), []);
+    assert.match(presentMobileSyncResult({ status: "attention_required", count: 2, error: "conflicts_preserved" }, []),
+      /Every conflicting contribution was preserved/);
+  });
+
+  it("retains invalid and unauthorized mobile edits without exposing a different Member's queue", async () => {
+    const store = new MemoryEncryptedStore();
+    store.pairing = { instanceUrl: "https://stash.example", memberToken: "member-ada", workspaceId, memberId: "ada" };
+    const client = new MobileCaptureClient(store, async () => new Response(JSON.stringify({
+      error: "unauthorized", message: "A valid Member session is required.",
+    }), { status: 401 }));
+    await client.queueTaskEdit(projectId, "WEB-12", 3, { priority: "urgent" });
+    assert.deepEqual(await client.sync(), { status: "attention_required", count: 0, error: "unauthorized" });
+    assert.match((await client.pendingMutations())[0]?.lastError ?? "", /valid Member session/i);
+
+    store.pairing = { instanceUrl: "https://stash.example", memberToken: "member-grace", workspaceId, memberId: "grace" };
+    assert.deepEqual(await client.pendingMutations(), []);
   });
 });

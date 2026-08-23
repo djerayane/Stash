@@ -1,9 +1,10 @@
-import type { EncryptedMobileCaptureStore, IncomingShareDelivery, MobileCapture, MobileCaptureOptions, MobileCapturePairing } from "../../src/mobile-capture-client";
+import type { EncryptedMobileCaptureStore, IncomingShareDelivery, MobileCapture, MobileCaptureOptions, MobileCapturePairing, MobileSyncMutation } from "../../src/mobile-capture-client";
 
 export interface MobileCipher { encrypt(plaintext: string): Promise<string>; decrypt(ciphertext: string): Promise<string> }
 export interface CiphertextStateRepository { read(key: string): Promise<string | undefined>; write(key: string, ciphertext: string): Promise<void> }
 const pairingKey = "pairing"; const outboxKey = "outbox"; const optionsKey = "options";
 const incomingSharesKey = "incoming-shares";
+const mutationOutboxKey = "mutation-outbox";
 type IncomingShareState = { pending: IncomingShareDelivery[]; native?: { fingerprint: string; ids: string[] } };
 
 export class EncryptedStateMobileCaptureStore implements EncryptedMobileCaptureStore {
@@ -14,6 +15,11 @@ export class EncryptedStateMobileCaptureStore implements EncryptedMobileCaptureS
   async listCaptures() { await this.#writeBarrier; return this.#read<MobileCapture[]>(outboxKey, []); }
   async saveCapture(capture: MobileCapture) { await this.#mutate((items) => [...items.filter(({ id }) => id !== capture.id), capture]); }
   async removeCapture(id: string) { await this.#mutate((items) => items.filter((capture) => capture.id !== id)); }
+  async listMutations() { await this.#writeBarrier; return this.#read<MobileSyncMutation[]>(mutationOutboxKey, []); }
+  async saveMutation(mutation: MobileSyncMutation) {
+    await this.#mutateMutations((items) => [...items.filter(({ id }) => id !== mutation.id), mutation]);
+  }
+  async removeMutation(id: string) { await this.#mutateMutations((items) => items.filter((mutation) => mutation.id !== id)); }
   async loadOptions(scope: string) {
     await this.#writeBarrier;
     return (await this.#read<Record<string, MobileCaptureOptions>>(optionsKey, {}))[scope]
@@ -49,6 +55,10 @@ export class EncryptedStateMobileCaptureStore implements EncryptedMobileCaptureS
   async #write(key: string, value: unknown) { await this.repository.write(key, await this.cipher.encrypt(JSON.stringify(value))); }
   async #mutate(change: (captures: MobileCapture[]) => MobileCapture[]) {
     const write = this.#writeBarrier.then(async () => this.#write(outboxKey, change(await this.#read(outboxKey, []))));
+    this.#writeBarrier = write.catch(() => undefined); await write;
+  }
+  async #mutateMutations(change: (mutations: MobileSyncMutation[]) => MobileSyncMutation[]) {
+    const write = this.#writeBarrier.then(async () => this.#write(mutationOutboxKey, change(await this.#read(mutationOutboxKey, []))));
     this.#writeBarrier = write.catch(() => undefined); await write;
   }
   async #mutateIncoming(change: (state: IncomingShareState) => IncomingShareState) {
