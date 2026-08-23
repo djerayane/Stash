@@ -6,36 +6,12 @@ export function notificationRoutes(service: NotificationService, memberAccess: M
   return {
     matches: (request, url) => request.method === "GET" && (url.pathname === "/api/notifications" || url.pathname === "/api/notifications/digest")
       || request.method === "POST" && /^\/api\/notifications\/[^/]+\/read$/.test(url.pathname)
-      || request.method === "POST" && /^\/api\/projects\/[^/]+\/(discussion-mentions|review-requests|automation-failures|followed-changes)$/.test(url.pathname)
       || ["GET", "PUT"].includes(request.method ?? "") && /^\/api\/projects\/[^/]+\/notification-settings$/.test(url.pathname),
     async handle(request, response, url) {
       const access = await memberAccess.authenticateBearer(request.headers.authorization);
       if (!access) { json(response, 401, { error: "unauthorized", message: "A valid Member session is required." }); return true; }
       try {
         const parts = url.pathname.split("/");
-        if (request.method === "POST" && parts[2] === "projects" && parts.length === 5) {
-          const projectId = decodeURIComponent(parts[3]!);
-          const value = await readJson(request) as Record<string, unknown>;
-          const source = parts[4];
-          const trigger = source === "discussion-mentions" ? "direct_mention" : source === "review-requests" ? "requested_review"
-            : source === "automation-failures" ? "automation_failure" : "followed_change";
-          const allowed = trigger === "direct_mention" ? ["memberId", "discussionId"]
-            : trigger === "requested_review" ? ["reviewerId", "taskId"]
-            : trigger === "automation_failure" ? ["memberId", "taskId", "automationId"] : ["memberId", "taskId", "followed"];
-          if (!value || typeof value !== "object" || !Object.keys(value).every((key) => allowed.includes(key)) || Object.keys(value).length !== allowed.length)
-            throw new InvalidNotificationInput();
-          const memberId = (trigger === "requested_review" ? value.reviewerId : value.memberId) as string;
-          const object = trigger === "direct_mention" ? { kind: "Discussion" as const, id: value.discussionId as string }
-            : { kind: "Task" as const, id: value.taskId as string };
-          const summary = trigger === "direct_mention" ? "You were mentioned in a Discussion" : trigger === "requested_review" ? "Your review was requested"
-            : trigger === "automation_failure" ? "An Automation failed" : "A followed Task changed";
-          const result = await service.recordSource(access.accountId, { projectId, trigger, memberId, object, summary,
-            ...(trigger === "followed_change" ? { followed: value.followed as boolean } : {}),
-            ...(trigger === "automation_failure" ? { automationId: value.automationId as string } : {}) });
-          if (result.status === "created") json(response, 201, { notification: result.notification });
-          else json(response, 404, { error: "notification_source_not_found", message: "The Project, source, or recipient is unavailable." });
-          return true;
-        }
         if (url.pathname === "/api/notifications") {
           const unread = url.searchParams.get("unread");
           if (unread !== null && unread !== "true" && unread !== "false") throw new InvalidNotificationInput();

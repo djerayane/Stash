@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
 import { after, before, describe, it } from "node:test";
 
 import { startInstance, type DatabaseProbe } from "../src/instance.js";
@@ -65,20 +64,6 @@ class NotificationFake implements DatabaseProbe, NotificationRepository, TaskPla
       && this.visibleProjects.has(`${requestedMemberId}:${entry.projectId}`)
       && this.preferences.get(`${requestedMemberId}:${entry.projectId}`)?.digest === cadence);
     claimed.forEach((entry) => { entry.digestedAt = claimedAt; }); return structuredClone(claimed);
-  }
-  async recordNotificationSource(actorId: string, input: import("../src/notifications.js").NotificationSourceInput) {
-    if (![memberId, otherMemberId].includes(actorId) || !this.visibleProjects.has(`${input.memberId}:${input.projectId}`)
-      || actorId === input.memberId) return undefined;
-    const preferences = await this.getNotificationPreferences(input.memberId, input.projectId) ?? { activity: "followed" as const, digest: "off" as const };
-    if (input.trigger === "followed_change" && (preferences.activity === "muted" || preferences.activity === "followed" && !input.followed)) return undefined;
-    const producedActivity: ActivityRecord = { schema: "stash.activity.v1", id: randomUUID(), workspaceId,
-      object: input.object, action: input.trigger, actor: { localAccountId: actorId, displayName: "Grace Hopper" },
-      cause: input.trigger === "automation_failure" ? { kind: "automation", automationId: input.automationId! } : { kind: "member" },
-      occurredAt: "2026-08-23T12:30:00.000Z", before: {}, after: { recipientMemberId: input.memberId } };
-    const delivery: NotificationDelivery = { schema: "stash.notification.v1", id: randomUUID(), memberId: input.memberId,
-      projectId: input.projectId, workspaceId, trigger: input.trigger, summary: input.summary, activity: producedActivity,
-      createdAt: producedActivity.occurredAt, delivery: "immediate" };
-    return this.saveNotification(delivery);
   }
   async findTaskByKey(requestedMemberId: string, requestedProjectId: string, key: string) {
     return [memberId, otherMemberId].includes(requestedMemberId) && requestedProjectId === projectId && key === this.task.key
@@ -240,7 +225,7 @@ describe("Member notifications", () => {
     } finally { await assignmentServer.close(); }
   });
 
-  it("creates every non-assignment notification through an authenticated canonical source boundary", async () => {
+  it("does not expose stand-alone commands that can forge notification source events", async () => {
     database.deliveries.length = 0; database.preferences.clear();
     const objectId = "77777777-7777-4777-8777-777777777777";
     const sources = [
@@ -251,15 +236,14 @@ describe("Member notifications", () => {
     ] as const;
     for (const [source, body] of sources) {
       const response = await request(`/api/v1/projects/${projectId}/${source}`, "POST", body, "other-token");
-      assert.equal(response.status, 201, source);
+      assert.equal(response.status, 404, source);
     }
     const inbox = await request("/api/v1/notifications");
     assert.equal(inbox.status, 200);
-    assert.deepEqual((await inbox.json() as { notifications: NotificationDelivery[] }).notifications.map(({ trigger }) => trigger).sort(),
-      ["automation_failure", "direct_mention", "followed_change", "requested_review"]);
+    assert.deepEqual((await inbox.json() as { notifications: NotificationDelivery[] }).notifications, []);
     const forgedActivity = await request(`/api/projects/${projectId}/discussion-mentions`, "POST", {
       memberId, discussionId: objectId, activity,
     }, "other-token");
-    assert.equal(forgedActivity.status, 422, "source commands must reject caller-authored Activity fields");
+    assert.equal(forgedActivity.status, 404, "source adapters must remain unreachable from the public Member API");
   });
 });

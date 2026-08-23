@@ -34,17 +34,6 @@ export interface NotificationRepository {
   getNotificationPreferences(memberId: string, projectId: string): Promise<NotificationPreferences | undefined>;
   saveNotificationPreferences(memberId: string, projectId: string, preferences: NotificationPreferences): Promise<NotificationPreferences | undefined>;
   claimDigestNotifications(memberId: string, cadence: Exclude<DigestCadence, "off">, since: string, until: string, claimedAt: string): Promise<NotificationDelivery[]>;
-  recordNotificationSource(actorId: string, input: NotificationSourceInput): Promise<NotificationDelivery | undefined>;
-}
-
-export interface NotificationSourceInput {
-  projectId: string;
-  memberId: string;
-  trigger: Exclude<NotificationTrigger, "assignment">;
-  object: ActivityRecord["object"];
-  summary: string;
-  followed?: boolean;
-  automationId?: string;
 }
 
 export class InvalidNotificationInput extends Error {}
@@ -91,16 +80,6 @@ export class NotificationService {
       createdAt: now.toISOString(), delivery: notificationDeliveryMode(now, preferences),
     };
     return { status: "created" as const, notification: await this.repository.saveNotification(delivery) };
-  }
-
-  async recordSource(actorId: string, input: NotificationSourceInput) {
-    if (!uuid.test(input.projectId) || !uuid.test(input.memberId)
-      || !uuid.test(input.object.id) || !input.summary.trim() || input.summary.length > 500
-      || !(["Note", "Task", "Discussion", "NoteLocation", "NoteLink"] as unknown[]).includes(input.object.kind)
-      || input.trigger === "followed_change" && typeof input.followed !== "boolean"
-      || input.trigger === "automation_failure" && (!input.automationId || !uuid.test(input.automationId))) throw new InvalidNotificationInput();
-    const notification = await this.repository.recordNotificationSource(actorId, { ...input, summary: input.summary.trim() });
-    return notification ? { status: "created" as const, notification } : { status: "not_found" as const };
   }
 
   async list(memberId: string, unreadOnly: boolean) {
