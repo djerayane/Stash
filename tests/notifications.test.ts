@@ -37,7 +37,13 @@ class NotificationFake implements DatabaseProbe, NotificationRepository, TaskPla
     createdAt: "2026-08-23T11:00:00.000Z", createdBy: { localAccountId: otherMemberId, displayName: "Grace Hopper" }, revision: 1,
     dependencyWarnings: [] };
   async verifyConnection() {} async close() {}
-  async saveNotification(delivery: NotificationDelivery) { if (this.fail) throw new Error("offline"); this.deliveries.push(structuredClone(delivery)); return delivery; }
+  async saveNotification(delivery: NotificationDelivery) {
+    if (this.fail) throw new Error("offline");
+    const existing = this.deliveries.find((entry) => entry.memberId === delivery.memberId
+      && entry.activity.id === delivery.activity.id && entry.trigger === delivery.trigger);
+    if (existing) return structuredClone(existing);
+    this.deliveries.push(structuredClone(delivery)); return delivery;
+  }
   async listNotifications(requestedMemberId: string) { if (this.fail) throw new Error("offline"); return this.deliveries.filter(({ memberId }) => memberId === requestedMemberId && this.visibleProjects.has(`${requestedMemberId}:${projectId}`)); }
   async markNotificationRead(requestedMemberId: string, id: string, readAt: string) {
     const item = this.deliveries.find((entry) => entry.id === id && entry.memberId === requestedMemberId);
@@ -128,27 +134,30 @@ describe("Member notifications", () => {
     database.visibleProjects.add(`${memberId}:${projectId}`);
   });
 
-  it("produces every relevant notification source through the running Instance and honors all/followed/muted", async () => {
+  it("accepts notification events only from trusted domain adapters and honors all/followed/muted", async () => {
     database.deliveries.length = 0; database.preferences.clear();
-    const event = async (trigger: NotificationTrigger, id: string, followed?: boolean) => request(`/api/projects/${projectId}/notification-events`, "POST", {
-      memberId, trigger, summary: trigger, ...(followed === undefined ? {} : { followed }),
-      activity: { ...activity, id, actor: { localAccountId: otherMemberId, displayName: "Grace Hopper" } },
-    }, "other-token");
+    const forged = await request(`/api/projects/${projectId}/notification-events`, "POST", {
+      memberId, trigger: "direct_mention", summary: "forged",
+      activity: { ...activity, actor: { localAccountId: memberId, displayName: "Ada Lovelace" } },
+    });
+    assert.equal(forged.status, 404, "a Member cannot submit even a same-actor fabricated Activity");
+    assert.equal(database.deliveries.length, 0);
+
+    const event = (trigger: NotificationTrigger, id: string, followed?: boolean) => service.notify({
+      activity: { ...activity, id }, projectId, memberId, trigger, summary: trigger,
+      ...(followed === undefined ? {} : { followed }),
+    });
     for (const [index, trigger] of (["direct_mention", "requested_review", "automation_failure"] as NotificationTrigger[]).entries())
-      assert.equal((await event(trigger, `10000000-0000-4000-8000-00000000000${index}`)).status, 201);
+      assert.equal((await event(trigger, `10000000-0000-4000-8000-00000000000${index}`)).status, "created");
 
     await service.setPreferences(memberId, projectId, { activity: "followed", digest: "off" });
-    assert.equal((await event("followed_change", "20000000-0000-4000-8000-000000000001", false)).status, 200);
-    assert.equal((await event("followed_change", "20000000-0000-4000-8000-000000000002", true)).status, 201);
+    assert.equal((await event("followed_change", "20000000-0000-4000-8000-000000000001", false)).status, "suppressed");
+    assert.equal((await event("followed_change", "20000000-0000-4000-8000-000000000002", true)).status, "created");
     await service.setPreferences(memberId, projectId, { activity: "all", digest: "off" });
-    assert.equal((await event("followed_change", "20000000-0000-4000-8000-000000000003", false)).status, 201);
+    assert.equal((await event("followed_change", "20000000-0000-4000-8000-000000000003", false)).status, "created");
     await service.setPreferences(memberId, projectId, { activity: "muted", digest: "off" });
-    assert.equal((await event("followed_change", "20000000-0000-4000-8000-000000000004", true)).status, 200);
+    assert.equal((await event("followed_change", "20000000-0000-4000-8000-000000000004", true)).status, "suppressed");
     assert.equal(database.deliveries.length, 5);
-    const forged = await request(`/api/projects/${projectId}/notification-events`, "POST", {
-      memberId, trigger: "direct_mention", summary: "forged", activity,
-    }, "member-token");
-    assert.equal(forged.status, 422, "the authenticated actor must own the attributed Activity");
   });
 
   it("uses distinct daily and weekly windows and does not redeliver a claimed digest", async () => {
@@ -163,6 +172,15 @@ describe("Member notifications", () => {
     database.deliveries.forEach((entry) => { delete entry.digestedAt; });
     await service.setPreferences(memberId, projectId, { activity: "all", digest: "weekly" });
     assert.equal((await service.digest(memberId)).length, 2, "weekly includes entries since Monday");
+  });
+
+  it("keeps the first trusted notification immutable when delivery is retried", async () => {
+    database.deliveries.length = 0; database.preferences.clear();
+    const first = await service.notify({ activity, projectId, memberId, trigger: "direct_mention", summary: "Canonical mention" });
+    const retry = await service.notify({ activity, projectId, memberId, trigger: "direct_mention", summary: "Changed retry" });
+    assert.equal(first.status, "created"); assert.equal(retry.status, "created");
+    assert.equal(database.deliveries.length, 1);
+    assert.equal(retry.status === "created" && retry.notification.summary, "Canonical mention");
   });
 
   it("validates and persists per-Project activity, digest, and quiet-hour controls", async () => {

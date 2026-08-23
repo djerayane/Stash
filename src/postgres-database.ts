@@ -1881,10 +1881,15 @@ export class PostgresDatabase implements
       AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$10) OR
         (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships actor_membership
           WHERE actor_membership.organization_id=workspace.organization_owner_id AND actor_membership.account_id=$10)))
-      ON CONFLICT (member_id, activity_id, trigger) DO UPDATE SET summary=EXCLUDED.summary
+      ON CONFLICT (member_id, activity_id, trigger) DO NOTHING
       RETURNING *`, [delivery.id, delivery.memberId, delivery.workspaceId, delivery.projectId, delivery.trigger,
       delivery.summary, JSON.stringify(delivery.activity), delivery.createdAt, delivery.delivery, delivery.activity.actor.localAccountId]);
-    const row = result.rows[0];
+    let row = result.rows[0];
+    if (!row) {
+      const existing = await this.#pool.query<any>(`SELECT * FROM stash_notifications
+        WHERE member_id=$1 AND activity_id=$2 AND trigger=$3`, [delivery.memberId, delivery.activity.id, delivery.trigger]);
+      row = existing.rows[0];
+    }
     if (!row) throw new Error("notification_recipient_forbidden");
     return this.#notificationFromRow(row);
   }

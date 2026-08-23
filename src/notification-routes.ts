@@ -6,17 +6,12 @@ export function notificationRoutes(service: NotificationService, memberAccess: M
   return {
     matches: (request, url) => request.method === "GET" && (url.pathname === "/api/notifications" || url.pathname === "/api/notifications/digest")
       || request.method === "POST" && /^\/api\/notifications\/[^/]+\/read$/.test(url.pathname)
-      || request.method === "POST" && /^\/api\/projects\/[^/]+\/notification-events$/.test(url.pathname)
       || ["GET", "PUT"].includes(request.method ?? "") && /^\/api\/projects\/[^/]+\/notification-settings$/.test(url.pathname),
     async handle(request, response, url) {
       const access = await memberAccess.authenticateBearer(request.headers.authorization);
       if (!access) { json(response, 401, { error: "unauthorized", message: "A valid Member session is required." }); return true; }
       try {
         const parts = url.pathname.split("/");
-        if (request.method === "POST" && url.pathname.endsWith("/notification-events")) {
-          const result = await service.publish(access.accountId, decodeURIComponent(parts[3]!), await readJson(request));
-          json(response, result.status === "created" ? 201 : 200, result); return true;
-        }
         if (url.pathname === "/api/notifications") {
           const unread = url.searchParams.get("unread");
           if (unread !== null && unread !== "true" && unread !== "false") throw new InvalidNotificationInput();

@@ -40,7 +40,6 @@ export class InvalidNotificationInput extends Error {}
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const clockTime = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 const defaultPreferences: NotificationPreferences = { activity: "followed", digest: "off" };
-const triggers = new Set<NotificationTrigger>(["direct_mention", "assignment", "requested_review", "automation_failure", "followed_change"]);
 
 export function assignmentNotificationInputs(activity: ActivityRecord, projectId: string,
   before: { assigneeIds?: string[] }, after: { assigneeIds?: string[]; key?: string; title?: string }) {
@@ -67,19 +66,7 @@ export function notificationDeliveryMode(now: Date, preferences: NotificationPre
 export class NotificationService {
   constructor(private readonly repository: NotificationRepository, private readonly now = () => new Date()) {}
 
-  async publish(actorId: string, projectId: string, value: unknown) {
-    if (value === null || typeof value !== "object" || Array.isArray(value)) throw new InvalidNotificationInput();
-    const event = value as Record<string, unknown>; const activity = event.activity as ActivityRecord | undefined;
-    if (!uuid.test(projectId) || !uuid.test(String(event.memberId)) || !triggers.has(event.trigger as NotificationTrigger)
-      || typeof event.summary !== "string" || !activity || activity.schema !== "stash.activity.v1"
-      || activity.actor.localAccountId !== actorId || activity.workspaceId.length === 0
-      || typeof event.followed !== "undefined" && typeof event.followed !== "boolean"
-      || !Object.keys(event).every((key) => ["memberId", "trigger", "summary", "activity", "followed"].includes(key)))
-      throw new InvalidNotificationInput();
-    return this.notify({ activity, projectId, memberId: event.memberId as string, trigger: event.trigger as NotificationTrigger,
-      summary: event.summary, ...(typeof event.followed === "boolean" ? { followed: event.followed } : {}) });
-  }
-
+  /** Trusted domain adapters call this only with canonical Activity they just committed. */
   async notify(input: { activity: ActivityRecord; projectId: string; memberId: string; trigger: NotificationTrigger; summary: string; followed?: boolean }) {
     if (!uuid.test(input.projectId) || !uuid.test(input.memberId) || !input.summary.trim() || input.summary.length > 500) throw new InvalidNotificationInput();
     if (input.activity.actor.localAccountId === input.memberId) return { status: "suppressed" as const };
