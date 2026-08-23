@@ -25,6 +25,10 @@ describe("portable rich-text Markdown", () => {
       assert.throws(() => markdownToRichText(markdown), UnsupportedMarkdown);
   });
 
+  it("parses an empty fenced code block without splitting its body", () => {
+    assert.deepEqual(markdownToRichText("```\n\n```"), { type: "doc", blocks: [{ type: "code", text: "" }] });
+  });
+
   it("round-trips portable callouts, attachments, images, and tables", () => {
     const document: RichTextDocument = { type: "doc", blocks: [
       { type: "callout", kind: "note", paragraphs: [{ content: [{ text: "Remember this" }] }] },

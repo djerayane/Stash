@@ -9,12 +9,14 @@ import { EditorContent, useEditor } from "@tiptap/react";
 import { Plugin } from "@tiptap/pm/state";
 import StarterKit from "@tiptap/starter-kit";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import * as Tabs from "@radix-ui/react-tabs";
 import { Link } from "react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useGSAP } from "@gsap/react";
 import gsap from "gsap";
 import * as Y from "yjs";
-import { toTiptap, type NoteDocument } from "./note-document";
+import { markdownToRichText } from "@stash/rich-text";
+import { markdownFromTiptap, toTiptap, type NoteDocument } from "./note-document";
 import styles from "./note-editor.module.css";
 
 gsap.registerPlugin(useGSAP);
@@ -77,6 +79,19 @@ function removePendingUpdate(key: string): void {
   try { localStorage.removeItem(key); } catch { /* A successful server acknowledgement remains authoritative. */ }
 }
 
+interface MarkdownDraft { base: string; draft: string }
+function readMarkdownDraft(key: string): MarkdownDraft | null {
+  try {
+    const value = JSON.parse(localStorage.getItem(key) ?? "null") as unknown;
+    return value && typeof value === "object" && typeof (value as MarkdownDraft).base === "string" && typeof (value as MarkdownDraft).draft === "string"
+      ? value as MarkdownDraft : null;
+  } catch { return null; }
+}
+
+function storeMarkdownDraft(key: string, value: MarkdownDraft): boolean {
+  try { localStorage.setItem(key, JSON.stringify(value)); return true; } catch { return false; }
+}
+
 export function applyAcknowledgedUpdate(localDocument: Y.Doc, update: Uint8Array): Uint8Array {
   const acknowledgedDocument = new Y.Doc();
   Y.applyUpdate(acknowledgedDocument, update);
@@ -102,6 +117,10 @@ export function NoteEditor(props: NoteEditorProps) {
 function NoteEditorDocument({ noteId, memberId, fetcher = globalThis.fetch, token = localStorage.getItem("stash.memberToken") ?? "" }: NoteEditorProps) {
   const [status, setStatus] = useState("Loading collaborative document");
   const [error, setError] = useState("");
+  const [editorMode, setEditorMode] = useState<"rich" | "markdown">("rich");
+  const [markdownDraft, setMarkdownDraft] = useState("");
+  const [markdownError, setMarkdownError] = useState("");
+  const [markdownDraftStored, setMarkdownDraftStored] = useState(true);
   const [taskTitle, setTaskTitle] = useState(""); const [taskProjectId, setTaskProjectId] = useState(""); const [taskComposerOpen, setTaskComposerOpen] = useState(false);
   const queryClient = useQueryClient();
   const [, refreshToolbar] = useState(0);
@@ -113,8 +132,11 @@ function NoteEditorDocument({ noteId, memberId, fetcher = globalThis.fetch, toke
   const asideRef = useRef<HTMLElement>(null);
   const statusRef = useRef<HTMLParagraphElement>(null);
   const unavailableRef = useRef<HTMLDivElement>(null);
+  const markdownPanelRef = useRef<HTMLDivElement>(null);
+  const markdownBase = useRef("");
   const headers = useMemo(() => ({ authorization: `Bearer ${token}` }), [token]);
   const pendingUpdateKey = `stash.pending-note-update:${memberId}:${noteId}`;
+  const markdownDraftKey = `stash.markdown-draft:${memberId}:${noteId}`;
   const ydoc = useMemo(() => new Y.Doc(), [memberId, noteId]);
   const note = useQuery({ queryKey: ["note", memberId, noteId], queryFn: async () => {
     const response = await fetcher(`/api/notes/${encodeURIComponent(noteId)}`, { headers });
@@ -157,6 +179,11 @@ function NoteEditorDocument({ noteId, memberId, fetcher = globalThis.fetch, toke
     if (!statusRef.current || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
     gsap.fromTo(statusRef.current, { opacity: .35, y: 3 }, { opacity: 1, y: 0, duration: .24, ease: "power1.out" });
   }, { scope: layoutRef, dependencies: [status], revertOnUpdate: true });
+
+  useGSAP(() => {
+    if (editorMode !== "markdown" || !markdownPanelRef.current || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+    gsap.fromTo(markdownPanelRef.current, { opacity: 0, y: 8 }, { opacity: 1, y: 0, duration: .28, ease: "power2.out", clearProps: "all" });
+  }, { scope: layoutRef, dependencies: [editorMode], revertOnUpdate: true });
 
   useEffect(() => {
     if (!editor || !note.data || !collaboration.data) return;
@@ -211,6 +238,65 @@ function NoteEditorDocument({ noteId, memberId, fetcher = globalThis.fetch, toke
     if (isUnavailable) unavailableRef.current?.focus();
   }, [isUnavailable]);
 
+  const markdownDirty = Boolean(canEdit && editorMode === "markdown" && markdownDraft !== markdownBase.current);
+  const visibleStatus = markdownDirty
+    ? markdownDraftStored ? "Markdown draft kept on this device — not applied" : "Markdown draft remains only in this open tab — not applied"
+    : status;
+  useEffect(() => {
+    if (!markdownDirty) return;
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    const guardLink = (event: MouseEvent) => {
+      const link = event.target instanceof Element ? event.target.closest("a[href]") : null;
+      if (link && !window.confirm("Your Markdown draft is not applied. Leave this Note and keep the draft on this device?")) event.preventDefault();
+    };
+    window.addEventListener("beforeunload", warn);
+    document.addEventListener("click", guardLink, true);
+    return () => { window.removeEventListener("beforeunload", warn); document.removeEventListener("click", guardLink, true); };
+  }, [markdownDirty]);
+
+  const changeEditorMode = (nextMode: string) => {
+    if (!editor) return;
+    if (nextMode === "markdown") {
+      const source = markdownFromTiptap(editor.getJSON());
+      const recovered = canEdit ? readMarkdownDraft(markdownDraftKey) : null;
+      if (recovered) {
+        markdownBase.current = recovered.base;
+        setMarkdownDraft(recovered.draft);
+        setMarkdownDraftStored(true);
+        setMarkdownError("");
+        setEditorMode("markdown");
+        return;
+      }
+      markdownBase.current = source;
+      setMarkdownDraft(source);
+      setMarkdownDraftStored(true);
+      setMarkdownError("");
+      setEditorMode("markdown");
+      return;
+    }
+    if (editorMode !== "markdown") return;
+    if (!canEdit || markdownDraft === markdownBase.current) {
+      setMarkdownError("");
+      setEditorMode("rich");
+      return;
+    }
+    const currentSource = markdownFromTiptap(editor.getJSON());
+    if (currentSource !== markdownBase.current) {
+      setMarkdownError("This Note changed while Markdown source was open. Copy your draft, reopen Markdown source, and apply it again.");
+      return;
+    }
+    try {
+      const parsed = markdownToRichText(markdownDraft);
+      editor.commands.setContent(toTiptap(parsed));
+      removePendingUpdate(markdownDraftKey);
+      setMarkdownError("");
+      setEditorMode("rich");
+      setStatus("Saving Markdown changes");
+    } catch {
+      setMarkdownError("This Markdown contains a construct Stash cannot round-trip. Repair the source before returning to rich text.");
+    }
+  };
+
   if (isUnavailable) return <main id="workspace-content" className={styles.errorState}>
     <div ref={unavailableRef} role="alert" tabIndex={-1} className={styles.errorPanel}>
       <h1>The Note editor is unavailable.</h1>
@@ -221,7 +307,12 @@ function NoteEditorDocument({ noteId, memberId, fetcher = globalThis.fetch, toke
   return <main id="workspace-content" ref={layoutRef} className={styles.layout} aria-busy={!editor || !note.data || !collaboration.data}>
     <article className={styles.document}>
       <header className={styles.header}><p className={styles.kicker}>Collaborative Note</p><h1 className={styles.title}>{note.data?.content.split("\n")[0] || "Untitled Note"}</h1></header>
-      <div ref={toolbarRef} className={styles.toolbar} role="toolbar" aria-label="Text formatting">
+      <Tabs.Root className={styles.mode} value={editorMode} activationMode="manual">
+        <Tabs.List className={styles.modeList} aria-label="Note editing mode">
+          <Tabs.Trigger className={styles.modeTrigger} value="rich" onClick={() => changeEditorMode("rich")}>Rich text</Tabs.Trigger>
+          <Tabs.Trigger className={styles.modeTrigger} value="markdown" onClick={() => changeEditorMode("markdown")}>Markdown source</Tabs.Trigger>
+        </Tabs.List>
+      <Tabs.Content value="rich"><div ref={toolbarRef} className={styles.toolbar} role="toolbar" aria-label="Text formatting">
         <button disabled={!canEdit} type="button" aria-label="Bold" aria-pressed={editor?.isActive("bold") ?? false} onClick={() => editor?.chain().focus().toggleBold().run()}>B</button>
         <button disabled={!canEdit} type="button" aria-label="Italic" aria-pressed={editor?.isActive("italic") ?? false} onClick={() => editor?.chain().focus().toggleItalic().run()}>I</button>
         <button disabled={!canEdit} type="button" aria-label="Heading" aria-pressed={editor?.isActive("heading", { level: 2 }) ?? false} onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()}>H2</button>
@@ -238,9 +329,18 @@ function NoteEditorDocument({ noteId, memberId, fetcher = globalThis.fetch, toke
         <button disabled={!canEdit} type="button" aria-label="Undo" onClick={() => editor?.chain().focus().undo().run()}>Undo</button>
         <button disabled={!canEdit} type="button" aria-label="Redo" onClick={() => editor?.chain().focus().redo().run()}>Redo</button>
       </div>
-      <div className={styles.editor}><EditorContent editor={editor} /></div>
+      <div className={styles.editor}><EditorContent editor={editor} /></div></Tabs.Content>
+      <Tabs.Content value="markdown"><div ref={markdownPanelRef} className={styles.markdownPanel}>
+        <label htmlFor={`markdown-source-${noteId}`}>Markdown source</label>
+        <p>Portable Markdown supports headings, lists, checklists, code, quotes, links, tables, callouts, images, and Workspace Attachments.</p>
+        <textarea id={`markdown-source-${noteId}`} aria-label="Markdown source" readOnly={!canEdit} spellCheck={false}
+          value={markdownDraft} onChange={(event) => { const draft = event.target.value; setMarkdownDraft(draft);
+            setMarkdownDraftStored(storeMarkdownDraft(markdownDraftKey, { base: markdownBase.current, draft })); setMarkdownError(""); }} />
+        {markdownError ? <p className={styles.error} role="alert">{markdownError}</p> : null}
+      </div></Tabs.Content>
+      </Tabs.Root>
     </article>
-    <aside ref={asideRef} className={styles.aside} aria-label="Note context"><h2>Collaboration</h2><p ref={statusRef} className={styles.status} role="status">{status}</p>
+    <aside ref={asideRef} className={styles.aside} aria-label="Note context"><h2>Collaboration</h2><p ref={statusRef} className={styles.status} role="status">{visibleStatus}</p>
       {error ? <><p className={styles.error} role="alert">{error}</p><button className={styles.retry} type="button" onClick={() => void synchronize()}>Retry saving</button></> : null}
       <p>Changes merge with contributions from other Members. Offline work remains on this device until the Instance accepts it.</p>
       <h2>Linked Tasks</h2>{linkedTasks.isError ? <p role="alert">{linkedTasks.error.message}</p> : linkedTasks.data?.tasks?.length ? <ul>{linkedTasks.data.tasks.map((task) => <li key={task.id}><Link to={`/app/projects/${task.projectId}/tasks/${task.key}`}>{task.key} · {task.title}</Link><span>{task.status.name} · {task.relationshipState}</span></li>)}</ul> : <p>No Tasks are linked to this Note yet.</p>}

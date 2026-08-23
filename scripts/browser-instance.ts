@@ -19,6 +19,7 @@ const noteId = "99999999-9999-4999-8999-999999999999";
 const secondNoteId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const richNoteId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const emptyCodeNoteId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+const markdownNoteId = "14141414-1414-4414-8414-141414141414";
 const principalBoundaryNoteId = "12121212-1212-4212-8212-121212121212";
 const browserWorkspaceId = "88888888-8888-4888-8888-888888888888";
 let inboxNotes: any[] = [];
@@ -30,6 +31,8 @@ const richSeededDocument = collaborativeDocumentFromRichText({ type: "doc", bloc
   blockKey: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", content: [{ text: "Rich structure seed" }] }] });
 const emptyCodeSeededDocument = collaborativeDocumentFromRichText({ type: "doc", blocks: [{ type: "paragraph",
   blockKey: "ffffffff-ffff-4fff-8fff-ffffffffffff", content: [{ text: "Clear this content" }] }] });
+const markdownSeededDocument = collaborativeDocumentFromRichText({ type: "doc", blocks: [{ type: "paragraph",
+  blockKey: "15151515-1515-4515-8515-151515151515", content: [{ text: "Technical source seed" }] }] });
 const principalBoundaryDocument = collaborativeDocumentFromRichText({ type: "doc", blocks: [{ type: "paragraph",
   blockKey: "13131313-1313-4313-8313-131313131313", content: [{ text: "Principal boundary seed" }] }] });
 const collaborations = new Map<string, CollaborationSnapshot>([
@@ -37,12 +40,14 @@ const collaborations = new Map<string, CollaborationSnapshot>([
   [secondNoteId, { noteId: secondNoteId, sequence: 0, update: Y.encodeStateAsUpdate(secondSeededDocument), updatedAt: new Date(0).toISOString(), updatedByMemberId: "browser-member", access: "edit" }],
   [richNoteId, { noteId: richNoteId, sequence: 0, update: Y.encodeStateAsUpdate(richSeededDocument), updatedAt: new Date(0).toISOString(), updatedByMemberId: "browser-member", access: "edit" }],
   [emptyCodeNoteId, { noteId: emptyCodeNoteId, sequence: 0, update: Y.encodeStateAsUpdate(emptyCodeSeededDocument), updatedAt: new Date(0).toISOString(), updatedByMemberId: "browser-member", access: "edit" }],
+  [markdownNoteId, { noteId: markdownNoteId, sequence: 0, update: Y.encodeStateAsUpdate(markdownSeededDocument), updatedAt: new Date(0).toISOString(), updatedByMemberId: "browser-member", access: "edit" }],
   [principalBoundaryNoteId, { noteId: principalBoundaryNoteId, sequence: 0, update: Y.encodeStateAsUpdate(principalBoundaryDocument), updatedAt: new Date(0).toISOString(), updatedByMemberId: "browser-member", access: "edit" }],
 ]);
 seededDocument.destroy();
 secondSeededDocument.destroy();
 richSeededDocument.destroy();
 emptyCodeSeededDocument.destroy();
+markdownSeededDocument.destroy();
 principalBoundaryDocument.destroy();
 const collaborationRepository = {
   async loadNoteCollaboration(memberId: string, requestedNoteId: string) {

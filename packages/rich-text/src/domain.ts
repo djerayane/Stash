@@ -173,7 +173,16 @@ function parseInline(text: string): RichTextSpan[] {
 
 export function markdownToRichText(markdown: string): RichTextDocument {
   if (!markdown.trim() || /^:::/m.test(markdown)) throw new UnsupportedMarkdown("Unsupported Markdown construct");
-  const chunks = markdown.trim().split(/\n\n+/);
+  const chunks: string[] = [];
+  let current: string[] = []; let fence = "";
+  for (const line of markdown.trim().split("\n")) {
+    const marker = line.match(/^(`{3,})/i)?.[1] ?? "";
+    if (marker && !fence) fence = marker;
+    current.push(line);
+    if (fence && line === fence && current.length > 1) fence = "";
+    else if (!fence && !line.trim()) { current.pop(); if (current.length) chunks.push(current.join("\n")); current = []; }
+  }
+  if (current.length) chunks.push(current.join("\n"));
   const blocks: RichTextBlock[] = [];
   for (let index = 0; index < chunks.length; index += 1) {
     let chunk = chunks[index]!;

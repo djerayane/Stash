@@ -66,6 +66,43 @@ it("loads an authorized collaborative Note and exposes keyboard-operable rich-te
   expect(fetcher).toHaveBeenCalledWith("/api/notes/note", expect.objectContaining({ headers: { authorization: "Bearer member-token" } }));
 });
 
+it("round-trips technical constructs through the optional Markdown source without losing linked identity", async () => {
+  const fetcher = vi.fn<typeof fetch>(async (input) => {
+    const url = String(input);
+    if (url.endsWith("/collaboration")) return new Response(JSON.stringify({ sequence: 0, update: emptyUpdate(), updatedAt: new Date(0).toISOString(), updatedByMemberId: "ada", access: "edit" }));
+    return new Response(JSON.stringify({ id: "note", revision: 1, content: "Technical plan", document: { type: "doc", blocks: [
+      { type: "heading", level: 2, blockKey: "11111111-1111-4111-8111-111111111111", id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", content: [{ text: "Technical plan" }] },
+      { type: "callout", kind: "warning", blockKey: "22222222-2222-4222-8222-222222222222", paragraphs: [{ blockKey: "33333333-3333-4333-8333-333333333333", content: [{ text: "Keep a backup" }] }] },
+      { type: "table", blockKey: "44444444-4444-4444-8444-444444444444", rows: [[{ header: true, content: [{ text: "Owner" }] }], [{ header: false, content: [{ text: "Ada" }] }]] },
+    ] } }));
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}><NoteEditor noteId="note" memberId="member" fetcher={fetcher} token="member-token" /></QueryClientProvider>);
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "Note content" })).toHaveTextContent("Keep a backup"));
+  fireEvent.click(screen.getByRole("tab", { name: "Markdown source" }));
+  const source = screen.getByRole("textbox", { name: "Markdown source" });
+  expect((source as HTMLTextAreaElement).value).toContain("> [!WARNING]");
+  expect((source as HTMLTextAreaElement).value).toContain("| Owner |");
+  fireEvent.change(source, { target: { value: `${String((source as HTMLTextAreaElement).value)}\n\n\`\`\`ts\nconst ready = true\n\`\`\`` } });
+  fireEvent.click(screen.getByRole("tab", { name: "Rich text" }));
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "Note content" }).querySelector("pre")).toHaveTextContent("const ready = true"));
+  expect(document.querySelector("[data-block-id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa']")).toBeInTheDocument();
+});
+
+it("keeps invalid Markdown visible for repair without changing the collaborative document", async () => {
+  const fetcher = vi.fn<typeof fetch>(async (input) => String(input).endsWith("/collaboration")
+    ? new Response(JSON.stringify({ sequence: 0, update: emptyUpdate(), updatedAt: new Date(0).toISOString(), updatedByMemberId: "ada", access: "edit" }))
+    : new Response(JSON.stringify({ id: "note", revision: 1, content: "Safe content", document: { type: "doc", blocks: [{ type: "paragraph", blockKey: "11111111-1111-4111-8111-111111111111", content: [{ text: "Safe content" }] }] } })));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}><NoteEditor noteId="note" memberId="member" fetcher={fetcher} token="member-token" /></QueryClientProvider>);
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "Note content" })).toHaveTextContent("Safe content"));
+  fireEvent.click(screen.getByRole("tab", { name: "Markdown source" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "Markdown source" }), { target: { value: ":::unsupported" } });
+  fireEvent.click(screen.getByRole("tab", { name: "Rich text" }));
+  expect(screen.getByRole("alert")).toHaveTextContent("This Markdown contains a construct Stash cannot round-trip");
+  expect(screen.getByRole("textbox", { name: "Markdown source" })).toHaveValue(":::unsupported");
+});
+
 it("presents an authorized read-only Note without interactive editing or pending writes", async () => {
   storage.set("stash.pending-note-update:guest:note", collaborativeUpdate("Unsent edit", "11111111-1111-4111-8111-111111111111"));
   const fetcher = vi.fn<typeof fetch>(async (input) => {
