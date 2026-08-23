@@ -22,6 +22,20 @@ test("ordinary Members cannot discover or deep-link Organization administration"
   await page.goto("/app/settings/organization"); await expect(page).toHaveURL(/\/app\/settings$/); await expect(page.getByRole("heading", { name: "Make Stash work in your language and time." })).toBeVisible();
 });
 
+test("confirms recovery-code replacement and Role authority changes before mutation", async ({ page }) => {
+  await authenticate(page); let recoveryPosts = 0; let rolePuts = 0;
+  await page.route("**/api/member/localization", (route) => route.fulfill({ json: { locale: "en", timeZone: "UTC", dateFormat: "medium", weekStartsOn: "monday" } }));
+  await page.route("**/api/auth/recovery-codes", (route) => { recoveryPosts += 1; return recoveryPosts === 1 ? route.fulfill({ status: 503, json: { message: "Recovery codes were not changed." } }) : route.fulfill({ json: { codes: ["new-code"] } }); });
+  await page.goto("/app/settings"); await page.getByRole("tab", { name: "Recovery" }).click(); await page.getByRole("button", { name: "Generate recovery codes" }).click();
+  const recovery = page.getByRole("dialog", { name: "Replace every recovery code?" }); await expect(recovery).toBeVisible(); await expect(recovery.getByRole("button", { name: "Keep existing codes" })).toBeFocused(); expect(recoveryPosts).toBe(0); expect((await new AxeBuilder({ page }).include("[role=dialog]").analyze()).violations).toEqual([]);
+  await recovery.getByRole("button", { name: "Invalidate and generate" }).click(); await expect(recovery.getByRole("alert")).toContainText("not changed"); await recovery.getByRole("button", { name: "Invalidate and generate" }).click(); await expect(page.getByText("new-code")).toBeVisible();
+  await page.route("**/api/organizations/*/roles", async (route) => { if (route.request().method() === "PUT") { rolePuts += 1; return rolePuts === 1 ? route.fulfill({ status: 403, json: { message: "The final Owner cannot be changed." } }) : route.fulfill({ json: {} }); } return route.fulfill({ json: { roles: [{ name: "Owner" }, { name: "Admin" }, { name: "Member" }] } }); });
+  await page.route("**/api/organizations/*/members/*/role", (route) => { rolePuts += 1; return rolePuts === 1 ? route.fulfill({ status: 403, json: { message: "The final Owner cannot be changed." } }) : route.fulfill({ json: {} }); });
+  await page.route("**/api/agent-grant-options", (route) => route.fulfill({ json: { organizations: [] } })); await page.route("**/api/organizations/*/repository-connections", (route) => route.fulfill({ json: { repositoryConnections: [] } }));
+  await page.goto("/app/settings/organization"); await page.getByRole("combobox", { name: "Role for Browser Member" }).selectOption("Admin"); const role = page.getByRole("dialog", { name: /Change Browser Member/ }); await expect(role.getByRole("button", { name: "Keep current Role" })).toBeFocused(); expect(rolePuts).toBe(0);
+  await role.getByRole("button", { name: "Confirm Role change" }).click(); await expect(role.getByRole("alert")).toContainText("final Owner"); expect((await new AxeBuilder({ page }).include("[role=dialog]").analyze()).violations).toEqual([]); await role.getByRole("button", { name: "Keep current Role" }).click(); expect(rolePuts).toBe(1);
+});
+
 test("@a11y administrators discover every Organization control surface", async ({ page }) => {
   await authenticate(page);
   await page.route("**/api/organizations/*/roles", (route) => route.fulfill({ json: { roles: [{ name: "Owner" }, { name: "Admin" }, { name: "Member" }] } }));
