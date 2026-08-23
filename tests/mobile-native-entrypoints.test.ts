@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { describe, it } from "node:test";
 
-import { parseIncomingCapture } from "../mobile/src/incoming-capture.js";
+import { parseIncomingCapture } from "../apps/mobile/src/incoming-capture.js";
 
 describe("native mobile capture entry points", () => {
   it("configures OS share targets on iOS and Android", async () => {
-    const app = JSON.parse(await readFile(new URL("../mobile/app.json", import.meta.url), "utf8")) as {
+    const app = JSON.parse(await readFile(new URL("../apps/mobile/app.json", import.meta.url), "utf8")) as {
       expo: { plugins: unknown[] };
     };
     const sharing = app.expo.plugins.find((plugin): plugin is [string, any] => Array.isArray(plugin) && plugin[0] === "expo-sharing");
@@ -16,8 +16,8 @@ describe("native mobile capture entry points", () => {
   });
 
   it("ships iOS and Android widget providers that invoke the validated capture boundary", async () => {
-    const swift = await readFile(new URL("../mobile/targets/capture-widget/StashCaptureWidget.swift", import.meta.url), "utf8");
-    const plugin = await readFile(new URL("../mobile/plugins/with-android-capture-widget.js", import.meta.url), "utf8");
+    const swift = await readFile(new URL("../apps/mobile/targets/capture-widget/StashCaptureWidget.swift", import.meta.url), "utf8");
+    const plugin = await readFile(new URL("../apps/mobile/plugins/with-android-capture-widget.js", import.meta.url), "utf8");
     assert.match(swift, /AppIntentConfiguration/);
     assert.match(swift, /URLQueryItem\(name: "source", value: "widget"\)/);
     assert.match(plugin, /AppWidgetProvider/);
