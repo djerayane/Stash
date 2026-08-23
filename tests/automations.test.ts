@@ -3,13 +3,18 @@ import { afterEach, describe, it } from "node:test";
 
 import { AutomationService, type AutomationRepository, type AutomationState } from "../src/automations.js";
 import { startInstance, type RunningInstance } from "../src/instance.js";
+import { NotificationService, type NotificationDelivery, type NotificationPreferences, type NotificationRepository } from "../src/notifications.js";
+import type { ActivityRecord } from "../src/activity.js";
 
 const projectId = "11111111-1111-4111-8111-111111111111";
 const taskKey = "STASH-37";
 const startedId = "22222222-2222-4222-8222-222222222222";
+const memberId = "77777777-7777-4777-8777-777777777777";
+const workspaceId = "88888888-8888-4888-8888-888888888888";
 
-class AutomationFake implements AutomationRepository {
+class AutomationFake implements AutomationRepository, NotificationRepository {
   state: AutomationState = { recipes: [], transitions: [], availableStatuses: [{ id: startedId, name: "In progress" }] };
+  deliveries: NotificationDelivery[] = [];
   writable = true;
   async listAutomationState(memberId: string, requestedProjectId: string, requestedTaskKey: string) {
     return memberId === "member" && requestedProjectId === projectId && requestedTaskKey === taskKey ? structuredClone(this.state) : undefined;
@@ -29,12 +34,34 @@ class AutomationFake implements AutomationRepository {
     return { status: "reversed" as const, transition };
   }
   async applySignalAutomations(signal: { id: string; trigger?: "branch_created" | "pull_request_completed" }, candidates: ReadonlyArray<{ taskId: string; projectId: string; status: "confirmed" | "pending_confirmation" }>) {
+    if (signal.id === "99999999-9999-4999-8999-999999999999") throw new Error("target update failed");
     const recipe = this.state.recipes.find((entry) => entry.trigger === signal.trigger);
     if (!recipe || !candidates.some((candidate) => candidate.projectId === projectId && candidate.status === "confirmed")
       || this.state.transitions.some((transition) => transition.signalId === signal.id)) return;
     this.state.transitions.push({ id: "44444444-4444-4444-8444-444444444444", automationId: recipe.id, signalId: signal.id,
       before: { id: "66666666-6666-4666-8666-666666666666", name: "Ready" }, after: recipe.targetStatus, occurredAt: "2026-08-23T09:00:00.000Z" });
   }
+  async recordSignalAutomationFailures(signal: { id: string; trigger: "branch_created" | "pull_request_completed" }, candidates: ReadonlyArray<{ taskId: string; projectId: string; status: "confirmed" | "pending_confirmation" }>) {
+    if (!candidates.some(({ projectId: candidateProjectId, status }) => candidateProjectId === projectId && status === "confirmed")) return [];
+    const activity: ActivityRecord = { schema: "stash.activity.v1", id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", workspaceId,
+      object: { kind: "Task", id: "task-37" }, action: "automation_execution_failed",
+      actor: { localAccountId: memberId, displayName: "Automation Owner" },
+      cause: { kind: "automation", automationId: "33333333-3333-4333-8333-333333333333", signalId: signal.id },
+      occurredAt: "2026-08-23T09:30:00.000Z", before: { status: "running" }, after: { status: "failed" } };
+    return [{ activity, projectId, memberId, summary: "Automation failed for STASH-37: Automate status" }];
+  }
+  async saveNotification(delivery: NotificationDelivery) {
+    const existing = this.deliveries.find((entry) => entry.memberId === delivery.memberId && entry.activity.id === delivery.activity.id && entry.trigger === delivery.trigger);
+    if (existing) return structuredClone(existing);
+    this.deliveries.push(structuredClone(delivery)); return delivery;
+  }
+  async listNotifications(requestedMemberId: string) { return this.deliveries.filter(({ memberId: recipient }) => recipient === requestedMemberId); }
+  async markNotificationRead() { return undefined; }
+  async getNotificationPreferences(requestedMemberId: string, requestedProjectId: string): Promise<NotificationPreferences | undefined> {
+    return requestedMemberId === memberId && requestedProjectId === projectId ? { activity: "followed", digest: "off" } : undefined;
+  }
+  async saveNotificationPreferences() { return undefined; }
+  async claimDigestNotifications() { return []; }
 }
 
 describe("visible Task status Automations", () => {
@@ -90,5 +117,30 @@ describe("visible Task status Automations", () => {
     assert.equal((await fetch(`${baseUrl}/api/projects/${projectId}/automations`, { method: "POST", headers: { authorization: "Bearer member", "content-type": "application/json" }, body: "{}" })).status, 422);
     repository.writable = false;
     assert.equal((await fetch(`${baseUrl}/api/projects/${projectId}/automations`, { method: "POST", headers: { authorization: "Bearer member", "content-type": "application/json" }, body: JSON.stringify({ trigger: "branch_created", targetStatusId: startedId }) })).status, 403);
+  });
+
+  it("notifies the server-derived Automation owner once when canonical execution fails", async () => {
+    const repository = new AutomationFake();
+    const service = new AutomationService(repository, new NotificationService(repository, () => new Date("2026-08-23T09:30:00.000Z")));
+    instance = await startInstance({ database: { async verifyConnection() {}, async close() {} }, host: "127.0.0.1", port: 0,
+      instanceAdminToken: "admin", memberAccess: { async authenticateBearer(value) { return value === "Bearer owner" ? { accountId: memberId, sessionId: "session" } : undefined; } },
+      automations: service, notifications: new NotificationService(repository) });
+    const signal = { id: "99999999-9999-4999-8999-999999999999", trigger: "branch_created" as const };
+    const candidates = [{ taskId: "task-37", projectId, status: "confirmed" as const },
+      { taskId: "private-task", projectId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", status: "pending_confirmation" as const }];
+    await assert.rejects(() => service.applySignal(signal, candidates), /target update failed/);
+    await assert.rejects(() => service.applySignal(signal, candidates), /target update failed/);
+    const response = await fetch(`${instance.url}/api/notifications`, { headers: { authorization: "Bearer owner" } });
+    assert.equal(response.status, 200);
+    const body = await response.json() as { notifications: NotificationDelivery[] };
+    assert.equal(body.notifications.length, 1, "a retried failed Signal must preserve one failure delivery");
+    assert.deepEqual(body.notifications[0], { schema: "stash.notification.v1", id: body.notifications[0]!.id, memberId, workspaceId, projectId,
+      trigger: "automation_failure", summary: "Automation failed for STASH-37: Automate status",
+      activity: { schema: "stash.activity.v1", id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", workspaceId,
+        object: { kind: "Task", id: "task-37" }, action: "automation_execution_failed",
+        actor: { localAccountId: memberId, displayName: "Automation Owner" },
+        cause: { kind: "automation", automationId: "33333333-3333-4333-8333-333333333333", signalId: signal.id },
+        occurredAt: "2026-08-23T09:30:00.000Z", before: { status: "running" }, after: { status: "failed" } },
+      createdAt: "2026-08-23T09:30:00.000Z", delivery: "immediate" });
   });
 });

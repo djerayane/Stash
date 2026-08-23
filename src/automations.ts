@@ -1,4 +1,6 @@
 import type { AutomationRecipe, AutomationState, AutomationTransition, AutomationTrigger } from "@stash/domain-types";
+import type { ActivityRecord } from "./activity.js";
+import type { NotificationService } from "./notifications.js";
 
 export type { AutomationRecipe, AutomationState, AutomationTransition, AutomationTrigger } from "@stash/domain-types";
 
@@ -11,6 +13,15 @@ export interface AutomationRepository {
     { status: "reversed"; transition: AutomationTransition } | "forbidden" | "not_found" | "conflict"
   >;
   applySignalAutomations?(signal: { id: string; trigger?: AutomationTrigger }, candidates: ReadonlyArray<{ taskId: string; projectId: string; status: "confirmed" | "pending_confirmation" }>): Promise<void>;
+  recordSignalAutomationFailures?(signal: { id: string; trigger: AutomationTrigger }, candidates: ReadonlyArray<AutomationCandidate>): Promise<AutomationFailureNotification[]>;
+}
+
+export interface AutomationCandidate { taskId: string; projectId: string; status: "confirmed" | "pending_confirmation" }
+export interface AutomationFailureNotification {
+  activity: ActivityRecord;
+  projectId: string;
+  memberId: string;
+  summary: string;
 }
 
 export class InvalidAutomationInput extends Error {}
@@ -22,7 +33,7 @@ const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const key = /^[A-Z][A-Z0-9]{0,15}-[1-9][0-9]*$/i;
 
 export class AutomationService {
-  constructor(private readonly repository: AutomationRepository) {}
+  constructor(private readonly repository: AutomationRepository, private readonly notifications?: NotificationService) {}
 
   async list(memberId: string, projectId: string, taskKey: string) {
     validateProjectAndKey(projectId, taskKey);
@@ -52,8 +63,17 @@ export class AutomationService {
     return result.transition;
   }
 
-  async applySignal(signal: { id: string; trigger?: AutomationTrigger }, candidates: ReadonlyArray<{ taskId: string; projectId: string; status: "confirmed" | "pending_confirmation" }>) {
-    if (signal.trigger) await this.repository.applySignalAutomations?.(signal, candidates);
+  async applySignal(signal: { id: string; trigger?: AutomationTrigger }, candidates: ReadonlyArray<AutomationCandidate>) {
+    if (!signal.trigger) return;
+    try {
+      await this.repository.applySignalAutomations?.(signal, candidates);
+    } catch (error) {
+      const failures = await this.repository.recordSignalAutomationFailures?.({ id: signal.id, trigger: signal.trigger }, candidates) ?? [];
+      for (const failure of failures) {
+        await this.notifications?.notify({ ...failure, trigger: "automation_failure" });
+      }
+      throw error;
+    }
   }
 }
 
