@@ -45,7 +45,7 @@ export interface ActivityRecord {
   readonly schema: "stash.activity.v1";
   readonly id: string;
   readonly workspaceId: string;
-  readonly object: { readonly kind: "Note" | "Task" | "Discussion" | "NoteLocation" | "NoteLink"; readonly id: string };
+  readonly object: { readonly kind: "Note" | "Task" | "Discussion" | "NoteLocation" | "NoteLink" | "Proposal"; readonly id: string };
   readonly action: string;
   readonly actor: PortableIdentity;
   readonly cause: ActivityCause;

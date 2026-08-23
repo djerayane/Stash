@@ -7,6 +7,7 @@ import {
   directMentionMemberIds,
   directMentionNotificationInputs,
   NotificationService,
+  requestedReviewNotificationInput,
   type NotificationDelivery,
   type NotificationPreferences,
   type NotificationRepository,
@@ -190,6 +191,27 @@ describe("Member notifications", () => {
     const quietService = new NotificationService(database, () => new Date("2026-08-23T22:30:00.000Z"));
     const deferred = await quietService.notify({ activity: { ...activity, id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" }, projectId, memberId, trigger: "assignment", summary: "quiet assignment" });
     assert.equal(deferred.status === "created" && deferred.notification.delivery, "quiet_hours");
+  });
+
+  it("delivers an agent-requested review to its sponsor exactly once, including workspace-wide Proposals", async () => {
+    const before = database.deliveries.length;
+    const proposalActivity: ActivityRecord = {
+      ...activity, id: "abababab-abab-4bab-8bab-abababababab",
+      object: { kind: "Proposal", id: "abababab-abab-4bab-8bab-abababababab" },
+      action: "proposal_review_requested",
+      actor: { localAccountId: memberId, displayName: "Ada Lovelace" },
+      cause: { kind: "agent", agentGrantId: "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd", sponsoringMemberId: memberId, agentName: "Planning assistant" },
+      before: {}, after: { capability: "note.write", status: "pending" },
+    };
+    const input = requestedReviewNotificationInput(proposalActivity, memberId, undefined, "Planning assistant", "note.write");
+    assert.equal((await service.notify(input)).status, "created");
+    assert.equal((await service.notify(input)).status, "created");
+    assert.equal(database.deliveries.length, before + 1);
+    const delivered = database.deliveries.at(-1);
+    assert.deepEqual(delivered?.activity.cause, proposalActivity.cause);
+    assert.equal(delivered?.projectId, undefined);
+    assert.match(delivered?.summary ?? "", /Planning assistant.*note\.write/);
+    database.deliveries.splice(before);
   });
 
   it("exposes a permission-filtered inbox, digest, and read state through both API prefixes", async () => {

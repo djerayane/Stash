@@ -52,8 +52,10 @@ export class AgentGrantService {
   proposals(actorId: string, organizationId: string) { if (!isUuid(organizationId)) throw new InvalidAgentGrantInput(); return this.repository.listAgentProposals(actorId, organizationId); }
 
   async propose(grant: AgentGrant, capability: AgentGrantCapability, input: unknown, baseRevision?: number): Promise<AgentProposal> {
+    const requestedProjectId = input && typeof input === "object" && !Array.isArray(input) && typeof (input as { projectId?: unknown }).projectId === "string"
+      ? (input as { projectId: string }).projectId : undefined;
     const proposal: AgentProposal = { id: randomUUID(), grantId: grant.id, organizationId: grant.organizationId,
-      sponsoringMemberId: grant.sponsoringMemberId, agentName: grant.name, ...(grant.projectId ? { projectId: grant.projectId } : {}),
+      sponsoringMemberId: grant.sponsoringMemberId, agentName: grant.name, ...(requestedProjectId ?? grant.projectId ? { projectId: requestedProjectId ?? grant.projectId } : {}),
       capability, input, ...(baseRevision ? { baseRevision } : {}), createdAt: this.now().toISOString(), status: "pending" };
     await this.repository.createAgentProposal(proposal); return proposal;
   }

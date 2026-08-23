@@ -53,6 +53,12 @@ export function directMentionNotificationInputs(activity: ActivityRecord, projec
       summary: `${activity.actor.displayName} mentioned you in a Discussion`, activity }));
 }
 
+export function requestedReviewNotificationInput(activity: ActivityRecord, memberId: string, projectId: string | undefined,
+  agentName: string, capability: string) {
+  return { memberId, ...(projectId ? { projectId } : {}), trigger: "requested_review" as const,
+    summary: `${agentName} requested review for ${capability}`, activity };
+}
+
 function isTimeZone(value: string): boolean {
   try { new Intl.DateTimeFormat("en", { timeZone: value }).format(); return true; } catch { return false; }
 }
@@ -71,16 +77,20 @@ export class NotificationService {
   constructor(private readonly repository: NotificationRepository, private readonly now = () => new Date()) {}
 
   /** Trusted domain adapters call this only with canonical Activity they just committed. */
-  async notify(input: { activity: ActivityRecord; projectId: string; memberId: string; trigger: NotificationTrigger; summary: string; followed?: boolean }) {
-    if (!uuid.test(input.projectId) || !uuid.test(input.memberId) || !input.summary.trim() || input.summary.length > 500) throw new InvalidNotificationInput();
-    if (input.activity.actor.localAccountId === input.memberId && input.trigger !== "automation_failure") return { status: "suppressed" as const };
-    const preferences = await this.repository.getNotificationPreferences(input.memberId, input.projectId) ?? defaultPreferences;
+  async notify(input: { activity: ActivityRecord; projectId?: string; memberId: string; trigger: NotificationTrigger; summary: string; followed?: boolean }) {
+    if (input.projectId !== undefined && !uuid.test(input.projectId) || !uuid.test(input.memberId)
+      || !input.summary.trim() || input.summary.length > 500) throw new InvalidNotificationInput();
+    if (input.activity.actor.localAccountId === input.memberId && input.trigger !== "automation_failure"
+      && !(input.trigger === "requested_review" && input.activity.cause.kind === "agent")) return { status: "suppressed" as const };
+    const preferences = input.projectId
+      ? await this.repository.getNotificationPreferences(input.memberId, input.projectId) ?? defaultPreferences
+      : defaultPreferences;
     if (input.trigger === "followed_change" && (preferences.activity === "muted"
       || preferences.activity === "followed" && input.followed !== true)) return { status: "suppressed" as const };
     const now = this.now();
     const delivery: NotificationDelivery = {
       schema: "stash.notification.v1", id: randomUUID(), memberId: input.memberId, workspaceId: input.activity.workspaceId,
-      projectId: input.projectId, trigger: input.trigger, summary: input.summary.trim(), activity: structuredClone(input.activity),
+      ...(input.projectId ? { projectId: input.projectId } : {}), trigger: input.trigger, summary: input.summary.trim(), activity: structuredClone(input.activity),
       createdAt: now.toISOString(), delivery: notificationDeliveryMode(now, preferences),
     };
     return { status: "created" as const, notification: await this.repository.saveNotification(delivery) };
