@@ -72,7 +72,11 @@ export function applyAcknowledgedUpdate(localDocument: Y.Doc, update: Uint8Array
   return acknowledgedVector;
 }
 
-export function NoteEditor({ noteId, fetcher = globalThis.fetch, token = localStorage.getItem("stash.memberToken") ?? "" }: NoteEditorProps) {
+export function NoteEditor(props: NoteEditorProps) {
+  return <NoteEditorDocument key={props.noteId} {...props} />;
+}
+
+function NoteEditorDocument({ noteId, fetcher = globalThis.fetch, token = localStorage.getItem("stash.memberToken") ?? "" }: NoteEditorProps) {
   const [status, setStatus] = useState("Loading collaborative document");
   const [error, setError] = useState("");
   const [, refreshToolbar] = useState(0);

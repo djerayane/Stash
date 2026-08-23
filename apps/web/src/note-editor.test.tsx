@@ -1,10 +1,22 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
+import { Schema } from "@tiptap/pm/model";
+import { prosemirrorJSONToYDoc } from "y-prosemirror";
 import * as Y from "yjs";
 import { applyAcknowledgedUpdate, encodeUpdateBase64, NoteEditor } from "./note-editor";
 
 const emptyUpdate = () => btoa(String.fromCharCode(...Y.encodeStateAsUpdate(new Y.Doc())));
+const collaborationSchema = new Schema({ nodes: {
+  doc: { content: "block+" }, text: { group: "inline" },
+  paragraph: { group: "block", content: "inline*", attrs: { blockKey: { default: null }, blockId: { default: null } } },
+} });
+const collaborativeUpdate = (text: string, blockKey: string) => {
+  const document = prosemirrorJSONToYDoc(collaborationSchema, { type: "doc", content: [
+    { type: "paragraph", attrs: { blockKey, blockId: null }, content: [{ type: "text", text }] },
+  ] }, "default");
+  return btoa(String.fromCharCode(...Y.encodeStateAsUpdate(document)));
+};
 const storage = new Map<string, string>();
 beforeEach(() => {
   storage.clear();
@@ -52,6 +64,28 @@ it("loads an authorized collaborative Note and exposes keyboard-operable rich-te
   expect(document.querySelector("table[data-block-id='linked-table']")).toHaveAttribute("data-block-key", "table-key");
   fireEvent.click(screen.getByRole("button", { name: "Bold" }));
   expect(fetcher).toHaveBeenCalledWith("/api/notes/note", expect.objectContaining({ headers: { authorization: "Bearer member-token" } }));
+});
+
+it("loads the authoritative collaboration snapshot when navigating directly between Notes", async () => {
+  const updates = {
+    first: collaborativeUpdate("Authoritative first", "11111111-1111-4111-8111-111111111111"),
+    second: collaborativeUpdate("Authoritative second", "22222222-2222-4222-8222-222222222222"),
+  };
+  const fetcher = vi.fn<typeof fetch>(async (input) => {
+    const url = String(input); const noteId = url.includes("/second") ? "second" : "first";
+    if (url.endsWith("/collaboration")) return new Response(JSON.stringify({ sequence: 1, update: updates[noteId],
+      updatedAt: new Date(0).toISOString(), updatedByMemberId: "ada" }));
+    return new Response(JSON.stringify({ id: noteId, revision: 1, content: `Canonical ${noteId}`, document: { type: "doc", blocks: [
+      { type: "paragraph", blockKey: noteId === "first" ? "11111111-1111-4111-8111-111111111111" : "22222222-2222-4222-8222-222222222222",
+        content: [{ text: `Canonical ${noteId}` }] },
+    ] } }));
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(<QueryClientProvider client={client}><NoteEditor noteId="first" fetcher={fetcher} token="token" /></QueryClientProvider>);
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "Note content" })).toHaveTextContent("Authoritative first"));
+  view.rerender(<QueryClientProvider client={client}><NoteEditor noteId="second" fetcher={fetcher} token="token" /></QueryClientProvider>);
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "Note content" })).toHaveTextContent("Authoritative second"));
+  expect(screen.getByRole("textbox", { name: "Note content" })).not.toHaveTextContent("Canonical second");
 });
 
 it("replays a restored offline update as soon as collaboration reconnects", async () => {

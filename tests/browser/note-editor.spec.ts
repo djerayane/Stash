@@ -2,6 +2,7 @@ import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
 
 const noteId = "99999999-9999-4999-8999-999999999999";
+const secondNoteId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const memberSession = JSON.stringify({ token: "browser-acceptance-member-token" });
 
 test.beforeEach(async ({ page }) => {
@@ -16,6 +17,19 @@ test("edits a stable linked Block with the collaborative React editor", async ({
   await editor.locator("p").click(); await page.keyboard.press("End"); await page.keyboard.type(" after review");
   await expect(page.getByRole("status")).toHaveText("All changes saved");
   await expect(editor.locator("[data-block-id='66666666-6666-4666-8666-666666666666']")).toContainText("after review");
+});
+
+test("direct Note navigation replaces the Yjs document with the destination's authoritative snapshot", async ({ page }) => {
+  await page.goto(`/app/notes/${noteId}`);
+  await expect(page.getByRole("textbox", { name: "Note content" })).toContainText("Preserve this linked Block");
+  await page.evaluate((destination) => {
+    history.pushState(null, "", destination);
+    dispatchEvent(new PopStateEvent("popstate"));
+  }, `/app/notes/${secondNoteId}`);
+  const editor = page.getByRole("textbox", { name: "Note content" });
+  await expect(editor).toHaveText("Authoritative second Note");
+  await expect(editor).not.toContainText("Stale canonical second Note");
+  await expect(editor).not.toContainText("Preserve this linked Block");
 });
 
 test("offers link, callout, and Workspace Attachment authoring controls", async ({ page }) => {
