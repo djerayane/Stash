@@ -128,7 +128,7 @@ test("a replacement Member cannot see or submit a revoked Member's offline contr
   const firstEditor = page.getByRole("textbox", { name: "Note content" });
   await firstEditor.click(); await page.keyboard.press("End"); await page.keyboard.type(" revoked offline contribution");
   await expect(page.getByRole("status")).toHaveText("Changes kept on this device");
-  const firstPendingKey = `stash.pending-note-update:browser-member:${principalBoundaryNoteId}`;
+  const firstPendingKey = `stash.pending-note-update:11111111-1111-4111-8111-111111111111:${principalBoundaryNoteId}`;
   await expect.poll(() => page.evaluate((key) => localStorage.getItem(key), firstPendingKey)).not.toBeNull();
 
   await page.evaluate(() => localStorage.setItem("stash.member-session", JSON.stringify({ token: "browser-acceptance-second-member-token" })));
