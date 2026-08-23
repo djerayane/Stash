@@ -4,6 +4,18 @@ Stash is a self-hosted application that connects early project thinking with the
 
 Member-facing integrations use the versioned, permission-aware [public domain API](docs/public-domain-api.md).
 
+## Client architecture
+
+The product clients use the architecture fixed by [ADR-0040](docs/adr/0040-standardize-the-web-and-mobile-client-stack.md):
+
+- `apps/web`: React 19, TypeScript, Vite, React Router, TanStack Query, Radix primitives, CSS Modules, and shared CSS design tokens.
+- Rich text: Tiptap/ProseMirror with Yjs and a self-hosted collaboration service.
+- `apps/mobile`: Expo and React Native, sharing domain types, API clients, validation, and synchronization logic rather than most UI components.
+- Repository: pnpm workspaces with focused shared packages.
+- Client testing: Vitest, Testing Library, Playwright, and axe accessibility checks.
+
+The existing operator page and any hand-built HTML or imperative DOM feature surfaces are transitional. A Member-facing ticket is not frontend-complete until its behavior exists in the appropriate React or Expo client and passes client acceptance tests.
+
 ## Run an Instance
 
 Docker Compose starts the supported baseline: one Stash application container and PostgreSQL.
