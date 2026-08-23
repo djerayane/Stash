@@ -69,6 +69,13 @@ matching account or Organization is available, importers preserve `displayName` 
 attribution remain intelligible without impersonating a local Member. Account identities degrade
 to Identity Stubs rather than being matched by name automatically.
 
+An authenticated Workspace owner, or an Organization Owner/Admin for an Organization-owned
+Workspace, can review unresolved stubs through `GET /api/imported-identities`. Mapping is always an
+explicit decision submitted to `POST /api/imported-identity-mappings` with an idempotency key and a
+stable local Member account ID. The Member boundary exposes neither the Instance Administrator
+credential nor unrelated imports, and a mapping updates local resolution without erasing the
+portable source identity or its import report.
+
 ## `stash.workflow.v1`
 
 A Project Workflow is projected as one ordered list of statuses. Each status has a stable `id`, a

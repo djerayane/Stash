@@ -103,6 +103,7 @@ async function main(): Promise<void> {
     attachments: new AttachmentService(database, attachmentStorage),
     portableWorkspaceExports: new PortableWorkspaceExportService(database, attachmentStorage),
     portableWorkspaceImports: new PortableWorkspaceImportService(database, attachmentStorage),
+    importedIdentityAdministration: database,
     mobileCaptures: new MobileCaptureService(database),
     discussions: new DiscussionService(database),
     activities: new ActivityService(database),
