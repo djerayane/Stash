@@ -51,6 +51,7 @@ import { activityRoutes } from "./activity-routes.js";
 import type { ActivityService } from "./activity.js";
 import { githubArtifactRoutes } from "./github-artifact-routes.js";
 import type { GitHubArtifactService } from "./github-artifacts.js";
+import { publicDomainApiRoute } from "./public-domain-api.js";
 
 export interface DatabaseProbe {
   verifyConnection(): Promise<void>;
@@ -136,14 +137,29 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
   });
   diagnostics.record({ kind: "instance_started", occurredAt: new Date().toISOString() });
   const acceleration = options.acceleration ?? createOptionalRedisAcceleration();
-  const routes = [
+  const memberAccess = options.memberAccess ?? options.passwordAuth;
+  const publicDomainRoutes = memberAccess ? [
+    ...(options.memberLocalization ? [memberLocalizationRoutes(options.memberLocalization, memberAccess)] : []),
+    ...(options.workspaceProjects ? [workspaceProjectRoutes(options.workspaceProjects, memberAccess)] : []),
+    ...(options.organizationRoles ? [organizationRoleRoutes(options.organizationRoles, memberAccess)] : []),
+    ...(options.invitations ? [invitationRoutes(options.invitations, memberAccess)] : []),
+    ...(options.notes ? [noteRoutes(options.notes, memberAccess)] : []),
+    ...(options.noteLinks ? [noteLinkRoutes(options.noteLinks, memberAccess)] : []),
+    ...(options.tasks ? [taskRoutes(options.tasks, memberAccess)] : []),
+    ...(options.projectWorkflows ? [projectWorkflowRoutes(options.projectWorkflows, memberAccess)] : []),
+    ...(options.boards ? [boardRoutes(options.boards, memberAccess)] : []),
+    ...(options.attachments ? [attachmentRoutes(options.attachments, memberAccess)] : []),
+    ...(options.discussions ? [discussionRoutes(options.discussions, memberAccess)] : []),
+    ...(options.portableWorkspaceExports ? [portableWorkspaceExportRoute(options.portableWorkspaceExports, memberAccess)] : []),
+    ...(options.activities ? [activityRoutes(options.activities, memberAccess)] : []),
+    ...(options.repositoryConnections ? [repositoryConnectionRoutes(options.repositoryConnections, memberAccess)] : []),
+    ...(options.githubArtifacts ? [githubArtifactRoutes(options.githubArtifacts, memberAccess)] : []),
+  ] : [];
+  const applicationRoutes = [
     boardSurfaceRoute(),
     noteEditorAssetRoute(),
     noteEditorRoute(),
     noteLibraryRoute(),
-    ...(options.memberLocalization && (options.memberAccess ?? options.passwordAuth)
-      ? [memberLocalizationRoutes(options.memberLocalization, (options.memberAccess ?? options.passwordAuth)!)]
-      : []),
     ...(options.oidcManagement && options.passwordAuth ? [oidcManagementRoute(options.oidcManagement, options.passwordAuth)] : []),
     ...(options.oidcAuth && oidcCallbackOrigin ? [oidcAuthRoute(options.oidcAuth, oidcCallbackOrigin)] : []),
     ...(options.accountRecovery && options.passwordAuth ? [accountRecoveryRoute(options.accountRecovery, {
@@ -157,51 +173,12 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
       options.instanceAdminToken,
       ownerBootstrapRoute(options.ownerBootstrap),
     ),
-    ...(options.workspaceProjects && (options.memberAccess ?? options.passwordAuth)
-      ? [workspaceProjectRoutes(
-        options.workspaceProjects,
-        (options.memberAccess ?? options.passwordAuth)!,
-      )]
-      : []),
-    ...(options.organizationRoles && (options.memberAccess ?? options.passwordAuth)
-      ? [organizationRoleRoutes(
-        options.organizationRoles,
-        (options.memberAccess ?? options.passwordAuth)!,
-      )]
-      : []),
-    ...(options.invitations && (options.memberAccess ?? options.passwordAuth)
-      ? [invitationRoutes(options.invitations, (options.memberAccess ?? options.passwordAuth)!)]
-      : []),
-    ...(options.notes && (options.memberAccess ?? options.passwordAuth)
-      ? [noteRoutes(options.notes, (options.memberAccess ?? options.passwordAuth)!)]
-      : []),
-    ...(options.noteLinks && (options.memberAccess ?? options.passwordAuth)
-      ? [noteLinkRoutes(options.noteLinks, (options.memberAccess ?? options.passwordAuth)!)] : []),
-    ...(options.tasks && (options.memberAccess ?? options.passwordAuth)
-      ? [taskRoutes(options.tasks, (options.memberAccess ?? options.passwordAuth)!)]
-      : []),
-    ...(options.projectWorkflows && (options.memberAccess ?? options.passwordAuth)
-      ? [projectWorkflowRoutes(options.projectWorkflows, (options.memberAccess ?? options.passwordAuth)!)]
-      : []),
-    ...(options.boards && (options.memberAccess ?? options.passwordAuth)
-      ? [boardRoutes(options.boards, (options.memberAccess ?? options.passwordAuth)!)] : []),
-    ...(options.attachments && (options.memberAccess ?? options.passwordAuth)
-      ? [attachmentRoutes(options.attachments, (options.memberAccess ?? options.passwordAuth)!)] : []),
+    ...publicDomainRoutes,
     ...(options.mobileCaptures && (options.memberAccess ?? options.passwordAuth)
       ? [mobileCaptureRoutes(options.mobileCaptures, (options.memberAccess ?? options.passwordAuth)!)]
       : []),
-    ...(options.discussions && (options.memberAccess ?? options.passwordAuth)
-      ? [discussionRoutes(options.discussions, (options.memberAccess ?? options.passwordAuth)!)] : []),
-    ...(options.portableWorkspaceExports && (options.memberAccess ?? options.passwordAuth)
-      ? [portableWorkspaceExportRoute(options.portableWorkspaceExports, (options.memberAccess ?? options.passwordAuth)!)] : []),
-    ...(options.activities && (options.memberAccess ?? options.passwordAuth)
-      ? [activityRoutes(options.activities, (options.memberAccess ?? options.passwordAuth)!)] : []),
-    ...(options.repositoryConnections && (options.memberAccess ?? options.passwordAuth)
-      ? [repositoryConnectionRoutes(options.repositoryConnections, (options.memberAccess ?? options.passwordAuth)!)]
-      : []),
-    ...(options.githubArtifacts && (options.memberAccess ?? options.passwordAuth)
-      ? [githubArtifactRoutes(options.githubArtifacts, (options.memberAccess ?? options.passwordAuth)!)] : []),
   ];
+  const routes = [publicDomainApiRoute(publicDomainRoutes), ...applicationRoutes];
 
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://stash.invalid");
