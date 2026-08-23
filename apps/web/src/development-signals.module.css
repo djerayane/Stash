@@ -30,7 +30,22 @@
 .actions { display: flex; justify-content: end; gap: var(--stash-space-3); margin-top: var(--stash-space-8); }
 .actions .secondary { color: var(--stash-color-ink); background: transparent; border-color: var(--stash-border-strong); }
 .inlineError { padding: var(--stash-space-3); color: var(--stash-color-error) !important; background: var(--stash-color-error-soft); }
+.artifacts { margin-top: clamp(3rem, 8vw, 7rem); padding: clamp(1.5rem, 4vw, 3rem); background: var(--stash-color-surface); border: 1px solid var(--stash-border-subtle); }
+.sectionHeading { display: grid; grid-template-columns: minmax(0, 1fr) minmax(16rem, 28rem); gap: var(--stash-space-8); align-items: end; padding-bottom: var(--stash-space-8); border-bottom: 1px solid var(--stash-border-subtle); }
+.sectionHeading h2 { margin: 0; font: 500 clamp(1.8rem, 3vw, 3rem)/1.05 var(--stash-font-display); letter-spacing: -.04em; }
+.sectionHeading > p, .artifactEmpty p, .artifactList > p, .artifactForms form > p { color: var(--stash-color-muted); line-height: 1.6; }
+.field { display: grid; gap: .45rem; margin-top: var(--stash-space-6); color: var(--stash-color-muted); font-size: .8rem; font-weight: 700; }
+.field input, .field select { min-height: 2.8rem; padding: .7rem .8rem; color: var(--stash-color-ink); background: var(--stash-color-canvas); border: 1px solid var(--stash-border-strong); border-radius: var(--stash-radius-sm); font: inherit; }
+.artifactForms { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; margin-top: var(--stash-space-6); background: var(--stash-border-subtle); }
+.artifactForms form { padding: var(--stash-space-6); background: var(--stash-color-canvas); }
+.artifactForms h3, .artifactList h3 { margin: 0; font: 600 1.15rem var(--stash-font-display); }
+.artifactForms button, .inlineError button { min-height: 2.6rem; margin-top: var(--stash-space-5); padding: .65rem 1rem; color: var(--stash-color-accent-contrast); background: var(--stash-color-accent); border: 1px solid var(--stash-color-accent); border-radius: var(--stash-radius-sm); font-weight: 700; cursor: pointer; }
+.artifactList { margin-top: var(--stash-space-8); }
+.artifactList ul { display: grid; gap: 1px; margin: var(--stash-space-4) 0 0; padding: 0; list-style: none; background: var(--stash-border-subtle); }
+.artifactList li { display: grid; grid-template-columns: 8rem minmax(0, 1fr); gap: var(--stash-space-4); padding: var(--stash-space-3); background: var(--stash-color-canvas); }
+.artifactList li span { color: var(--stash-color-muted); font-size: .75rem; font-weight: 750; text-transform: uppercase; }
+.artifactEmpty { margin-top: var(--stash-space-6); padding: var(--stash-space-6); background: var(--stash-color-canvas); }
 button:focus-visible, a:focus-visible, .dialog:focus-visible { outline: 3px solid var(--stash-color-focus); outline-offset: 3px; }
 button:disabled { opacity: .6; cursor: wait; }
-@media (max-width: 760px) { .header { align-items: start; flex-direction: column; } .relation { grid-template-columns: 1fr; } .relation button { justify-self: start; } }
+@media (max-width: 760px) { .header { align-items: start; flex-direction: column; } .relation, .sectionHeading, .artifactForms { grid-template-columns: 1fr; } .relation button { justify-self: start; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition-duration: .01ms !important; } }

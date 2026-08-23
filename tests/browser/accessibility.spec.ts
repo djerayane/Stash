@@ -1,6 +1,11 @@
 import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
 
+test.beforeEach(async ({ page }) => {
+  await page.route("**/api/projects/*/repository-connections", (route) => route.fulfill({ json: { repositoryConnections: [] } }));
+  await page.route("**/api/projects/*/tasks/*/development-artifacts", (route) => route.fulfill({ json: { artifacts: [] } }));
+});
+
 test("the primary shell has no automatically detectable accessibility violations @a11y", async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem("stash.member-session", JSON.stringify({
     token: "browser-acceptance-member-token",

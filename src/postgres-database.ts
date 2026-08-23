@@ -2558,6 +2558,19 @@ export class PostgresDatabase implements
     return row ? { installationId: Number(row.installation_id), repositoryId: row.repository_id, repositoryUrl: row.repository_url } : undefined;
   }
 
+  async listConnections(memberId: string, projectId: string) {
+    await this.#ensureRepositoryConnectionSchema();
+    const result = await this.#pool.query<{ id: string; repository_url: string }>(`SELECT connection.id, connection.repository_url
+      FROM stash_repository_connections connection
+      JOIN stash_repository_connection_projects selected ON selected.connection_id = connection.id AND selected.project_id = $1
+      JOIN stash_projects project ON project.id = selected.project_id
+      JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
+      WHERE connection.state = 'active' AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2)
+        OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)))
+      ORDER BY connection.repository_url`, [projectId, memberId]);
+    return result.rows.map((row) => ({ id: row.id, repositoryUrl: row.repository_url }));
+  }
+
   async canLinkArtifact(memberId: string, projectId: string, taskKey: string) {
     const client = await this.#pool.connect();
     try {

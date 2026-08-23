@@ -2,6 +2,7 @@ export type DevelopmentArtifactKind = "branch" | "commit" | "pull_request";
 export interface DevelopmentArtifact { kind: DevelopmentArtifactKind; providerId: string; url: string; label: string }
 export interface GitHubArtifactRepositoryIdentity { installationId: number; repositoryId: string; repositoryUrl: string }
 export interface GitHubArtifactRepository {
+  listConnections?(memberId: string, projectId: string): Promise<Array<{ id: string; repositoryUrl: string }>>;
   resolveTask(memberId: string, projectId: string, taskKey: string): Promise<{ id: string; key: string; title: string } | undefined>;
   resolveConnection(memberId: string, projectId: string, connectionId: string): Promise<GitHubArtifactRepositoryIdentity | undefined>;
   canLinkArtifact(memberId: string, projectId: string, taskKey: string): Promise<boolean>;
@@ -46,6 +47,10 @@ export class GitHubArtifactService {
     const artifacts = await this.repository.listArtifacts(memberId, projectId, taskKey.toUpperCase());
     if (!artifacts) throw new GitHubArtifactNotFound();
     return artifacts;
+  }
+  async listConnections(memberId: string, projectId: string) {
+    if (!uuid.test(projectId)) throw new InvalidGitHubArtifactInput();
+    return this.repository.listConnections?.(memberId, projectId) ?? [];
   }
   private async context(memberId: string, projectId: string, taskKey: string, connectionId: string) {
     validatePath(projectId, taskKey); if (!uuid.test(connectionId)) throw new InvalidGitHubArtifactInput();

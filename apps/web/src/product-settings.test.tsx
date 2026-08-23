@@ -32,9 +32,16 @@ describe("remaining product settings", () => {
 
   it("exposes Organization-only roles, invitations, connections, and OIDC controls", async () => {
     vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true, addEventListener() {}, removeEventListener() {} })));
-    vi.stubGlobal("fetch", vi.fn(async (path: string) => Response.json(path.endsWith("/roles") ? { roles: [{ name: "Owner" }, { name: "Admin" }, { name: "Member" }] } : { repositoryConnections: [] })));
+    const requests: Array<{ path: string; init?: RequestInit }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (path: string, init?: RequestInit) => { requests.push({ path, init });
+      if (path === "/api/workspaces") return Response.json({ workspaces: [{ id: "workspace-1", name: "Engineering", projects: [{ id: "project-1", name: "Launch", key: "LAUNCH" }] }] });
+      if (path.endsWith("/roles")) return Response.json({ roles: [{ name: "Owner" }, { name: "Admin" }, { name: "Member" }] });
+      return Response.json({ repositoryConnections: [{ id: "connection-1", repositoryUrl: "https://github.com/acme/stash", projectIds: [], ownership: "organization", state: "active" }] }); }));
     view(<OrganizationSettingsPage token="admin-token" activeOrganizationId="org-1" administrations={[{ organizationId: "org-1", organizationName: "Acme", members: [{ id: "member-1", name: "Ada", email: "ada@example.com", role: "Owner" }] }]} />);
     expect(await screen.findByRole("heading", { name: "Roles and Members" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "Invite access" })).toBeVisible(); expect(screen.getByRole("heading", { name: "GitHub Repository Connections" })).toBeVisible(); expect(screen.getByRole("heading", { name: "OpenID Connect" })).toBeVisible();
+    fireEvent.change(await screen.findByRole("combobox", { name: "Project for https://github.com/acme/stash" }), { target: { value: "project-1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Attach" }));
+    await waitFor(() => expect(requests.some(({ path, init }) => path.endsWith("/repository-connections/connection-1/projects/project-1") && init?.method === "POST")).toBe(true));
   });
 });

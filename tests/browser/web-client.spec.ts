@@ -1,6 +1,11 @@
 import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 
+test.beforeEach(async ({ page }) => {
+  await page.route("**/api/projects/*/repository-connections", (route) => route.fulfill({ json: { repositoryConnections: [] } }));
+  await page.route("**/api/projects/*/tasks/*/development-artifacts", (route) => route.fulfill({ json: { artifacts: [] } }));
+});
+
 const memberSession = JSON.stringify({
   token: "browser-acceptance-member-token",
   member: { name: "Forged Member", email: "forged@evil.test" },
@@ -350,6 +355,20 @@ test("reviews and confirms an ambiguous GitHub Signal by keyboard without reload
   await page.keyboard.press("Enter");
   await expect(page.getByText("Relationship confirmed")).toBeVisible();
   expect(documentNavigations).toBe(0);
+});
+
+test("creates a Task branch from its named Repository Connection without navigation", async ({ page }) => {
+  await installMemberSession(page);
+  const projectId = "11111111-1111-4111-8111-111111111111"; let body: Record<string, unknown> = {}; let navigations = 0;
+  page.on("framenavigated", (frame) => { if (frame === page.mainFrame()) navigations += 1; });
+  await page.route("**/development-signals", (route) => route.fulfill({ json: { signals: [] } }));
+  await page.route("**/automations", (route) => route.fulfill({ json: { automation: { recipes: [], transitions: [], availableStatuses: [] } } }));
+  await page.route("**/api/projects/*/repository-connections", (route) => route.fulfill({ json: { repositoryConnections: [{ id: "22222222-2222-4222-8222-222222222222", repositoryUrl: "https://github.com/acme/stash" }] } }));
+  await page.route("**/development-artifacts", async (route) => { if (route.request().method() === "POST") { body = route.request().postDataJSON(); await route.fulfill({ status: 201, json: { artifact: { kind: "branch", providerId: "STASH-35-work", url: "https://github.com/acme/stash/tree/STASH-35-work", label: "STASH-35-work" } } }); return; } await route.fulfill({ json: { artifacts: [] } }); });
+  await page.goto(`/app/projects/${projectId}/tasks/STASH-35/development`); navigations = 0;
+  await expect(page.getByRole("combobox", { name: "Repository" })).toHaveValue("22222222-2222-4222-8222-222222222222");
+  await page.getByRole("textbox", { name: "Branch name (optional)" }).fill("STASH-35-work"); await page.getByRole("button", { name: "Create branch" }).click();
+  await expect.poll(() => body).toMatchObject({ action: "create_branch", connectionId: "22222222-2222-4222-8222-222222222222", branchName: "STASH-35-work" }); expect(navigations).toBe(0);
 });
 
 test("focuses a development Signal load failure and retries by keyboard without reloading", async ({ page }) => {
