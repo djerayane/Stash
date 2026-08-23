@@ -32,6 +32,15 @@ export function oidcAuthRoute(service: OidcAuthService, callbackOrigin: string):
             url.searchParams.get("state"),
             request.headers["user-agent"],
           );
+          if (request.headers.accept?.split(",").some((value) => value.trim().startsWith("text/html"))) {
+            const fragment = new URLSearchParams({ token: result.token });
+            response.writeHead(303, {
+              location: `/auth/oidc/callback#${fragment.toString()}`,
+              "cache-control": "no-store",
+              "referrer-policy": "no-referrer",
+            }).end();
+            return true;
+          }
           json(response, 201, result);
           return true;
         }

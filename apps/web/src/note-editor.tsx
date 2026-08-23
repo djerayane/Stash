@@ -1,6 +1,6 @@
 import { Collaboration } from "@tiptap/extension-collaboration";
 import Image from "@tiptap/extension-image";
-import Link from "@tiptap/extension-link";
+import TiptapLink from "@tiptap/extension-link";
 import TaskItem from "@tiptap/extension-task-item";
 import TaskList from "@tiptap/extension-task-list";
 import { TableKit } from "@tiptap/extension-table";
@@ -8,7 +8,8 @@ import { Extension, Node, mergeAttributes } from "@tiptap/core";
 import { EditorContent, useEditor } from "@tiptap/react";
 import { Plugin } from "@tiptap/pm/state";
 import StarterKit from "@tiptap/starter-kit";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useGSAP } from "@gsap/react";
 import gsap from "gsap";
@@ -101,6 +102,8 @@ export function NoteEditor(props: NoteEditorProps) {
 function NoteEditorDocument({ noteId, memberId, fetcher = globalThis.fetch, token = localStorage.getItem("stash.memberToken") ?? "" }: NoteEditorProps) {
   const [status, setStatus] = useState("Loading collaborative document");
   const [error, setError] = useState("");
+  const [taskTitle, setTaskTitle] = useState(""); const [taskProjectId, setTaskProjectId] = useState(""); const [taskComposerOpen, setTaskComposerOpen] = useState(false);
+  const queryClient = useQueryClient();
   const [, refreshToolbar] = useState(0);
   const persistedVector = useRef<Uint8Array>(new Uint8Array());
   const restoredPendingUpdate = useRef(false);
@@ -121,6 +124,8 @@ function NoteEditorDocument({ noteId, memberId, fetcher = globalThis.fetch, toke
     const response = await fetcher(`/api/notes/${encodeURIComponent(noteId)}/collaboration`, { headers });
     if (!response.ok) throw new Error("Collaboration could not be started."); return response.json() as Promise<Snapshot>;
   }});
+  const linkedTasks = useQuery({ queryKey: ["note-linked-tasks", noteId], retry: false, queryFn: async () => { const response = await fetcher(`/api/notes/${encodeURIComponent(noteId)}/linked-tasks`, { headers }); if (!response.ok) throw new Error("Linked Tasks could not be loaded."); return response.json() as Promise<{ tasks: Array<{ id: string; key: string; title: string; projectId: string; status: { name: string }; relationshipState: string }> }>; } });
+  const workspaces = useQuery({ queryKey: ["workspace-discovery"], retry: false, queryFn: async () => { const response = await fetcher("/api/workspaces", { headers }); if (!response.ok) throw new Error("Projects could not be loaded."); return response.json() as Promise<{ workspaces: Array<{ projects: Array<{ id: string; name: string; key: string }> }> }>; } });
 
   if (collaboration.data && persistedVector.current.byteLength === 0) {
     persistedVector.current = applyAcknowledgedUpdate(ydoc, decode(collaboration.data.update));
@@ -133,12 +138,14 @@ function NoteEditorDocument({ noteId, memberId, fetcher = globalThis.fetch, toke
 
   const editor = useEditor({ immediatelyRender: false, onSelectionUpdate: () => refreshToolbar((revision) => revision + 1),
     onTransaction: () => refreshToolbar((revision) => revision + 1), extensions: [
-    StarterKit.configure({ undoRedo: false, link: false }), blockIdentity(ydoc), TaskList, TaskItem.configure({ nested: true }), Image, Link.configure({ openOnClick: false }),
+    StarterKit.configure({ undoRedo: false, link: false }), blockIdentity(ydoc), TaskList, TaskItem.configure({ nested: true }), Image, TiptapLink.configure({ openOnClick: false }),
     TableKit, Callout, WorkspaceAttachment, Collaboration.configure({ document: ydoc }),
   ], content: undefined, editorProps: { attributes: { "aria-label": "Note content", role: "textbox", "aria-multiline": "true" } } }, [ydoc]);
   const canEdit = collaboration.data?.access === "edit";
   const canEditRef = useRef(false);
   canEditRef.current = canEdit;
+  const selectedBlockKey = () => { if (!editor) return ""; for (let depth = editor.state.selection.$from.depth; depth >= 0; depth -= 1) { const value = editor.state.selection.$from.node(depth).attrs.blockKey; if (typeof value === "string" && value) return value; } return ""; };
+  const createTask = useMutation({ mutationFn: async () => { const blockKey = selectedBlockKey(); if (!blockKey) throw new Error("Place the cursor in the Block that should source this Task."); const response = await fetcher(`/api/notes/${encodeURIComponent(noteId)}/blocks/${encodeURIComponent(blockKey)}/tasks`, { method: "POST", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify({ projectId: taskProjectId, title: taskTitle }) }); const body = await response.json().catch(() => ({})) as { message?: string }; if (!response.ok) throw new Error(body.message || "The Task could not be created."); return body; }, onSuccess: async () => { setTaskComposerOpen(false); setTaskTitle(""); await queryClient.invalidateQueries({ queryKey: ["note-linked-tasks", noteId] }); } });
 
   useGSAP(() => {
     if (!toolbarRef.current || !asideRef.current || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
@@ -227,14 +234,17 @@ function NoteEditorDocument({ noteId, memberId, fetcher = globalThis.fetch, toke
         <button disabled={!canEdit} type="button" aria-label="Insert link" aria-pressed={editor?.isActive("link") ?? false} onClick={() => { const href = window.prompt("Link URL"); if (href) editor?.chain().focus().extendMarkRange("link").setLink({ href }).run(); }}>Link</button>
         <button disabled={!canEdit} type="button" aria-label="Insert callout" onClick={() => editor?.chain().focus().insertContent({ type: "callout", attrs: { blockKey: crypto.randomUUID(), blockId: null, kind: "note" }, content: [{ type: "paragraph", content: [{ type: "text", text: "Callout" }] }] }).run()}>Callout</button>
         <button disabled={!canEdit} type="button" aria-label="Insert Workspace Attachment" onClick={() => { const href = window.prompt("Workspace Attachment path"); if (!href?.startsWith("./attachments/")) return; const label = window.prompt("Attachment label")?.trim() || "Attachment"; editor?.chain().focus().insertContent({ type: "workspaceAttachment", attrs: { blockKey: crypto.randomUUID(), blockId: null, href, label } }).run(); }}>Attachment</button>
+        <button disabled={!canEdit} type="button" aria-label="Create Task from current Block" onClick={() => setTaskComposerOpen(true)}>Task</button>
         <button disabled={!canEdit} type="button" aria-label="Undo" onClick={() => editor?.chain().focus().undo().run()}>Undo</button>
         <button disabled={!canEdit} type="button" aria-label="Redo" onClick={() => editor?.chain().focus().redo().run()}>Redo</button>
       </div>
       <div className={styles.editor}><EditorContent editor={editor} /></div>
     </article>
-    <aside ref={asideRef} className={styles.aside} aria-label="Collaboration status"><h2>Collaboration</h2><p ref={statusRef} className={styles.status} role="status">{status}</p>
+    <aside ref={asideRef} className={styles.aside} aria-label="Note context"><h2>Collaboration</h2><p ref={statusRef} className={styles.status} role="status">{status}</p>
       {error ? <><p className={styles.error} role="alert">{error}</p><button className={styles.retry} type="button" onClick={() => void synchronize()}>Retry saving</button></> : null}
       <p>Changes merge with contributions from other Members. Offline work remains on this device until the Instance accepts it.</p>
+      <h2>Linked Tasks</h2>{linkedTasks.isError ? <p role="alert">{linkedTasks.error.message}</p> : linkedTasks.data?.tasks?.length ? <ul>{linkedTasks.data.tasks.map((task) => <li key={task.id}><Link to={`/app/projects/${task.projectId}/tasks/${task.key}`}>{task.key} · {task.title}</Link><span>{task.status.name} · {task.relationshipState}</span></li>)}</ul> : <p>No Tasks are linked to this Note yet.</p>}
+      {taskComposerOpen ? <form onSubmit={(event) => { event.preventDefault(); createTask.mutate(); }}><label>Project<select required value={taskProjectId} onChange={(event) => setTaskProjectId(event.target.value)}><option value="">Choose a Project</option>{workspaces.data?.workspaces.flatMap((workspace) => workspace.projects).map((project) => <option key={project.id} value={project.id}>{project.name} · {project.key}</option>)}</select></label><label>Task title<input required value={taskTitle} onChange={(event) => setTaskTitle(event.target.value)} /></label><button disabled={createTask.isPending} type="submit">Create linked Task</button><button type="button" onClick={() => setTaskComposerOpen(false)}>Cancel</button>{createTask.isError ? <p role="alert">{createTask.error.message}</p> : null}</form> : null}
     </aside>
   </main>;
 }

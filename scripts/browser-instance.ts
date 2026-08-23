@@ -7,12 +7,21 @@ import { collaborativeDocumentFromRichText, richTextFromCollaborativeDocument } 
 import { richTextToMarkdown } from "../src/rich-text.js";
 import { TaskService, type TaskPlanningReadModel, type TaskPlanningUpdate } from "../src/tasks.js";
 import { OrganizationRoleService, type BuiltInOrganizationRole } from "../src/organization-roles.js";
+import { WorkspaceSearchService } from "../src/workspace-search.js";
+import { WorkspaceProjectService } from "../src/workspaces-projects.js";
+import { EmailRecoveryUnavailable } from "../src/account-recovery.js";
+import { InvalidOidcRequest } from "../src/oidc-auth.js";
+import { ActivityService, type ActivityRepository, type NoteHistoryRevision } from "../src/activity.js";
+import { NotificationService, type NotificationRepository } from "../src/notifications.js";
+import type { ActivityRecord, NotificationDelivery } from "@stash/domain-types";
 
 const noteId = "99999999-9999-4999-8999-999999999999";
 const secondNoteId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const richNoteId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const emptyCodeNoteId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 const principalBoundaryNoteId = "12121212-1212-4212-8212-121212121212";
+const browserWorkspaceId = "88888888-8888-4888-8888-888888888888";
+let inboxNotes: any[] = [];
 const seededDocument = collaborativeDocumentFromRichText({ type: "doc", blocks: [{ type: "paragraph", blockKey: "77777777-7777-4777-8777-777777777777",
   id: "66666666-6666-4666-8666-666666666666", content: [{ text: "Preserve this linked Block" }] }] });
 const secondSeededDocument = collaborativeDocumentFromRichText({ type: "doc", blocks: [{ type: "paragraph",
@@ -53,6 +62,29 @@ const collaborationRepository = {
 
 const projectId = "22222222-2222-4222-8222-222222222222";
 const browserMemberId = "11111111-1111-4111-8111-111111111111";
+const browserBoardId = "abababab-abab-4bab-8bab-abababababa1";
+let browserBoardStatus = "Ready";
+let browserDiscussions: any[] = [{ id: "abababab-abab-4bab-8bab-abababababa2", workspaceId: browserWorkspaceId, target: { kind: "note", noteId }, createdAt: new Date(0).toISOString(), messages: [{ id: "abababab-abab-4bab-8bab-abababababa3", content: "Keep this release context", author: { localAccountId: browserMemberId, displayName: "Browser Member" }, createdAt: new Date(0).toISOString() }] }, { id: "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdc1", workspaceId: browserWorkspaceId, target: { kind: "note", noteId }, createdAt: new Date(0).toISOString(), messages: [{ id: "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdc2", content: "Unrelated migration thread", author: { localAccountId: browserMemberId, displayName: "Browser Member" }, createdAt: new Date(0).toISOString() }] }];
+const browserBlockDiscussions: any[] = [{ id: "dededede-dede-4ede-8ede-dededededed1", workspaceId: browserWorkspaceId, target: { kind: "block", noteId, blockId: "66666666-6666-4666-8666-666666666666", state: "attached" }, createdAt: new Date(0).toISOString(), messages: [{ id: "dededede-dede-4ede-8ede-dededededed2", content: "Exact Block thread", author: { localAccountId: browserMemberId, displayName: "Browser Member" }, createdAt: new Date(0).toISOString() }] }, { id: "efefefef-efef-4fef-8fef-efefefefefe1", workspaceId: browserWorkspaceId, target: { kind: "block", noteId, blockId: "efefefef-efef-4fef-8fef-efefefefefe2", state: "attached" }, createdAt: new Date(0).toISOString(), messages: [{ id: "efefefef-efef-4fef-8fef-efefefefefe3", content: "Unrelated Block thread", author: { localAccountId: browserMemberId, displayName: "Browser Member" }, createdAt: new Date(0).toISOString() }] }];
+const browserActivity: ActivityRecord = { schema: "stash.activity.v1", id: "abababab-abab-4bab-8bab-abababababa6", workspaceId: browserWorkspaceId,
+  object: { kind: "Note", id: noteId }, action: "note_updated", actor: { localAccountId: browserMemberId, displayName: "Browser Member" },
+  cause: { kind: "member" }, occurredAt: new Date(0).toISOString(), before: { title: "Draft release plan" }, after: { title: "Release plan" } };
+let browserNotifications: NotificationDelivery[] = [{ schema: "stash.notification.v1", id: "abababab-abab-4bab-8bab-abababababa4", memberId: browserMemberId,
+  workspaceId: browserWorkspaceId, projectId, trigger: "followed_change", summary: "Release plan updated", activity: browserActivity,
+  createdAt: new Date(0).toISOString(), delivery: "immediate" }];
+let browserHistory: NoteHistoryRevision[] = [1, 2].map((revision) => ({ noteId, workspaceId: browserWorkspaceId, revision,
+  content: revision === 1 ? "Original release plan" : "Release collaboration plan", document: { type: "doc", blocks: [] }, recordedAt: new Date(revision * 1000).toISOString(),
+  actor: browserActivity.actor, cause: { kind: "member", ...(revision === 2 ? { restorationOfRevision: 1 } : {}) } }));
+const browserActivityRepository: ActivityRepository = {
+  async listWorkspaceActivity(memberId, workspaceId) { return memberId === browserMemberId && workspaceId === browserWorkspaceId ? { status: "found", activities: [browserActivity] } : { status: "forbidden" }; },
+  async listNoteHistory(memberId, requestedNoteId) { return memberId === browserMemberId && requestedNoteId === noteId ? { status: "found", revisions: browserHistory } : { status: "not_found" }; },
+  async restoreNote(memberId, requestedNoteId, targetRevision, expectedRevision) { if (memberId !== browserMemberId || requestedNoteId !== noteId) return { status: "not_found" }; const target = browserHistory.find(({ revision }) => revision === targetRevision); if (!target) return { status: "revision_not_found" }; if (expectedRevision !== browserHistory.at(-1)?.revision) return { status: "revision_conflict", currentRevision: browserHistory.at(-1)!.revision }; const revision = expectedRevision + 1; browserHistory = [...browserHistory, { ...target, revision, recordedAt: new Date().toISOString(), cause: { kind: "member", restorationOfRevision: targetRevision } }]; return { status: "restored", note: { revision, content: target.content, document: target.document }, activity: { ...browserActivity, id: crypto.randomUUID(), action: "note_restored", cause: { kind: "member", restorationOfRevision: targetRevision } } }; },
+};
+const browserNotificationRepository: NotificationRepository = {
+  async saveNotification(delivery) { browserNotifications = [...browserNotifications, delivery]; return delivery; }, async listNotifications(memberId) { return browserNotifications.filter((item) => item.memberId === memberId); },
+  async markNotificationRead(memberId, id, readAt) { const item = browserNotifications.find((entry) => entry.memberId === memberId && entry.id === id); if (!item) return undefined; const read = { ...item, readAt }; browserNotifications = browserNotifications.map((entry) => entry.id === id ? read : entry); return read; },
+  async getNotificationPreferences() { return undefined; }, async saveNotificationPreferences() { return undefined; }, async claimDigestNotifications() { return []; },
+};
 const organizationId = "44444444-4444-4444-8444-444444444444";
 const otherOrganizationId = "33333333-3333-4333-8333-333333333333";
 const departedMemberId = "55555555-5555-4555-8555-555555555555";
@@ -65,6 +97,7 @@ let task: TaskPlanningReadModel = {
   dependencies: [], developmentLinks: [], sourceNoteIds: [], createdAt: "2026-08-23T00:00:00.000Z",
   createdBy: { localAccountId: "browser-member", displayName: "Browser Member" }, revision: 1, dependencyWarnings: [],
 };
+let browserTaskLinked = false;
 const memberships = new Map<string, BuiltInOrganizationRole>([[browserMemberId, "Admin"], [departedMemberId, "Member"]]);
 const pendingImportedIdentities = new Map([["77777777-7777-4777-8777-777777777777", { importId: "66666666-6666-4666-8666-666666666666", workspaceId: "browser-workspace", workspaceName: "Imported Atlas", sourceAccountId: "77777777-7777-4777-8777-777777777777", displayName: "Grace Hopper" }]]);
 const organizationRoleRepository = {
@@ -84,6 +117,9 @@ const organizationRoleRepository = {
   },
 };
 const taskRepository = {
+  async createTaskFromBlock(memberId: string, requestedNoteId: string, requestedBlockKey: string, draft: { projectId: string; title: string }) { if (memberId !== browserMemberId || requestedNoteId !== noteId || requestedBlockKey !== "77777777-7777-4777-8777-777777777777" || draft.projectId !== projectId) return { status: "block_not_found" as const }; task = { ...task, title: draft.title }; browserTaskLinked = true; return { status: "created" as const, task, sourceBlock: { noteId, blockId: "66666666-6666-4666-8666-666666666666" } }; },
+  async listLinkedTasks(memberId: string, requestedNoteId: string) { return memberId === browserMemberId && requestedNoteId === noteId ? { status: "found" as const, tasks: browserTaskLinked ? [{ id: task.id, key: task.key, title: task.title, projectId, status: task.status, sourceBlock: { noteId, blockId: "66666666-6666-4666-8666-666666666666" }, relationshipState: "linked" as const }] : [] } : { status: "note_not_found" as const }; },
+  async listTaskSourceBlocks(memberId: string, requestedTaskId: string) { return memberId === browserMemberId && requestedTaskId === task.id ? { status: "found" as const, sourceBlocks: browserTaskLinked ? [{ noteId, blockId: "66666666-6666-4666-8666-666666666666", state: "linked" as const }] : [] } : { status: "task_not_found" as const }; },
   async findTaskByKey(memberId: string, requestedProjectId: string, taskKey: string) {
     return memberId === browserMemberId && requestedProjectId === projectId && taskKey === task.key
       ? { status: "found" as const, task } : { status: "not_found" as const };
@@ -96,8 +132,12 @@ const taskRepository = {
     const reassigned = requestedAssigneeIds !== undefined
       && formerAssigneeIds.every((id) => !assigneeIds.includes(id))
       && assigneeIds.some((id) => !formerAssigneeIds.includes(id));
-    const { formerAssigneeIds: _previousFormerAssignees, ...currentTask } = task;
-    task = { ...currentTask, assigneeIds, ...(!reassigned && formerAssigneeIds.length ? { formerAssigneeIds } : {}), revision: task.revision + 1 };
+    const { formerAssigneeIds: _previousFormerAssignees, dueDate: _previousDueDate, estimate: _previousEstimate, ...currentTask } = task;
+    const { dueDate, estimate, statusId: _statusId, ...portableUpdate } = update;
+    task = { ...currentTask, ...portableUpdate, assigneeIds,
+      ...(dueDate !== null && dueDate !== undefined ? { dueDate } : {}),
+      ...(estimate !== null && estimate !== undefined ? { estimate } : {}),
+      ...(!reassigned && formerAssigneeIds.length ? { formerAssigneeIds } : {}), revision: task.revision + 1 };
     return { status: "updated" as const, task };
   },
 };
@@ -108,7 +148,7 @@ const instance = await startInstance({
     return { member: { id: accountId,
       name: accountId === browserMemberId ? "Browser Member" : accountId === "browser-second-member" ? "Second Browser Member" : "Browser Guest",
       email: accountId === browserMemberId ? "member@stash.test" : `${accountId}@stash.test` },
-      workspace: { id: "browser-workspace", name: "Acceptance Workspace" }, capabilities: [], ...(accountId === browserMemberId ? {
+      workspace: { id: browserWorkspaceId, name: "Acceptance Workspace" }, capabilities: [], ...(accountId === browserMemberId ? {
       activeOrganizationId: organizationId, organizationAdministrations: [
       { organizationId: otherOrganizationId, organizationName: "Other Organization", members: [
         { id: browserMemberId, name: "Browser Member", email: "member@stash.test", role: "Admin" as const },
@@ -122,6 +162,17 @@ const instance = await startInstance({
   host: "127.0.0.1",
   port: Number.parseInt(process.env.STASH_BROWSER_PORT ?? "4173", 10),
   instanceAdminToken: "browser-acceptance-admin-token",
+  passwordAuth: { authenticateBearer: async (authorization: string | undefined) => { const accountId = activeTokens.get(authorization?.replace(/^Bearer /, "") || ""); return accountId ? { accountId, sessionId: `session-${accountId}` } : undefined; }, signIn: async () => { throw new Error("invalid_credentials"); } } as any,
+  accountRecovery: { async authenticationOptions() { return { challenge: "cHJvb2Y", rpId: "127.0.0.1", userVerification: "required", allowCredentials: [] }; }, async signInWithPasskey() { return { token: "browser-acceptance-member-token" }; }, async signInWithRecoveryCode() { return { token: "browser-acceptance-member-token" }; }, async requestEmailRecovery() { throw new EmailRecoveryUnavailable(); }, async signInWithEmailRecovery() { return { token: "browser-acceptance-member-token" }; } } as any,
+  oidcAuth: {
+    async begin() { throw new InvalidOidcRequest(); },
+    async complete(_organizationId: string, code: string | null, state: string | null) {
+      if (code !== "browser-code" || state !== "browser-state") throw new InvalidOidcRequest();
+      return { token: "browser-acceptance-member-token", member: { email: "member@example.test" } };
+    },
+  } as any,
+  oidcCallbackOrigin: "http://127.0.0.1:4173",
+  allowInsecureOidcCallbackOriginForTest: true,
   memberAccess: {
     async authenticateBearer(authorization) {
       const token = authorization?.replace(/^Bearer /, "");
@@ -129,7 +180,14 @@ const instance = await startInstance({
       return accountId ? { accountId, sessionId: `session-${accountId}` } : undefined;
     },
   },
-  notes: { async get(memberId: string, requestedNoteId: string) { if (![browserMemberId, "browser-second-member", "browser-guest"].includes(memberId) || !collaborations.has(requestedNoteId)) return undefined;
+  workspaceProjects: new WorkspaceProjectService({ async findPortableMemberIdentity() { return { localAccountId: browserMemberId, displayName: "Browser Member" }; }, async createWorkspace() { return { status: "organization_forbidden" }; }, async createProject() { return "workspace_forbidden"; }, async listAccessibleWorkspaces() { return [{ id: browserWorkspaceId, name: "Acceptance Workspace", projects: [{ id: projectId, name: "Stash", key: "STASH" }] }, { id: "77777777-7777-4777-8777-777777777777", name: "Shared Workspace", projects: [{ id: "66666666-6666-4666-8666-666666666665", name: "Shared roadmap", key: "SHARED" }] }]; } }),
+  notes: { async listInbox(memberId: string, workspaceId: string) { return memberId === browserMemberId && workspaceId === browserWorkspaceId ? { status: "found", notes: inboxNotes } : { status: "workspace_forbidden" }; },
+    async listNotes(memberId: string, workspaceId: string) { return memberId === browserMemberId && workspaceId === browserWorkspaceId ? { status: "found", notes: [{ id: secondNoteId, workspaceId, content: "Authoritative second Note", createdAt: new Date(0).toISOString() }, { id: noteId, workspaceId, content: "Release collaboration plan", tags: ["decision"], createdAt: new Date(0).toISOString() }] } : { status: "workspace_forbidden" }; },
+    async listTemplates() { return { status: "found", templates: [{ id: "abababab-abab-4bab-8bab-abababababa5", name: "Decision", description: "Record context and outcome." }] }; },
+    async listDecisions() { return { status: "found", notes: [{ id: noteId, workspaceId: browserWorkspaceId, content: "Release collaboration plan", createdAt: new Date(0).toISOString() }] }; },
+    async capture(memberId: string, workspaceId: string, value: { content?: string }) { const note = { id: "abababab-abab-4bab-8bab-abababababab", workspaceId, content: value.content ?? "", document: { type: "doc", blocks: [] }, revision: 1, tags: [], createdByMemberId: memberId, createdAt: new Date().toISOString() }; inboxNotes = [note]; return { status: "created", note, projection: { schema: "stash.note.v2" } }; },
+    async triage(memberId: string, workspaceId: string, requestedNoteId: string, value: { action?: string }) { const note = inboxNotes.find(({ id }) => id === requestedNoteId); if (memberId !== browserMemberId || workspaceId !== browserWorkspaceId) return { status: "workspace_forbidden" }; if (!note) return { status: "note_not_found" }; if (value.action === "archive") { inboxNotes = []; return { status: "updated", result: { kind: "archived", note: { ...note, archivedAt: new Date().toISOString() }, projections: [{ schema: "stash.note-state.v1" }] } }; } return { status: "project_forbidden" }; },
+    async get(memberId: string, requestedNoteId: string) { if (![browserMemberId, "browser-second-member", "browser-guest"].includes(memberId) || !collaborations.has(requestedNoteId)) return undefined;
     if (requestedNoteId === richNoteId) { const current = new Y.Doc(); Y.applyUpdate(current, collaborations.get(requestedNoteId)!.update);
       const document = richTextFromCollaborativeDocument(current); current.destroy(); return {
         id: requestedNoteId, workspaceId: "88888888-8888-4888-8888-888888888888", content: richTextToMarkdown(document), revision: collaborations.get(requestedNoteId)!.sequence + 1,
@@ -151,7 +209,12 @@ const instance = await startInstance({
       pendingImportedIdentities.delete(input.sourceAccountId); return { status: "mapped" as const };
     },
   },
-  tasks: new TaskService(taskRepository, { async findPortableMemberIdentity() { return undefined; } }),
+  tasks: new TaskService(taskRepository, { async findPortableMemberIdentity(memberId: string) { return memberId === browserMemberId ? { localAccountId: memberId, displayName: "Browser Member" } : undefined; } }),
+  boards: { async list() { return { status: "found", boards: [{ id: browserBoardId, name: "Delivery" }] }; }, async read() { return { status: "found", board: { id: browserBoardId, name: "Delivery" }, columns: [{ id: "ready", name: "Ready", archived: false, tasks: [{ id: task.id, key: task.key, title: task.title }] }, { id: "done", name: "Done", archived: false, tasks: [] }] }; }, async move(_memberId: string, _projectId: string, _boardId: string, _taskKey: string, value: { statusId: string }) { browserBoardStatus = value.statusId; return { status: "moved", task: { ...task, status: { id: value.statusId, name: value.statusId === "done" ? "Done" : "Ready" } } }; } } as any,
+  discussions: { async listForNote() { return { status: "found", discussions: browserDiscussions }; }, async listForBlock(_memberId: string, _noteId: string, requestedBlockKey: string) { return requestedBlockKey === "77777777-7777-4777-8777-777777777777" ? { status: "found", discussions: [browserBlockDiscussions[0]] } : { status: "not_found" }; }, async listForTask() { return { status: "found", discussions: browserDiscussions }; }, async create(_memberId: string, value: any) { const discussion = { id: crypto.randomUUID(), workspaceId: browserWorkspaceId, target: value.target, createdAt: new Date().toISOString(), messages: [{ id: crypto.randomUUID(), content: value.message, author: { displayName: "Browser Member" }, createdAt: new Date().toISOString() }] }; browserDiscussions = [...browserDiscussions, discussion]; return { status: "created", discussion, projection: {} }; }, async reply(_memberId: string, id: string, value: any) { const discussion = [...browserDiscussions, ...browserBlockDiscussions].find((item) => item.id === id); discussion.messages.push({ id: crypto.randomUUID(), content: value.content, author: { displayName: "Browser Member" }, createdAt: new Date().toISOString() }); return { status: "updated", discussion, projection: {} }; }, async resolve(_memberId: string, id: string) { const discussion = [...browserDiscussions, ...browserBlockDiscussions].find((item) => item.id === id); discussion.resolvedAt = new Date().toISOString(); return { status: "resolved", discussion, projection: {} }; }, async createWork() { return { status: "created", work: { kind: "note" }, activity: {}, projections: [] }; } } as any,
+  activities: new ActivityService(browserActivityRepository),
+  notifications: new NotificationService(browserNotificationRepository),
+  searches: new WorkspaceSearchService({ async searchWorkspace(memberId, workspaceId, query) { return memberId === browserMemberId && workspaceId === browserWorkspaceId ? { status: "found", results: query.q === "discussion" ? [{ id: browserDiscussions[0].id, kind: "discussion", title: "Keep this release context", href: `/app/notes/${noteId}/discussions` }] : [{ id: noteId, kind: "note", title: "Release collaboration plan", excerpt: `Matched ${query.q}`, href: `/app/notes/${noteId}` }] } : { status: "forbidden" }; } }),
   webClientRoot: fileURLToPath(new URL("../apps/web/dist", import.meta.url)),
 });
 

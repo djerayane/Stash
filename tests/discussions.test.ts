@@ -72,6 +72,12 @@ class DiscussionFake implements DatabaseProbe, DiscussionRepository {
     }
     return { status: "found" as const, discussions };
   }
+  async listBlockDiscussions(memberId: string, sourceNoteId: string, sourceBlockKey: string) {
+    if (sourceNoteId !== noteId || sourceBlockKey !== blockKey || !this.blockPresent) return { status: "not_found" as const };
+    const listed = await this.listNoteDiscussions(memberId, sourceNoteId);
+    if (listed.status !== "found") return listed;
+    return { status: "found" as const, discussions: listed.discussions.filter(({ target }) => target.kind === "block" && target.blockId === blockId) };
+  }
   async listTaskDiscussions(memberId: string, sourceTaskId: string) {
     if (this.revoked || ![taskId, secretTaskId].includes(sourceTaskId)
       || memberId !== "ada" && !(memberId === "grace" && sourceTaskId === taskId)) return { status: "not_found" as const };
@@ -200,6 +206,12 @@ describe("portable Discussions", () => {
     assert.deepEqual(database.discussions[1]?.target, { kind: "block", noteId, blockId });
     assert.equal(database.projections.every(({ schema }) => schema === "stash.discussion.v1"), true);
     assert.equal((await (await request(`/api/notes/${noteId}/discussions`)).json() as { discussions: DiscussionRecord[] }).discussions.length, 2);
+    const blockResponse = await request(`/api/notes/${noteId}/blocks/${blockKey}/discussions`);
+    assert.equal(blockResponse.status, 200);
+    const blockDiscussions = (await blockResponse.json() as { discussions: DiscussionRecord[] }).discussions;
+    assert.deepEqual(blockDiscussions.map(({ target }) => target.kind), ["block"]);
+    assert.deepEqual(blockDiscussions.map(({ messages }) => messages[0]?.content), ["Message 2"]);
+    assert.equal((await request(`/api/notes/${noteId}/blocks/99999999-9999-4999-8999-999999999999/discussions`)).status, 404);
     assert.equal((await (await request(`/api/tasks/${taskId}/discussions`)).json() as { discussions: DiscussionRecord[] }).discussions.length, 1);
   });
 

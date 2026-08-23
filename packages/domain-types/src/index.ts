@@ -11,6 +11,41 @@ export interface ProjectSummary {
   readonly name: string;
 }
 
+export interface PortableIdentity { readonly localAccountId: string; readonly displayName: string }
+export type ActivityCause =
+  | { readonly kind: "member"; readonly restorationOfRevision?: number; readonly automationId?: string; readonly signalId?: string }
+  | { readonly kind: "automation"; readonly automationId: string; readonly signalId?: string }
+  | { readonly kind: "signal"; readonly signalId: string }
+  | { readonly kind: "agent"; readonly agentGrantId: string; readonly sponsoringMemberId: string }
+  | { readonly kind: "migration"; readonly source: "existing_note" };
+export interface ActivityRecord {
+  readonly schema: "stash.activity.v1";
+  readonly id: string;
+  readonly workspaceId: string;
+  readonly object: { readonly kind: "Note" | "Task" | "Discussion" | "NoteLocation" | "NoteLink"; readonly id: string };
+  readonly action: string;
+  readonly actor: PortableIdentity;
+  readonly cause: ActivityCause;
+  readonly occurredAt: string;
+  readonly before: Record<string, unknown>;
+  readonly after: Record<string, unknown>;
+}
+export type NotificationTrigger = "direct_mention" | "assignment" | "requested_review" | "automation_failure" | "followed_change";
+export interface NotificationDelivery {
+  schema: "stash.notification.v1";
+  id: string;
+  memberId: string;
+  workspaceId: string;
+  projectId?: string;
+  trigger: NotificationTrigger;
+  summary: string;
+  activity: ActivityRecord;
+  createdAt: string;
+  delivery: "immediate" | "quiet_hours";
+  readAt?: string;
+  digestedAt?: string;
+}
+
 export type RichTextMark = "bold" | "italic" | "code";
 export interface RichTextSpan { text: string; marks?: RichTextMark[]; href?: string }
 export interface RichTextTableCell { header: boolean; content: RichTextSpan[] }

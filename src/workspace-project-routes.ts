@@ -11,7 +11,8 @@ export function workspaceProjectRoutes(
   memberAccess: MemberAccessResolver,
 ): HttpRoute {
   return {
-    matches: (request, url) => request.method === "POST" && (
+    matches: (request, url) => request.method === "GET" && url.pathname === "/api/workspaces"
+      || request.method === "POST" && (
       url.pathname === "/api/workspaces"
       || /^\/api\/workspaces\/[^/]+\/projects$/.test(url.pathname)
     ),
@@ -26,6 +27,10 @@ export function workspaceProjectRoutes(
       }
 
       try {
+        if (request.method === "GET") {
+          json(response, 200, { workspaces: await service.listAccessible(access.accountId) });
+          return true;
+        }
         const input = await readJson(request);
         if (url.pathname === "/api/workspaces") {
           const result = await service.createWorkspace(access.accountId, input);

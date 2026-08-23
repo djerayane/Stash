@@ -43,6 +43,7 @@ import * as Y from "yjs";
 import { prosemirrorJSONToYDoc, yDocToProsemirrorJSON } from "y-prosemirror";
 import { Schema } from "prosemirror-model";
 import { InvalidCollaborationUpdate, type CollaborationSnapshot, type NoteCollaborationRepository } from "./note-collaboration.js";
+import type { WorkspaceSearchQuery, WorkspaceSearchRepository, WorkspaceSearchResult } from "./workspace-search.js";
 import { proseMirrorToRichText, richTextToProseMirror } from "@stash/rich-text";
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
@@ -208,6 +209,7 @@ export class PostgresDatabase implements
   NotificationRepository,
   AutomationRepository,
   NoteCollaborationRepository
+  , WorkspaceSearchRepository
 {
   readonly #pool: Pool;
   readonly #authenticationSecrets: AuthenticationSecretCodec;
@@ -366,6 +368,28 @@ export class PostgresDatabase implements
       );
       return { status: "created", projection };
     });
+  }
+
+  async listAccessibleWorkspaces(memberId: string) {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureWorkspaceProjectSchema(client);
+      const result = await client.query<{ workspace_id: string; workspace_name: string; project_id: string | null; project_name: string | null; project_key: string | null }>(`
+        SELECT workspace.id AS workspace_id, workspace.name AS workspace_name,
+          project.id AS project_id, project.name AS project_name, project.project_key
+        FROM stash_workspaces workspace
+        LEFT JOIN stash_projects project ON project.workspace_id=workspace.id AND (
+          (workspace.owner_type='personal' AND workspace.personal_owner_id=$1)
+          OR (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$1))
+          OR EXISTS (SELECT 1 FROM stash_project_guests guest WHERE guest.project_id=project.id AND guest.account_id=$1))
+        WHERE (workspace.owner_type='personal' AND workspace.personal_owner_id=$1)
+          OR (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$1))
+          OR EXISTS (SELECT 1 FROM stash_projects visible JOIN stash_project_guests guest ON guest.project_id=visible.id WHERE visible.workspace_id=workspace.id AND guest.account_id=$1)
+        ORDER BY workspace.name, project.name`, [memberId]);
+      const workspaces = new Map<string, { id: string; name: string; projects: Array<{ id: string; name: string; key: string }> }>();
+      for (const row of result.rows) { const workspace = workspaces.get(row.workspace_id) ?? { id: row.workspace_id, name: row.workspace_name, projects: [] }; if (row.project_id) workspace.projects.push({ id: row.project_id, name: row.project_name!, key: row.project_key! }); workspaces.set(row.workspace_id, workspace); }
+      return [...workspaces.values()];
+    } finally { client.release(); }
   }
 
   async createProject(
@@ -565,6 +589,33 @@ export class PostgresDatabase implements
           (note.project_id IS NOT NULL AND EXISTS (SELECT 1 FROM stash_project_guests guest
             WHERE guest.project_id = note.project_id AND guest.account_id = $3))) ORDER BY note.created_at, note.id`,
       [workspaceId, JSON.stringify([tag]), memberId]);
+      return { status: "found" as const, notes: result.rows.map((row: any) => ({ id: row.id, workspaceId: row.workspace_id,
+        content: row.content, document: row.document, revision: row.revision, tags: row.tags, createdByMemberId: row.created_by_account_id,
+        createdAt: new Date(row.created_at).toISOString(), ...(row.project_id ? { projectId: row.project_id } : {}),
+        ...(row.reminder_at ? { reminder: { at: new Date(row.reminder_at).toISOString() } } : {}) })) };
+    } finally { client.release(); }
+  }
+
+  async listNotes(memberId: string, workspaceId: string) {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureNoteSchema(client);
+      const access = await client.query(`SELECT 1 FROM stash_workspaces workspace WHERE workspace.id = $1 AND (
+        (workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR
+        (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)) OR
+        EXISTS (SELECT 1 FROM stash_projects project JOIN stash_project_guests guest ON guest.project_id = project.id
+          WHERE project.workspace_id = workspace.id AND guest.account_id = $2))`, [workspaceId, memberId]);
+      if (!access.rowCount) return { status: "workspace_forbidden" as const };
+      const result = await client.query<any>(`SELECT note.id, note.workspace_id, note.project_id, note.content, note.document, note.revision,
+        note.tags, note.reminder_at, note.created_by_account_id, note.created_at, note.archived_at
+        FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id = note.workspace_id
+        WHERE note.workspace_id = $1 AND note.archived_at IS NULL AND (
+          (workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR
+          (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+            WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)) OR
+          (note.project_id IS NOT NULL AND EXISTS (SELECT 1 FROM stash_project_guests guest
+            WHERE guest.project_id = note.project_id AND guest.account_id = $2))) ORDER BY note.created_at, note.id`, [workspaceId, memberId]);
       return { status: "found" as const, notes: result.rows.map((row: any) => ({ id: row.id, workspaceId: row.workspace_id,
         content: row.content, document: row.document, revision: row.revision, tags: row.tags, createdByMemberId: row.created_by_account_id,
         createdAt: new Date(row.created_at).toISOString(), ...(row.project_id ? { projectId: row.project_id } : {}),
@@ -826,6 +877,31 @@ export class PostgresDatabase implements
       for (const { id } of ids.rows) {
         const discussion = await this.#readDiscussion(client, memberId, id, false);
         if (discussion) discussions.push(discussion);
+      }
+      return { status: "found" as const, discussions };
+    } finally { client.release(); }
+  }
+
+  async listBlockDiscussions(memberId: string, noteId: string, blockKey: string) {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureDiscussionSchema(client);
+      const note = await client.query<any>(`SELECT note.document FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id = note.workspace_id
+        WHERE note.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR EXISTS (
+          SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id = workspace.organization_owner_id
+            AND membership.account_id = $2) OR (note.project_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM stash_project_guests guest WHERE guest.project_id = note.project_id AND guest.account_id = $2)))`, [noteId, memberId]);
+      if (!note.rowCount) return { status: "not_found" as const };
+      const blocks = Array.isArray(note.rows[0].document?.blocks) ? note.rows[0].document.blocks as Array<{ blockKey?: string; id?: string }> : [];
+      const matches = blocks.filter((block) => block.blockKey === blockKey);
+      if (matches.length !== 1 || typeof matches[0]!.id !== "string"
+        || blocks.filter((block) => block.id === matches[0]!.id).length !== 1) return { status: "not_found" as const };
+      const ids = await client.query<{ id: string }>(`SELECT id FROM stash_discussions
+        WHERE target_kind = 'block' AND note_id = $1 AND block_id = $2 ORDER BY created_at, id`, [noteId, matches[0]!.id]);
+      const discussions: DiscussionRecord[] = [];
+      for (const { id } of ids.rows) {
+        const discussion = await this.#readDiscussion(client, memberId, id, false);
+        if (discussion?.target.kind === "block") discussions.push(discussion);
       }
       return { status: "found" as const, discussions };
     } finally { client.release(); }
@@ -2085,6 +2161,85 @@ export class PostgresDatabase implements
       ...(row.project_id ? { projectId: row.project_id } : {}), trigger: row.trigger, summary: row.summary, activity: row.activity, delivery: row.delivery,
       createdAt: new Date(row.created_at).toISOString(), ...(row.read_at ? { readAt: new Date(row.read_at).toISOString() } : {}),
       ...(row.digested_at ? { digestedAt: new Date(row.digested_at).toISOString() } : {}) };
+  }
+
+  async searchWorkspace(memberId: string, workspaceId: string, query: WorkspaceSearchQuery) {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureDiscussionSchema(client);
+      await this.#ensureAttachmentSchema(client);
+      const access = await client.query<{ full_member: boolean }>(`SELECT
+        ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
+         (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+           WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2))) AS full_member
+        FROM stash_workspaces workspace WHERE workspace.id=$1 AND (((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
+         (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+           WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2))) OR EXISTS (
+             SELECT 1 FROM stash_projects project JOIN stash_project_guests guest ON guest.project_id=project.id
+             WHERE project.workspace_id=workspace.id AND guest.account_id=$2))`, [workspaceId, memberId]);
+      if (!access.rowCount) return { status: "forbidden" as const };
+      const values = [workspaceId, memberId, query.q, query.projectId ?? null, query.object ?? null, query.author ?? null,
+        query.assignee ?? null, query.status ?? null, query.from ?? null, query.to ?? null, access.rows[0]!.full_member];
+      const rows = await client.query<any>(`WITH visible_projects AS (
+          SELECT project.id FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
+          WHERE project.workspace_id=$1 AND ($11::boolean OR EXISTS (SELECT 1 FROM stash_project_guests guest
+            WHERE guest.project_id=project.id AND guest.account_id=$2))
+        ), candidates AS (
+          SELECT note.id::text, 'note'::text AS kind, split_part(note.content,E'\\n',1) AS title,
+            left(note.content,240) AS excerpt, '/app/notes/'||note.id AS href, note.project_id,
+            author.name AS author, NULL::text AS assignee, CASE WHEN note.archived_at IS NULL THEN 'active' ELSE 'archived' END AS status,
+            note.created_at AS occurred_at, note.content AS searchable
+          FROM stash_notes note JOIN stash_accounts author ON author.id=note.created_by_account_id
+          WHERE note.workspace_id=$1 AND (($11 AND note.project_id IS NULL) OR note.project_id IN (SELECT id FROM visible_projects))
+          UNION ALL
+          SELECT task.id::text,'task',task.task_key||' · '||task.title,task.title,'/app/projects/'||task.project_id||'/tasks/'||task.task_key,task.project_id,
+            author.name, (SELECT string_agg(account.name,', ' ORDER BY account.name) FROM stash_accounts account
+              WHERE task.assignee_ids ? account.id::text), status.name, task.created_at,
+            concat_ws(' ',task.task_key,task.title,task.label_names::text,task.development_links::text)
+          FROM stash_tasks task JOIN stash_accounts author ON author.id=task.created_by_account_id
+          JOIN stash_workflow_statuses status ON status.id=task.workflow_status_id WHERE task.workspace_id=$1 AND task.project_id IN (SELECT id FROM visible_projects)
+          UNION ALL
+          SELECT discussion.id::text,'discussion',left(message.content,120),left(message.content,240),
+            CASE discussion.target_kind WHEN 'task' THEN '/app/tasks/'||discussion.task_id||'/discussions' ELSE '/app/notes/'||discussion.note_id||'/discussions' END,
+            COALESCE(note.project_id,task.project_id),author.name,NULL,CASE WHEN discussion.resolved_at IS NULL THEN 'open' ELSE 'resolved' END,
+            message.created_at,message.content
+          FROM stash_discussions discussion JOIN stash_discussion_messages message ON message.discussion_id=discussion.id
+          JOIN stash_accounts author ON author.id=message.author_account_id LEFT JOIN stash_notes note ON note.id=discussion.note_id
+          LEFT JOIN stash_tasks task ON task.id=discussion.task_id WHERE discussion.workspace_id=$1
+            AND ($11 OR COALESCE(note.project_id,task.project_id) IN (SELECT id FROM visible_projects))
+          UNION ALL
+          SELECT attachment.id::text,'file',attachment.filename,attachment.content_type,attachment.relative_path,NULL,
+            author.name,NULL,NULL,attachment.created_at,attachment.filename||' '||attachment.content_type
+          FROM stash_attachments attachment JOIN stash_accounts author ON author.id=attachment.created_by_account_id
+          WHERE attachment.workspace_id=$1 AND $11
+          UNION ALL
+          SELECT task.id::text||':'||label.value,'label',label.value,NULL,'/app/projects/'||task.project_id||'/tasks/'||task.task_key,task.project_id,
+            NULL,NULL,status.name,task.created_at,label.value
+          FROM stash_tasks task CROSS JOIN LATERAL jsonb_array_elements_text(task.label_names) label(value)
+          JOIN stash_workflow_statuses status ON status.id=task.workflow_status_id
+          WHERE task.workspace_id=$1 AND task.project_id IN (SELECT id FROM visible_projects)
+          UNION ALL
+          SELECT account.id::text,'member',account.name,account.email,NULL,NULL,account.name,NULL,NULL,NULL,
+            account.name||' '||account.email FROM stash_accounts account JOIN stash_organization_memberships membership ON membership.account_id=account.id
+          JOIN stash_workspaces workspace ON workspace.organization_owner_id=membership.organization_id WHERE workspace.id=$1 AND $11
+          UNION ALL
+          SELECT task.id::text||':'||development.ordinality,'development',COALESCE(development.value->>'label',development.value->>'url'),
+            development.value->>'url',development.value->>'url',task.project_id,author.name,NULL,status.name,task.created_at,development.value::text
+          FROM stash_tasks task CROSS JOIN LATERAL jsonb_array_elements(task.development_links) WITH ORDINALITY development(value,ordinality)
+          JOIN stash_accounts author ON author.id=task.created_by_account_id JOIN stash_workflow_statuses status ON status.id=task.workflow_status_id
+          WHERE task.workspace_id=$1 AND task.project_id IN (SELECT id FROM visible_projects)
+        ) SELECT id,kind,title,excerpt,href,project_id,author,assignee,status,occurred_at FROM candidates
+          WHERE searchable ILIKE '%'||$3||'%' AND ($4::uuid IS NULL OR project_id=$4) AND ($5::text IS NULL OR kind=$5)
+            AND ($6::text IS NULL OR author ILIKE '%'||$6||'%') AND ($7::text IS NULL OR assignee ILIKE '%'||$7||'%')
+            AND ($8::text IS NULL OR status ILIKE $8) AND ($9::timestamptz IS NULL OR occurred_at >= $9)
+            AND ($10::timestamptz IS NULL OR occurred_at <= $10)
+          ORDER BY occurred_at DESC NULLS LAST, kind, title LIMIT 100`, values);
+      return { status: "found" as const, results: rows.rows.map((row): WorkspaceSearchResult => ({ id: row.id, kind: row.kind,
+        title: row.title, ...(row.excerpt ? { excerpt: row.excerpt } : {}), ...(row.href ? { href: row.href } : {}),
+        ...(row.project_id ? { projectId: row.project_id } : {}), ...(row.author ? { author: row.author } : {}),
+        ...(row.assignee ? { assignee: row.assignee } : {}), ...(row.status ? { status: row.status } : {}),
+        ...(row.occurred_at ? { occurredAt: new Date(row.occurred_at).toISOString() } : {}) })) };
+    } finally { client.release(); }
   }
 
   async listWorkspaceActivity(memberId: string, workspaceId: string) {

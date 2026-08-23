@@ -7,7 +7,7 @@ export function noteRoutes(service: NoteService, memberAccess: MemberAccessResol
   return {
     matches: (request, url) => (request.method === "POST" && /^\/api\/workspaces\/[^/]+\/notes$/.test(url.pathname))
       || (request.method === "GET" && /^\/api\/workspaces\/[^/]+\/note-templates$/.test(url.pathname))
-      || (request.method === "GET" && /^\/api\/workspaces\/[^/]+\/notes$/.test(url.pathname) && url.searchParams.get("view") === "decisions")
+      || (request.method === "GET" && /^\/api\/workspaces\/[^/]+\/notes$/.test(url.pathname))
       || (request.method === "GET" && /^\/api\/workspaces\/[^/]+\/inbox$/.test(url.pathname))
       || (request.method === "POST" && /^\/api\/workspaces\/[^/]+\/inbox\/[^/]+\/triage$/.test(url.pathname))
       || (request.method === "GET" && /^\/api\/notes\/[^/]+\/conflicts$/.test(url.pathname))
@@ -23,9 +23,12 @@ export function noteRoutes(service: NoteService, memberAccess: MemberAccessResol
         if (request.method === "GET" && /^\/api\/workspaces\/[^/]+\/(note-templates|notes)$/.test(url.pathname)) {
           let workspaceId: string;
           try { workspaceId = decodeURIComponent(url.pathname.split("/")[3]!); } catch { throw new InvalidNoteInput(); }
+          const view = url.searchParams.get("view");
+          if (view && view !== "decisions") throw new InvalidNoteInput();
           const result = url.pathname.endsWith("/note-templates")
             ? await service.listTemplates(access.accountId, workspaceId)
-            : await service.listDecisions(access.accountId, workspaceId);
+            : view === "decisions" ? await service.listDecisions(access.accountId, workspaceId)
+              : await service.listNotes(access.accountId, workspaceId);
           if (result.status === "workspace_forbidden") {
             json(response, 403, { error: "workspace_forbidden", message: "This Member cannot read Notes in that Workspace." });
           } else if ("templates" in result) json(response, 200, { templates: result.templates });

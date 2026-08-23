@@ -129,6 +129,7 @@ class NotificationFake implements DatabaseProbe, NotificationRepository, TaskPla
       ? { status: "found" as const, discussion: structuredClone(this.discussion) } : { status: "not_found" as const };
   }
   async listNoteDiscussions() { return { status: "not_found" as const }; }
+  async listBlockDiscussions() { return { status: "not_found" as const }; }
   async listTaskDiscussions() { return { status: "not_found" as const }; }
   async addMessage(requestedMemberId: string, requestedDiscussionId: string, message: DiscussionMessage) {
     const found = await this.findDiscussion(requestedMemberId, requestedDiscussionId);

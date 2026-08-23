@@ -6,6 +6,7 @@ export function discussionRoutes(service: DiscussionService, memberAccess: Membe
   return {
     matches: (request, url) => (request.method === "POST" && url.pathname === "/api/discussions")
       || (request.method === "GET" && /^\/api\/(notes|tasks)\/[^/]+\/discussions$/.test(url.pathname))
+      || (request.method === "GET" && /^\/api\/notes\/[^/]+\/blocks\/[^/]+\/discussions$/.test(url.pathname))
       || (["GET"].includes(request.method ?? "") && /^\/api\/discussions\/[^/]+$/.test(url.pathname))
       || (request.method === "POST" && /^\/api\/discussions\/[^/]+\/messages$/.test(url.pathname))
       || (request.method === "POST" && /^\/api\/discussions\/[^/]+\/work$/.test(url.pathname))
@@ -17,8 +18,12 @@ export function discussionRoutes(service: DiscussionService, memberAccess: Membe
         if (request.method === "GET" && url.pathname.endsWith("/discussions")) {
           let targetId: string;
           try { targetId = decodeURIComponent(url.pathname.split("/")[3]!); } catch { throw new InvalidDiscussionInput(); }
-          const result = url.pathname.startsWith("/api/notes/")
-            ? await service.listForNote(access.accountId, targetId)
+          const blockRoute = url.pathname.includes("/blocks/");
+          let blockKey = "";
+          if (blockRoute) try { blockKey = decodeURIComponent(url.pathname.split("/")[5]!); } catch { throw new InvalidDiscussionInput(); }
+          const result = blockRoute
+            ? await service.listForBlock(access.accountId, targetId, blockKey)
+            : url.pathname.startsWith("/api/notes/") ? await service.listForNote(access.accountId, targetId)
             : await service.listForTask(access.accountId, targetId);
           if (result.status === "found") json(response, 200, { discussions: result.discussions });
           else json(response, 404, { error: "target_not_found", message: "The Discussion target is unavailable." });
