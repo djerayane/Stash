@@ -100,8 +100,16 @@ test("marks a departed Task assignee until reassignment and keeps the flow acces
   await expect(marker).toContainText("Departed Member — assignment needs attention");
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 
-  await page.getByRole("button", { name: "Clear departed assignment" }).click();
-  await expect(page.getByText("Assignment cleared", { exact: true })).toBeVisible();
+  const unassigned = await page.evaluate(async () => fetch(location.pathname.replace(/^\/app/, "/api"), {
+    method: "PATCH", headers: { authorization: "Bearer browser-acceptance-member-token", "content-type": "application/json" },
+    body: JSON.stringify({ assigneeIds: [] }),
+  }).then((response) => response.json()));
+  expect(unassigned.task.formerAssigneeIds).toEqual(["departed-member"]);
+  await page.reload();
+  await expect(page.getByText("Departed Member — assignment needs attention", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Assign to me" }).click();
+  await expect(page.getByText("Assigned to you", { exact: true })).toBeVisible();
   await expect(page.getByText("Departed Member — assignment needs attention", { exact: true })).toHaveCount(0);
   await page.reload();
   await expect(page.getByText("Departed Member — assignment needs attention", { exact: true })).toHaveCount(0);

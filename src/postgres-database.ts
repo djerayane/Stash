@@ -118,6 +118,17 @@ function taskProjectionFromRow(row: any): PortableTaskProjection {
   };
 }
 
+function formerAssignmentsAfterUpdate(
+  previousFormerAssigneeIds: readonly string[],
+  nextAssigneeIds: readonly string[],
+  assigneesWereUpdated: boolean,
+): string[] {
+  if (!assigneesWereUpdated) return [...previousFormerAssigneeIds];
+  const removedEveryFormerAssignee = previousFormerAssigneeIds.every((id) => !nextAssigneeIds.includes(id));
+  const hasReplacementAssignee = nextAssigneeIds.some((id) => !previousFormerAssigneeIds.includes(id));
+  return removedEveryFormerAssignee && hasReplacementAssignee ? [] : [...previousFormerAssigneeIds];
+}
+
 function taskPlanningReadModelFromRow(row: any): TaskPlanningReadModel {
   return { ...taskProjectionFromRow(row), revision: Number(row.revision), dependencyWarnings: row.dependency_warnings ?? [] };
 }
@@ -1266,8 +1277,9 @@ export class PostgresDatabase implements
       const nextFieldRevisions = { ...(row.field_revisions ?? {}) };
       for (const field of Object.keys(update)) nextFieldRevisions[field] = nextRevision;
       const nextAssigneeIds = [...new Set(next.assigneeIds ?? [])];
-      const nextFormerAssigneeIds = (row.former_assignee_ids ?? [])
-        .filter((formerAssigneeId: string) => nextAssigneeIds.includes(formerAssigneeId));
+      const nextFormerAssigneeIds = formerAssignmentsAfterUpdate(
+        row.former_assignee_ids ?? [], nextAssigneeIds, update.assigneeIds !== undefined,
+      );
       await client.query(`UPDATE stash_tasks SET title = $2, workflow_status_id = $3, assignee_ids = $4::jsonb, priority = $5,
         label_names = $6::jsonb, due_date = $7, estimate = $8, linked_note_ids = $9::jsonb,
         development_links = $10::jsonb, revision = $11, field_revisions = $12::jsonb,
@@ -1460,8 +1472,8 @@ export class PostgresDatabase implements
     }
     const current=taskProjectionFromRow(row); const next={...current,...update} as any;
     const nextAssigneeIds=[...new Set<string>(next.assigneeIds??[])];
-    const nextFormerAssigneeIds=(row.former_assignee_ids??[])
-      .filter((formerAssigneeId:string)=>nextAssigneeIds.includes(formerAssigneeId));
+    const nextFormerAssigneeIds=formerAssignmentsAfterUpdate(
+      row.former_assignee_ids??[],nextAssigneeIds,update.assigneeIds!==undefined);
     await client.query(`UPDATE stash_tasks SET title=$2,workflow_status_id=$3,assignee_ids=$4::jsonb,priority=$5,label_names=$6::jsonb,
       due_date=$7,estimate=$8,linked_note_ids=$9::jsonb,development_links=$10::jsonb,
       former_assignee_ids=$11::jsonb WHERE id=$1`,[row.id,next.title,

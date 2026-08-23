@@ -36,13 +36,13 @@ emptyCodeSeededDocument.destroy();
 principalBoundaryDocument.destroy();
 const collaborationRepository = {
   async loadNoteCollaboration(memberId: string, requestedNoteId: string) {
-    if (!["browser-member", "browser-second-member", "browser-guest"].includes(memberId)) return undefined;
+    if (![browserMemberId, "browser-second-member", "browser-guest"].includes(memberId)) return undefined;
     const snapshot = collaborations.get(requestedNoteId);
     return snapshot ? { ...snapshot, access: memberId === "browser-guest" ? "read" as const : "edit" as const } : undefined;
   },
   async appendNoteCollaboration(memberId: string, requestedNoteId: string, update: Uint8Array) {
     const collaboration = collaborations.get(requestedNoteId);
-    if (!["browser-member", "browser-second-member"].includes(memberId) || !collaboration) return undefined;
+    if (![browserMemberId, "browser-second-member"].includes(memberId) || !collaboration) return undefined;
     const document = new Y.Doc(); Y.applyUpdate(document, collaboration.update); Y.applyUpdate(document, update);
     const next = { noteId: requestedNoteId, sequence: collaboration.sequence + 1, update: Y.encodeStateAsUpdate(document),
       updatedAt: new Date().toISOString(), updatedByMemberId: memberId, access: "edit" as const };
@@ -51,6 +51,7 @@ const collaborationRepository = {
 };
 
 const projectId = "22222222-2222-4222-8222-222222222222";
+const browserMemberId = "11111111-1111-4111-8111-111111111111";
 let task: TaskPlanningReadModel = {
   schema: "stash.task.v1", id: "32323232-3232-4232-8232-323232323232", workspaceId: "browser-workspace", projectId,
   key: "STASH-32", title: "Restore release ownership", status: { id: "ready", name: "Ready", category: "unstarted" },
@@ -60,23 +61,28 @@ let task: TaskPlanningReadModel = {
 };
 const taskRepository = {
   async findTaskByKey(memberId: string, requestedProjectId: string, taskKey: string) {
-    return memberId === "browser-member" && requestedProjectId === projectId && taskKey === task.key
+    return memberId === browserMemberId && requestedProjectId === projectId && taskKey === task.key
       ? { status: "found" as const, task } : { status: "not_found" as const };
   },
   async updateTaskByKey(memberId: string, requestedProjectId: string, taskKey: string, update: TaskPlanningUpdate) {
-    if (memberId !== "browser-member" || requestedProjectId !== projectId || taskKey !== task.key) return { status: "not_found" as const };
+    if (memberId !== browserMemberId || requestedProjectId !== projectId || taskKey !== task.key) return { status: "not_found" as const };
     const { assigneeIds: requestedAssigneeIds } = update;
     const assigneeIds = requestedAssigneeIds ?? task.assigneeIds ?? [];
-    const formerAssigneeIds = task.formerAssigneeIds?.filter((id) => assigneeIds.includes(id)) ?? [];
+    const formerAssigneeIds = task.formerAssigneeIds ?? [];
+    const reassigned = requestedAssigneeIds !== undefined
+      && formerAssigneeIds.every((id) => !assigneeIds.includes(id))
+      && assigneeIds.some((id) => !formerAssigneeIds.includes(id));
     const { formerAssigneeIds: _previousFormerAssignees, ...currentTask } = task;
-    task = { ...currentTask, assigneeIds, ...(formerAssigneeIds.length ? { formerAssigneeIds } : {}), revision: task.revision + 1 };
+    task = { ...currentTask, assigneeIds, ...(!reassigned && formerAssigneeIds.length ? { formerAssigneeIds } : {}), revision: task.revision + 1 };
     return { status: "updated" as const, task };
   },
 };
 
 const instance = await startInstance({
   database: { async verifyConnection() {}, async close() {}, async resolveClientSessionPrincipal(accountId: string) {
-    return ["browser-member", "browser-second-member", "browser-guest"].includes(accountId) ? { member: { id: accountId, name: accountId === "browser-member" ? "Browser Member" : accountId === "browser-second-member" ? "Second Browser Member" : "Browser Guest", email: `${accountId}@stash.test` },
+    return [browserMemberId, "browser-second-member", "browser-guest"].includes(accountId) ? { member: { id: accountId,
+      name: accountId === browserMemberId ? "Browser Member" : accountId === "browser-second-member" ? "Second Browser Member" : "Browser Guest",
+      email: accountId === browserMemberId ? "member@stash.test" : `${accountId}@stash.test` },
       workspace: { id: "browser-workspace", name: "Acceptance Workspace" }, capabilities: [] } : undefined;
   } },
   host: "127.0.0.1",
@@ -84,13 +90,13 @@ const instance = await startInstance({
   instanceAdminToken: "browser-acceptance-admin-token",
   memberAccess: {
     async authenticateBearer(authorization) {
-      if (authorization === "Bearer browser-acceptance-member-token") return { accountId: "browser-member", sessionId: "browser-session" };
+      if (authorization === "Bearer browser-acceptance-member-token") return { accountId: browserMemberId, sessionId: "browser-session" };
       if (authorization === "Bearer browser-acceptance-second-member-token") return { accountId: "browser-second-member", sessionId: "browser-second-session" };
       if (authorization === "Bearer browser-acceptance-guest-token") return { accountId: "browser-guest", sessionId: "browser-guest-session" };
       return undefined;
     },
   },
-  notes: { async get(memberId: string, requestedNoteId: string) { if (!["browser-member", "browser-second-member", "browser-guest"].includes(memberId) || !collaborations.has(requestedNoteId)) return undefined;
+  notes: { async get(memberId: string, requestedNoteId: string) { if (![browserMemberId, "browser-second-member", "browser-guest"].includes(memberId) || !collaborations.has(requestedNoteId)) return undefined;
     if (requestedNoteId === richNoteId) { const current = new Y.Doc(); Y.applyUpdate(current, collaborations.get(requestedNoteId)!.update);
       const document = richTextFromCollaborativeDocument(current); current.destroy(); return {
         id: requestedNoteId, workspaceId: "88888888-8888-4888-8888-888888888888", content: richTextToMarkdown(document), revision: collaborations.get(requestedNoteId)!.sequence + 1,

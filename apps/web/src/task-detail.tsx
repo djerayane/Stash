@@ -33,7 +33,7 @@ async function readTask(token: string, projectId: string, taskKey: string): Prom
   return task;
 }
 
-export function TaskDetailPage({ token }: { readonly token?: string }) {
+export function TaskDetailPage({ memberId, token }: { readonly memberId?: string; readonly token?: string }) {
   const { projectId = "", taskKey = "" } = useParams();
   const queryClient = useQueryClient();
   const markerRef = useRef<HTMLLIElement>(null);
@@ -46,9 +46,11 @@ export function TaskDetailPage({ token }: { readonly token?: string }) {
     mutationFn: async () => {
       const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskKey)}`, {
         method: "PATCH", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-        body: JSON.stringify({ assigneeIds: task!.assigneeIds.filter((id) => !departed.includes(id)) }),
+        body: JSON.stringify({ assigneeIds: [...new Set([
+          ...task!.assigneeIds.filter((id) => !departed.includes(id)), memberId!,
+        ])] }),
       });
-      if (!response.ok) throw new Error("The assignment could not be cleared. Try again.");
+      if (!response.ok) throw new Error("The Task could not be reassigned. Try again.");
       const payload = await response.json() as { task?: unknown };
       if (!isTaskDetail(payload.task)) throw new Error("The Instance returned an invalid Task.");
       return payload.task;
@@ -72,8 +74,8 @@ export function TaskDetailPage({ token }: { readonly token?: string }) {
       <div>
         {departed.length ? <ul className={styles.assigneeList}>{departed.map((id, index) => <li className={styles.departedMarker} key={id} ref={index === 0 ? markerRef : undefined}>
           <span role="status"><strong>Departed Member — assignment needs attention</strong><small>Former assignee · {id}</small></span>
-          <button className={styles.clearButton} type="button" disabled={clearAssignment.isPending} onClick={() => clearAssignment.mutate()}>Clear departed assignment</button>
-        </li>)}</ul> : <p>Assignment cleared</p>}
+          <button className={styles.clearButton} type="button" disabled={!memberId || clearAssignment.isPending} onClick={() => clearAssignment.mutate()}>Assign to me</button>
+        </li>)}</ul> : <p>{memberId && task.assigneeIds.includes(memberId) ? "Assigned to you" : "No assignee"}</p>}
         {clearAssignment.isError ? <p className={styles.error} role="alert">{clearAssignment.error.message}</p> : null}
       </div>
     </section>
