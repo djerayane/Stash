@@ -597,6 +597,7 @@ export class PostgresDatabase implements
       await client.query("INSERT INTO stash_task_note_sources (task_id, note_id) VALUES ($1,$2)", [task.id, noteId]);
       await client.query("INSERT INTO stash_task_block_sources (task_id, note_id, block_id) VALUES ($1,$2,$3)", [task.id, noteId, blockId]);
       await this.#recordPortableProjection(client, "Task", task.id, task.schema, task);
+      await this.#recordDomainActivity(client,memberId,row.workspace_id,"Task",task.id,"task_created_from_block",{},task);
       const sourceBlock: TaskSourceBlockReference = { noteId, blockId };
       return { status: "created" as const, task, sourceBlock };
     });
@@ -1411,30 +1412,35 @@ export class PostgresDatabase implements
     { result: NoteTriageResult } | { status: "project_forbidden" | "target_note_not_found" }
   > {
     switch (change.kind) {
-      case "organized": return this.#organizeInboxNote(client, workspaceId, noteId, change);
-      case "archived": return this.#archiveInboxNote(client, noteId, change);
-      case "linked": return this.#linkInboxNote(client, workspaceId, noteId, change);
+      case "organized": return this.#organizeInboxNote(client, memberId, workspaceId, noteId, change);
+      case "archived": return this.#archiveInboxNote(client, memberId, workspaceId, noteId, change);
+      case "linked": return this.#linkInboxNote(client, memberId, workspaceId, noteId, change);
       case "task_created": return this.#createTaskFromInbox(client, memberId, workspaceId, noteId, change);
     }
   }
 
-  async #organizeInboxNote(client: PoolClient, workspaceId: string, noteId: string, change: Extract<NoteTriageChange, { kind: "organized" }>) {
+  async #organizeInboxNote(client: PoolClient, memberId: string, workspaceId: string, noteId: string, change: Extract<NoteTriageChange, { kind: "organized" }>) {
     const project = await client.query("SELECT 1 FROM stash_projects WHERE id = $1 AND workspace_id = $2", [change.note.projectId, workspaceId]);
     if (!project.rowCount) return { status: "project_forbidden" as const };
+    const before=await client.query<any>("SELECT project_id,tags FROM stash_notes WHERE id=$1",[noteId]);
     await client.query("UPDATE stash_notes SET project_id = $2, tags = $3::jsonb WHERE id = $1", [noteId, change.note.projectId, JSON.stringify(change.note.tags)]);
+    await this.#recordDomainActivity(client,memberId,workspaceId,"Note",noteId,"note_organized",before.rows[0]??{},
+      {projectId:change.note.projectId,tags:change.note.tags});
     return { result: change };
   }
 
-  async #archiveInboxNote(client: PoolClient, noteId: string, change: Extract<NoteTriageChange, { kind: "archived" }>) {
+  async #archiveInboxNote(client: PoolClient, memberId: string, workspaceId: string, noteId: string, change: Extract<NoteTriageChange, { kind: "archived" }>) {
     await client.query("UPDATE stash_notes SET archived_at = $2 WHERE id = $1", [noteId, change.note.archivedAt]);
+    await this.#recordDomainActivity(client,memberId,workspaceId,"Note",noteId,"note_archived",{archivedAt:null},{archivedAt:change.note.archivedAt});
     return { result: change };
   }
 
-  async #linkInboxNote(client: PoolClient, workspaceId: string, noteId: string, change: Extract<NoteTriageChange, { kind: "linked" }>) {
+  async #linkInboxNote(client: PoolClient, memberId: string, workspaceId: string, noteId: string, change: Extract<NoteTriageChange, { kind: "linked" }>) {
     const target = await client.query("SELECT 1 FROM stash_notes WHERE id = $1 AND workspace_id = $2", [change.link.targetNoteId, workspaceId]);
     if (!target.rowCount) return { status: "target_note_not_found" as const };
     await client.query("INSERT INTO stash_note_links (id, workspace_id, source_note_id, target_note_id) VALUES ($1, $2, $3, $4)",
       [change.link.id, workspaceId, noteId, change.link.targetNoteId]);
+    await this.#recordDomainActivity(client,memberId,workspaceId,"NoteLink",change.link.id,"note_link_created",{},change.link);
     return { result: change };
   }
 
@@ -1445,6 +1451,7 @@ export class PostgresDatabase implements
     await client.query("INSERT INTO stash_tasks (id, workspace_id, project_id, task_key, workflow_status_id, title, created_by_account_id, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
       [task.id, workspaceId, task.projectId, task.key, task.status.id, task.title, memberId, task.createdAt]);
     await client.query("INSERT INTO stash_task_note_sources (task_id, note_id) VALUES ($1,$2)", [change.task.id, noteId]);
+    await this.#recordDomainActivity(client,memberId,workspaceId,"Task",task.id,"task_created_from_inbox",{},task);
     return { result: { kind: "task_created" as const, task, projections: [task] as [PortableTaskProjection] } };
   }
 
@@ -1524,6 +1531,7 @@ export class PostgresDatabase implements
         aliases: [...new Set([...current.aliases.filter((alias) => alias !== path), current.path])], revision: current.revision + 1 };
       const projection: PortableNoteLocationProjection = { schema: "stash.note-location.v1", ...location };
       await this.#recordPortableProjection(client, "NoteLocation", noteId, projection.schema, projection);
+      await this.#recordDomainActivity(client,memberId,current.workspaceId,"NoteLocation",noteId,"note_moved",current,location);
       return { status: "moved" as const, location };
     });
   }
@@ -3425,6 +3433,20 @@ export class PostgresDatabase implements
       VALUES ($1,$2,'Task',$3,$4,$5,'member',$6,$7::jsonb,$8::jsonb)`, [activity.id, workspaceId, taskId, action,
       memberId, activity.occurredAt, JSON.stringify(before), JSON.stringify(after)]);
     await this.#recordPortableProjection(client, "Activity", activity.id, activity.schema, activity);
+  }
+
+  async #recordDomainActivity(client: PoolClient, memberId: string, workspaceId: string,
+    kind: ActivityRecord["object"]["kind"], objectId: string, action: string, before: object, after: object): Promise<void> {
+    const actor=await client.query<{name:string}>("SELECT name FROM stash_accounts WHERE id=$1",[memberId]);
+    if(!actor.rows[0]) throw new Error("member_identity_unavailable");
+    const activity:ActivityRecord={schema:"stash.activity.v1",id:randomUUID(),workspaceId,object:{kind,id:objectId},action,
+      actor:{localAccountId:memberId,displayName:actor.rows[0].name},cause:{kind:"member"},occurredAt:new Date().toISOString(),
+      before:{...before},after:{...after}};
+    await client.query(`INSERT INTO stash_workspace_activity
+      (id,workspace_id,object_kind,object_id,action,actor_account_id,cause,occurred_at,before_state,after_state)
+      VALUES($1,$2,$3,$4,$5,$6,'member',$7,$8::jsonb,$9::jsonb)`,[activity.id,workspaceId,kind,objectId,action,memberId,
+      activity.occurredAt,JSON.stringify(activity.before),JSON.stringify(activity.after)]);
+    await this.#recordPortableProjection(client,"Activity",activity.id,activity.schema,activity);
   }
 }
 

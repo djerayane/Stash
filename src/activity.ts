@@ -12,7 +12,7 @@ export interface ActivityRecord {
   schema: "stash.activity.v1";
   id: string;
   workspaceId: string;
-  object: { kind: "Note" | "Task" | "Discussion"; id: string };
+  object: { kind: "Note" | "Task" | "Discussion" | "NoteLocation" | "NoteLink"; id: string };
   action: string;
   actor: PortableIdentity;
   cause: ActivityCause;
