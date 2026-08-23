@@ -4,6 +4,8 @@ import { after, before, describe, it } from "node:test";
 import { startInstance, type DatabaseProbe } from "../src/instance.js";
 import {
   assignmentNotificationInputs,
+  directMentionMemberIds,
+  directMentionNotificationInputs,
   NotificationService,
   type NotificationDelivery,
   type NotificationPreferences,
@@ -11,11 +13,13 @@ import {
   type NotificationTrigger,
 } from "../src/notifications.js";
 import { TaskService, type TaskPlanningReadModel, type TaskPlanningRepository, type TaskPlanningUpdate } from "../src/tasks.js";
+import { DiscussionService, type DiscussionDraft, type DiscussionMessage, type DiscussionRecord, type DiscussionRepository } from "../src/discussions.js";
 import type { ActivityRecord } from "../src/activity.js";
 import type { MemberAccessResolver } from "../src/workspaces-projects.js";
 
 const memberId = "11111111-1111-4111-8111-111111111111";
 const otherMemberId = "22222222-2222-4222-8222-222222222222";
+const inaccessibleMemberId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const workspaceId = "33333333-3333-4333-8333-333333333333";
 const projectId = "44444444-4444-4444-8444-444444444444";
 const otherProjectId = "55555555-5555-4555-8555-555555555555";
@@ -26,7 +30,7 @@ const activity: ActivityRecord = {
   occurredAt: "2026-08-23T12:00:00.000Z", before: { assigneeIds: [] }, after: { assigneeIds: [memberId] },
 };
 
-class NotificationFake implements DatabaseProbe, NotificationRepository, TaskPlanningRepository {
+class NotificationFake implements DatabaseProbe, NotificationRepository, TaskPlanningRepository, DiscussionRepository {
   readonly deliveries: NotificationDelivery[] = [];
   readonly preferences = new Map<string, NotificationPreferences>();
   readonly visibleProjects = new Set([`${memberId}:${projectId}`]);
@@ -36,6 +40,9 @@ class NotificationFake implements DatabaseProbe, NotificationRepository, TaskPla
     assigneeIds: [], priority: "none", labelNames: [], sourceNoteIds: [], linkedNoteIds: [], dependencies: [], developmentLinks: [],
     createdAt: "2026-08-23T11:00:00.000Z", createdBy: { localAccountId: otherMemberId, displayName: "Grace Hopper" }, revision: 1,
     dependencyWarnings: [] };
+  discussion: DiscussionRecord = { id: "88888888-8888-4888-8888-888888888888", workspaceId,
+    target: { kind: "task", taskId: "77777777-7777-4777-8777-777777777777" }, messages: [],
+    createdAt: "2026-08-23T11:30:00.000Z" };
   async verifyConnection() {} async close() {}
   async saveNotification(delivery: NotificationDelivery) {
     if (this.fail) throw new Error("offline");
@@ -87,6 +94,50 @@ class NotificationFake implements DatabaseProbe, NotificationRepository, TaskPla
     }
     return { status: "updated" as const, task: structuredClone(this.task) };
   }
+  async findPortableMemberIdentity(requestedMemberId: string) {
+    return requestedMemberId === memberId ? { localAccountId: memberId, displayName: "Ada Lovelace" }
+      : requestedMemberId === otherMemberId ? { localAccountId: otherMemberId, displayName: "Grace Hopper" } : undefined;
+  }
+  async createDiscussion(requestedMemberId: string, draft: DiscussionDraft) {
+    if (requestedMemberId !== otherMemberId || draft.target.kind !== "task" || draft.target.taskId !== this.task.id)
+      return { status: "target_not_found" as const };
+    this.discussion = { ...structuredClone(draft), workspaceId,
+      target: { kind: "task", taskId: draft.target.taskId } };
+    await this.recordMentionNotifications(requestedMemberId, this.discussion.messages[0]!);
+    return { status: "created" as const, discussion: structuredClone(this.discussion),
+      projection: { schema: "stash.discussion.v1" as const, id: this.discussion.id, workspaceId,
+        target: this.discussion.target, messages: structuredClone(this.discussion.messages), createdAt: this.discussion.createdAt } };
+  }
+  async findDiscussion(requestedMemberId: string, requestedDiscussionId: string) {
+    return [memberId, otherMemberId].includes(requestedMemberId) && requestedDiscussionId === this.discussion.id
+      ? { status: "found" as const, discussion: structuredClone(this.discussion) } : { status: "not_found" as const };
+  }
+  async listNoteDiscussions() { return { status: "not_found" as const }; }
+  async listTaskDiscussions() { return { status: "not_found" as const }; }
+  async addMessage(requestedMemberId: string, requestedDiscussionId: string, message: DiscussionMessage) {
+    const found = await this.findDiscussion(requestedMemberId, requestedDiscussionId);
+    if (found.status === "not_found") return found;
+    this.discussion.messages.push(structuredClone(message));
+    await this.recordMentionNotifications(requestedMemberId, message);
+    return { status: "updated" as const, discussion: structuredClone(this.discussion),
+      projection: { schema: "stash.discussion.v1" as const, id: this.discussion.id, workspaceId,
+        target: this.discussion.target, messages: structuredClone(this.discussion.messages), createdAt: this.discussion.createdAt } };
+  }
+  private async recordMentionNotifications(requestedMemberId: string, message: DiscussionMessage) {
+    const recipients = directMentionMemberIds(message.content).filter((id) => id === memberId && id !== requestedMemberId);
+    if (recipients.length) {
+      const mentionActivity: ActivityRecord = { schema: "stash.activity.v1", id: message.id, workspaceId,
+        object: { kind: "Discussion", id: this.discussion.id }, action: "discussion_message_mentioned_members",
+        actor: message.author, cause: { kind: "member" }, occurredAt: message.createdAt, before: {},
+        after: { messageId: message.id, mentionedMemberIds: recipients } };
+      for (const input of directMentionNotificationInputs(mentionActivity, projectId, recipients)) {
+        await this.saveNotification({ schema: "stash.notification.v1", id: "99999999-9999-4999-8999-999999999999",
+          ...input, workspaceId, createdAt: message.createdAt, delivery: "immediate" });
+      }
+    }
+  }
+  async resolveDiscussion() { return { status: "not_found" as const }; }
+  async createWorkFromMessages() { return { status: "not_found" as const }; }
 }
 
 const access: MemberAccessResolver = { async authenticateBearer(value) {
@@ -102,6 +153,13 @@ describe("Member notifications", () => {
   after(async () => server.close());
   const request = (path: string, method = "GET", body?: unknown, token = "member-token") => fetch(`${baseUrl}${path}`, {
     method, headers: { authorization: `Bearer ${token}`, ...(body ? { "content-type": "application/json" } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+
+  it("derives stable, unique, non-self Discussion mention recipients", () => {
+    assert.deepEqual(directMentionMemberIds(`Hi <@${memberId}> and <@${memberId.toUpperCase()}>; email @member is inert`), [memberId]);
+    assert.deepEqual(directMentionMemberIds("<@not-a-member>"), []);
+    assert.deepEqual(directMentionNotificationInputs(activity, projectId, [memberId, memberId, otherMemberId])
+      .map(({ memberId: recipient }) => recipient), [memberId]);
   });
 
   it("delivers only relevant Activity and suppresses self-authored or disabled changes", async () => {
@@ -223,6 +281,45 @@ describe("Member notifications", () => {
         headers: { authorization: "Bearer member-token", "content-type": "application/json" }, body: JSON.stringify({ assigneeIds: [memberId] }) });
       assert.equal(database.deliveries.length, 1, "self-assignment must be suppressed");
     } finally { await assignmentServer.close(); }
+  });
+
+  it("creates only accessible, non-self direct-mention delivery through the real Discussion reply boundary", async () => {
+    database.deliveries.length = 0;
+    const discussionServer = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin",
+      memberAccess: access, notifications: service, discussions: new DiscussionService(database) });
+    try {
+      const reply = (content: string) => fetch(`${discussionServer.url}/api/discussions/${database.discussion.id}/messages`, {
+        method: "POST", headers: { authorization: "Bearer other-token", "content-type": "application/json" },
+        body: JSON.stringify({ content }),
+      });
+      assert.equal((await reply(`Please review <@${memberId}> <@${memberId}> and ignore <@${otherMemberId}> <@${inaccessibleMemberId}>`)).status, 201);
+      const inbox = await fetch(`${discussionServer.url}/api/notifications`, { headers: { authorization: "Bearer member-token" } });
+      const body = await inbox.json() as { notifications: NotificationDelivery[] };
+      assert.equal(body.notifications.length, 1);
+      assert.equal(body.notifications[0]?.trigger, "direct_mention");
+      assert.equal(body.notifications[0]?.activity.object.id, database.discussion.id);
+      assert.equal(body.notifications[0]?.activity.actor.localAccountId, otherMemberId);
+      assert.deepEqual(body.notifications[0]?.activity.after.mentionedMemberIds, [memberId]);
+      assert.equal((await reply(`Self only <@${otherMemberId}>`)).status, 201);
+      assert.equal(database.deliveries.length, 1, "duplicate and self mentions must not create noise");
+    } finally { await discussionServer.close(); }
+  });
+
+  it("creates direct-mention delivery from the first canonical Discussion message", async () => {
+    database.deliveries.length = 0;
+    const discussionServer = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin",
+      memberAccess: access, notifications: service, discussions: new DiscussionService(database) });
+    try {
+      const created = await fetch(`${discussionServer.url}/api/discussions`, { method: "POST",
+        headers: { authorization: "Bearer other-token", "content-type": "application/json" },
+        body: JSON.stringify({ target: { kind: "task", taskId: database.task.id }, message: `Heads up <@${memberId}>` }),
+      });
+      assert.equal(created.status, 201);
+      const inbox = await fetch(`${discussionServer.url}/api/notifications`, { headers: { authorization: "Bearer member-token" } });
+      const body = await inbox.json() as { notifications: NotificationDelivery[] };
+      assert.equal(body.notifications.length, 1);
+      assert.equal(body.notifications[0]?.activity.action, "discussion_message_mentioned_members");
+    } finally { await discussionServer.close(); }
   });
 
   it("does not expose stand-alone commands that can forge notification source events", async () => {
