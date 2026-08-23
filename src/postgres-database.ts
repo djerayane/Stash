@@ -2414,9 +2414,10 @@ export class PostgresDatabase implements
   }
 
   async applySignalAutomations(signal: { id: string; trigger?: AutomationTrigger }, candidates: ReadonlyArray<AutomationCandidate>) {
-    if (!signal.trigger) return { failures: [] };
+    if (!signal.trigger) return { failed: false, notifications: [] };
     const triggeredSignal = { id: signal.id, trigger: signal.trigger };
-    const failures: AutomationFailureNotification[] = [];
+    const notifications: AutomationFailureNotification[] = [];
+    let failed = false;
     for (const candidate of candidates.filter(({ status }) => status === "confirmed")) {
       try {
         await this.#withTransaction(async (client) => {
@@ -2440,10 +2441,11 @@ export class PostgresDatabase implements
           { kind: "automation", automationId: row.automation_id, signalId: signal.id });
         });
       } catch {
-        failures.push(...await this.recordSignalAutomationFailures(triggeredSignal, [candidate]));
+        failed = true;
+        notifications.push(...await this.recordSignalAutomationFailures(triggeredSignal, [candidate]));
       }
     }
-    return { failures };
+    return { failed, notifications };
   }
 
   async recordSignalAutomationFailures(signal: { id: string; trigger: AutomationTrigger }, candidates: ReadonlyArray<AutomationCandidate>): Promise<AutomationFailureNotification[]> {

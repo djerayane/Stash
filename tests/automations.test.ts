@@ -39,20 +39,21 @@ class AutomationFake implements AutomationRepository, NotificationRepository {
   }
   async applySignalAutomations(signal: { id: string; trigger?: "branch_created" | "pull_request_completed" }, candidates: ReadonlyArray<{ taskId: string; projectId: string; status: "confirmed" | "pending_confirmation" }>) {
     if (this.failExecutions) {
-      if (!this.recipientHasAccess || !candidates.some(({ projectId: candidateProjectId, status }) => candidateProjectId === projectId && status === "confirmed")) return { failures: [] };
+      if (!candidates.some(({ projectId: candidateProjectId, status }) => candidateProjectId === projectId && status === "confirmed")) return { failed: false, notifications: [] };
       const activity: ActivityRecord = { schema: "stash.activity.v1", id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", workspaceId,
         object: { kind: "Task", id: "task-37" }, action: "automation_execution_failed",
         actor: { localAccountId: memberId, displayName: "Automation Owner" },
         cause: { kind: "automation", automationId: "33333333-3333-4333-8333-333333333333", signalId: signal.id },
         occurredAt: "2026-08-23T09:30:00.000Z", before: { status: "running" }, after: { status: "failed" } };
-      return { failures: [{ activity, projectId, memberId, summary: "Automation failed for STASH-37: Automate status" }] };
+      return { failed: true, notifications: this.recipientHasAccess
+        ? [{ activity, projectId, memberId, summary: "Automation failed for STASH-37: Automate status" }] : [] };
     }
     const recipe = this.state.recipes.find((entry) => entry.trigger === signal.trigger);
     if (!recipe || !candidates.some((candidate) => candidate.projectId === projectId && candidate.status === "confirmed")
-      || this.state.transitions.some((transition) => transition.signalId === signal.id)) return { failures: [] };
+      || this.state.transitions.some((transition) => transition.signalId === signal.id)) return { failed: false, notifications: [] };
     this.state.transitions.push({ id: "44444444-4444-4444-8444-444444444444", automationId: recipe.id, signalId: signal.id,
       before: { id: "66666666-6666-4666-8666-666666666666", name: "Ready" }, after: recipe.targetStatus, occurredAt: "2026-08-23T09:00:00.000Z" });
-    return { failures: [] };
+    return { failed: false, notifications: [] };
   }
   async saveNotification(delivery: NotificationDelivery) {
     const existing = this.deliveries.find((entry) => entry.memberId === delivery.memberId && entry.activity.id === delivery.activity.id && entry.trigger === delivery.trigger);
@@ -162,7 +163,7 @@ describe("visible Task status Automations", () => {
     repository.recipientHasAccess = false;
     const departed = await fetch(`${instance.url}/api/github/webhooks`, { method: "POST", headers: { "x-github-event": "create",
       "x-github-delivery": "departed-owner-delivery", "x-hub-signature-256": `sha256=${createHmac("sha256", webhookSecret).update(webhookBody).digest("hex")}` }, body: webhookBody });
-    assert.equal(departed.status, 202);
+    assert.equal(departed.status, 503);
     assert.equal(repository.deliveries.length, 1, "a departed Automation owner must not receive another Project notification");
   });
 });

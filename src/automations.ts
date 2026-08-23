@@ -13,7 +13,7 @@ export interface AutomationRepository {
     { status: "reversed"; transition: AutomationTransition } | "forbidden" | "not_found" | "conflict"
   >;
   applySignalAutomations?(signal: { id: string; trigger?: AutomationTrigger }, candidates: ReadonlyArray<AutomationCandidate>): Promise<
-    { failures: AutomationFailureNotification[] } | void
+    { failed: boolean; notifications: AutomationFailureNotification[] } | void
   >;
 }
 
@@ -68,10 +68,10 @@ export class AutomationService {
   async applySignal(signal: { id: string; trigger?: AutomationTrigger }, candidates: ReadonlyArray<AutomationCandidate>) {
     if (!signal.trigger) return;
     const result = await this.repository.applySignalAutomations?.(signal, candidates);
-    for (const failure of result?.failures ?? []) {
+    for (const failure of result?.notifications ?? []) {
       await this.notifications?.notify({ ...failure, trigger: "automation_failure" });
     }
-    if (result?.failures.length) throw new AutomationExecutionFailed("One or more Automation executions failed");
+    if (result?.failed) throw new AutomationExecutionFailed("One or more Automation executions failed");
   }
 }
 
