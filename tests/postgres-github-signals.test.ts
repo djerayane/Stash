@@ -56,12 +56,20 @@ describe("PostgreSQL GitHub Signal acceptance", { skip: databaseUrl ? false : "S
       instance = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin",
         githubSignals: new GitHubSignalService(database, secret, automations), automations, notifications,
         memberAccess: { async authenticateBearer(value) { return value === "Bearer configurer" ? { accountId: configuringMemberId, sessionId: "configurer" } : undefined; } } });
+      await database.listNotifications(configuringMemberId);
+      await sql.query(`CREATE FUNCTION reject_first_automation_notification() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+        RAISE EXCEPTION 'forced notification delivery failure'; END $$;
+        CREATE TRIGGER reject_first_automation_notification BEFORE INSERT ON stash_notifications FOR EACH ROW
+        EXECUTE FUNCTION reject_first_automation_notification()`);
       const deliver = async (deliveryId: string) => {
         const body = JSON.stringify({ ref_type: "branch", ref: `AUTO-1-${deliveryId}`, installation: { id: 42 },
           repository: { id: 987, html_url: "https://github.com/acme/stash" } });
         return fetch(`${instance!.url}/api/github/webhooks`, { method: "POST", headers: { "x-github-event": "create",
           "x-github-delivery": deliveryId, "x-hub-signature-256": `sha256=${createHmac("sha256", secret).update(body).digest("hex")}` }, body });
       };
+      assert.equal((await deliver("failed-run")).status, 503, "the original notification delivery fails after Activity commits");
+      await automations.enable(ownerId, project.project.id, { trigger: "branch_created", targetStatusId: target.rows[0]!.id });
+      await sql.query("DROP TRIGGER reject_first_automation_notification ON stash_notifications");
       assert.equal((await deliver("failed-run")).status, 503);
       assert.equal((await deliver("failed-run")).status, 503);
       const inbox = await fetch(`${instance.url}/api/notifications`, { headers: { authorization: "Bearer configurer" } });
@@ -75,15 +83,15 @@ describe("PostgreSQL GitHub Signal acceptance", { skip: databaseUrl ? false : "S
       const persistedSignal = await sql.query<{ id: string }>("SELECT id FROM stash_github_signals WHERE delivery_id='failed-run'");
       assert.deepEqual(deliveries[0]!.activity.cause, { kind: "automation", automationId: persistedRecipe.rows[0]!.id,
         signalId: persistedSignal.rows[0]!.id });
-      assert.equal(persistedRecipe.rows[0]!.created_by_account_id, configuringMemberId, "the latest configuring Member owns failure attribution");
+      assert.equal(persistedRecipe.rows[0]!.created_by_account_id, ownerId, "the recipe was reconfigured after the original failure");
       assert.equal((await sql.query("SELECT COUNT(*)::int AS count FROM stash_automation_failures")).rows[0].count, 1);
       assert.equal((await sql.query("SELECT COUNT(*)::int AS count FROM stash_workspace_activity WHERE action='automation_execution_failed'")).rows[0].count, 1);
       assert.equal((await sql.query("SELECT COUNT(*)::int AS count FROM stash_portable_projection_outbox WHERE object_kind='Activity' AND payload->>'action'='automation_execution_failed'")).rows[0].count, 1);
       await sql.query("DELETE FROM stash_organization_memberships WHERE organization_id=$1 AND account_id=$2", [organizationId, configuringMemberId]);
-      assert.equal((await deliver("departed-owner-run")).status, 503);
+      assert.equal((await deliver("failed-run")).status, 503);
       assert.equal((await sql.query("SELECT COUNT(*)::int AS count FROM stash_notifications")).rows[0].count, 1,
         "a departed configuring Member must not receive a new Project notification");
-      assert.equal((await sql.query("SELECT COUNT(*)::int AS count FROM stash_workspace_activity WHERE action='automation_execution_failed'")).rows[0].count, 2,
+      assert.equal((await sql.query("SELECT COUNT(*)::int AS count FROM stash_workspace_activity WHERE action='automation_execution_failed'")).rows[0].count, 1,
         "the failed run remains attributed Activity after recipient access is revoked");
     } finally {
       await instance?.close().catch(() => undefined); if (!instance) await database.close().catch(() => undefined); await sql.end();
