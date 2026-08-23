@@ -117,9 +117,21 @@ be committed. See [the portable projection format](docs/portable-projection.md).
 ```sh
 corepack enable
 pnpm install --frozen-lockfile
+pnpm exec playwright install chromium
 pnpm run check
 pnpm run test
 pnpm run build
 ```
+
+Run each client quality gate independently when working on the React application:
+
+```sh
+pnpm run test:unit
+pnpm run test:integration
+pnpm run test:browser
+pnpm run test:a11y
+```
+
+The browser and accessibility commands build the Vite client, start a real Stash Instance, and wait on its readiness endpoint before running Playwright. The harness shuts the Instance down automatically and does not use arbitrary delays.
 
 Acceptance tests bind a real ephemeral HTTP port and exercise the public protocol. Protocol-compatible database and Member-access fakes provide deterministic ownership, healthy, and recoverable-outage scenarios without bypassing the Instance HTTP boundary. `pnpm run smoke` targets a running, PostgreSQL-backed Instance and verifies both readiness and the browser surface.

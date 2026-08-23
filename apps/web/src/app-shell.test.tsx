@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router";
 import { expect, test } from "vitest";
@@ -9,7 +10,8 @@ function RoutedShell() {
 }
 
 test("navigates inside the React application without replacing the document", () => {
-  render(<MemoryRouter><RoutedShell /></MemoryRouter>);
+  const client = new QueryClient({ defaultOptions: { queries: { enabled: false } } });
+  render(<QueryClientProvider client={client}><MemoryRouter><RoutedShell /></MemoryRouter></QueryClientProvider>);
   expect(screen.getByRole("navigation", { name: "Workspace" })).toBeInTheDocument();
   const notes = screen.getByRole("link", { name: "Notes" });
   fireEvent.click(notes);

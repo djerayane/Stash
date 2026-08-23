@@ -7,24 +7,31 @@
   "type": "module",
   "scripts": {
     "build": "pnpm --recursive --if-present build && pnpm run build:server",
+    "build:web": "pnpm --filter @stash/web build",
     "build:server": "tsc -p tsconfig.build.json",
     "check": "pnpm run check:server && pnpm --recursive --if-present check",
     "check:server": "tsc --noEmit",
     "start": "node dist/main.js",
     "pretest": "pnpm --filter @stash/sync build",
     "test": "pnpm run test:server && pnpm --recursive --if-present test",
+    "test:unit": "pnpm --filter @stash/web exec vitest run --exclude '**/*.integration.test.*'",
+    "test:integration": "pnpm --filter @stash/web run test:integration",
+    "test:browser": "pnpm run build:web && playwright test --grep-invert @a11y",
+    "test:a11y": "pnpm run build:web && playwright test --grep @a11y",
     "test:server": "node --import tsx --test tests/**/*.test.ts",
     "smoke": "node --import tsx scripts/smoke.ts"
   },
   "dependencies": {
-    "@stash/sync": "workspace:*",
     "@simplewebauthn/server": "^13.3.2",
+    "@stash/sync": "workspace:*",
     "gsap": "^3.15.0",
     "nodemailer": "^9.0.5",
     "pg": "^8.16.3",
     "redis": "^5.12.1"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
+    "@playwright/test": "^1.62.1",
     "@types/jsdom": "^30.0.0",
     "@types/node": "^24.3.0",
     "@types/nodemailer": "^8.0.1",

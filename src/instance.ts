@@ -1,4 +1,6 @@
 import { createServer } from "node:http";
+import { readFile } from "node:fs/promises";
+import { extname, resolve, sep } from "node:path";
 
 import {
   createOptionalRedisAcceleration,
@@ -97,6 +99,7 @@ export interface InstanceOptions {
   noteLinks?: NoteLinkService;
   activities?: ActivityService;
   githubArtifacts?: GitHubArtifactService;
+  webClientRoot?: string;
 }
 
 const browserSurface = `<!doctype html>
@@ -113,6 +116,36 @@ const browserSurface = `<!doctype html>
   </head>
   <body><main><h1>Stash</h1><p>This Instance is running.</p></main></body>
 </html>`;
+
+const webContentTypes: Record<string, string> = {
+  ".css": "text/css; charset=utf-8",
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".woff2": "font/woff2",
+};
+
+async function readWebClientFile(root: string, pathname: string): Promise<{ body: Buffer; contentType: string } | undefined> {
+  const normalizedRoot = resolve(root);
+  let relativePath: string;
+  try {
+    relativePath = pathname === "/" ? "index.html" : decodeURIComponent(pathname).replace(/^\/+/, "");
+  } catch {
+    return undefined;
+  }
+  const filePath = resolve(normalizedRoot, relativePath);
+  if (filePath !== normalizedRoot && !filePath.startsWith(`${normalizedRoot}${sep}`)) return undefined;
+  try {
+    return {
+      body: await readFile(filePath),
+      contentType: webContentTypes[extname(filePath)] ?? "application/octet-stream",
+    };
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && (error.code === "ENOENT" || error.code === "EISDIR")) return undefined;
+    throw error;
+  }
+}
 
 export async function startInstance(options: InstanceOptions): Promise<RunningInstance> {
   if (!options.instanceAdminToken) {
@@ -188,7 +221,7 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://stash.invalid");
 
-    if (request.method === "GET" && url.pathname === "/") {
+    if (request.method === "GET" && url.pathname === "/" && !options.webClientRoot) {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       response.end(browserSurface);
       return;
@@ -211,6 +244,17 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
 
     for (const route of routes) {
       if (route.matches(request, url) && await route.handle(request, response, url)) return;
+    }
+
+    if (request.method === "GET" && options.webClientRoot) {
+      const requested = await readWebClientFile(options.webClientRoot, url.pathname);
+      const acceptsHtml = (request.headers.accept ?? "").includes("text/html");
+      const webFile = requested ?? (acceptsHtml ? await readWebClientFile(options.webClientRoot, "/") : undefined);
+      if (webFile) {
+        response.writeHead(200, { "content-type": webFile.contentType });
+        response.end(webFile.body);
+        return;
+      }
     }
 
     json(response, 404, {

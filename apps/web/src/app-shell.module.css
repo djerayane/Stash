@@ -8,4 +8,8 @@
 .eyebrow { margin: 0 0 var(--stash-space-4); color: var(--stash-color-accent); font-weight: 700; }
 .title { max-width: 16ch; margin: 0; font-size: clamp(3rem, 8vw, 7.5rem); line-height: 0.94; letter-spacing: -0.065em; text-wrap: balance; }
 .summary { max-width: 38rem; margin: var(--stash-space-8) 0 0; color: var(--stash-color-muted); font-size: clamp(1.1rem, 2vw, 1.35rem); line-height: 1.6; }
+.instanceStatus { margin: var(--stash-space-6) 0 0; color: var(--stash-color-muted); }
+.instanceError { display: flex; align-items: center; gap: var(--stash-space-4); width: fit-content; margin-top: var(--stash-space-6); padding: var(--stash-space-3) var(--stash-space-4); border: 1px solid var(--stash-color-accent); border-radius: var(--stash-radius-sm); }
+.instanceError:focus { outline: 2px solid var(--stash-color-accent); outline-offset: 3px; }
+.instanceError button { border: 0; border-radius: var(--stash-radius-sm); padding: var(--stash-space-2) var(--stash-space-3); color: var(--stash-color-canvas); background: var(--stash-color-ink); font: inherit; font-weight: 700; cursor: pointer; }
 @media (prefers-reduced-motion: reduce) { .link { transition: none; } }
