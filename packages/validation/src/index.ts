@@ -17,6 +17,40 @@ export function canonicalUuid(value: string): string {
   return isUuid(value) ? value.toLowerCase() : value;
 }
 
+import { agentGrantCapabilities, agentGrantModes, type AgentGrant, type AgentGrantOption, type AgentProposal, type CreateAgentGrantRequest, type CreateAgentGrantResponse, type RevokeAgentGrantResponse } from "@stash/domain-types";
+
+export function createAgentGrantRequest(value: unknown): ValidationResult<CreateAgentGrantRequest> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { ok: false, message: "Agent Grant request is invalid" };
+  const input = value as Record<string, unknown>;
+  if (!Object.keys(input).every((key) => ["organizationId", "projectId", "name", "scopes", "expiresAt"].includes(key))
+    || typeof input.organizationId !== "string" || !isUuid(input.organizationId)
+    || input.projectId !== undefined && (typeof input.projectId !== "string" || !isUuid(input.projectId))
+    || typeof input.name !== "string" || !input.name.trim() || input.name.trim().length > 80
+    || typeof input.expiresAt !== "string" || !Array.isArray(input.scopes) || input.scopes.length < 1 || input.scopes.length > 20)
+    return { ok: false, message: "Agent Grant request is invalid" };
+  const scopes = input.scopes as unknown[];
+  if (new Set(scopes.map((scope) => scope && typeof scope === "object" ? (scope as any).capability : "")).size !== scopes.length
+    || !scopes.every((scope) => scope && typeof scope === "object" && !Array.isArray(scope) && Object.keys(scope).length === 2
+      && agentGrantCapabilities.includes((scope as any).capability) && agentGrantModes.includes((scope as any).mode)
+      && (!(scope as any).capability.endsWith(".read") || (scope as any).mode !== "propose")))
+    return { ok: false, message: "Agent Grant request is invalid" };
+  return { ok: true, value: { organizationId: input.organizationId, ...(input.projectId ? { projectId: input.projectId as string } : {}),
+    name: input.name.trim(), scopes: scopes as CreateAgentGrantRequest["scopes"], expiresAt: input.expiresAt } };
+}
+
+export function agentGrantOptionsResponse(value: unknown): ValidationResult<{ organizations: AgentGrantOption[] }> { return collectionResponse(value, "organizations", isOption); }
+export function agentGrantListResponse(value: unknown): ValidationResult<{ grants: AgentGrant[] }> { return collectionResponse(value, "grants", isGrant); }
+export function agentProposalListResponse(value: unknown): ValidationResult<{ proposals: AgentProposal[] }> { return collectionResponse(value, "proposals", isProposal); }
+export function createAgentGrantResponse(value: unknown): ValidationResult<CreateAgentGrantResponse> { if (!plain(value) || !exact(value, ["status", "grant", "token"]) || value.status !== "created" || typeof value.token !== "string" || !isGrant(value.grant)) return { ok: false, message: "Agent Grant response is invalid" }; return { ok: true, value: value as unknown as CreateAgentGrantResponse }; }
+export function revokeAgentGrantResponse(value: unknown): ValidationResult<RevokeAgentGrantResponse> { if (!plain(value) || !exact(value, ["grantId", "revoked"]) || typeof value.grantId !== "string" || value.revoked !== true) return { ok: false, message: "Agent Grant response is invalid" }; return { ok: true, value: value as unknown as RevokeAgentGrantResponse }; }
+function collectionResponse<K extends "organizations" | "grants" | "proposals", T>(value: unknown, key: K, predicate: (item: unknown) => item is T): ValidationResult<Record<K, T[]>> { if (!plain(value) || !exact(value, [key]) || !Array.isArray(value[key]) || !value[key].every(predicate)) return { ok: false, message: "Agent Grant response is invalid" }; return { ok: true, value: value as Record<K, T[]> }; }
+function isScope(value: unknown): boolean { return plain(value) && exact(value, ["capability", "mode"]) && agentGrantCapabilities.includes(value.capability as any) && agentGrantModes.includes(value.mode as any); }
+function isGrant(value: unknown): value is AgentGrant { return plain(value) && exact(value, ["id", "organizationId", "sponsoringMemberId", "name", "projectId", "scopes", "expiresAt", "createdAt", "revokedAt"], ["id", "organizationId", "sponsoringMemberId", "name", "scopes", "expiresAt", "createdAt"]) && typeof value.id === "string" && typeof value.organizationId === "string" && typeof value.sponsoringMemberId === "string" && typeof value.name === "string" && (value.projectId === undefined || typeof value.projectId === "string") && Array.isArray(value.scopes) && value.scopes.every(isScope) && typeof value.expiresAt === "string" && typeof value.createdAt === "string" && (value.revokedAt === undefined || typeof value.revokedAt === "string"); }
+function isOption(value: unknown): value is AgentGrantOption { return plain(value) && exact(value, ["organizationId", "organizationName", "projects"]) && typeof value.organizationId === "string" && typeof value.organizationName === "string" && Array.isArray(value.projects) && value.projects.every((project) => plain(project) && exact(project, ["id", "name"]) && typeof project.id === "string" && typeof project.name === "string"); }
+function isProposal(value: unknown): value is AgentProposal { return plain(value) && exact(value, ["id", "grantId", "sponsoringMemberId", "capability", "input", "createdAt", "status"]) && typeof value.id === "string" && typeof value.grantId === "string" && typeof value.sponsoringMemberId === "string" && agentGrantCapabilities.includes(value.capability as any) && "input" in value && typeof value.createdAt === "string" && value.status === "pending"; }
+function plain(value: unknown): value is Record<string, unknown> { return Boolean(value && typeof value === "object" && !Array.isArray(value)); }
+function exact(value: Record<string, unknown>, allowed: string[], required = allowed): boolean { return Object.keys(value).every((key) => allowed.includes(key)) && required.every((key) => key in value); }
+
 export function validPortableFilename(value: string): boolean {
   return Boolean(value && value.length <= 255 && value === value.trim() && !/[\/\\\u0000-\u001f\u007f]/.test(value)
     && !/[. ]$/.test(value) && value !== "." && value !== ".."

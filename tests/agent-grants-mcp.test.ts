@@ -17,6 +17,7 @@ class RepositoryFake implements AgentGrantRepository {
   async findActiveAgentGrant(lookup: string) { return this.grants.find((grant) => grant.tokenLookup === lookup && !grant.revokedAt); }
   async agentGrantOptions(actorId: string) { return actorId === "member" ? [{ organizationId, organizationName: "Test Organization", projects: [] }] : []; }
   async createAgentProposal(proposal: import("../src/agent-grants.js").AgentProposal) { this.proposals.push(proposal); }
+  async listAgentProposals(actorId: string, requestedOrganizationId: string) { return actorId === "member" && requestedOrganizationId === organizationId ? this.proposals : undefined; }
   async agentGrantTargetAllowed(grant: AgentGrant, target: { workspaceId?: string; projectId?: string }) { return grant.organizationId === organizationId
     && (!grant.projectId || target.projectId === grant.projectId) && target.workspaceId !== "77777777-7777-4777-8777-777777777777"; }
 }
@@ -51,11 +52,19 @@ describe("Agent Grants and MCP", () => {
     const repository = await run(); const { response, body } = await issue([{ capability: "note.read", mode: "direct" }, { capability: "note.write", mode: "propose" }, { capability: "task.write", mode: "deny" }]);
     assert.equal(response.status, 201); assert.match(body.token, /^stash_agent_/); assert.equal("token" in body.grant, false);
     const tools = await fetch(`${instance!.url}/mcp`, { method: "POST", headers: { authorization: `Bearer ${body.token}`, "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
+    const initialized = await fetch(`${instance!.url}/mcp`, { method: "POST", headers: { authorization: `Bearer ${body.token}`, "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: "init", method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "compatibility-test", version: "1" } } }) });
+    assert.equal((await initialized.json() as any).result.protocolVersion, "2025-06-18");
     const toolsBody = await tools.json() as any; assert.deepEqual(toolsBody.result.tools.map((tool: any) => tool.name), ["stash.note.read", "stash.note.write"]);
+    assert.deepEqual(toolsBody.result.tools[0].inputSchema.required, ["noteId"]); assert.equal(toolsBody.result.tools[0].inputSchema.additionalProperties, false);
+    assert.deepEqual(toolsBody.result.tools[1].inputSchema.required, ["workspaceId", "input"]); assert.equal(toolsBody.result.tools[1].inputSchema.properties.input.additionalProperties, false);
     const read = await fetch(`${instance!.url}/mcp`, { method: "POST", headers: { authorization: `Bearer ${body.token}`, "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "stash.note.read", arguments: { noteId: "22222222-2222-4222-8222-222222222222" } } }) });
     assert.equal((await read.json() as any).result.structuredContent.result.content, "Authorized context");
     const proposal = await fetch(`${instance!.url}/mcp`, { method: "POST", headers: { authorization: `Bearer ${body.token}`, "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "stash.note.write", arguments: { workspaceId: "55555555-5555-4555-8555-555555555555", input: { content: "Proposed contribution" } } } }) });
     assert.equal((await proposal.json() as any).result.structuredContent.status, "pending"); assert.equal(repository.proposals.length, 1);
+    const proposals = await fetch(`${instance!.url}/api/organizations/${organizationId}/agent-grants/proposals`, { headers: { authorization: "Bearer member-session" } });
+    assert.deepEqual((await proposals.json() as any).proposals.map((item: any) => item.status), ["pending"]);
+    const extra = await fetch(`${instance!.url}/mcp`, { method: "POST", headers: { authorization: `Bearer ${body.token}`, "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "stash.note.read", arguments: { noteId: "22222222-2222-4222-8222-222222222222", unexpected: true } } }) });
+    assert.equal((await extra.json() as any).error.code, -32602);
     const denied = await fetch(`${instance!.url}/mcp`, { method: "POST", headers: { authorization: `Bearer ${body.token}`, "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "stash.task.write" } }) });
     assert.equal((await denied.json() as any).error.code, -32003);
   });

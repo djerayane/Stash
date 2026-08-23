@@ -29,5 +29,10 @@
 .list li div { display: grid; gap: .3rem; }
 .list button { color: var(--stash-color-error); background: transparent; border: 1px solid currentColor; }
 .alert { margin: 2rem 0; padding: 1rem; color: var(--stash-color-error); border: 1px solid currentColor; }
+.dialogOverlay { position: fixed; inset: 0; z-index: 20; background: rgb(20 20 18 / .58); }
+.dialog { position: fixed; z-index: 21; top: 50%; left: 50%; width: min(34rem, calc(100vw - 2rem)); padding: 2rem; transform: translate(-50%,-50%); color: var(--stash-color-ink); background: var(--stash-color-surface); border: 1px solid var(--stash-border-strong); border-radius: var(--stash-radius-md); box-shadow: 0 1.5rem 5rem rgb(0 0 0 / .24); }
+.dialog h2 { margin-top: 0; font-size: 1.6rem; }.dialog p,.dialog li { line-height: 1.55; }.dialogActions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .75rem; margin-top: 1.5rem; }
+.dialogActions button { min-height: 2.75rem; padding: .7rem 1rem; color: var(--stash-color-ink); background: transparent; border: 1px solid var(--stash-border-strong); border-radius: var(--stash-radius-sm); font-weight: 700; }.dialogActions button:last-child { color: var(--stash-color-surface); background: var(--stash-color-ink); }
+.list details { margin-top: .35rem; }.list summary { cursor: pointer; font-weight: 650; }.list pre { max-width: 34rem; overflow: auto; padding: .75rem; white-space: pre-wrap; background: var(--stash-color-surface); border-radius: var(--stash-radius-sm); }
 @media (max-width: 700px) { .page { padding: 1.25rem; } .header { padding-bottom: 2.5rem; } .composer,.list,.credential { grid-template-columns: 1fr; gap: 1.5rem; padding: 2.5rem 0; } .capability { grid-template-columns: 1fr; } }
 @media (prefers-reduced-motion: reduce) { .page *, .page *::before, .page *::after { scroll-behavior: auto !important; transition-duration: .001ms !important; animation-duration: .001ms !important; } }

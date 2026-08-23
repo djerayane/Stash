@@ -1,5 +1,20 @@
 export type EntityId = string;
 
+export const agentGrantModes = ["direct", "propose", "deny"] as const;
+export const agentGrantCapabilities = ["note.read", "note.write", "task.read", "task.write"] as const;
+export type AgentGrantMode = (typeof agentGrantModes)[number];
+export type AgentGrantCapability = (typeof agentGrantCapabilities)[number];
+export interface AgentGrantScope { readonly capability: AgentGrantCapability; readonly mode: AgentGrantMode }
+export interface AgentGrant {
+  id: string; organizationId: string; sponsoringMemberId: string; name: string;
+  projectId?: string; scopes: AgentGrantScope[]; expiresAt: string; createdAt: string; revokedAt?: string;
+}
+export interface AgentGrantOption { readonly organizationId: string; readonly organizationName: string; readonly projects: ReadonlyArray<{ id: string; name: string }> }
+export interface CreateAgentGrantRequest { readonly organizationId: string; readonly projectId?: string; readonly name: string; readonly scopes: AgentGrantScope[]; readonly expiresAt: string }
+export interface CreateAgentGrantResponse { readonly status: "created"; readonly grant: AgentGrant; readonly token: string }
+export interface RevokeAgentGrantResponse { readonly grantId: string; readonly revoked: true }
+export interface AgentProposal { readonly id: string; readonly grantId: string; readonly sponsoringMemberId: string; readonly capability: AgentGrantCapability; readonly input: unknown; readonly createdAt: string; readonly status: "pending" }
+
 export interface WorkspaceSummary {
   readonly id: EntityId;
   readonly name: string;

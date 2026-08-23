@@ -10,7 +10,10 @@ export function agentGrantRoutes(service: AgentGrantService, access: MemberAcces
       if (!member) { json(response, 401, { error: "unauthorized", message: "A valid Member session is required." }); return true; }
       try {
         if (url.pathname === "/api/agent-grant-options") { if (request.method !== "GET") json(response, 405, { error: "method_not_allowed", message: "Only Agent Grant option discovery is supported." }); else json(response, 200, { organizations: await service.options(member.accountId) }); return true; }
-        const parts = url.pathname.split("/"); const organizationId = decodeURIComponent(parts[3]!); const grantId = parts[5] ? decodeURIComponent(parts[5]) : undefined;
+        const parts = url.pathname.split("/"); const organizationId = decodeURIComponent(parts[3]!); const grantId = parts[5] && parts[5] !== "proposals" ? decodeURIComponent(parts[5]) : undefined;
+        if (request.method === "GET" && parts[5] === "proposals") { const proposals = await service.proposals(member.accountId, organizationId);
+          if (!proposals) json(response, 403, { error: "agent_proposals_forbidden", message: "Only the sponsoring Member can review these Proposals." });
+          else json(response, 200, { proposals }); return true; }
         if (request.method === "GET" && !grantId) {
           const grants = await service.list(member.accountId, organizationId);
           if (!grants) json(response, 403, { error: "agent_grants_forbidden", message: "Only the sponsoring Member can view their Agent Grants." });

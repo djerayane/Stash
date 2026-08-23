@@ -4,6 +4,17 @@ export interface StashApiClientOptions {
   readonly memberToken?: string;
 }
 
+import type { AgentGrant, AgentGrantOption, AgentProposal, CreateAgentGrantRequest, CreateAgentGrantResponse } from "@stash/domain-types";
+import { agentGrantListResponse, agentGrantOptionsResponse, agentProposalListResponse, createAgentGrantResponse, revokeAgentGrantResponse } from "@stash/validation";
+
+export interface AgentGrantsApi {
+  options(): Promise<{ organizations: AgentGrantOption[] }>;
+  list(organizationId: string): Promise<{ grants: AgentGrant[] }>;
+  create(input: CreateAgentGrantRequest): Promise<CreateAgentGrantResponse>;
+  revoke(organizationId: string, grantId: string): Promise<{ grantId: string; revoked: true }>;
+  proposals(organizationId: string): Promise<{ proposals: AgentProposal[] }>;
+}
+
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 export interface MobileProtocolClientOptions {
@@ -52,6 +63,24 @@ export function createStashApiClient(options: StashApiClientOptions) {
       if (!response.ok) throw await apiError(response);
       return response.json() as Promise<T>;
     },
+  };
+}
+
+export function createAgentGrantsApi(options: StashApiClientOptions): AgentGrantsApi {
+  const request = options.fetch ?? globalThis.fetch; const baseUrl = options.baseUrl.replace(/\/$/, "");
+  const send = async (path: string, init?: RequestInit): Promise<unknown> => {
+    const response = await request(`${baseUrl}${path}`, { ...init, credentials: "include", headers: {
+      ...(options.memberToken ? { authorization: `Bearer ${options.memberToken}` } : {}), ...(init?.body ? { "content-type": "application/json" } : {}), ...init?.headers,
+    } });
+    if (!response.ok) throw await apiError(response); return response.json() as Promise<unknown>;
+  };
+  const validated = async <T>(promise: Promise<unknown>, parse: (value: unknown) => { ok: boolean; value?: T; message?: string }) => { const result = parse(await promise); if (!result.ok || !result.value) throw new StashApiError(502, result.message ?? "Stash returned an invalid Agent Grant response"); return result.value; };
+  const root = (organizationId: string) => `/api/organizations/${encodeURIComponent(organizationId)}/agent-grants`;
+  return {
+    options: () => validated(send("/api/agent-grant-options"), agentGrantOptionsResponse), list: (organizationId) => validated(send(root(organizationId)), agentGrantListResponse),
+    create: (input) => validated(send(root(input.organizationId), { method: "POST", body: JSON.stringify(input) }), createAgentGrantResponse),
+    revoke: (organizationId, grantId) => validated(send(`${root(organizationId)}/${encodeURIComponent(grantId)}`, { method: "DELETE" }), revokeAgentGrantResponse),
+    proposals: (organizationId) => validated(send(`${root(organizationId)}/proposals`), agentProposalListResponse),
   };
 }
 

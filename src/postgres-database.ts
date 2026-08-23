@@ -45,7 +45,7 @@ import { Schema } from "prosemirror-model";
 import { InvalidCollaborationUpdate, type CollaborationSnapshot, type NoteCollaborationRepository } from "./note-collaboration.js";
 import type { WorkspaceSearchQuery, WorkspaceSearchRepository, WorkspaceSearchResult } from "./workspace-search.js";
 import { proseMirrorToRichText, richTextToProseMirror } from "@stash/rich-text";
-import type { AgentGrant, AgentGrantOptions, AgentProposal, StoredAgentGrant } from "./agent-grants.js";
+import type { AgentGrant, AgentGrantOption, AgentProposal, StoredAgentGrant } from "./agent-grants.js";
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
@@ -4678,7 +4678,7 @@ export class PostgresDatabase implements
     } finally { client.release(); }
   }
 
-  async agentGrantOptions(actorId: string): Promise<AgentGrantOptions[]> {
+  async agentGrantOptions(actorId: string): Promise<AgentGrantOption[]> {
     const client = await this.#pool.connect();
     try {
       await this.#ensureMemberDepartureSchema(client);
@@ -4699,6 +4699,18 @@ export class PostgresDatabase implements
     await this.#pool.query(`INSERT INTO stash_agent_proposals (id,grant_id,sponsoring_member_id,capability,input,status,created_at)
       VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7)`, [proposal.id, proposal.grantId, proposal.sponsoringMemberId, proposal.capability,
       JSON.stringify(proposal.input), proposal.status, proposal.createdAt]);
+  }
+
+  async listAgentProposals(actorId: string, organizationId: string): Promise<AgentProposal[] | undefined> {
+    const client = await this.#pool.connect(); try { await this.#ensureMemberDepartureSchema(client);
+    const membership = await client.query("SELECT 1 FROM stash_organization_memberships WHERE organization_id=$1 AND account_id=$2", [organizationId, actorId]);
+    if (!membership.rowCount) return undefined;
+    const result = await client.query<any>(`SELECT proposal.id,proposal.grant_id,proposal.sponsoring_member_id,proposal.capability,proposal.input,proposal.created_at,proposal.status
+      FROM stash_agent_proposals proposal JOIN stash_agent_grants grant ON grant.id=proposal.grant_id
+      WHERE grant.organization_id=$1 AND proposal.sponsoring_member_id=$2 AND proposal.status='pending' ORDER BY proposal.created_at DESC,proposal.id`, [organizationId, actorId]);
+    return result.rows.map((row) => ({ id: row.id, grantId: row.grant_id, sponsoringMemberId: row.sponsoring_member_id,
+      capability: row.capability, input: row.input, createdAt: new Date(row.created_at).toISOString(), status: "pending" }));
+    } finally { client.release(); }
   }
 
   async agentGrantTargetAllowed(grant: AgentGrant, target: { workspaceId?: string; projectId?: string }): Promise<boolean> {
