@@ -213,8 +213,8 @@ export class NoteService {
     const createdBy = await this.#repository.findPortableMemberIdentity(memberId);
     if (!createdBy) throw new Error("member_identity_unavailable");
     const content = value.content ?? decisionStarter;
-    const tags = [...new Set([...(value.templateId === "decision" ? ["decision"] : []),
-      ...(value.tags ?? []).map((tag) => tag.trim())])];
+    const tags = [...new Set((value.tags ?? (value.templateId === "decision" ? ["decision"] : []))
+      .map((tag) => tag.trim()))];
     const note: NoteRecord = {
       id: randomUUID(),
       workspaceId,

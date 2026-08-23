@@ -477,12 +477,20 @@ export class PostgresDatabase implements
       const access = await client.query(`SELECT 1 FROM stash_workspaces workspace WHERE workspace.id = $1 AND (
         (workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR
         (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
-          WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)))`, [workspaceId, memberId]);
+          WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)) OR
+        EXISTS (SELECT 1 FROM stash_projects project JOIN stash_project_guests guest ON guest.project_id = project.id
+          WHERE project.workspace_id = workspace.id AND guest.account_id = $2))`, [workspaceId, memberId]);
       if (!access.rowCount) return { status: "workspace_forbidden" as const };
-      const result = await client.query<any>(`SELECT id, workspace_id, project_id, content, document, revision, tags, reminder_at,
-        created_by_account_id, created_at, archived_at FROM stash_notes
-        WHERE workspace_id = $1 AND archived_at IS NULL AND tags @> $2::jsonb ORDER BY created_at, id`,
-      [workspaceId, JSON.stringify([tag])]);
+      const result = await client.query<any>(`SELECT note.id, note.workspace_id, note.project_id, note.content, note.document, note.revision,
+        note.tags, note.reminder_at, note.created_by_account_id, note.created_at, note.archived_at
+        FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id = note.workspace_id
+        WHERE note.workspace_id = $1 AND note.archived_at IS NULL AND note.tags @> $2::jsonb AND (
+          (workspace.owner_type = 'personal' AND workspace.personal_owner_id = $3) OR
+          (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+            WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $3)) OR
+          (note.project_id IS NOT NULL AND EXISTS (SELECT 1 FROM stash_project_guests guest
+            WHERE guest.project_id = note.project_id AND guest.account_id = $3))) ORDER BY note.created_at, note.id`,
+      [workspaceId, JSON.stringify([tag]), memberId]);
       return { status: "found" as const, notes: result.rows.map((row: any) => ({ id: row.id, workspaceId: row.workspace_id,
         content: row.content, document: row.document, revision: row.revision, tags: row.tags, createdByMemberId: row.created_by_account_id,
         createdAt: new Date(row.created_at).toISOString(), ...(row.project_id ? { projectId: row.project_id } : {}),

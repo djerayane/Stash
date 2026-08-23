@@ -197,8 +197,8 @@ reports the projection as `recorded` only after both writes succeed; it does not
 Portable Workspace Export has already been generated.
 
 Templates are optional creation-time suggestions, not durable Note types. The built-in Decision
-template supplies editable Markdown starter content and the ordinary `decision` tag. A Member may
-replace the starter content and add properties before creation. Decision Notes are discovered by
+template supplies editable Markdown starter content and suggests the ordinary `decision` tag when
+tags are omitted. A Member may replace the starter content or suggested properties before creation. Decision Notes are discovered by
 filtering active, permission-visible Notes by that tag, so the resulting `stash.note.v1` projection
 remains understandable and editable without Template support.
 
