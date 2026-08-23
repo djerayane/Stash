@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 
 export const agentGrantModes = ["direct", "propose", "deny"] as const;
+export const agentGrantCapabilities = ["workspace.read", "note.write", "task.write"] as const;
 export type AgentGrantMode = (typeof agentGrantModes)[number];
 
 export interface AgentGrantScope { capability: string; mode: AgentGrantMode }
@@ -67,8 +68,9 @@ function isCreateInput(value: unknown): value is { organizationId: string; proje
     && isUuid(input.organizationId) && (input.projectId === undefined || isUuid(input.projectId))
     && typeof input.name === "string" && input.name.trim().length > 0 && input.name.trim().length <= 80
     && typeof input.expiresAt === "string" && Array.isArray(input.scopes) && input.scopes.length > 0 && input.scopes.length <= 20
+    && new Set(input.scopes.map((scope) => scope && typeof scope === "object" ? (scope as AgentGrantScope).capability : "")).size === input.scopes.length
     && input.scopes.every((scope) => scope && typeof scope === "object" && !Array.isArray(scope)
       && Object.keys(scope).length === 2 && typeof (scope as AgentGrantScope).capability === "string"
-      && /^[a-z][a-z0-9]*(?:\.[a-z0-9]+)+$/.test((scope as AgentGrantScope).capability)
+      && agentGrantCapabilities.includes((scope as AgentGrantScope).capability as (typeof agentGrantCapabilities)[number])
       && agentGrantModes.includes((scope as AgentGrantScope).mode));
 }

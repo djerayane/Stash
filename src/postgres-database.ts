@@ -4654,8 +4654,8 @@ export class PostgresDatabase implements
       const result = await client.query(`UPDATE stash_agent_grants SET revoked_at=CURRENT_TIMESTAMP
         WHERE id=$1 AND organization_id=$2 AND sponsoring_member_id=$3 AND revoked_at IS NULL RETURNING id`, [grantId, organizationId, actorId]);
       if (result.rowCount) return "revoked";
-      const existing = await client.query("SELECT sponsoring_member_id FROM stash_agent_grants WHERE id=$1 AND organization_id=$2", [grantId, organizationId]);
-      return existing.rowCount ? "forbidden" : "not_found";
+      const existing = await client.query<{ sponsoring_member_id: string }>("SELECT sponsoring_member_id FROM stash_agent_grants WHERE id=$1 AND organization_id=$2", [grantId, organizationId]);
+      return !existing.rowCount ? "not_found" : existing.rows[0]!.sponsoring_member_id === actorId ? "revoked" : "forbidden";
     } finally { client.release(); }
   }
 
