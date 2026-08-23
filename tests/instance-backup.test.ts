@@ -37,10 +37,11 @@ class Probe implements DatabaseProbe { async verifyConnection() {} async close()
 class FakeRestoreTarget implements InstanceBackupRestoreTarget {
   readonly calls: string[] = [];
   commitFailure: Error | undefined;
+  rollbackFailure: Error | undefined;
   async validateConfiguration(configuration: Record<string, unknown>) { assert.equal(configuration.attachmentStorage, "local"); this.calls.push("configuration"); }
   async prepareAttachments(path: string, paths: ReadonlyArray<string>) { assert.match(path, /attachments$/); assert.deepEqual(paths, ["workspace/attachment"]); this.calls.push("prepare"); return "prepared"; }
   async snapshotDatabase(path: string) { await writeFile(path, "rollback"); this.calls.push("snapshot"); }
-  async restoreDatabase(path: string) { this.calls.push(path.endsWith("database.dump") ? "database" : "rollback"); }
+  async restoreDatabase(path: string) { const rollback = !path.endsWith("database.dump"); this.calls.push(rollback ? "rollback" : "database"); if (rollback && this.rollbackFailure) throw this.rollbackFailure; }
   async commitAttachments() { this.calls.push("commit"); if (this.commitFailure) throw this.commitFailure; }
   async discardPreparedAttachments() { this.calls.push("discard"); }
 }
@@ -135,6 +136,72 @@ describe("coordinated Instance Backup", () => {
     const target = new FakeRestoreTarget(); target.commitFailure = new Error("attachment swap unavailable");
     await assert.rejects(service.restore(path, target, { dryRun: false }), /attachment swap unavailable/);
     assert.deepEqual(target.calls, ["configuration", "prepare", "snapshot", "database", "commit", "rollback", "discard"]);
+    assert.equal(service.availability(), "available");
+  });
+
+  it("gates all application API traffic before the rollback snapshot and throughout a running restore", async () => {
+    const root = await mkdtemp(join(tmpdir(), "stash-backup-concurrency-")); const backupRoot = join(root, "scheduled");
+    const service = new InstanceBackupService(new FakeSource(), { masterKey }); await service.create(join(backupRoot, "release-ready"));
+    const target = new FakeRestoreTarget(); let continueSnapshot!: () => void; let snapshotStarted!: () => void;
+    const snapshotGate = new Promise<void>((resolve) => { continueSnapshot = resolve; });
+    const enteredSnapshot = new Promise<void>((resolve) => { snapshotStarted = resolve; });
+    target.snapshotDatabase = async (path) => { target.calls.push("snapshot"); snapshotStarted(); await snapshotGate; await writeFile(path, "rollback"); };
+    let continueApplicationRead!: () => void; let applicationReadStarted!: () => void;
+    const applicationReadGate = new Promise<void>((resolve) => { continueApplicationRead = resolve; });
+    const enteredApplicationRead = new Promise<void>((resolve) => { applicationReadStarted = resolve; });
+    const database: DatabaseProbe = { async verifyConnection() {}, async close() {}, async resolveClientSessionPrincipal() {
+      applicationReadStarted(); await applicationReadGate; return { member: { id: "member", name: "Member", email: "member@stash.test" },
+        workspace: { id: "workspace", name: "Workspace" }, capabilities: [] }; } };
+    const instance = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin",
+      memberAccess: { async authenticateBearer(authorization) { return authorization === "Bearer member" ? { accountId: "member", sessionId: "session" } : undefined; } },
+      instanceBackups: service, instanceBackupRoot: backupRoot, instanceBackupRestoreTarget: target }); instances.push(instance);
+    const headers = { authorization: "Bearer admin", "content-type": "application/json" };
+    const activeRead = fetch(`${instance.url}/api/client-session`, { headers: { authorization: "Bearer member" } }); await enteredApplicationRead;
+    const restore = fetch(`${instance.url}/api/instance/backups/release-ready/restore`, { method: "POST", headers,
+      body: JSON.stringify({ dryRun: false, confirmation: "release-ready" }) });
+    while (service.availability() !== "restore_in_progress") await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(service.availability(), "restore_in_progress");
+    assert.deepEqual(target.calls, ["configuration", "prepare"]);
+    assert.equal((await fetch(`${instance.url}/api/client-session`, { headers })).status, 503);
+    continueApplicationRead(); assert.equal((await activeRead).status, 200); await enteredSnapshot;
+    assert.deepEqual(target.calls, ["configuration", "prepare", "snapshot"]);
+    for (const request of [
+      fetch(`${instance.url}/api/client-session`, { headers }),
+      fetch(`${instance.url}/api/client-session`, { method: "HEAD", headers }),
+      fetch(`${instance.url}/api/v1/workspaces`, { headers }),
+      fetch(`${instance.url}/api/instance/backups/release-ready/restore`, { headers }),
+      fetch(`${instance.url}/api/v1/workspaces`, { method: "POST", headers, body: "{}" }),
+    ]) {
+      const response = await request; assert.equal(response.status, 503); assert.equal(response.headers.get("cache-control"), "no-store");
+    }
+    const readiness = await fetch(`${instance.url}/health/ready`); assert.equal(readiness.status, 503);
+    assert.equal((await readiness.json() as { error: string }).error, "restore_in_progress");
+    assert.equal((await fetch(`${instance.url}/api/instance/backups/health`, { headers })).status, 200);
+    const concurrent = await fetch(`${instance.url}/api/instance/backups/release-ready/restore`, { method: "POST", headers,
+      body: JSON.stringify({ dryRun: true }) });
+    assert.equal(concurrent.status, 409);
+
+    continueSnapshot(); const restored = await restore; assert.equal(restored.status, 200);
+    assert.equal(service.availability(), "restore_restart_required");
+    assert.equal((await fetch(`${instance.url}/api/client-session`, { headers })).status, 503);
+  });
+
+  it("never resumes traffic when Attachment failure and database rollback both fail", async () => {
+    const root = await mkdtemp(join(tmpdir(), "stash-backup-double-failure-")); const backupRoot = join(root, "scheduled");
+    const service = new InstanceBackupService(new FakeSource(), { masterKey }); await service.create(join(backupRoot, "release-ready"));
+    const target = new FakeRestoreTarget(); target.commitFailure = new Error("attachment swap unavailable"); target.rollbackFailure = new Error("database rollback unavailable");
+    const instance = await startInstance({ database: new Probe(), host: "127.0.0.1", port: 0, instanceAdminToken: "admin",
+      instanceBackups: service, instanceBackupRoot: backupRoot, instanceBackupRestoreTarget: target }); instances.push(instance);
+    const headers = { authorization: "Bearer admin", "content-type": "application/json" };
+    const response = await fetch(`${instance.url}/api/instance/backups/release-ready/restore`, { method: "POST", headers,
+      body: JSON.stringify({ dryRun: false, confirmation: "release-ready" }) });
+    assert.equal(response.status, 503); assert.equal((await response.json() as { error: string }).error, "restore_failed");
+    assert.deepEqual(target.calls, ["configuration", "prepare", "snapshot", "database", "commit", "rollback", "discard"]);
+    assert.equal(service.availability(), "restore_restart_required");
+    for (const path of ["/api/client-session", "/api/v1/workspaces"]) assert.equal((await fetch(`${instance.url}${path}`, { headers })).status, 503);
+    const readiness = await fetch(`${instance.url}/health/ready`); assert.equal(readiness.status, 503);
+    assert.equal((await readiness.json() as { error: string }).error, "restore_restart_required");
   });
 
   it("rejects unlisted files, symbolic links, and unlisted directories before restore", async () => {
@@ -209,7 +276,8 @@ describe("coordinated Instance Backup", () => {
       body: JSON.stringify({ dryRun: false, confirmation: "release-ready" }) });
     assert.equal(restored.status, 200); assert.deepEqual(await restored.json(), { status: "restored", backup: "release-ready" });
     assert.deepEqual(target.calls, ["configuration", "configuration", "prepare", "snapshot", "database", "commit", "discard"]);
-    const restartGate = await fetch(`${instance.url}/api/instance/backups/health`, { headers });
+    assert.equal((await fetch(`${instance.url}/api/instance/backups/health`, { headers })).status, 200);
+    const restartGate = await fetch(`${instance.url}/api/client-session`, { headers });
     assert.equal(restartGate.status, 503); assert.equal((await restartGate.json() as { error: string }).error, "restore_restart_required");
   });
 

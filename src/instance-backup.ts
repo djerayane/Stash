@@ -38,6 +38,7 @@ export type BackupHealth =
   | { status: "failed"; error: "backup_failed" }
   | { status: "unverified"; createdAt: string; schema: typeof instanceBackupSchema }
   | { status: "verified"; createdAt: string; verifiedAt: string; schema: typeof instanceBackupSchema };
+export type InstanceBackupAvailability = "available" | "backup_in_progress" | "restore_in_progress" | "restore_restart_required";
 
 async function fileIntegrity(path: string): Promise<{ bytes: number; sha256: string }> {
   const metadata = await lstat(path);
@@ -75,8 +76,8 @@ function childPath(root: string, relative: string): string {
 
 export class InstanceBackupService {
   #health: BackupHealth = { status: "never_created" };
-  #running = false;
-  #restartRequired = false;
+  #operation: "idle" | "backup" | "restore_preflight" | "restoring" | "restart_required" = "idle";
+  #restoreUnavailableBarrier: () => Promise<void> = async () => undefined;
   readonly #key: Buffer;
   readonly #now: () => Date;
   readonly #instanceVersion: string;
@@ -88,12 +89,19 @@ export class InstanceBackupService {
   }
 
   health(): BackupHealth { return this.#health; }
-  isRunning(): boolean { return this.#running; }
-  requiresRestart(): boolean { return this.#restartRequired; }
+  isRunning(): boolean { return this.#operation === "backup"; }
+  availability(): InstanceBackupAvailability {
+    if (this.#operation === "backup") return "backup_in_progress";
+    if (this.#operation === "restoring") return "restore_in_progress";
+    if (this.#operation === "restart_required") return "restore_restart_required";
+    return "available";
+  }
+  requiresRestart(): boolean { return this.#operation === "restart_required"; }
+  setRestoreUnavailableBarrier(barrier: () => Promise<void>): void { this.#restoreUnavailableBarrier = barrier; }
 
   async create(destination: string): Promise<{ status: "created"; manifest: BackupManifest }> {
-    if (this.#running) throw new Error("an Instance Backup is already running");
-    this.#running = true;
+    if (this.#operation !== "idle") throw new Error("an Instance Backup operation is already running");
+    this.#operation = "backup";
     const temporary = `${destination}.partial-${randomUUID()}`;
     try {
       await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
@@ -137,7 +145,7 @@ export class InstanceBackupService {
       await rm(temporary, { recursive: true, force: true }).catch(() => undefined);
       this.#health = { status: "failed", error: "backup_failed" };
       throw error;
-    } finally { this.#running = false; }
+    } finally { this.#operation = "idle"; }
   }
 
   async verify(source: string): Promise<{ status: "verified"; schema: typeof instanceBackupSchema; files: number }> {
@@ -180,8 +188,8 @@ export class InstanceBackupService {
   }
 
   async restore(source: string, target: InstanceBackupRestoreTarget, options: { dryRun: boolean }): Promise<{ status: "verified" | "restored" }> {
-    if (this.#running) throw new Error("an Instance Backup operation is already running");
-    this.#running = true;
+    if (this.#operation !== "idle") throw new Error("an Instance Backup operation is already running");
+    this.#operation = "restore_preflight";
     try {
     await this.verify(source);
     let configuration: Record<string, unknown>;
@@ -191,28 +199,37 @@ export class InstanceBackupService {
       configuration = decoded as Record<string, unknown>;
     } catch { throw new Error("Instance Backup configuration is invalid"); }
     await target.validateConfiguration(configuration);
-    if (options.dryRun) return { status: "verified" };
+    if (options.dryRun) { this.#operation = "idle"; return { status: "verified" }; }
     const manifest = JSON.parse(await readFile(join(source, "manifest.json"), "utf8")) as BackupManifest;
     const attachmentPaths = manifest.files.filter((file) => file.kind === "attachment")
       .map((file) => file.path.slice("attachments/".length));
     const prepared = await target.prepareAttachments(childPath(source, "attachments"), attachmentPaths);
     const rollbackDatabase = join(dirname(source), `.stash-restore-rollback-${randomUUID()}.dump`);
+    let unsafeToResume = false;
+    this.#operation = "restoring";
     try {
+      await this.#restoreUnavailableBarrier();
       await target.snapshotDatabase(rollbackDatabase);
       await target.restoreDatabase(childPath(source, "database.dump"));
       try { await target.commitAttachments(prepared); }
       catch (error) {
         try { await target.restoreDatabase(rollbackDatabase); }
-        catch (rollbackError) { throw new AggregateError([error, rollbackError], "Attachment restore failed and database rollback also failed"); }
+        catch (rollbackError) { unsafeToResume = true; throw new AggregateError([error, rollbackError], "Attachment restore failed and database rollback also failed"); }
         throw error;
       }
-      this.#restartRequired = true;
+      this.#operation = "restart_required";
       return { status: "restored" };
+    } catch (error) {
+      this.#operation = unsafeToResume ? "restart_required" : "idle";
+      throw error;
     } finally {
       await target.discardPreparedAttachments(prepared).catch(() => undefined);
       await rm(rollbackDatabase, { force: true }).catch(() => undefined);
     }
-    } finally { this.#running = false; }
+    } catch (error) {
+      if (this.#operation === "restore_preflight") this.#operation = "idle";
+      throw error;
+    }
   }
 
   async refreshHealth(backupRoot: string): Promise<BackupHealth> {
