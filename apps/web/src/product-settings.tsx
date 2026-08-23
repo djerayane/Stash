@@ -6,22 +6,12 @@ import gsap from "gsap";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Link } from "react-router";
 import type { OrganizationAdministration } from "./member-administration";
+import { authenticatedJson as api, responseMessage } from "./http-client";
 import styles from "./product-settings.module.css";
 
 type Json = Record<string, unknown>;
 type Localization = { locale: string; timeZone: string; dateFormat: "short" | "medium" | "long"; weekStartsOn: "sunday" | "monday" | "saturday"; updatedAt?: string };
 type Connection = { id: string; repositoryUrl: string; projectIds: string[]; ownership: "organization" | "personal"; state: "active" | "degraded" };
-
-async function responseMessage(response: Response, fallback: string) {
-  try { const body = await response.json() as { message?: unknown }; return typeof body.message === "string" ? body.message : fallback; }
-  catch { return fallback; }
-}
-async function api<T>(path: string, token: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetch(path, { ...init, headers: { authorization: `Bearer ${token}`, ...(init.body ? { "content-type": "application/json" } : {}), ...init.headers } });
-  if (!response.ok) throw new Error(await responseMessage(response, "The operation could not be completed. No changes were saved."));
-  if (response.status === 204) return undefined as T;
-  return await response.json() as T;
-}
 
 function Feedback({ mutation }: { readonly mutation: { isError: boolean; isSuccess: boolean; error: Error | null } }) {
   if (mutation.isError) return <p className={styles.error} role="alert">{mutation.error?.message}</p>;
@@ -66,10 +56,11 @@ export function MemberSettingsPage({ token }: { readonly token: string }) {
 }
 
 export function WorkspaceDataPage({ token, workspaceId, memberId }: { readonly token: string; readonly workspaceId: string; readonly memberId: string }) {
-  const [archive, setArchive] = useState<File>();
+  const [archive, setArchive] = useState<File>(); const pageRef = useRef<HTMLElement>(null);
+  useGSAP(() => { if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return; gsap.from(`.${styles.panel}`, { opacity: 0, scale: .98, y: 14, stagger: .08, duration: .42, ease: "power2.out", clearProps: "all" }); }, { scope: pageRef });
   const exportWorkspace = useMutation({ mutationFn: async () => { const response = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/export`, { headers: { authorization: `Bearer ${token}` } }); if (!response.ok) throw new Error(await responseMessage(response, "Export failed. No partial archive was saved.")); const blob = await response.blob(); const disposition = response.headers.get("content-disposition"); const filename = disposition?.match(/filename="([^"]+)"/)?.[1] ?? "stash-workspace.zip"; const url = URL.createObjectURL(blob); const link = document.createElement("a"); link.href = url; link.download = filename; link.click(); URL.revokeObjectURL(url); } });
   const importWorkspace = useMutation({ mutationFn: async () => { if (!archive) throw new Error("Choose a portable Workspace archive first."); const response = await fetch("/api/workspace-imports", { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/zip", "idempotency-key": crypto.randomUUID(), "x-stash-import-owner-account-id": memberId }, body: archive }); if (!response.ok) throw new Error(await responseMessage(response, "Import failed validation. Nothing was imported.")); return response.json() as Promise<{ report?: { identityStubs?: unknown[] } }>;} });
-  return <article className={styles.page} aria-labelledby="data-title"><header className={styles.header}><p className={styles.kicker}>Workspace portability</p><h1 id="data-title">Your work has an exit.</h1><p>Export a documented archive or restore a portable Workspace without importing Instance secrets.</p></header><div className={styles.grid}>
+  return <article className={styles.page} ref={pageRef} aria-labelledby="data-title"><header className={styles.header}><p className={styles.kicker}>Workspace portability</p><h1 id="data-title">Your work has an exit.</h1><p>Export a documented archive or restore a portable Workspace without importing Instance secrets.</p></header><div className={styles.grid}>
     <section className={styles.panel}><h2>Portable export</h2><p>Includes durable work, history, relationships, permissions, and Attachments. Credentials are excluded.</p><button className={styles.primary} disabled={!workspaceId || exportWorkspace.isPending} onClick={() => exportWorkspace.mutate()} type="button">{exportWorkspace.isPending ? "Preparing archive…" : "Download Workspace archive"}</button><Feedback mutation={exportWorkspace} /></section>
     <section className={styles.panel}><h2>Portable import</h2><p>The archive is fully validated before commit. Unknown people remain visible as Identity Stubs for an Admin to map. Your verified Member account becomes the imported owner.</p><form className={styles.form} onSubmit={(event) => { event.preventDefault(); importWorkspace.mutate(); }}><label>Archive<input accept=".zip,application/zip" onChange={(event) => setArchive(event.target.files?.[0])} required type="file" /></label><button className={styles.primary} disabled={importWorkspace.isPending}>Validate and import</button><Feedback mutation={importWorkspace} />{importWorkspace.isSuccess ? <p className={styles.success} role="status">Import committed. Review Imported identities for any unresolved people.</p> : null}</form></section>
   </div></article>;
@@ -77,6 +68,8 @@ export function WorkspaceDataPage({ token, workspaceId, memberId }: { readonly t
 
 export function OrganizationSettingsPage({ token, administrations, activeOrganizationId }: { readonly token: string; readonly administrations: readonly OrganizationAdministration[]; readonly activeOrganizationId?: string }) {
   const [organizationId, setOrganizationId] = useState(activeOrganizationId ?? administrations[0]?.organizationId ?? ""); const [invitationToken, setInvitationToken] = useState(""); const [connectionToRepair, setConnectionToRepair] = useState<Connection>();
+  const pageRef = useRef<HTMLElement>(null);
+  useGSAP(() => { if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return; gsap.from(`.${styles.panel}`, { opacity: 0, y: 16, stagger: .07, duration: .44, ease: "power2.out", clearProps: "all" }); }, { scope: pageRef, dependencies: [organizationId] });
   const queryClient = useQueryClient(); const administration = administrations.find((item) => item.organizationId === organizationId) ?? administrations[0];
   const connections = useQuery({ queryKey: ["repository-connections", organizationId], enabled: Boolean(organizationId), queryFn: () => api<{ repositoryConnections: Connection[] }>(`/api/organizations/${encodeURIComponent(organizationId)}/repository-connections`, token), retry: false });
   const roles = useQuery({ queryKey: ["organization-roles", organizationId], enabled: Boolean(organizationId), queryFn: () => api<{ roles: Array<{ name: string; description?: string }> }>(`/api/organizations/${encodeURIComponent(organizationId)}/roles`, token), retry: false });
@@ -87,7 +80,7 @@ export function OrganizationSettingsPage({ token, administrations, activeOrganiz
   const repair = useMutation({ mutationFn: ({ connection, value }: { connection: Connection; value: Json }) => api(`/api/organizations/${encodeURIComponent(organizationId)}/repository-connections/${encodeURIComponent(connection.id)}/repair`, token, { method: "PUT", body: JSON.stringify(value) }), onSuccess: () => { setConnectionToRepair(undefined); void connections.refetch(); } });
   const oidc = useMutation({ mutationFn: (value: Json) => api(`/api/organizations/${encodeURIComponent(organizationId)}/auth/oidc`, token, { method: "PUT", body: JSON.stringify(value) }) });
   if (!administration) return <p className={styles.error} role="alert">Organization administration is unavailable.</p>;
-  return <article className={styles.page} aria-labelledby="organization-title"><header className={styles.header}><p className={styles.kicker}>Organization administration</p><h1 id="organization-title">Authority should be explicit.</h1><p>Roles, invitations, authentication, and Repository Connections remain outside Member navigation unless the server grants administrative scope.</p></header>
+  return <article className={styles.page} ref={pageRef} aria-labelledby="organization-title"><header className={styles.header}><p className={styles.kicker}>Organization administration</p><h1 id="organization-title">Authority should be explicit.</h1><p>Roles, invitations, authentication, and Repository Connections remain outside Member navigation unless the server grants administrative scope.</p></header>
     {administrations.length > 1 ? <label className={styles.organizationPicker}>Organization<select value={organizationId} onChange={(event) => setOrganizationId(event.target.value)}>{administrations.map((item) => <option value={item.organizationId} key={item.organizationId}>{item.organizationName}</option>)}</select></label> : null}
     <div className={styles.stack}>
       <section className={styles.panel}><h2>Roles and Members</h2><p>Built-in Roles are immutable. Owners can assign them while preserving the final Owner. <Link to="/app/settings/members">Review Member departure</Link>.</p>{roles.isError ? <p className={styles.error} role="alert">{roles.error.message}</p> : <ul className={styles.rows}>{administration.members.map((member) => <li key={member.id}><span><strong>{member.name}</strong><small>{member.email}</small></span><label><span className={styles.srOnly}>Role for {member.name}</span><select value={member.role} onChange={(event) => assignRole.mutate({ memberId: member.id, role: event.target.value })}>{["Owner", "Admin", "Member"].map((role) => <option key={role}>{role}</option>)}</select></label></li>)}</ul>}<Feedback mutation={assignRole} /></section>

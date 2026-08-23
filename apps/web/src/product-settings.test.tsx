@@ -31,6 +31,7 @@ describe("remaining product settings", () => {
   });
 
   it("exposes Organization-only roles, invitations, connections, and OIDC controls", async () => {
+    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true, addEventListener() {}, removeEventListener() {} })));
     vi.stubGlobal("fetch", vi.fn(async (path: string) => Response.json(path.endsWith("/roles") ? { roles: [{ name: "Owner" }, { name: "Admin" }, { name: "Member" }] } : { repositoryConnections: [] })));
     view(<OrganizationSettingsPage token="admin-token" activeOrganizationId="org-1" administrations={[{ organizationId: "org-1", organizationName: "Acme", members: [{ id: "member-1", name: "Ada", email: "ada@example.com", role: "Owner" }] }]} />);
     expect(await screen.findByRole("heading", { name: "Roles and Members" })).toBeVisible();
