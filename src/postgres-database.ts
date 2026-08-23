@@ -2380,7 +2380,8 @@ export class PostgresDatabase implements
       if (!status.rowCount) return "invalid_status" as const;
       const id = randomUUID();
       const result = await client.query<any>(`INSERT INTO stash_automation_recipes(id,project_id,trigger,target_status_id,created_by_account_id,created_at)
-        VALUES($1,$2,$3,$4,$5,now()) ON CONFLICT(project_id,trigger) DO UPDATE SET target_status_id=EXCLUDED.target_status_id,enabled=TRUE
+        VALUES($1,$2,$3,$4,$5,now()) ON CONFLICT(project_id,trigger) DO UPDATE SET target_status_id=EXCLUDED.target_status_id,
+        enabled=TRUE,created_by_account_id=EXCLUDED.created_by_account_id,created_at=EXCLUDED.created_at
         RETURNING *`, [id, projectId, trigger, targetStatusId, memberId]);
       return { status: "enabled" as const, recipe: automationRecipeFromRow({ ...result.rows[0], target_status_name: status.rows[0]!.name }) };
     });

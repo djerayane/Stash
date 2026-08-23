@@ -23,10 +23,13 @@ describe("PostgreSQL GitHub Signal acceptance", { skip: databaseUrl ? false : "S
     const separator = connectionString.includes("?") ? "&" : "?"; const scoped = `${connectionString}${separator}options=-csearch_path%3D${schema}`;
     const database = new PostgresDatabase(scoped, createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
     const sql = new Pool({ connectionString: scoped }); let instance: RunningInstance | undefined;
-    const ownerId = "11111111-1111-4111-8111-111111111111"; const organizationId = "22222222-2222-4222-8222-222222222222";
+    const ownerId = "11111111-1111-4111-8111-111111111111"; const configuringMemberId = "33333333-3333-4333-8333-333333333333";
+    const organizationId = "22222222-2222-4222-8222-222222222222";
     try {
       await database.createFirstOrganizationOwner({ organizationId, organizationName: "Automation organization", ownerId,
         ownerName: "Automation Owner", ownerEmail: "automation-owner@example.test", passwordHash: "test", role: "Owner" });
+      await sql.query("INSERT INTO stash_accounts(id,name,email,password_hash) VALUES($1,'Automation Configurer','automation-configurer@example.test','test')", [configuringMemberId]);
+      await sql.query("INSERT INTO stash_organization_memberships(organization_id,account_id,role) VALUES($1,$2,'Admin')", [organizationId, configuringMemberId]);
       const workspaces = new WorkspaceProjectService(database); const notes = new NoteService(database); const tasks = new TaskService(database, database);
       const workspace = await workspaces.createWorkspace(ownerId, { name: "Automation workspace", owner: { type: "organization", organizationId } });
       assert.equal(workspace.status, "created"); if (workspace.status !== "created") throw new Error("workspace setup failed");
@@ -40,6 +43,7 @@ describe("PostgreSQL GitHub Signal acceptance", { skip: databaseUrl ? false : "S
       const target = await sql.query<{ id: string }>("SELECT id FROM stash_workflow_statuses WHERE project_id=$1 AND category='started' ORDER BY position LIMIT 1", [project.project.id]);
       const notifications = new NotificationService(database); const automations = new AutomationService(database, notifications);
       await automations.enable(ownerId, project.project.id, { trigger: "branch_created", targetStatusId: target.rows[0]!.id });
+      await automations.enable(configuringMemberId, project.project.id, { trigger: "branch_created", targetStatusId: target.rows[0]!.id });
       const github: GitHubApp = { async inspectRepository(input) { return { installationId: input.installationId, repositoryId: "987", repositoryUrl: "https://github.com/acme/stash" }; }, async verifyRepository() {} };
       const connections = new RepositoryConnectionService(database, github);
       const connection = await connections.connect(ownerId, organizationId, { installationId: 42, owner: "acme", name: "stash" });
@@ -51,7 +55,7 @@ describe("PostgreSQL GitHub Signal acceptance", { skip: databaseUrl ? false : "S
       const secret = "postgres-automation-failure-secret";
       instance = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin",
         githubSignals: new GitHubSignalService(database, secret, automations), automations, notifications,
-        memberAccess: { async authenticateBearer(value) { return value === "Bearer owner" ? { accountId: ownerId, sessionId: "owner" } : undefined; } } });
+        memberAccess: { async authenticateBearer(value) { return value === "Bearer configurer" ? { accountId: configuringMemberId, sessionId: "configurer" } : undefined; } } });
       const deliver = async (deliveryId: string) => {
         const body = JSON.stringify({ ref_type: "branch", ref: `AUTO-1-${deliveryId}`, installation: { id: 42 },
           repository: { id: 987, html_url: "https://github.com/acme/stash" } });
@@ -60,15 +64,22 @@ describe("PostgreSQL GitHub Signal acceptance", { skip: databaseUrl ? false : "S
       };
       assert.equal((await deliver("failed-run")).status, 503);
       assert.equal((await deliver("failed-run")).status, 503);
-      const inbox = await fetch(`${instance.url}/api/notifications`, { headers: { authorization: "Bearer owner" } });
+      const inbox = await fetch(`${instance.url}/api/notifications`, { headers: { authorization: "Bearer configurer" } });
       const deliveries = (await inbox.json() as { notifications: NotificationDelivery[] }).notifications;
-      assert.equal(deliveries.length, 1); assert.equal(deliveries[0]!.memberId, ownerId);
+      assert.equal(deliveries.length, 1); assert.equal(deliveries[0]!.memberId, configuringMemberId);
       assert.equal(deliveries[0]!.activity.action, "automation_execution_failed");
+      assert.equal(deliveries[0]!.activity.actor.localAccountId, configuringMemberId);
+      assert.deepEqual(deliveries[0]!.activity.object, { kind: "Task", id: created.task.id });
       assert.deepEqual(deliveries[0]!.activity.after, { status: "failed" });
+      const persistedRecipe = await sql.query<{ id: string; created_by_account_id: string }>("SELECT id,created_by_account_id FROM stash_automation_recipes");
+      const persistedSignal = await sql.query<{ id: string }>("SELECT id FROM stash_github_signals WHERE delivery_id='failed-run'");
+      assert.deepEqual(deliveries[0]!.activity.cause, { kind: "automation", automationId: persistedRecipe.rows[0]!.id,
+        signalId: persistedSignal.rows[0]!.id });
+      assert.equal(persistedRecipe.rows[0]!.created_by_account_id, configuringMemberId, "the latest configuring Member owns failure attribution");
       assert.equal((await sql.query("SELECT COUNT(*)::int AS count FROM stash_automation_failures")).rows[0].count, 1);
       assert.equal((await sql.query("SELECT COUNT(*)::int AS count FROM stash_workspace_activity WHERE action='automation_execution_failed'")).rows[0].count, 1);
       assert.equal((await sql.query("SELECT COUNT(*)::int AS count FROM stash_portable_projection_outbox WHERE object_kind='Activity' AND payload->>'action'='automation_execution_failed'")).rows[0].count, 1);
-      await sql.query("DELETE FROM stash_organization_memberships WHERE organization_id=$1 AND account_id=$2", [organizationId, ownerId]);
+      await sql.query("DELETE FROM stash_organization_memberships WHERE organization_id=$1 AND account_id=$2", [organizationId, configuringMemberId]);
       assert.equal((await deliver("departed-owner-run")).status, 503);
       assert.equal((await sql.query("SELECT COUNT(*)::int AS count FROM stash_notifications")).rows[0].count, 1,
         "a departed configuring Member must not receive a new Project notification");
