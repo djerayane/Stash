@@ -116,11 +116,11 @@ every checksum, local Attachment adapter requirement, and supplied master key wi
 PostgreSQL or files.
 
 ```sh
-npm run backup -- create /srv/stash-backups/2026-08-23
-npm run backup -- verify /srv/stash-backups/2026-08-23
-npm run backup -- restore /srv/stash-backups/2026-08-23 --dry-run
+pnpm run backup -- create /srv/stash-backups/2026-08-23
+pnpm run backup -- verify /srv/stash-backups/2026-08-23
+pnpm run backup -- restore /srv/stash-backups/2026-08-23 --dry-run
 # after stopping the Stash application:
-npm run backup -- restore /srv/stash-backups/2026-08-23
+pnpm run backup -- restore /srv/stash-backups/2026-08-23
 ```
 
 Restore copies only the verified Attachment inventory into staging before touching PostgreSQL. It
