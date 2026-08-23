@@ -41,6 +41,9 @@ describe("ProjectNotificationsPage", () => {
       && init?.method === "PUT" && String(init.body).includes('"activity":"all"') && String(init.body).includes('"digest":"weekly"')
       && String(init.body).includes('"quietHours"'))).toBe(true));
     expect(await screen.findByText("Preferences saved.")).toBeVisible();
+    fireEvent.change(screen.getByRole("combobox", { name: /Digest cadence/ }), { target: { value: "daily" } });
+    expect(screen.queryByText("Preferences saved.")).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Unsaved changes.");
   });
 
   it("focuses a load failure and recovers without reloading", async () => {

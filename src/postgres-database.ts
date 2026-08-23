@@ -4588,15 +4588,20 @@ export class PostgresDatabase implements
 
   async #recordProjectActivityNotifications(client: PoolClient, activity: ActivityRecord): Promise<void> {
     await this.#ensureNoteSchema(client);
+    await this.#ensureDiscussionSchema(client);
     await this.#ensureNotificationSchema(client);
     const scope = await client.query<any>(`WITH activity_scope AS (
-      SELECT COALESCE(task.project_id, note.project_id, location_note.project_id, link_note.project_id) AS project_id
+      SELECT COALESCE(task.project_id, note.project_id, location_note.project_id, link_note.project_id,
+        discussion_task.project_id, discussion_note.project_id) AS project_id
       FROM (SELECT 1) seed
       LEFT JOIN stash_tasks task ON $2='Task' AND task.id=$1
       LEFT JOIN stash_notes note ON $2='Note' AND note.id=$1
       LEFT JOIN stash_notes location_note ON $2='NoteLocation' AND location_note.id=$1
       LEFT JOIN stash_note_links link ON $2='NoteLink' AND link.id=$1
       LEFT JOIN stash_notes link_note ON link_note.id=link.source_note_id
+      LEFT JOIN stash_discussions discussion ON $2='Discussion' AND discussion.id=$1
+      LEFT JOIN stash_tasks discussion_task ON discussion_task.id=discussion.task_id
+      LEFT JOIN stash_notes discussion_note ON discussion_note.id=discussion.note_id
     ) SELECT scope.project_id, account.id AS member_id,
       COALESCE(preference.activity,'followed') AS activity_preference, COALESCE(preference.digest,'off') AS digest,
       preference.quiet_start, preference.quiet_end, preference.quiet_time_zone

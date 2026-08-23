@@ -46,6 +46,7 @@ export function ProjectNotificationsPage({ token }: { readonly token?: string })
   if (query.isError || !draft) return <section className={styles.page}><div className={styles.error} ref={alertRef} role="alert" tabIndex={-1}>
     <p>{query.error?.message ?? "Project notification settings are unavailable."}</p><button type="button" onClick={() => query.refetch()}>Try again</button></div></section>;
   const quiet = draft.quietHours;
+  const dirty = JSON.stringify(draft) !== JSON.stringify(query.data);
   return <section className={styles.page} aria-labelledby="notification-title" ref={pageRef}><header><p className={styles.eyebrow}>Project preferences</p>
     <h1 id="notification-title">Choose what reaches you.</h1><p className={styles.lede}>Activity stays trustworthy and attributed. Notifications only interrupt you at the level you choose.</p></header>
     <form className={styles.panel} onSubmit={(event) => { event.preventDefault(); save.mutate(draft); }}>
@@ -65,8 +66,8 @@ export function ProjectNotificationsPage({ token }: { readonly token?: string })
           onChange={(event) => setDraft({ ...draft, quietHours: { ...quiet, start: event.target.value } })} /></label>
           <label>End<input aria-label="Quiet hours end" type="time" value={quiet.end} onChange={(event) => setDraft({ ...draft, quietHours: { ...quiet, end: event.target.value } })} /></label>
           <label>Time zone<input aria-label="Quiet hours time zone" value={quiet.timeZone} onChange={(event) => setDraft({ ...draft, quietHours: { ...quiet, timeZone: event.target.value } })} /></label></fieldset> : null}</div>
-      <button className={styles.save} type="submit" disabled={save.isPending}>Save preferences</button></form>
-    <p className={styles.status} role="status" aria-live="polite">{save.isPending ? "Saving…" : save.isSuccess ? "Preferences saved." : "Review your choices, then save."}</p>
+      <button className={styles.save} type="submit" disabled={save.isPending || !dirty}>Save preferences</button></form>
+    <p className={styles.status} role="status" aria-live="polite">{save.isPending ? "Saving…" : save.isSuccess && !dirty ? "Preferences saved." : dirty ? "Unsaved changes." : "Review your choices, then save."}</p>
     {save.isError ? <div className={styles.error} ref={alertRef} role="alert" tabIndex={-1}><p>{save.error.message}</p><button type="button" onClick={() => save.mutate(draft)}>Try again</button></div> : null}
   </section>;
 }

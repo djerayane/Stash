@@ -73,6 +73,9 @@ test("configures followed Project notifications by keyboard without accessibilit
   await page.getByRole("checkbox", { name: /Quiet hours/ }).check();
   await page.getByRole("button", { name: "Save preferences" }).focus(); await page.keyboard.press("Enter");
   await expect(page.getByText("Preferences saved.")).toBeVisible();
+  await page.getByRole("combobox", { name: /Digest cadence/ }).selectOption("daily");
+  await expect(page.getByText("Preferences saved.")).toHaveCount(0);
+  await expect(page.getByRole("status")).toHaveText("Unsaved changes.");
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 });
 
