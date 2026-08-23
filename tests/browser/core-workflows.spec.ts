@@ -72,6 +72,40 @@ test("navigates Notes, Boards, Discussions, notifications, and Activity through 
   await search.fill("discussion"); await search.press("Enter"); const discussionResult = page.getByRole("link", { name: /Keep this release context/ }); await expect(discussionResult).toHaveAttribute("href", `/app/notes/99999999-9999-4999-8999-999999999999/discussions`);
 });
 
+test("presents every relevant canonical notification without collapsing its attribution", async ({ page }) => {
+  await authenticate(page);
+  const triggers = [
+    ["direct_mention", "Grace mentioned you", "discussion message mentioned members", "Grace Hopper · member"],
+    ["assignment", "You were assigned STASH-33", "task assigned", "Grace Hopper · member"],
+    ["requested_review", "Planning assistant requested review", "proposal review requested", "Ada Lovelace · Agent Planning assistant"],
+    ["automation_failure", "Automation failed for STASH-37", "automation execution failed", "Grace Hopper · automation"],
+    ["followed_change", "Release plan updated", "note updated", "Grace Hopper · member"],
+  ] as const;
+  const notifications = triggers.map(([trigger, summary, action], index) => ({
+    schema: "stash.notification.v1", id: `00000000-0000-4000-8000-00000000000${index}`, memberId: "browser-member",
+    workspaceId: "11111111-1111-4111-8111-111111111111", projectId: "22222222-2222-4222-8222-222222222222",
+    trigger, summary, createdAt: "2026-08-23T12:00:00.000Z", delivery: "immediate",
+    activity: { schema: "stash.activity.v1", id: `10000000-0000-4000-8000-00000000000${index}`,
+      workspaceId: "11111111-1111-4111-8111-111111111111", object: { kind: trigger === "requested_review" ? "Proposal" : "Task", id: `20000000-0000-4000-8000-00000000000${index}` },
+      action, actor: trigger === "requested_review" ? { localAccountId: "browser-member", displayName: "Ada Lovelace" }
+        : { localAccountId: "grace", displayName: "Grace Hopper" },
+      cause: trigger === "requested_review" ? { kind: "agent", agentGrantId: "grant", sponsoringMemberId: "browser-member", agentName: "Planning assistant" }
+        : trigger === "automation_failure" ? { kind: "automation", automationId: "automation" } : { kind: "member" },
+      occurredAt: "2026-08-23T12:00:00.000Z", before: {}, after: {} },
+  }));
+  let read = false;
+  await page.route("**/api/notifications", (route) => route.fulfill({ json: { notifications: notifications.map((item, index) => index === 0 && read ? { ...item, readAt: "2026-08-23T12:01:00.000Z" } : item) } }));
+  await page.route("**/api/notifications/*/read", (route) => { read = true; return route.fulfill({ json: { notification: { ...notifications[0], readAt: "2026-08-23T12:01:00.000Z" } } }); });
+  await page.goto("/app/notifications");
+  for (const [trigger, summary, action, attribution] of triggers) {
+    const item = page.getByRole("heading", { name: summary }).locator("xpath=ancestor::article");
+    await expect(item.getByText(`${trigger.replaceAll("_", " ")} · ${action.replaceAll("_", " ")}`)).toBeVisible();
+    await expect(item.getByText(new RegExp(attribution))).toBeVisible();
+  }
+  const firstRead = page.getByRole("heading", { name: triggers[0][1] }).locator("xpath=ancestor::article").getByRole("button", { name: "Mark read" });
+  await firstRead.focus(); await page.keyboard.press("Enter"); await expect(page.getByRole("heading", { name: triggers[0][1] }).locator("xpath=ancestor::article").getByText("Read", { exact: true })).toBeVisible();
+});
+
 test("reviews and restores authoritative Note history with keyboard error recovery", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" }); await authenticate(page); let restoreAttempts = 0;
   await page.route("**/api/notes/99999999-9999-4999-8999-999999999999/history/1/restore", async (route) => { restoreAttempts += 1; if (restoreAttempts === 1) await route.fulfill({ status: 503, json: { message: "Restore temporarily unavailable" } }); else await route.continue(); });

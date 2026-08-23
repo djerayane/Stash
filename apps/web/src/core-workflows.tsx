@@ -37,7 +37,9 @@ function Header({ title, lede, action }: { readonly title: string; readonly lede
 function Empty({ title, body }: { readonly title: string; readonly body: string }) { return <section className={styles.empty}><span aria-hidden="true" /><h2>{title}</h2><p>{body}</p></section>; }
 const words = (value: string) => value.replaceAll("_", " ");
 const facts = (value: Record<string, unknown>) => Object.entries(value).map(([key, entry]) => `${words(key)}: ${typeof entry === "string" ? entry : JSON.stringify(entry)}`).join(", ") || "none";
-const causeLabel = (cause: ActivityCause) => cause.kind === "member" && cause.restorationOfRevision ? `Member restoration of revision ${cause.restorationOfRevision}` : words(cause.kind);
+const causeLabel = (cause: ActivityCause) => cause.kind === "member" && cause.restorationOfRevision
+  ? `Member restoration of revision ${cause.restorationOfRevision}`
+  : cause.kind === "agent" ? `Agent ${cause.agentName}` : words(cause.kind);
 
 export function InboxPage({ workspaceId, token, fetcher = globalThis.fetch }: CoreProps) {
   const client = useQueryClient(); const [content, setContent] = useState(""); const [captureOpen, setCaptureOpen] = useState(false); const [selected, setSelected] = useState<Note>(); const [projectId, setProjectId] = useState("");
