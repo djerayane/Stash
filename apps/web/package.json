@@ -12,12 +12,14 @@
     "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
+    "@gsap/react": "^2.1.2",
     "@radix-ui/react-navigation-menu": "^1.2.14",
     "@stash/api-client": "workspace:*",
     "@stash/domain-types": "workspace:*",
     "@stash/tokens": "workspace:*",
     "@stash/validation": "workspace:*",
     "@tanstack/react-query": "^5.90.2",
+    "gsap": "^3.15.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-router": "^7.9.3"
