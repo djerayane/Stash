@@ -6,6 +6,8 @@ import type { MemberAccessResolver } from "./workspaces-projects.js";
 export function noteRoutes(service: NoteService, memberAccess: MemberAccessResolver): HttpRoute {
   return {
     matches: (request, url) => (request.method === "POST" && /^\/api\/workspaces\/[^/]+\/notes$/.test(url.pathname))
+      || (request.method === "GET" && /^\/api\/workspaces\/[^/]+\/note-templates$/.test(url.pathname))
+      || (request.method === "GET" && /^\/api\/workspaces\/[^/]+\/notes$/.test(url.pathname) && url.searchParams.get("view") === "decisions")
       || (request.method === "GET" && /^\/api\/workspaces\/[^/]+\/inbox$/.test(url.pathname))
       || (request.method === "POST" && /^\/api\/workspaces\/[^/]+\/inbox\/[^/]+\/triage$/.test(url.pathname))
       || (request.method === "GET" && /^\/api\/notes\/[^/]+\/conflicts$/.test(url.pathname))
@@ -18,6 +20,18 @@ export function noteRoutes(service: NoteService, memberAccess: MemberAccessResol
         return true;
       }
       try {
+        if (request.method === "GET" && /^\/api\/workspaces\/[^/]+\/(note-templates|notes)$/.test(url.pathname)) {
+          let workspaceId: string;
+          try { workspaceId = decodeURIComponent(url.pathname.split("/")[3]!); } catch { throw new InvalidNoteInput(); }
+          const result = url.pathname.endsWith("/note-templates")
+            ? await service.listTemplates(access.accountId, workspaceId)
+            : await service.listDecisions(access.accountId, workspaceId);
+          if (result.status === "workspace_forbidden") {
+            json(response, 403, { error: "workspace_forbidden", message: "This Member cannot read Notes in that Workspace." });
+          } else if ("templates" in result) json(response, 200, { templates: result.templates });
+          else json(response, 200, { notes: result.notes.map(({ createdByMemberId: _, ...note }) => note) });
+          return true;
+        }
         if (request.method === "GET" && url.pathname.endsWith("/conflicts")) {
           let noteId: string;
           try { noteId = decodeURIComponent(url.pathname.split("/")[3]!); } catch { throw new InvalidNoteEdit(); }
@@ -110,7 +124,7 @@ export function noteRoutes(service: NoteService, memberAccess: MemberAccessResol
         } else if (error instanceof InvalidNoteInput || error instanceof InvalidNoteTriageInput) {
           json(response, 422, {
             error: "invalid_input",
-            message: "A Note requires content and valid optional Project, tags, and reminder fields.",
+            message: "A Note requires content or a supported Template and valid optional Project, tags, and reminder fields.",
           });
         } else if (error instanceof SyntaxError || (error instanceof Error && error.message === "body_too_large")) {
           const tooLarge = error instanceof Error && error.message === "body_too_large";
@@ -125,6 +139,28 @@ export function noteRoutes(service: NoteService, memberAccess: MemberAccessResol
           });
         }
       }
+      return true;
+    },
+  };
+}
+
+export function noteLibraryRoute(): HttpRoute {
+  return {
+    matches: (request, url) => request.method === "GET" && /^\/workspaces\/[0-9a-f-]+\/notes$/.test(url.pathname),
+    async handle(_request, response) {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8",
+        "content-security-policy": "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'" });
+      response.end(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Notes · Stash</title><script src="/assets/gsap.min.js"></script><style>
+      :root{font-family:Geist,system-ui,sans-serif;color:#17201b;background:#f3f1e9}*{box-sizing:border-box}body{margin:0}main{max-width:68rem;margin:auto;padding:clamp(1.25rem,5vw,4.5rem)}nav{display:flex;justify-content:space-between;align-items:center;margin-bottom:clamp(3rem,8vw,7rem)}.brand{font-weight:780;letter-spacing:-.04em}.status{color:#566158}.intro{max-width:48rem}.intro h1{margin:0;font-size:clamp(2.6rem,7vw,5.6rem);line-height:.94;letter-spacing:-.065em}.intro p{max-width:38rem;margin:1.5rem 0 2rem;font-size:1.08rem;line-height:1.65;color:#566158}.composer{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.75rem;align-items:stretch}textarea{min-height:7.5rem;resize:vertical;border:1px solid #c9c4b7;border-radius:.7rem;padding:1rem;background:#fff;color:#17201b;font:1rem/1.55 Georgia,serif}button,a.note{border:0;border-radius:.55rem;font:700 .92rem Geist,system-ui,sans-serif}button{padding:.8rem 1rem;cursor:pointer}.actions{display:flex;flex-direction:column;gap:.5rem}.blank{background:#17201b;color:#fff}.decision{background:#d98b22;color:#17201b}.views{margin-top:clamp(5rem,10vw,9rem);border-top:1px solid #c9c4b7;padding-top:2rem}.views h2{font-size:clamp(1.75rem,4vw,3rem);letter-spacing:-.045em}.notes{display:grid;gap:.6rem}.note{display:block;padding:1rem 1.1rem;background:#fff;color:#17201b;text-decoration:none;border-left:3px solid #d98b22}.note small{display:block;margin-top:.35rem;color:#6d756f}button:hover,.note:hover{transform:translateY(-2px)}button:focus-visible,textarea:focus-visible,.note:focus-visible{outline:3px solid #9a6114;outline-offset:3px}.empty{color:#6d756f}@media(max-width:42rem){.composer{grid-template-columns:1fr}.actions{flex-direction:row}.actions button{flex:1}}@media(prefers-reduced-motion:no-preference){button,.note{transition:transform .2s ease,background .2s ease}}
+      </style></head><body><main><nav><span class="brand">Stash</span><span class="status" role="status" aria-live="polite">Ready</span></nav><section class="intro"><h1>Start with a useful shape.</h1><p>Begin from a blank Note or use a lightweight template. Templates suggest structure; every result stays an ordinary, portable Note.</p><div class="composer"><label><span>Opening thought</span><textarea placeholder="Write a first thought, or leave empty when using the Decision template"></textarea></label><div class="actions"><button class="blank" type="button" data-template="blank">Blank Note</button><button class="decision" type="button" data-template="decision">Decision Note</button></div></div></section><section class="views"><h2>Decision Notes</h2><div class="notes" aria-live="polite"><p class="empty">Loading settled choices…</p></div></section><script>
+      const workspaceId=location.pathname.split('/')[2],token=()=>localStorage.getItem('stash.memberToken')||'',status=document.querySelector('.status'),notes=document.querySelector('.notes'),text=document.querySelector('textarea');
+      const announce=(message)=>status.textContent=message;
+      const reduceMotion=matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const reveal=(targets,options={})=>{if(!reduceMotion&&window.gsap)window.gsap.from(targets,{opacity:0,y:10,duration:.35,ease:'power2.out',...options})};
+      const render=(items)=>{notes.replaceChildren();if(!items.length){const empty=document.createElement('p');empty.className='empty';empty.textContent='No Decision Notes yet.';notes.append(empty);return}for(const note of items){const link=document.createElement('a');link.className='note';link.href='/notes/'+note.id+'/edit';link.textContent=note.content.split('\\n').find(line=>line.trim())?.replace(/^#+\\s*/, '')||'Untitled Decision';const date=document.createElement('small');date.textContent=new Date(note.createdAt).toLocaleDateString();link.append(date);notes.append(link)}reveal('.note',{stagger:.05})};
+      const refresh=async()=>{try{const response=await fetch('/api/workspaces/'+workspaceId+'/notes?view=decisions',{headers:{authorization:'Bearer '+token()}}),body=await response.json();if(!response.ok)throw new Error(body.message);render(body.notes)}catch(error){notes.replaceChildren();const empty=document.createElement('p');empty.className='empty';empty.textContent=error.message||'Decision Notes could not be loaded.';notes.append(empty)}};
+      document.querySelectorAll('[data-template]').forEach(button=>button.addEventListener('click',async()=>{const templateId=button.dataset.template,content=text.value.trim();if(templateId==='blank'&&!content){announce('Write an opening thought first.');text.focus();return}announce('Creating Note…');button.disabled=true;try{const payload={...(content?{content}:{}),...(templateId==='decision'?{templateId}:{})};const response=await fetch('/api/workspaces/'+workspaceId+'/notes',{method:'POST',headers:{authorization:'Bearer '+token(),'content-type':'application/json'},body:JSON.stringify(payload)}),body=await response.json();if(!response.ok)throw new Error(body.message);location.href='/notes/'+body.id+'/edit'}catch(error){announce(error.message||'The Note could not be created.');button.disabled=false}}));reveal('.intro');reveal('.views',{delay:.08});refresh();
+      </script></main></body></html>`);
       return true;
     },
   };

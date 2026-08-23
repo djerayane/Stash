@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { normalizeExplicitOffsetTimestamp } from "./explicit-offset-timestamp.js";
 import type { PortableIdentity } from "./workspaces-projects.js";
-import { isRichTextDocument, paragraphDocument, type RichTextBlock, type RichTextDocument } from "./rich-text.js";
+import { isRichTextDocument, markdownToRichText, paragraphDocument, type RichTextBlock, type RichTextDocument } from "./rich-text.js";
 import type { TaskSourceBlockReference } from "./tasks.js";
 
 export interface NoteReminder {
@@ -120,6 +120,9 @@ export interface NoteRepository {
   listInboxNotes(memberId: string, workspaceId: string): Promise<
     { status: "found"; notes: NoteRecord[] } | { status: "workspace_forbidden" }
   >;
+  listNotesByTag?(memberId: string, workspaceId: string, tag: string): Promise<
+    { status: "found"; notes: NoteRecord[] } | { status: "workspace_forbidden" }
+  >;
   triageNote(memberId: string, workspaceId: string, noteId: string, change: NoteTriageChange): Promise<
     { status: "updated"; result: NoteTriageResult }
     | { status: "workspace_forbidden" | "project_forbidden" | "note_not_found" | "target_note_not_found" }
@@ -137,7 +140,8 @@ export class InvalidNoteEdit extends Error {}
 export class InvalidNoteTriageInput extends Error {}
 
 interface NoteInput {
-  content: string;
+  content?: string;
+  templateId?: string;
   projectId?: string;
   tags?: string[];
   reminder?: NoteReminder;
@@ -152,7 +156,10 @@ function isUuid(value: string): boolean {
 }
 
 function isNoteInput(value: unknown): value is NoteInput {
-  if (!isPlainObject(value) || typeof value.content !== "string" || value.content.trim().length === 0) {
+  if (!isPlainObject(value)
+    || (value.content !== undefined && (typeof value.content !== "string" || value.content.trim().length === 0))
+    || (value.templateId !== undefined && value.templateId !== "decision")
+    || value.content === undefined && value.templateId === undefined) {
     return false;
   }
   if (value.projectId !== undefined && (typeof value.projectId !== "string" || !isUuid(value.projectId))) {
@@ -169,7 +176,21 @@ function isNoteInput(value: unknown): value is NoteInput {
       || typeof value.reminder.at !== "string"
       || normalizeExplicitOffsetTimestamp(value.reminder.at) === undefined) return false;
   }
-  return Object.keys(value).every((key) => ["content", "projectId", "tags", "reminder"].includes(key));
+  return Object.keys(value).every((key) => ["content", "templateId", "projectId", "tags", "reminder"].includes(key));
+}
+
+export const noteTemplates = [{
+  id: "decision",
+  name: "Decision Note",
+  description: "Record a settled choice, its context, and resulting work.",
+  suggestedTags: ["decision"],
+}] as const;
+
+const decisionStarter = "# Decision\n\n## Context\n\nDescribe the situation and constraints.\n\n## Decision\n\nRecord the settled choice.\n\n## Resulting work\n\nCapture the follow-up work.";
+
+function decisionStarterDocument(): RichTextDocument {
+  const document = markdownToRichText(decisionStarter);
+  return { ...document, blocks: document.blocks.map((block) => ({ ...block, blockKey: randomUUID() })) };
 }
 
 export class NoteService {
@@ -191,12 +212,15 @@ export class NoteService {
     if (!isUuid(workspaceId) || !isNoteInput(value)) throw new InvalidNoteInput();
     const createdBy = await this.#repository.findPortableMemberIdentity(memberId);
     if (!createdBy) throw new Error("member_identity_unavailable");
-    const tags = [...new Set((value.tags ?? []).map((tag) => tag.trim()))];
+    const content = value.content ?? decisionStarter;
+    const tags = [...new Set((value.tags ?? (value.templateId === "decision" ? ["decision"] : []))
+      .map((tag) => tag.trim()))];
     const note: NoteRecord = {
       id: randomUUID(),
       workspaceId,
-      content: value.content,
-      document: paragraphDocument(value.content, randomUUID()),
+      content,
+      document: value.templateId === "decision" && value.content === undefined
+        ? decisionStarterDocument() : paragraphDocument(content, randomUUID()),
       revision: 1,
       tags,
       createdByMemberId: memberId,
@@ -217,6 +241,19 @@ export class NoteService {
     };
     const status = await this.#repository.createNote(memberId, note, projection);
     return status === "created" ? { status, note, projection } : { status };
+  }
+
+  async listTemplates(memberId: string, workspaceId: string) {
+    if (!isUuid(workspaceId)) throw new InvalidNoteInput();
+    if (!this.#repository.listNotesByTag) throw new Error("note_filters_unavailable");
+    const access = await this.#repository.listNotesByTag(memberId, workspaceId, "__template_access_probe__");
+    return access.status === "found" ? { status: "found" as const, templates: noteTemplates } : access;
+  }
+
+  async listDecisions(memberId: string, workspaceId: string) {
+    if (!isUuid(workspaceId)) throw new InvalidNoteInput();
+    if (!this.#repository.listNotesByTag) throw new Error("note_filters_unavailable");
+    return this.#repository.listNotesByTag(memberId, workspaceId, "decision");
   }
 
   async listInbox(memberId: string, workspaceId: string) {
