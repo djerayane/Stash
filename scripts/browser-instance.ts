@@ -113,7 +113,9 @@ const instance = await startInstance({
         { id: browserMemberId, name: "Browser Member", email: "member@stash.test", role: "Admin" as const },
       ] }, { organizationId, organizationName: "Acceptance Organization", members: [
         { id: browserMemberId, name: "Browser Member", email: "member@stash.test", role: "Admin" as const },
-        { id: departedMemberId, name: "Departing Member", email: "departing@stash.test", role: "Member" as const },
+        ...(memberships.has(departedMemberId)
+          ? [{ id: departedMemberId, name: "Departing Member", email: "departing@stash.test", role: "Member" as const }]
+          : []),
       ] }] } : {}) };
   } },
   host: "127.0.0.1",

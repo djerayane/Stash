@@ -119,6 +119,11 @@ test("removes a Member, revokes authority, and keeps former assignment repair ac
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
   await page.getByRole("button", { name: "Remove Member" }).click();
   await expect(page.getByRole("heading", { name: "Departing Member no longer has access" })).toBeVisible();
+  await page.getByRole("link", { name: "Home" }).click();
+  await page.getByRole("link", { name: "Members" }).click();
+  await expect(page.getByRole("heading", { name: "Member access" })).toBeVisible();
+  await expect(page.getByText("Departing Member", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Review departure" })).toHaveCount(0);
   const departedAuthority = await page.evaluate(async () => fetch("/api/organizations/44444444-4444-4444-8444-444444444444/roles", {
     headers: { authorization: "Bearer departed-member-token" },
   }).then((response) => response.status));

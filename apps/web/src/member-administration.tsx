@@ -1,5 +1,5 @@
 import { useGSAP } from "@gsap/react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import gsap from "gsap";
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
@@ -22,6 +22,7 @@ export function MemberAdministrationPage({ administrations, activeOrganizationId
   const [candidate, setCandidate] = useState<OrganizationAdministration["members"][number]>();
   const [departed, setDeparted] = useState<OrganizationAdministration["members"][number]>();
   const confirmationRef = useRef<HTMLDivElement>(null);
+  const queryClient = useQueryClient();
   const removal = useMutation({
     mutationFn: async (member: OrganizationAdministration["members"][number]) => {
       const response = await fetch(`/api/organizations/${encodeURIComponent(administration!.organizationId)}/members/${encodeURIComponent(member.id)}`, {
@@ -32,7 +33,11 @@ export function MemberAdministrationPage({ administrations, activeOrganizationId
         : "The Member could not be removed. No authority was changed.");
       return member;
     },
-    onSuccess: (member) => { setCandidate(undefined); setDeparted(member); },
+    onSuccess: async (member) => {
+      await queryClient.invalidateQueries({ queryKey: ["member-session", token] });
+      setCandidate(undefined);
+      setDeparted(member);
+    },
   });
   useGSAP(() => {
     if (!confirmationRef.current || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
