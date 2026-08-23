@@ -28,6 +28,7 @@ import { BoardService } from "./boards.js";
 import { NoteLinkService } from "./note-links.js";
 import { ActivityService } from "./activity.js";
 import { GitHubArtifactService } from "./github-artifacts.js";
+import { fileURLToPath } from "node:url";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -70,6 +71,7 @@ async function main(): Promise<void> {
     host: process.env.HOST ?? "0.0.0.0",
     port,
     instanceAdminToken: requiredEnvironment("INSTANCE_ADMIN_TOKEN"),
+    webClientRoot: process.env.WEB_CLIENT_ROOT?.trim() || fileURLToPath(new URL("../apps/web/dist", import.meta.url)),
     ownerBootstrap: new OwnerBootstrapService(database),
     passwordAuth,
     workspaceProjects: new WorkspaceProjectService(database),

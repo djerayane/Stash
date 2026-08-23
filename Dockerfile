@@ -3,7 +3,7 @@ WORKDIR /app
 RUN corepack enable
 COPY . .
 RUN pnpm install --frozen-lockfile
-RUN pnpm --filter @stash/sync build && pnpm run build:server
+RUN pnpm run build
 
 FROM node:22-alpine AS runtime
 ENV NODE_ENV=production
@@ -13,6 +13,7 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/packages/sync/package.json ./packages/sync/package.json
 COPY --from=build /app/packages/sync/dist ./packages/sync/dist
 COPY --from=build /app/dist ./dist
+COPY --from=build /app/apps/web/dist ./apps/web/dist
 USER root
 RUN mkdir -p /var/lib/stash/attachments && chown -R node:node /var/lib/stash
 USER node

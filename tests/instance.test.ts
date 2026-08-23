@@ -127,6 +127,35 @@ describe("running Stash Instance", () => {
     assert.deepEqual(await allowed.json(), { name: "Stash", status: "running" });
   });
 
+  it("reports authenticated client permissions without granting Member sessions Instance authority", async () => {
+    instance = await startInstance({
+      database: new ProtocolCompatibleDatabaseProbe(),
+      host: "127.0.0.1",
+      port: 0,
+      instanceAdminToken: "test-instance-admin-token",
+      memberAccess: {
+        async authenticateBearer(authorization) {
+          return authorization === "Bearer member-token" ? { accountId: "member", sessionId: "session" } : undefined;
+        },
+      },
+    });
+
+    const administrator = await fetch(`${instance.url}/api/client-session`, {
+      headers: { authorization: "Bearer test-instance-admin-token" },
+    });
+    assert.equal(administrator.status, 200);
+    assert.deepEqual(await administrator.json(), { authenticated: true, permissions: ["instance:manage"] });
+
+    const member = await fetch(`${instance.url}/api/client-session`, {
+      headers: { authorization: "Bearer member-token" },
+    });
+    assert.equal(member.status, 200);
+    assert.deepEqual(await member.json(), { authenticated: true, permissions: [] });
+
+    const anonymous = await fetch(`${instance.url}/api/client-session`);
+    assert.equal(anonymous.status, 401);
+  });
+
   it("keeps the Instance API identical on Redis hits, misses, and outages", async () => {
     const expected = { name: "Stash", status: "running" };
     const authorization = { authorization: "Bearer test-instance-admin-token" };

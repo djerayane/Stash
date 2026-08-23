@@ -7,7 +7,9 @@
     "dev": "vite",
     "check": "tsc --noEmit",
     "build": "tsc --noEmit && vite build",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:unit": "vitest run --exclude '**/*.integration.test.*'",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
     "@radix-ui/react-navigation-menu": "^1.2.14",
