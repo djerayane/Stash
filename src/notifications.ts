@@ -39,15 +39,26 @@ const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const clockTime = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 const defaultPreferences: NotificationPreferences = { activity: "followed", digest: "off" };
 
+export function assignmentNotificationInputs(activity: ActivityRecord, projectId: string,
+  before: { assigneeIds?: string[] }, after: { assigneeIds?: string[]; key?: string; title?: string }) {
+  const previous = new Set(before.assigneeIds ?? []);
+  return (after.assigneeIds ?? []).filter((memberId) => !previous.has(memberId) && memberId !== activity.actor.localAccountId)
+    .map((memberId) => ({ memberId, projectId, trigger: "assignment" as const,
+      summary: after.key && after.title ? `Assigned to ${after.key}: ${after.title}` : "A Task was assigned to you", activity }));
+}
+
 function isTimeZone(value: string): boolean {
   try { new Intl.DateTimeFormat("en", { timeZone: value }).format(); return true; } catch { return false; }
 }
 
-function isQuiet(now: Date, quiet: NonNullable<NotificationPreferences["quietHours"]>): boolean {
+export function notificationDeliveryMode(now: Date, preferences: NotificationPreferences): NotificationDelivery["delivery"] {
+  const quiet = preferences.quietHours;
+  if (!quiet) return "immediate";
   const parts = new Intl.DateTimeFormat("en-GB", { timeZone: quiet.timeZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" })
     .formatToParts(now);
   const current = `${parts.find(({ type }) => type === "hour")!.value}:${parts.find(({ type }) => type === "minute")!.value}`;
-  return quiet.start < quiet.end ? current >= quiet.start && current < quiet.end : current >= quiet.start || current < quiet.end;
+  const quietNow = quiet.start < quiet.end ? current >= quiet.start && current < quiet.end : current >= quiet.start || current < quiet.end;
+  return quietNow ? "quiet_hours" : "immediate";
 }
 
 export class NotificationService {
@@ -62,7 +73,7 @@ export class NotificationService {
     const delivery: NotificationDelivery = {
       schema: "stash.notification.v1", id: randomUUID(), memberId: input.memberId, workspaceId: input.activity.workspaceId,
       projectId: input.projectId, trigger: input.trigger, summary: input.summary.trim(), activity: structuredClone(input.activity),
-      createdAt: now.toISOString(), delivery: preferences.quietHours && isQuiet(now, preferences.quietHours) ? "quiet_hours" : "immediate",
+      createdAt: now.toISOString(), delivery: notificationDeliveryMode(now, preferences),
     };
     return { status: "created" as const, notification: await this.repository.saveNotification(delivery) };
   }

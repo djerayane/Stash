@@ -36,7 +36,7 @@ import type { Board, BoardRepository, BoardTask } from "./boards.js";
 import type { NoteLinkRecord, NoteLocationRecord, PortableNoteLinkStateProjection, PortableNoteLocationProjection } from "./note-links.js";
 import type { ActivityCause, ActivityRecord, ActivityRepository, NoteHistoryRevision } from "./activity.js";
 import type { DevelopmentArtifact, GitHubArtifactRepository } from "./github-artifacts.js";
-import type { NotificationDelivery, NotificationPreferences, NotificationRepository } from "./notifications.js";
+import { assignmentNotificationInputs, notificationDeliveryMode, type NotificationDelivery, type NotificationPreferences, type NotificationRepository } from "./notifications.js";
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
@@ -1215,8 +1215,9 @@ export class PostgresDatabase implements
       const saved = await client.query<any>(taskPlanningSelect, [projectId, taskKey, memberId]);
       const task = taskPlanningReadModelFromRow(saved.rows[0]);
       await this.#recordPortableProjection(client, "Task", task.id, task.schema, taskProjectionFromRow(saved.rows[0]));
-      await this.#recordTaskActivity(client, memberId, task.workspaceId, task.id, "task_planning_updated",
-        taskPlanningReadModelFromRow(row), task);
+      const beforeTask = taskPlanningReadModelFromRow(row);
+      const activity = await this.#recordTaskActivity(client, memberId, task.workspaceId, task.id, "task_planning_updated", beforeTask, task);
+      await this.#recordAssignmentNotifications(client, projectId, activity, beforeTask, task);
       for (const affectedId of (row.affected_dependency_task_ids ?? []).filter((id: string) => id !== task.id)) {
         const affectedBefore = await client.query<any>(taskPlanningSelectById, [affectedId, memberId]);
         await client.query(`UPDATE stash_tasks SET revision=revision+1,
@@ -1293,8 +1294,12 @@ export class PostgresDatabase implements
       }
       if (Object.keys(compatible).length) {
         const saved = await client.query<any>(taskPlanningSelectById, [row.id, memberId]);
-        if (saved.rows[0]) await this.#recordTaskActivity(client, memberId, row.workspace_id, row.id,
-          "task_structured_edit_applied", beforeTask, taskPlanningReadModelFromRow(saved.rows[0]));
+        if (saved.rows[0]) {
+          const afterTask = taskPlanningReadModelFromRow(saved.rows[0]);
+          const activity = await this.#recordTaskActivity(client, memberId, row.workspace_id, row.id,
+            "task_structured_edit_applied", beforeTask, afterTask);
+          await this.#recordAssignmentNotifications(client, projectId, activity, beforeTask, afterTask);
+        }
       }
       await client.query("INSERT INTO stash_task_edit_operations (task_id,operation_id,digest,outcome) VALUES ($1,$2,$3,$4::jsonb)",
         [row.id, batch.operationId, digest, JSON.stringify(outcome)]);
@@ -1358,6 +1363,7 @@ export class PostgresDatabase implements
         activity.action, memberId, occurredAt, JSON.stringify(activity.before), JSON.stringify(activity.after)]);
       await this.#recordPortableProjection(client, "Task", task.id, task.schema, taskProjectionFromRow(saved.rows[0]));
       await this.#recordPortableProjection(client, "Activity", activity.id, activity.schema, activity);
+      if (resolution === "apply_contribution") await this.#recordAssignmentNotifications(client, projectId, activity, before, task);
       return { status: "resolved" as const, task, revision: row.revision, activity };
     });
   }
@@ -2906,8 +2912,8 @@ export class PostgresDatabase implements
     await this.#ensurePortableProjectionSchema(client);
   }
 
-  async #ensureNotificationSchema(): Promise<void> {
-    const client = await this.#pool.connect();
+  async #ensureNotificationSchema(transactionClient?: PoolClient): Promise<void> {
+    const client = transactionClient ?? await this.#pool.connect();
     try {
       await this.#ensureWorkspaceProjectSchema(client);
       await client.query(`CREATE TABLE IF NOT EXISTS stash_notification_preferences (
@@ -2935,7 +2941,7 @@ export class PostgresDatabase implements
         UNIQUE (member_id,activity_id,trigger)
       );
       CREATE INDEX IF NOT EXISTS stash_notifications_member_created_idx ON stash_notifications(member_id,created_at DESC)`);
-    } finally { client.release(); }
+    } finally { if (!transactionClient) client.release(); }
   }
 
   async #ensureNoteSchema(client: PoolClient): Promise<void> {
@@ -3913,7 +3919,7 @@ export class PostgresDatabase implements
   }
 
   async #recordTaskActivity(client: PoolClient, memberId: string, workspaceId: string, taskId: string,
-    action: string, before: TaskPlanningReadModel, after: TaskPlanningReadModel): Promise<void> {
+    action: string, before: TaskPlanningReadModel, after: TaskPlanningReadModel): Promise<ActivityRecord> {
     const actor = await client.query<{ name: string }>("SELECT name FROM stash_accounts WHERE id=$1", [memberId]);
     if (!actor.rows[0]) throw new Error("member_identity_unavailable");
     const activity: ActivityRecord = { schema: "stash.activity.v1", id: randomUUID(), workspaceId,
@@ -3924,6 +3930,33 @@ export class PostgresDatabase implements
       VALUES ($1,$2,'Task',$3,$4,$5,'member',$6,$7::jsonb,$8::jsonb)`, [activity.id, workspaceId, taskId, action,
       memberId, activity.occurredAt, JSON.stringify(before), JSON.stringify(after)]);
     await this.#recordPortableProjection(client, "Activity", activity.id, activity.schema, activity);
+    return activity;
+  }
+
+  async #recordAssignmentNotifications(client: PoolClient, projectId: string, activity: ActivityRecord,
+    before: { assigneeIds?: string[] }, after: { assigneeIds?: string[]; key?: string; title?: string }): Promise<void> {
+    const inputs = assignmentNotificationInputs(activity, projectId, before, after);
+    if (!inputs.length) return;
+    await this.#ensureNotificationSchema(client);
+    for (const input of inputs) {
+      const settings = await client.query<any>(`SELECT preference.* FROM stash_projects project
+        JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
+        LEFT JOIN stash_notification_preferences preference ON preference.project_id=project.id AND preference.member_id=$1
+        WHERE project.id=$2 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$1) OR
+          (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+            WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$1)))`, [input.memberId, projectId]);
+      if (!settings.rowCount) throw new Error("notification_recipient_forbidden");
+      const row = settings.rows[0];
+      const preferences: NotificationPreferences = row.member_id ? { activity: row.activity, digest: row.digest,
+        ...(row.quiet_start ? { quietHours: { start: row.quiet_start, end: row.quiet_end, timeZone: row.quiet_time_zone } } : {}) }
+        : { activity: "followed", digest: "off" };
+      await client.query(`INSERT INTO stash_notifications
+        (id,member_id,workspace_id,project_id,trigger,summary,activity,created_at,delivery)
+        VALUES ($1,$2,$3,$4,'assignment',$5,$6::jsonb,$7,$8)
+        ON CONFLICT (member_id,activity_id,trigger) DO NOTHING`, [randomUUID(), input.memberId, activity.workspaceId,
+        projectId, input.summary, JSON.stringify(activity), activity.occurredAt,
+        notificationDeliveryMode(new Date(activity.occurredAt), preferences)]);
+    }
   }
 
   async #recordDomainActivity(client: PoolClient, memberId: string, workspaceId: string,

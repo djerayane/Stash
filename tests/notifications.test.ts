@@ -3,12 +3,14 @@ import { after, before, describe, it } from "node:test";
 
 import { startInstance, type DatabaseProbe } from "../src/instance.js";
 import {
+  assignmentNotificationInputs,
   NotificationService,
   type NotificationDelivery,
   type NotificationPreferences,
   type NotificationRepository,
   type NotificationTrigger,
 } from "../src/notifications.js";
+import { TaskService, type TaskPlanningReadModel, type TaskPlanningRepository, type TaskPlanningUpdate } from "../src/tasks.js";
 import type { ActivityRecord } from "../src/activity.js";
 import type { MemberAccessResolver } from "../src/workspaces-projects.js";
 
@@ -24,11 +26,16 @@ const activity: ActivityRecord = {
   occurredAt: "2026-08-23T12:00:00.000Z", before: { assigneeIds: [] }, after: { assigneeIds: [memberId] },
 };
 
-class NotificationFake implements DatabaseProbe, NotificationRepository {
+class NotificationFake implements DatabaseProbe, NotificationRepository, TaskPlanningRepository {
   readonly deliveries: NotificationDelivery[] = [];
   readonly preferences = new Map<string, NotificationPreferences>();
   readonly visibleProjects = new Set([`${memberId}:${projectId}`]);
   fail = false;
+  task: TaskPlanningReadModel = { schema: "stash.task.v1", id: "77777777-7777-4777-8777-777777777777", workspaceId, projectId,
+    key: "STASH-33", title: "Review notification delivery", status: { id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", name: "Ready", category: "unstarted" },
+    assigneeIds: [], priority: "none", labelNames: [], sourceNoteIds: [], linkedNoteIds: [], dependencies: [], developmentLinks: [],
+    createdAt: "2026-08-23T11:00:00.000Z", createdBy: { localAccountId: otherMemberId, displayName: "Grace Hopper" }, revision: 1,
+    dependencyWarnings: [] };
   async verifyConnection() {} async close() {}
   async saveNotification(delivery: NotificationDelivery) { if (this.fail) throw new Error("offline"); this.deliveries.push(structuredClone(delivery)); return delivery; }
   async listNotifications(requestedMemberId: string) { if (this.fail) throw new Error("offline"); return this.deliveries.filter(({ memberId }) => memberId === requestedMemberId && this.visibleProjects.has(`${requestedMemberId}:${projectId}`)); }
@@ -44,6 +51,28 @@ class NotificationFake implements DatabaseProbe, NotificationRepository {
   async saveNotificationPreferences(requestedMemberId: string, requestedProjectId: string, value: NotificationPreferences) {
     if (!this.visibleProjects.has(`${requestedMemberId}:${requestedProjectId}`)) return undefined;
     this.preferences.set(`${requestedMemberId}:${requestedProjectId}`, structuredClone(value)); return value;
+  }
+  async findTaskByKey(requestedMemberId: string, requestedProjectId: string, key: string) {
+    return [memberId, otherMemberId].includes(requestedMemberId) && requestedProjectId === projectId && key === this.task.key
+      ? { status: "found" as const, task: structuredClone(this.task) } : { status: "not_found" as const };
+  }
+  async updateTaskByKey(requestedMemberId: string, requestedProjectId: string, key: string, update: TaskPlanningUpdate) {
+    const found = await this.findTaskByKey(requestedMemberId, requestedProjectId, key);
+    if (found.status === "not_found") return found;
+    const before = structuredClone(this.task);
+    this.task = { ...this.task, ...(update.assigneeIds ? { assigneeIds: update.assigneeIds } : {}), revision: this.task.revision + 1 };
+    const producedActivity: ActivityRecord = { schema: "stash.activity.v1", id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", workspaceId,
+      object: { kind: "Task", id: this.task.id }, action: "task_planning_updated",
+      actor: { localAccountId: requestedMemberId, displayName: "Grace Hopper" }, cause: { kind: "member" },
+      occurredAt: "2026-08-23T12:00:00.000Z", before: { ...before }, after: { ...structuredClone(this.task) } };
+    for (const input of assignmentNotificationInputs(producedActivity, requestedProjectId, before, this.task)) {
+      const preferences = await this.getNotificationPreferences(input.memberId, input.projectId) ?? { activity: "followed" as const, digest: "off" as const };
+      const delivery: NotificationDelivery = { schema: "stash.notification.v1", id: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        ...input, workspaceId, createdAt: producedActivity.occurredAt,
+        delivery: preferences.quietHours ? "quiet_hours" : "immediate" };
+      await this.saveNotification(delivery);
+    }
+    return { status: "updated" as const, task: structuredClone(this.task) };
   }
 }
 
@@ -102,5 +131,32 @@ describe("Member notifications", () => {
     const response = await request("/api/notifications");
     assert.equal(response.status, 503); assert.equal((await response.json() as { error: string }).error, "notifications_unavailable");
     database.fail = false;
+  });
+
+  it("creates an assignment notification through the real Task boundary without manually notifying", async () => {
+    database.deliveries.length = 0;
+    database.task.assigneeIds = [];
+    const assignmentServer = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin",
+      memberAccess: access, notifications: service, tasks: new TaskService(database, { async findPortableMemberIdentity() { return undefined; } }) });
+    try {
+      const assigned = await fetch(`${assignmentServer.url}/api/projects/${projectId}/tasks/${database.task.key}`, { method: "PATCH",
+        headers: { authorization: "Bearer other-token", "content-type": "application/json" }, body: JSON.stringify({ assigneeIds: [memberId] }) });
+      assert.equal(assigned.status, 200);
+      const inbox = await fetch(`${assignmentServer.url}/api/notifications`, { headers: { authorization: "Bearer member-token" } });
+      assert.equal(inbox.status, 200);
+      const body = await inbox.json() as { notifications: NotificationDelivery[] };
+      assert.equal(body.notifications.length, 1);
+      assert.equal(body.notifications[0]?.trigger, "assignment");
+      assert.equal(body.notifications[0]?.activity.object.id, database.task.id);
+      const repeated = await fetch(`${assignmentServer.url}/api/projects/${projectId}/tasks/${database.task.key}`, { method: "PATCH",
+        headers: { authorization: "Bearer other-token", "content-type": "application/json" }, body: JSON.stringify({ assigneeIds: [memberId] }) });
+      assert.equal(repeated.status, 200);
+      assert.equal(database.deliveries.length, 1, "repeating an unchanged assignment must not create noise");
+      await fetch(`${assignmentServer.url}/api/projects/${projectId}/tasks/${database.task.key}`, { method: "PATCH",
+        headers: { authorization: "Bearer other-token", "content-type": "application/json" }, body: JSON.stringify({ assigneeIds: [] }) });
+      await fetch(`${assignmentServer.url}/api/projects/${projectId}/tasks/${database.task.key}`, { method: "PATCH",
+        headers: { authorization: "Bearer member-token", "content-type": "application/json" }, body: JSON.stringify({ assigneeIds: [memberId] }) });
+      assert.equal(database.deliveries.length, 1, "self-assignment must be suppressed");
+    } finally { await assignmentServer.close(); }
   });
 });
