@@ -88,11 +88,12 @@ function rejectSensitiveKeys(value: unknown): void {
 function exactCause(value: unknown, kind: string): void {
   if (!object(value) || !["member","automation","signal","agent","migration"].includes(String(value.kind)))
     throw new InvalidPortableWorkspaceImport(`invalid_${kind}`);
-  const keys: Record<string,string[]> = { member:["kind","restorationOfRevision"], automation:["kind","automationId"],
+  const keys: Record<string,string[]> = { member:["kind","restorationOfRevision","automationId","signalId"], automation:["kind","automationId","signalId"],
     signal:["kind","signalId"], agent:["kind","agentGrantId","sponsoringMemberId"], migration:["kind","source"] };
   exact(value,keys[String(value.kind)]!,kind);
   if (value.kind === "member" && value.restorationOfRevision !== undefined && (!Number.isInteger(value.restorationOfRevision) || Number(value.restorationOfRevision) < 1)
-    || value.kind === "automation" && !uuid.test(String(value.automationId))
+    || value.kind === "automation" && (!uuid.test(String(value.automationId)) || value.signalId !== undefined && !uuid.test(String(value.signalId)))
+    || value.kind === "member" && (value.automationId !== undefined && !uuid.test(String(value.automationId)) || value.signalId !== undefined && !uuid.test(String(value.signalId)))
     || value.kind === "signal" && !uuid.test(String(value.signalId))
     || value.kind === "agent" && (!uuid.test(String(value.agentGrantId)) || !uuid.test(String(value.sponsoringMemberId)))
     || value.kind === "migration" && value.source !== "existing_note") throw new InvalidPortableWorkspaceImport(`invalid_${kind}`);

@@ -3,7 +3,6 @@
 .heading h2 { margin: 0; color: var(--stash-color-ink); font-size: clamp(1.8rem, 4vw, 3rem); letter-spacing: -.045em; }
 .headingAction { display: flex; align-items: center; gap: var(--stash-space-4); }
 .headingAction p { max-width: 28rem; margin: 0; color: var(--stash-color-muted); line-height: 1.6; }
-.kicker { margin: 0 0 var(--stash-space-2); color: var(--stash-color-accent-strong); font-size: .72rem; font-weight: 760; letter-spacing: .14em; text-transform: uppercase; }
 .recipes, .history { display: grid; gap: var(--stash-space-3); }
 .recipe, .transition { display: flex; align-items: center; gap: var(--stash-space-4); padding: var(--stash-space-4); background: var(--stash-color-surface); border: 1px solid var(--stash-border-subtle); border-radius: var(--stash-radius-md); }
 .recipe div, .transition div { flex: 1; min-width: 0; }

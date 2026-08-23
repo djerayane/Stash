@@ -2368,7 +2368,8 @@ export class PostgresDatabase implements
       const saved = await client.query<any>(taskPlanningSelectById, [row.task_id, memberId]);
       const after = taskPlanningReadModelFromRow(saved.rows[0]);
       await this.#recordPortableProjection(client, "Task", after.id, after.schema, taskProjectionFromRow(saved.rows[0]));
-      await this.#recordTaskActivity(client, memberId, row.workspace_id, row.task_id, "automation_status_transition_reversed", taskPlanningReadModelFromRow(before.rows[0]), after, { kind: "member" });
+      await this.#recordTaskActivity(client, memberId, row.workspace_id, row.task_id, "automation_status_transition_reversed", taskPlanningReadModelFromRow(before.rows[0]), after,
+        { kind: "member", automationId: row.automation_id, signalId: row.signal_id });
       return { status: "reversed" as const, transition: automationTransitionFromRow({ ...row, reversed_at: reversedAt }) };
     });
   }
@@ -2394,7 +2395,7 @@ export class PostgresDatabase implements
         const saved = await client.query<any>(taskPlanningSelectById, [row.id, row.created_by_account_id]); const after = taskPlanningReadModelFromRow(saved.rows[0]);
         await this.#recordPortableProjection(client, "Task", after.id, after.schema, taskProjectionFromRow(saved.rows[0]));
         await this.#recordTaskActivity(client, row.created_by_account_id, row.workspace_id, row.id, "task_status_automated", before, after,
-          { kind: "automation", automationId: row.automation_id });
+          { kind: "automation", automationId: row.automation_id, signalId: signal.id });
       }
     });
   }

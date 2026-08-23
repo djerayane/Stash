@@ -36,6 +36,28 @@ export interface TaskPlanningUpdate {
   estimate?: number | null;
 }
 
+export type AutomationTrigger = "branch_created" | "pull_request_completed";
+export interface AutomationRecipe {
+  id: string;
+  trigger: AutomationTrigger;
+  targetStatus: { id: string; name: string };
+  enabled: boolean;
+}
+export interface AutomationTransition {
+  id: string;
+  automationId: string;
+  signalId: string;
+  before: { id: string; name: string };
+  after: { id: string; name: string };
+  occurredAt: string;
+  reversedAt?: string;
+}
+export interface AutomationState {
+  recipes: AutomationRecipe[];
+  transitions: AutomationTransition[];
+  availableStatuses: Array<{ id: string; name: string }>;
+}
+
 export interface MobileCapturePairing {
   instanceUrl: string;
   memberToken: string;

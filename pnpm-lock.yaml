@@ -11,6 +11,9 @@ importers:
       '@simplewebauthn/server':
         specifier: ^13.3.2
         version: 13.3.2
+      '@stash/domain-types':
+        specifier: workspace:*
+        version: link:packages/domain-types
       '@stash/sync':
         specifier: workspace:*
         version: link:packages/sync

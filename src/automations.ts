@@ -1,23 +1,6 @@
-export type AutomationTrigger = "branch_created" | "pull_request_completed";
+import type { AutomationRecipe, AutomationState, AutomationTransition, AutomationTrigger } from "@stash/domain-types";
 
-export interface AutomationRecipe {
-  id: string;
-  trigger: AutomationTrigger;
-  targetStatus: { id: string; name: string };
-  enabled: boolean;
-}
-
-export interface AutomationTransition {
-  id: string;
-  automationId: string;
-  signalId: string;
-  before: { id: string; name: string };
-  after: { id: string; name: string };
-  occurredAt: string;
-  reversedAt?: string;
-}
-
-export interface AutomationState { recipes: AutomationRecipe[]; transitions: AutomationTransition[]; availableStatuses: Array<{ id: string; name: string }> }
+export type { AutomationRecipe, AutomationState, AutomationTransition, AutomationTrigger } from "@stash/domain-types";
 
 export interface AutomationRepository {
   listAutomationState(memberId: string, projectId: string, taskKey: string): Promise<AutomationState | undefined>;

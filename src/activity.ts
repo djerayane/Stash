@@ -2,8 +2,8 @@ import type { RichTextDocument } from "./rich-text.js";
 import type { PortableIdentity } from "./workspaces-projects.js";
 
 export type ActivityCause =
-  | { kind: "member"; restorationOfRevision?: number }
-  | { kind: "automation"; automationId: string }
+  | { kind: "member"; restorationOfRevision?: number; automationId?: string; signalId?: string }
+  | { kind: "automation"; automationId: string; signalId?: string }
   | { kind: "signal"; signalId: string }
   | { kind: "agent"; agentGrantId: string; sponsoringMemberId: string }
   | { kind: "migration"; source: "existing_note" };
