@@ -3,7 +3,7 @@ import { Pool, type PoolClient } from "pg";
 
 import type { DatabaseProbe } from "./instance.js";
 import { noteOperationDigest, type NoteConflictResolution, type NoteEditBatch, type NoteEditConflict, type NoteRecord, type NoteRepository, type NoteTriageChange, type NoteTriageResult, type PortableNoteLinkProjection, type PortableNoteProjection, type PortableTaskProjection, type TaskCreation } from "./notes.js";
-import { markdownToRichText, paragraphDocument, richTextToMarkdown } from "./rich-text.js";
+import { isRichTextDocument, markdownToRichText, paragraphDocument, richTextToMarkdown } from "./rich-text.js";
 import type { BootstrapRecord, OwnerBootstrapRepository } from "./owner-bootstrap.js";
 import type { AccountAuthenticationRecord, PasswordAuthRepository, SessionRecord } from "./password-auth.js";
 import type { OidcAuthRepository, OidcIdentityKey, OidcIdentityRecord, OidcOrganizationConfiguration } from "./oidc-auth.js";
@@ -42,7 +42,7 @@ import type { AutomationRecipe, AutomationRepository, AutomationState, Automatio
 import * as Y from "yjs";
 import { prosemirrorJSONToYDoc, yDocToProsemirrorJSON } from "y-prosemirror";
 import { Schema } from "prosemirror-model";
-import type { CollaborationSnapshot, NoteCollaborationRepository } from "./note-collaboration.js";
+import { InvalidCollaborationUpdate, type CollaborationSnapshot, type NoteCollaborationRepository } from "./note-collaboration.js";
 import { proseMirrorToRichText, richTextToProseMirror } from "@stash/rich-text";
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
@@ -147,6 +147,12 @@ export function collaborativeDocumentFromRichText(document: import("./rich-text.
 
 export function richTextFromCollaborativeDocument(document: Y.Doc): import("./rich-text.js").RichTextDocument {
   return proseMirrorToRichText(yDocToProsemirrorJSON(document, "default"));
+}
+
+export function validatedRichTextFromCollaborativeDocument(document: Y.Doc): import("./rich-text.js").RichTextDocument {
+  const materialized = richTextFromCollaborativeDocument(document);
+  if (!isRichTextDocument(materialized)) throw new InvalidCollaborationUpdate();
+  return materialized;
 }
 
 export class PostgresDatabase implements
@@ -4344,7 +4350,9 @@ export class PostgresDatabase implements
         return { noteId: current.note_id, sequence: Number(current.sequence), update: new Uint8Array(current.update),
           updatedAt: new Date(current.updated_at).toISOString(), updatedByMemberId: current.updated_by_account_id };
       }
-      const canonicalDocument = richTextFromCollaborativeDocument(document); document.destroy();
+      let canonicalDocument: import("./rich-text.js").RichTextDocument;
+      try { canonicalDocument = validatedRichTextFromCollaborativeDocument(document); }
+      finally { document.destroy(); }
       const note: NoteRecord = { ...before, document: canonicalDocument, content: richTextToMarkdown(canonicalDocument), revision: before.revision + 1 };
       await client.query("UPDATE stash_notes SET content=$2,document=$3::jsonb,revision=$4 WHERE id=$1",
         [noteId, note.content, JSON.stringify(note.document), note.revision]);

@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { applyAcknowledgedUpdate, NoteEditor } from "./note-editor";
+import { applyAcknowledgedUpdate, encodeUpdateBase64, NoteEditor } from "./note-editor";
 
 const emptyUpdate = () => btoa(String.fromCharCode(...Y.encodeStateAsUpdate(new Y.Doc())));
 const storage = new Map<string, string>();
@@ -22,6 +22,12 @@ it("does not acknowledge an unsent local contribution when an older server snaps
   const restoredServer = new Y.Doc(); Y.applyUpdate(restoredServer, published); Y.applyUpdate(restoredServer, stillPending);
   expect(restoredServer.getText("note").toString()).toBe("Published plus offline work");
   expect(stillPending.byteLength).toBeGreaterThan(2);
+});
+
+it("encodes updates up to the server limit without overflowing the browser call stack", () => {
+  const update = new Uint8Array(1_048_576);
+  for (let index = 0; index < update.length; index += 1) update[index] = index % 251;
+  expect(Uint8Array.from(atob(encodeUpdateBase64(update)), (character) => character.charCodeAt(0))).toEqual(update);
 });
 
 it("loads an authorized collaborative Note and exposes keyboard-operable rich-text controls", async () => {
@@ -80,5 +86,32 @@ it("keeps unsaved Yjs updates locally and offers recovery when the Instance is o
   await vi.advanceTimersByTimeAsync(400);
   await vi.waitFor(() => expect(screen.getByRole("button", { name: "Retry saving" })).toBeInTheDocument());
   expect(localStorage.getItem("stash.pending-note-update:note")).toBeTruthy();
+  vi.useRealTimers();
+});
+
+it("reports tab-only recovery and still sends changes when browser storage is unavailable", async () => {
+  vi.useFakeTimers();
+  vi.stubGlobal("localStorage", { getItem: () => { throw new DOMException("disabled", "SecurityError"); },
+    setItem: () => { throw new DOMException("quota", "QuotaExceededError"); }, removeItem: () => { throw new DOMException("disabled", "SecurityError"); } });
+  let online = false;
+  const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+    const url = String(input);
+    if (init?.method === "POST") {
+      if (!online) throw new TypeError("offline");
+      const body = JSON.parse(String(init.body)) as { update: string };
+      return new Response(JSON.stringify({ sequence: 1, update: body.update, updatedAt: new Date(0).toISOString(), updatedByMemberId: "ada" }));
+    }
+    if (url.endsWith("/collaboration")) return new Response(JSON.stringify({ sequence: 0, update: emptyUpdate(), updatedAt: new Date(0).toISOString(), updatedByMemberId: "ada" }));
+    return new Response(JSON.stringify({ id: "note", revision: 1, content: "Online plan", document: { type: "doc", blocks: [{ type: "paragraph", blockKey: "key", content: [{ text: "Draft" }] }] } }));
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}><NoteEditor noteId="note" fetcher={fetcher} token="token" /></QueryClientProvider>);
+  await vi.waitFor(() => expect(screen.getByRole("textbox", { name: "Note content" })).toHaveTextContent("Draft"));
+  await vi.advanceTimersByTimeAsync(400);
+  await vi.waitFor(() => expect(fetcher.mock.calls.some(([, init]) => init?.method === "POST")).toBe(true));
+  await vi.waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Changes remain only in this open tab"));
+  online = true;
+  fireEvent.click(screen.getByRole("button", { name: "Retry saving" }));
+  await vi.waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("All changes saved"));
   vi.useRealTimers();
 });

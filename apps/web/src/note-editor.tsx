@@ -44,7 +44,24 @@ const WorkspaceAttachment = Node.create({
 });
 
 const decode = (value: string) => Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
-const encode = (value: Uint8Array) => btoa(String.fromCharCode(...value));
+export function encodeUpdateBase64(value: Uint8Array): string {
+  const chunks: string[] = [];
+  for (let offset = 0; offset < value.length; offset += 0x8000)
+    chunks.push(String.fromCharCode(...value.subarray(offset, offset + 0x8000)));
+  return btoa(chunks.join(""));
+}
+
+function readPendingUpdate(key: string): string | null {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+
+function storePendingUpdate(key: string, update: string): boolean {
+  try { localStorage.setItem(key, update); return true; } catch { return false; }
+}
+
+function removePendingUpdate(key: string): void {
+  try { localStorage.removeItem(key); } catch { /* A successful server acknowledgement remains authoritative. */ }
+}
 
 export function applyAcknowledgedUpdate(localDocument: Y.Doc, update: Uint8Array): Uint8Array {
   const acknowledgedDocument = new Y.Doc();
@@ -80,7 +97,7 @@ export function NoteEditor({ noteId, fetcher = globalThis.fetch, token = localSt
   if (collaboration.data && persistedVector.current.byteLength === 0) {
     persistedVector.current = applyAcknowledgedUpdate(ydoc, decode(collaboration.data.update));
     try {
-      const pending = localStorage.getItem(`stash.pending-note-update:${noteId}`);
+      const pending = readPendingUpdate(`stash.pending-note-update:${noteId}`);
       if (pending) { Y.applyUpdate(ydoc, decode(pending)); restoredPendingUpdate.current = true; }
     } catch { /* Browser storage may be disabled; the live Y.Doc still retains this session's contribution. */ }
   }
@@ -113,15 +130,17 @@ export function NoteEditor({ noteId, fetcher = globalThis.fetch, token = localSt
     if (update.byteLength <= 2) return;
     const key = `stash.pending-note-update:${noteId}`;
     setStatus("Saving changes");
+    const encodedUpdate = encodeUpdateBase64(update);
+    const storedOnDevice = storePendingUpdate(key, encodedUpdate);
     try {
-      localStorage.setItem(key, encode(update));
       const response = await fetcher(`/api/notes/${encodeURIComponent(noteId)}/collaboration`, { method: "POST",
-        headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify({ update: encode(update) }) });
+        headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify({ update: encodedUpdate }) });
       if (!response.ok) throw new Error("The Instance rejected this update.");
       const snapshot = await response.json() as Snapshot;
       persistedVector.current = applyAcknowledgedUpdate(ydoc, decode(snapshot.update));
-      localStorage.removeItem(key); setStatus("All changes saved"); setError("");
-    } catch (cause) { setStatus("Changes kept on this device"); setError(cause instanceof Error ? cause.message : "The update could not be saved."); }
+      removePendingUpdate(key); setStatus("All changes saved"); setError("");
+    } catch (cause) { setStatus(storedOnDevice ? "Changes kept on this device" : "Changes remain only in this open tab");
+      setError(cause instanceof Error ? cause.message : "The update could not be saved."); }
   }, [fetcher, headers, noteId, ydoc]);
 
   useEffect(() => { if (!editor) return; let timer = 0; const changed = () => { clearTimeout(timer); timer = window.setTimeout(() => void synchronize(), 350); };
@@ -138,7 +157,7 @@ export function NoteEditor({ noteId, fetcher = globalThis.fetch, token = localSt
     const refresh = window.setInterval(() => { void fetcher(`/api/notes/${encodeURIComponent(noteId)}/collaboration`, { headers })
       .then(async (response) => { if (!response.ok) return; const snapshot = await response.json() as Snapshot;
         persistedVector.current = applyAcknowledgedUpdate(ydoc, decode(snapshot.update));
-        if (localStorage.getItem(`stash.pending-note-update:${noteId}`)) void synchronize(); })
+        if (readPendingUpdate(`stash.pending-note-update:${noteId}`)) void synchronize(); })
       .catch(() => undefined); }, 2_000);
     return () => clearInterval(refresh);
   }, [collaboration.data, fetcher, headers, noteId, synchronize, ydoc]);

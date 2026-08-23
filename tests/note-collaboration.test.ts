@@ -3,7 +3,8 @@ import { describe, it } from "node:test";
 import * as Y from "yjs";
 import { NoteCollaborationService, type CollaborationSnapshot, type NoteCollaborationRepository } from "../src/note-collaboration.js";
 import { yDocToProsemirrorJSON } from "y-prosemirror";
-import { collaborativeDocumentFromRichText, richTextFromCollaborativeDocument } from "../src/postgres-database.js";
+import { collaborativeDocumentFromRichText, richTextFromCollaborativeDocument, validatedRichTextFromCollaborativeDocument } from "../src/postgres-database.js";
+import { InvalidCollaborationUpdate } from "../src/note-collaboration.js";
 import { richTextToMarkdown, type RichTextDocument } from "../src/rich-text.js";
 
 class MemoryRepository implements NoteCollaborationRepository {
@@ -72,6 +73,15 @@ describe("self-hosted Note collaboration", () => {
     assert.match(markdown, /\[Spec sheet\]\(<\.\/attachments\/asset-id\/spec%20sheet\.pdf>\)/);
     assert.match(markdown, /!\[System diagram\]\(<\.\/attachments\/image-id\/diagram\.png> "Architecture"\)/);
     assert.match(markdown, /\| Owner \| State \|\n\| --- \| --- \|\n\| Ada \| Ready \|/);
+  });
+
+  it("rejects collaborative content that violates canonical rich-text invariants", () => {
+    const unsafe = collaborativeDocumentFromRichText({ type: "doc", blocks: [
+      { type: "image", src: "javascript:alert(1)", alt: "Unsafe", id: "11111111-1111-4111-8111-111111111111" },
+      { type: "attachment", href: "https://outside.example/file", label: "Not Workspace-owned", id: "11111111-1111-4111-8111-111111111111" },
+    ] });
+    assert.throws(() => validatedRichTextFromCollaborativeDocument(unsafe), InvalidCollaborationUpdate);
+    unsafe.destroy();
   });
 
   it("allows permission-aware reads without granting collaboration edits", async () => {
