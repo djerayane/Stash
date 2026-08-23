@@ -25,8 +25,9 @@ export INSTANCE_ADMIN_TOKEN="replace-with-a-long-random-secret"
 export INSTANCE_MASTER_KEY="$(openssl rand -base64 32)"
 export PUBLIC_ORIGIN="https://stash.example.com"
 docker compose up --build -d
-npm ci
-npm run smoke
+corepack enable
+pnpm install --frozen-lockfile
+pnpm run smoke
 ```
 
 Open <http://localhost:3000>. Stop the Instance with `docker compose down`. PostgreSQL data remains in the `stash-postgres` volume; removing that volume deletes the local database and is intentionally not part of the normal stop command.
@@ -114,10 +115,11 @@ be committed. See [the portable projection format](docs/portable-projection.md).
 ## Development and acceptance tests
 
 ```sh
-npm ci
-npm run check
-npm test
-npm run build
+corepack enable
+pnpm install --frozen-lockfile
+pnpm run check
+pnpm run test
+pnpm run build
 ```
 
-Acceptance tests bind a real ephemeral HTTP port and exercise the public protocol. Protocol-compatible database and Member-access fakes provide deterministic ownership, healthy, and recoverable-outage scenarios without bypassing the Instance HTTP boundary. `npm run smoke` targets a running, PostgreSQL-backed Instance and verifies both readiness and the browser surface.
+Acceptance tests bind a real ephemeral HTTP port and exercise the public protocol. Protocol-compatible database and Member-access fakes provide deterministic ownership, healthy, and recoverable-outage scenarios without bypassing the Instance HTTP boundary. `pnpm run smoke` targets a running, PostgreSQL-backed Instance and verifies both readiness and the browser surface.

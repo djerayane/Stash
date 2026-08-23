@@ -1,17 +1,23 @@
 {
-  "name": "stash",
+  "name": "@stash/server",
   "version": "0.1.0",
   "license": "AGPL-3.0-or-later",
   "private": true,
+  "packageManager": "pnpm@10.17.1",
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "check": "tsc --noEmit",
+    "build": "pnpm --recursive --if-present build && pnpm run build:server",
+    "build:server": "tsc -p tsconfig.build.json",
+    "check": "pnpm run check:server && pnpm --recursive --if-present check",
+    "check:server": "tsc --noEmit",
     "start": "node dist/main.js",
-    "test": "node --import tsx --test tests/**/*.test.ts",
+    "pretest": "pnpm --filter @stash/sync build",
+    "test": "pnpm run test:server && pnpm --recursive --if-present test",
+    "test:server": "node --import tsx --test tests/**/*.test.ts",
     "smoke": "node --import tsx scripts/smoke.ts"
   },
   "dependencies": {
+    "@stash/sync": "workspace:*",
     "@simplewebauthn/server": "^13.3.2",
     "gsap": "^3.15.0",
     "nodemailer": "^9.0.5",

@@ -11,7 +11,7 @@ import {
   type MobileCaptureOptions,
   type MobileCapturePairing,
   type MobileSyncMutation,
-} from "../src/mobile-capture-client.js";
+} from "@stash/sync";
 import {
   MobileCaptureService,
   type MobileCaptureRepository,
@@ -20,16 +20,16 @@ import { NoteService, type NoteEditBatch, type NoteEditConflict, type NoteRecord
 import { TaskService, type TaskEditBatch, type TaskEditConflict, type TaskPlanningReadModel } from "../src/tasks.js";
 import { paragraphDocument, richTextToMarkdown } from "../src/rich-text.js";
 import type { MemberAccessResolver } from "../src/workspaces-projects.js";
-import { EncryptedStateMobileCaptureStore, type CiphertextStateRepository, type MobileCipher } from "../mobile/src/encrypted-mobile-store.js";
-import { presentMobileSyncResult } from "../mobile/src/sync-status.js";
+import { EncryptedStateMobileCaptureStore, type CiphertextStateRepository, type MobileCipher } from "../apps/mobile/src/encrypted-mobile-store.js";
+import { presentMobileSyncResult } from "../apps/mobile/src/sync-status.js";
 import {
   ensureCaptureOptionsReady,
   loadCachedOptionsOnFocus,
   reconcileCaptureSelections,
-} from "../mobile/src/capture-options-focus.js";
-import { IncomingCaptureDeliveryGate, parseIncomingCapture } from "../mobile/src/incoming-capture.js";
-import { IncomingShareDeliveryBatch, SerializedIncomingShareDrain, drainIncomingShares, incomingShareFingerprint } from "../mobile/src/incoming-share-deliveries.js";
-import { MAX_ATTACHMENT_BYTES, readBoundedOriginal } from "../mobile/src/media-input.js";
+} from "../apps/mobile/src/capture-options-focus.js";
+import { IncomingCaptureDeliveryGate, parseIncomingCapture } from "../apps/mobile/src/incoming-capture.js";
+import { IncomingShareDeliveryBatch, SerializedIncomingShareDrain, drainIncomingShares, incomingShareFingerprint } from "../apps/mobile/src/incoming-share-deliveries.js";
+import { MAX_ATTACHMENT_BYTES, readBoundedOriginal } from "../apps/mobile/src/media-input.js";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const projectId = "22222222-2222-4222-8222-222222222222";
@@ -62,9 +62,9 @@ class MemoryEncryptedStore implements EncryptedMobileCaptureStore {
   async loadOptions(scope: string) { return structuredClone(this.options.get(scope) ?? { projects: [], tags: [], reminders: [] }); }
   async saveOptions(scope: string, options: { projects: { id: string; name: string }[]; tags: string[];
     reminders: { id: string; label: string; offsetMinutes: number }[] }) { this.options.set(scope, structuredClone(options)); }
-  incomingShares: import("../src/mobile-capture-client.js").IncomingShareDelivery[] = [];
+  incomingShares: import("@stash/sync").IncomingShareDelivery[] = [];
   nativeShare: { fingerprint: string; ids: string[] } | undefined;
-  async stageIncomingShares(fingerprint: string, deliveries: import("../src/mobile-capture-client.js").IncomingShareDelivery[]) {
+  async stageIncomingShares(fingerprint: string, deliveries: import("@stash/sync").IncomingShareDelivery[]) {
     if (this.nativeShare?.fingerprint !== fingerprint) {
       this.incomingShares.push(...structuredClone(deliveries)); this.nativeShare = { fingerprint, ids: deliveries.map(({ id }) => id) };
     }
@@ -73,7 +73,7 @@ class MemoryEncryptedStore implements EncryptedMobileCaptureStore {
   async acknowledgeNativeShares(fingerprint?: string) { if (!fingerprint || this.nativeShare?.fingerprint === fingerprint) this.nativeShare = undefined; }
   async listIncomingShares() { return structuredClone(this.incomingShares); }
   async removeIncomingShare(id: string) { this.incomingShares = this.incomingShares.filter((item) => item.id !== id); }
-  async saveIncomingShare(delivery: import("../src/mobile-capture-client.js").IncomingShareDelivery) {
+  async saveIncomingShare(delivery: import("@stash/sync").IncomingShareDelivery) {
     this.incomingShares = [...this.incomingShares.filter(({ id }) => id !== delivery.id), structuredClone(delivery)];
   }
 }
@@ -433,7 +433,7 @@ describe("offline mobile capture synchronization", () => {
     ];
     let unavailable = true;
     const captured: string[] = [];
-    const consume = async ({ payload }: import("../src/mobile-capture-client.js").IncomingShareDelivery) => {
+    const consume = async ({ payload }: import("@stash/sync").IncomingShareDelivery) => {
       if (payload.value === "A" && unavailable) throw new Error("The original could not be read right now.");
       captured.push(payload.value);
     };

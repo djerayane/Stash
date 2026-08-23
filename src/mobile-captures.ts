@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { normalizeExplicitOffsetTimestamp } from "./explicit-offset-timestamp.js";
 import type { NoteRecord, PortableNoteProjection } from "./notes.js";
-import { isUuid, type MobileCaptureOptions } from "./mobile-capture-client.js";
+import { isUuid, type MobileCaptureOptions } from "@stash/sync";
 import { paragraphDocument, richTextToMarkdown, type RichTextDocument } from "./rich-text.js";
 
 export interface MobileCaptureRepository {

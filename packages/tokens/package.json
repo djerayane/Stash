@@ -1,0 +1,7 @@
+{
+  "name": "@stash/tokens",
+  "version": "0.1.0",
+  "private": true,
+  "exports": { ".": "./src/tokens.css", "./tokens.css": "./src/tokens.css" },
+  "scripts": { "check": "node ./scripts/check.mjs", "build": "node ./scripts/check.mjs", "test": "node ./scripts/check.mjs" }
+}
