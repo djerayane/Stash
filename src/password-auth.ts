@@ -23,6 +23,7 @@ export interface PasswordAuthRepository {
   findAccountById(id: string): Promise<AccountAuthenticationRecord | undefined>;
   createSession(session: SessionRecord): Promise<void>;
   findSessionByTokenHash(tokenHash: string): Promise<SessionRecord | undefined>;
+  findPersonalAccessTokenByTokenHash?(tokenHash: string): Promise<{ id: string; accountId: string } | undefined>;
   listSessions(accountId: string): Promise<SessionRecord[]>;
   deleteSession(accountId: string, sessionId: string): Promise<boolean>;
   changePasswordAndDeleteOtherSessions(accountId: string, currentSessionId: string, passwordHash: string): Promise<void>;
@@ -95,7 +96,9 @@ export class PasswordAuthService {
     const token = authorization.slice(7);
     if (!token) return undefined;
     const session = await this.#repository.findSessionByTokenHash(tokenHash(token));
-    return session ? { accountId: session.accountId, sessionId: session.id } : undefined;
+    if (session) return { accountId: session.accountId, sessionId: session.id };
+    const personalToken = await this.#repository.findPersonalAccessTokenByTokenHash?.(tokenHash(token));
+    return personalToken ? { accountId: personalToken.accountId, sessionId: `personal-token:${personalToken.id}` } : undefined;
   }
 
   async sessions(member: AuthenticatedMember) {

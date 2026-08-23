@@ -23,9 +23,10 @@ class ProtocolCompatibleDatabase implements DatabaseProbe, OrganizationRoleRepos
     [otherOrganizationId, new Map([[margaretId, "Owner"]])],
   ]);
   failure: Error | undefined;
-  readonly revokedMembers = new Set<string>();
-  readonly activeSessions = new Set([linusId]);
-  readonly personalCredentials = new Set([linusId]);
+  readonly activeSessions = new Set([adaId, linusId, graceId, margaretId]);
+  readonly personalTokens = new Set([linusId]);
+  readonly passkeys = new Set([linusId]);
+  readonly recoveryCodes = new Set([linusId]);
   readonly activeAgentGrants = new Set([linusId]);
   readonly authoredNotes = new Map([[linusId, ["note-by-linus"]]]);
   readonly taskAssignments = new Map([["task-assigned-to-linus", { assigneeIds: [linusId], formerAssigneeIds: [] as string[] }]]);
@@ -70,13 +71,8 @@ class ProtocolCompatibleDatabase implements DatabaseProbe, OrganizationRoleRepos
       return "final_owner" as const;
     }
     members.delete(accountId);
-    const belongsElsewhere = [...this.memberships.entries()].some(([candidateOrganizationId, candidateMembers]) =>
-      candidateOrganizationId !== orgId && candidateMembers.has(accountId));
-    if (!belongsElsewhere) {
-      this.revokedMembers.add(accountId);
-      this.activeSessions.delete(accountId);
-      this.personalCredentials.delete(accountId);
-    }
+    this.activeSessions.delete(accountId);
+    this.personalTokens.delete(accountId);
     const revokedAgentGrants = this.activeAgentGrants.delete(accountId) ? 1 : 0;
     const affectedTaskIds: string[] = [];
     for (const [taskId, assignment] of this.taskAssignments) {
@@ -124,7 +120,9 @@ describe("managing built-in Organization Roles", () => {
       memberAccess: {
         async authenticateBearer(authorization) {
           const authenticated = await access.authenticateBearer(authorization);
-          return authenticated && !database.revokedMembers.has(authenticated.accountId) ? authenticated : undefined;
+          const accountId = authorization?.match(/^Bearer personal-(.+)$/)?.[1];
+          if (accountId) return database.personalTokens.has(accountId) ? { accountId, sessionId: `personal-token:${accountId}` } : undefined;
+          return authenticated && database.activeSessions.has(authenticated.accountId) ? authenticated : undefined;
         },
       },
       organizationRoles: new OrganizationRoleService(database),
@@ -221,15 +219,19 @@ describe("managing built-in Organization Roles", () => {
     assert.deepEqual(database.repositoryConnections.get("organization-github-connection"), { owner: "organization", state: "active" });
     assert.deepEqual(database.repositoryConnections.get("personal-github-connection"), { owner: linusId, state: "degraded" });
     assert.equal(database.activeSessions.has(linusId), false);
-    assert.equal(database.personalCredentials.has(linusId), false);
+    assert.equal(database.personalTokens.has(linusId), false);
+    assert.equal(database.passkeys.has(linusId), true);
+    assert.equal(database.recoveryCodes.has(linusId), true);
     assert.equal(database.activeAgentGrants.has(linusId), false);
     assert.deepEqual(database.operatorAudit, [{ actorId: adaId, memberId: linusId, action: "organization_member_departed" }]);
 
     const departedSession = await request(baseUrl, `/api/organizations/${organizationId}/roles`, `member-${linusId}`);
     assert.equal(departedSession.status, 401);
+    const departedPersonalToken = await request(baseUrl, `/api/organizations/${organizationId}/roles`, `personal-${linusId}`);
+    assert.equal(departedPersonalToken.status, 401);
   });
 
-  it("preserves account-global authentication for a Member who still belongs to another Organization", async () => {
+  it("invalidates sessions without deleting account recovery material when a Member belongs elsewhere", async () => {
     const { baseUrl, database } = await run();
     database.memberships.get(otherOrganizationId)!.set(linusId, "Member");
 
@@ -238,10 +240,12 @@ describe("managing built-in Organization Roles", () => {
     });
 
     assert.equal(removed.status, 200);
-    assert.equal(database.activeSessions.has(linusId), true);
-    assert.equal(database.personalCredentials.has(linusId), true);
+    assert.equal(database.activeSessions.has(linusId), false);
+    assert.equal(database.personalTokens.has(linusId), false);
+    assert.equal(database.passkeys.has(linusId), true);
+    assert.equal(database.recoveryCodes.has(linusId), true);
     const oldOrganization = await request(baseUrl, `/api/organizations/${organizationId}/roles`, `member-${linusId}`);
-    assert.equal(oldOrganization.status, 403);
+    assert.equal(oldOrganization.status, 401);
   });
 
   it("rejects non-Owners, invalid Roles, and attempts to mutate built-in definitions", async () => {
@@ -300,6 +304,7 @@ describe("managing built-in Organization Roles", () => {
     assert.doesNotMatch(await removalUnavailable.text(), /postgres|secret/i);
     assert.equal(database.memberships.get(organizationId)?.get(linusId), "Member");
     assert.equal(database.activeSessions.has(linusId), true);
+    assert.equal(database.personalTokens.has(linusId), true);
     assert.equal(database.repositoryConnections.get("personal-github-connection")?.state, "active");
   });
 

@@ -2859,6 +2859,17 @@ export class PostgresDatabase implements
     return result.rows[0] ? this.#sessionRecord(result.rows[0]) : undefined;
   }
 
+  async findPersonalAccessTokenByTokenHash(hash: string): Promise<{ id: string; accountId: string } | undefined> {
+    const table = await this.#pool.query<{ exists: boolean }>("SELECT to_regclass('stash_personal_access_tokens') IS NOT NULL AS exists");
+    if (!table.rows[0]?.exists) return undefined;
+    const result = await this.#pool.query<{ id: string; account_id: string }>(
+      `SELECT id, account_id FROM stash_personal_access_tokens
+       WHERE token_lookup = $1 AND revoked_at IS NULL AND expires_at > CURRENT_TIMESTAMP`,
+      [this.#authenticationSecrets.blindIndex(hash)],
+    );
+    return result.rows[0] ? { id: result.rows[0].id, accountId: result.rows[0].account_id } : undefined;
+  }
+
   async listSessions(accountId: string): Promise<SessionRecord[]> {
     await this.#ensureAuthSchema();
     const result = await this.#pool.query<SessionRow>(
@@ -4311,6 +4322,15 @@ export class PostgresDatabase implements
       confirmation_policy JSONB NOT NULL CHECK (jsonb_typeof(confirmation_policy) = 'object'),
       revoked_at TIMESTAMPTZ
     );
+    CREATE TABLE IF NOT EXISTS stash_personal_access_tokens (
+      id UUID PRIMARY KEY,
+      organization_id UUID NOT NULL REFERENCES stash_organizations(id) ON DELETE CASCADE,
+      account_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
+      token_lookup TEXT NOT NULL UNIQUE,
+      token_hash TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      revoked_at TIMESTAMPTZ
+    );
     CREATE TABLE IF NOT EXISTS stash_operator_audit (
       id UUID PRIMARY KEY, action TEXT NOT NULL, actor_account_id UUID NOT NULL REFERENCES stash_accounts(id),
       organization_id UUID NOT NULL REFERENCES stash_organizations(id), target_account_id UUID NOT NULL REFERENCES stash_accounts(id),
@@ -4339,19 +4359,16 @@ export class PostgresDatabase implements
   async #revokeDepartedMemberAuthority(client: PoolClient, organizationId: string, accountId: string) {
     const authorityTables = await client.query<{ tablename: string }>(`SELECT tablename FROM pg_tables
       WHERE schemaname = current_schema() AND tablename = ANY($1::text[])`,
-    [["stash_sessions", "stash_passkeys", "stash_recovery_codes", "stash_oidc_identities"]]);
+    [["stash_sessions", "stash_personal_access_tokens"]]);
     const present = new Set(authorityTables.rows.map(({ tablename }) => tablename));
-    const remaining = await client.query("SELECT 1 FROM stash_organization_memberships WHERE account_id = $1 LIMIT 1", [accountId]);
-    const deleteGlobal = remaining.rowCount === 0;
-    const sessions = deleteGlobal && present.has("stash_sessions") ? await client.query("DELETE FROM stash_sessions WHERE account_id = $1", [accountId]) : { rowCount: 0 };
-    const passkeys = deleteGlobal && present.has("stash_passkeys") ? await client.query("DELETE FROM stash_passkeys WHERE account_id = $1", [accountId]) : { rowCount: 0 };
-    const recovery = deleteGlobal && present.has("stash_recovery_codes") ? await client.query("DELETE FROM stash_recovery_codes WHERE account_id = $1", [accountId]) : { rowCount: 0 };
-    const oidc = present.has("stash_oidc_identities") ? await client.query(
-      "DELETE FROM stash_oidc_identities WHERE organization_id = $1 AND account_id = $2", [organizationId, accountId]) : { rowCount: 0 };
+    const sessions = present.has("stash_sessions") ? await client.query("DELETE FROM stash_sessions WHERE account_id = $1", [accountId]) : { rowCount: 0 };
+    const personalTokens = present.has("stash_personal_access_tokens") ? await client.query(
+      `UPDATE stash_personal_access_tokens SET revoked_at = CURRENT_TIMESTAMP
+       WHERE organization_id = $1 AND account_id = $2 AND revoked_at IS NULL`, [organizationId, accountId]) : { rowCount: 0 };
     const grants = await client.query(`UPDATE stash_agent_grants SET revoked_at = CURRENT_TIMESTAMP
       WHERE organization_id = $1 AND sponsoring_member_id = $2 AND revoked_at IS NULL`, [organizationId, accountId]);
     return { revokedSessions: sessions.rowCount ?? 0,
-      revokedCredentials: (passkeys.rowCount ?? 0) + (recovery.rowCount ?? 0) + (oidc.rowCount ?? 0),
+      revokedCredentials: personalTokens.rowCount ?? 0,
       revokedAgentGrants: grants.rowCount ?? 0 };
   }
 
