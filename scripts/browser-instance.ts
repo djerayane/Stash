@@ -7,6 +7,7 @@ import { collaborativeDocumentFromRichText, richTextFromCollaborativeDocument } 
 import { richTextToMarkdown } from "../src/rich-text.js";
 import { TaskService, type TaskPlanningReadModel, type TaskPlanningUpdate } from "../src/tasks.js";
 import { OrganizationRoleService, type BuiltInOrganizationRole } from "../src/organization-roles.js";
+import { WorkspaceSearchService } from "../src/workspace-search.js";
 
 const noteId = "99999999-9999-4999-8999-999999999999";
 const secondNoteId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -55,6 +56,10 @@ const collaborationRepository = {
 
 const projectId = "22222222-2222-4222-8222-222222222222";
 const browserMemberId = "11111111-1111-4111-8111-111111111111";
+const browserBoardId = "abababab-abab-4bab-8bab-abababababa1";
+let browserBoardStatus = "Ready";
+let browserDiscussions: any[] = [{ id: "abababab-abab-4bab-8bab-abababababa2", workspaceId: browserWorkspaceId, target: { kind: "note", noteId }, createdAt: new Date(0).toISOString(), messages: [{ id: "abababab-abab-4bab-8bab-abababababa3", content: "Keep this release context", author: { localAccountId: browserMemberId, displayName: "Browser Member" }, createdAt: new Date(0).toISOString() }] }];
+let browserNotifications: any[] = [{ id: "abababab-abab-4bab-8bab-abababababa4", title: "Release changed", message: "The release Task moved.", createdAt: new Date(0).toISOString() }];
 const organizationId = "44444444-4444-4444-8444-444444444444";
 const otherOrganizationId = "33333333-3333-4333-8333-333333333333";
 const departedMemberId = "55555555-5555-4555-8555-555555555555";
@@ -132,6 +137,8 @@ const instance = await startInstance({
     },
   },
   notes: { async listInbox(memberId: string, workspaceId: string) { return memberId === browserMemberId && workspaceId === browserWorkspaceId ? { status: "found", notes: inboxNotes } : { status: "workspace_forbidden" }; },
+    async listTemplates() { return { status: "found", templates: [{ id: "abababab-abab-4bab-8bab-abababababa5", name: "Decision", description: "Record context and outcome." }] }; },
+    async listDecisions() { return { status: "found", notes: [{ id: noteId, workspaceId: browserWorkspaceId, content: "Release collaboration plan", createdAt: new Date(0).toISOString() }] }; },
     async capture(memberId: string, workspaceId: string, value: { content?: string }) { const note = { id: "abababab-abab-4bab-8bab-abababababab", workspaceId, content: value.content ?? "", document: { type: "doc", blocks: [] }, revision: 1, tags: [], createdByMemberId: memberId, createdAt: new Date().toISOString() }; inboxNotes = [note]; return { status: "created", note, projection: { schema: "stash.note.v2" } }; },
     async triage(memberId: string, workspaceId: string, requestedNoteId: string, value: { action?: string }) { const note = inboxNotes.find(({ id }) => id === requestedNoteId); if (memberId !== browserMemberId || workspaceId !== browserWorkspaceId) return { status: "workspace_forbidden" }; if (!note) return { status: "note_not_found" }; if (value.action === "archive") { inboxNotes = []; return { status: "updated", result: { kind: "archived", note: { ...note, archivedAt: new Date().toISOString() }, projections: [{ schema: "stash.note-state.v1" }] } }; } return { status: "project_forbidden" }; },
     async get(memberId: string, requestedNoteId: string) { if (![browserMemberId, "browser-second-member", "browser-guest"].includes(memberId) || !collaborations.has(requestedNoteId)) return undefined;
@@ -157,6 +164,11 @@ const instance = await startInstance({
     },
   },
   tasks: new TaskService(taskRepository, { async findPortableMemberIdentity() { return undefined; } }),
+  boards: { async list() { return { status: "found", boards: [{ id: browserBoardId, name: "Delivery" }] }; }, async read() { return { status: "found", board: { id: browserBoardId, name: "Delivery" }, columns: [{ id: "ready", name: "Ready", archived: false, tasks: [{ id: task.id, key: task.key, title: task.title }] }, { id: "done", name: "Done", archived: false, tasks: [] }] }; }, async move(_memberId: string, _projectId: string, _boardId: string, _taskKey: string, value: { statusId: string }) { browserBoardStatus = value.statusId; return { status: "moved", task: { ...task, status: { id: value.statusId, name: value.statusId === "done" ? "Done" : "Ready" } } }; } } as any,
+  discussions: { async listForNote() { return { status: "found", discussions: browserDiscussions }; }, async listForTask() { return { status: "found", discussions: browserDiscussions }; }, async create(_memberId: string, value: any) { const discussion = { id: crypto.randomUUID(), workspaceId: browserWorkspaceId, target: value.target, createdAt: new Date().toISOString(), messages: [{ id: crypto.randomUUID(), content: value.message, author: { displayName: "Browser Member" }, createdAt: new Date().toISOString() }] }; browserDiscussions = [...browserDiscussions, discussion]; return { status: "created", discussion, projection: {} }; }, async reply(_memberId: string, id: string, value: any) { const discussion = browserDiscussions.find((item) => item.id === id); discussion.messages.push({ id: crypto.randomUUID(), content: value.content, author: { displayName: "Browser Member" }, createdAt: new Date().toISOString() }); return { status: "updated", discussion, projection: {} }; }, async resolve(_memberId: string, id: string) { const discussion = browserDiscussions.find((item) => item.id === id); discussion.resolvedAt = new Date().toISOString(); return { status: "resolved", discussion, projection: {} }; }, async createWork() { return { status: "created", work: { kind: "note" }, activity: {}, projections: [] }; } } as any,
+  activities: { async listWorkspace() { return { status: "found", activities: [{ id: "abababab-abab-4bab-8bab-abababababa6", summary: "Release plan updated", actor: { name: "Browser Member" }, occurredAt: new Date(0).toISOString() }] }; } } as any,
+  notifications: { async list() { return browserNotifications; }, async markRead(_memberId: string, id: string) { const notification = browserNotifications.find((item) => item.id === id); if (notification) notification.readAt = new Date().toISOString(); return notification; } } as any,
+  searches: new WorkspaceSearchService({ async searchWorkspace(memberId, workspaceId, query) { return memberId === browserMemberId && workspaceId === browserWorkspaceId ? { status: "found", results: [{ id: noteId, kind: "note", title: "Release collaboration plan", excerpt: `Matched ${query.q}`, href: `/app/notes/${noteId}` }] } : { status: "forbidden" }; } }),
   webClientRoot: fileURLToPath(new URL("../apps/web/dist", import.meta.url)),
 });
 

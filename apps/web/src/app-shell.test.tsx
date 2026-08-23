@@ -107,3 +107,15 @@ test("exposes the implemented search, capture, and notification actions", () => 
   expect(screen.getByRole("link", { name: "Notifications" })).toHaveAttribute("href", "/app/notifications");
   expect(screen.getByRole("link", { name: "Capture" })).toHaveAttribute("href", "/app/inbox");
 });
+
+test.each([
+  ["notes", "note-17", "/app/notes/note-17/discussions", "/api/notes/note-17/discussions"],
+  ["tasks", "task-23", "/app/tasks/task-23/discussions", "/api/tasks/task-23/discussions"],
+  ["blocks", "block-31", "/app/notes/note-17/blocks/block-31/discussions", "/api/notes/note-17/discussions"],
+])("opens the supported %s discussion deep link", async (_targetType, _targetId, route, endpoint) => {
+  const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ discussions: [] }), { status: 200 }));
+  renderShell(route);
+  expect(await screen.findByRole("heading", { name: "Discussions" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "No Discussion yet" })).toBeInTheDocument();
+  expect(fetcher).toHaveBeenCalledWith(endpoint, expect.any(Object));
+});

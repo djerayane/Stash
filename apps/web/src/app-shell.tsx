@@ -167,7 +167,9 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
           <Route path="/app/tasks" element={<ProjectGatewayPage />} />
           <Route path="/app/projects/:projectId/boards" element={<BoardsPage token={session.token ?? ""} />} />
           <Route path="/app/projects/:projectId/boards/:boardId" element={<BoardsPage token={session.token ?? ""} />} />
-          <Route path="/app/:targetType(notes|tasks)/:targetId/discussions" element={<DiscussionsPage token={session.token ?? ""} />} />
+          <Route path="/app/notes/:targetId/discussions" element={<DiscussionsPage targetKind="note" token={session.token ?? ""} />} />
+          <Route path="/app/tasks/:targetId/discussions" element={<DiscussionsPage targetKind="task" token={session.token ?? ""} />} />
+          <Route path="/app/notes/:targetId/blocks/:blockKey/discussions" element={<DiscussionsPage targetKind="block" token={session.token ?? ""} />} />
           <Route path="/app/projects/:projectId/tasks/:taskKey/development" element={<DevelopmentSignalsRoute />} />
           <Route path="/app/projects/:projectId/tasks/:taskKey" element={<TaskDetailPage memberId={session.member.id} token={session.token} />} />
           <Route path="/app/projects/:projectId/notifications" element={<ProjectNotificationsPage token={session.token} />} />

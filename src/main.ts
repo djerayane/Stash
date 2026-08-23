@@ -35,6 +35,7 @@ import { PostgresLocalInstanceBackupSource, PostgresLocalInstanceRestoreTarget }
 import { NotificationService } from "./notifications.js";
 import { AutomationService } from "./automations.js";
 import { NoteCollaborationService } from "./note-collaboration.js";
+import { WorkspaceSearchService } from "./workspace-search.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -107,6 +108,7 @@ async function main(): Promise<void> {
     mobileCaptures: new MobileCaptureService(database),
     discussions: new DiscussionService(database),
     activities: new ActivityService(database),
+    searches: new WorkspaceSearchService(database),
     instanceBackups,
     instanceBackupRestoreTarget: new PostgresLocalInstanceRestoreTarget({ databaseUrl: requiredEnvironment("DATABASE_URL"), attachmentRoot: attachmentStoragePath, publicOrigin }),
     ...(process.env.INSTANCE_BACKUP_PATH?.trim() ? { instanceBackupRoot: process.env.INSTANCE_BACKUP_PATH.trim() } : {}),

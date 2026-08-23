@@ -21,6 +21,7 @@
 .topbar { min-height: 4.5rem; position: sticky; z-index: 10; top: 0; display: flex; align-items: center; justify-content: space-between; gap: var(--stash-space-4); padding: var(--stash-space-3) clamp(1rem, 3vw, 2.5rem); background: color-mix(in srgb, var(--stash-color-canvas) 90%, transparent); border-bottom: 1px solid var(--stash-border-subtle); backdrop-filter: blur(18px); }
 .searchPreview { width: min(26rem, 55vw); display: flex; align-items: center; gap: var(--stash-space-3); padding: .68rem var(--stash-space-3); color: var(--stash-color-muted); background: var(--stash-color-surface); border: 1px solid var(--stash-border-subtle); border-radius: var(--stash-radius-md); font: inherit; }
 .searchPreview input { flex: 1; min-width: 0; border: 0; outline: 0; color: var(--stash-color-ink); background: transparent; }
+.searchPreview:focus-within { outline: 3px solid var(--stash-color-focus); outline-offset: 3px; }
 .searchPreview input::placeholder { color: var(--stash-color-ink); opacity: 1; }
 .notificationLink { color: var(--stash-color-muted); font-size: .78rem; font-weight: 700; text-underline-offset: .25em; }
 .compactCreate, .primaryButton { display: inline-flex; align-items: center; justify-content: center; gap: var(--stash-space-2); min-height: 2.65rem; padding: .65rem 1rem; color: var(--stash-color-accent-contrast); background: var(--stash-color-accent); border: 1px solid var(--stash-color-accent); border-radius: var(--stash-radius-sm); font: 650 .82rem/1 var(--stash-font-sans); text-decoration: none; cursor: pointer; transition: background-color 160ms ease, transform 160ms ease; }
@@ -70,7 +71,7 @@
   .topbar { min-height: 4rem; }
   .searchPreview { width: 2.65rem; justify-content: center; }
   .searchPreview input { width: 1px; }
-  .notificationLink { display: none; }
+  .notificationLink { flex: 0 0 auto; }
   .content { min-height: calc(100dvh - 8.5rem); }
   .pageHeader { align-items: flex-start; flex-direction: column; }
   .emptyState { grid-template-columns: 1fr; }
