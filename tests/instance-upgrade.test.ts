@@ -7,10 +7,13 @@ import { afterEach, describe, it } from "node:test";
 import { InstanceBackupService, type InstanceBackupSource } from "../src/instance-backup.js";
 import { startInstance, type RunningInstance } from "../src/instance.js";
 import { InstanceUpgradeService, type InstanceUpgradeTarget, type UpgradeCheck } from "../src/instance-upgrade.js";
+import { PostgresInstanceUpgradeTarget } from "../src/postgres-instance-upgrade.js";
+import { readStashReleaseVersion } from "../src/release-version.js";
 
 const masterKey = Buffer.alloc(32, 9).toString("base64");
 class Source implements InstanceBackupSource {
-  async captureDatabase(path: string) { await import("node:fs/promises").then(({ writeFile }) => writeFile(path, "before-upgrade")); }
+  captures = 0;
+  async captureDatabase(path: string) { this.captures += 1; await import("node:fs/promises").then(({ writeFile }) => writeFile(path, "before-upgrade")); }
   async captureAttachments() { return []; }
   async captureConfiguration() { return { publicOrigin: "https://stash.test", attachmentStorage: "local" }; }
 }
@@ -64,5 +67,35 @@ describe("Instance upgrades", () => {
     assert.equal((await readiness.json() as { error: string }).error, "upgrade_restart_required");
     assert.equal((await fetch(`${instance.url}/api/client-session`)).status, 503);
     await instance.close(); instances.splice(instances.indexOf(instance), 1); assert.equal(target.closed, 1);
+  });
+
+  it("claims the upgrade before asynchronous preflight so concurrent callers cannot both mutate", async () => {
+    const root = await mkdtemp(join(tmpdir(), "stash-upgrade-concurrent-")); const target = new Target(); target.fail = false; const source = new Source();
+    const upgrades = new InstanceUpgradeService({ target, backups: new InstanceBackupService(source, { masterKey }), backupRoot: root, targetVersion: "0.2.0" });
+    const [first, second] = await Promise.allSettled([upgrades.upgrade(), upgrades.upgrade()]);
+    assert.equal(first.status, "fulfilled"); assert.equal(second.status, "rejected");
+    if (second.status === "rejected") assert.match(String(second.reason), /already running/);
+    assert.equal(source.captures, 1); assert.equal(target.applied, 1);
+  });
+
+  it("uses the release package version and executes the production PostgreSQL migration registry", async () => {
+    assert.equal(await readStashReleaseVersion(), "0.1.0");
+    let table = false; let version: string | undefined; let ended = 0; const statements: string[] = [];
+    const query = async (sql: string, values?: unknown[]) => { statements.push(sql);
+      if (sql === "SHOW server_version_num") return { rows: [{ server_version_num: "150000" }] };
+      if (sql.includes("to_regclass")) return { rows: [{ table_name: table ? "stash_instance_format" : null }] };
+      if (sql.startsWith("SELECT version")) return { rows: version ? [{ version }] : [] };
+      if (sql.startsWith("CREATE TABLE stash_instance_format")) table = true;
+      if (sql.startsWith("INSERT INTO stash_instance_format")) version = String(values?.[0]);
+      return { rows: [] };
+    };
+    const database = { query, async connect() { return { query, release() {} }; }, async end() { ended += 1; } };
+    const target = new PostgresInstanceUpgradeTarget("postgres://unused", async () => undefined, database as any);
+    const before = await target.inspect("0.1.0"); assert.equal(before.currentVersion, "0.0.0"); assert.ok(before.checks.every((check) => check.status === "pass"));
+    await target.apply("0.0.0", "0.1.0"); assert.equal(version, "0.1.0");
+    assert.ok(statements.some((sql) => sql.startsWith("CREATE TABLE stash_instance_format")));
+    const current = await target.inspect("0.1.0"); assert.equal(current.currentVersion, "0.1.0");
+    const unsupported = await target.inspect("0.2.0"); assert.equal(unsupported.checks.find((check) => check.id === "migration_path")?.status, "fail");
+    await target.close(); assert.equal(ended, 1);
   });
 });

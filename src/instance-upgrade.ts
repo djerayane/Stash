@@ -5,7 +5,7 @@ import type { InstanceBackupService } from "./instance-backup.js";
 
 export interface UpgradeCheck { id: string; status: "pass" | "fail"; message: string }
 export interface InstanceUpgradeTarget {
-  inspect(): Promise<{ currentVersion: string; checks: UpgradeCheck[] }>;
+  inspect(targetVersion: string): Promise<{ currentVersion: string; checks: UpgradeCheck[] }>;
   apply(fromVersion: string, targetVersion: string): Promise<void>;
   rollback(backupPath: string): Promise<void>;
   close?(): Promise<void>;
@@ -25,7 +25,7 @@ export class InstanceUpgradeService {
   setUnavailableBarrier(barrier: () => Promise<void>): void { this.#unavailableBarrier = barrier; }
   async close(): Promise<void> { await this.options.target.close?.(); }
   async plan(): Promise<InstanceUpgradePlan> {
-    const inspected = await this.options.target.inspect();
+    const inspected = await this.options.target.inspect(this.options.targetVersion);
     const checks = [...inspected.checks];
     try { await mkdir(this.options.backupRoot, { recursive: true, mode: 0o700 }); checks.push({ id: "backup", status: "pass", message: "Rollback storage is writable." }); }
     catch { checks.push({ id: "backup", status: "fail", message: "Rollback storage is not writable." }); }
@@ -34,12 +34,12 @@ export class InstanceUpgradeService {
   }
   async upgrade(): Promise<{ status: "upgraded"; fromVersion: string; targetVersion: string; restartRequired: true }> {
     if (this.#operation !== "idle") throw new Error("an Instance upgrade is already running");
-    const plan = await this.plan();
-    if (plan.status !== "ready") throw new Error(plan.status === "current" ? "Instance is already current" : "upgrade preflight failed");
     this.#operation = "upgrading";
-    const name = `pre-upgrade-${plan.currentVersion}-to-${plan.targetVersion}-${this.#now().toISOString().replaceAll(":", "-")}`;
-    const backupPath = join(this.options.backupRoot, name);
     try {
+      const plan = await this.plan();
+      if (plan.status !== "ready") throw new Error(plan.status === "current" ? "Instance is already current" : "upgrade preflight failed");
+      const name = `pre-upgrade-${plan.currentVersion}-to-${plan.targetVersion}-${this.#now().toISOString().replaceAll(":", "-")}`;
+      const backupPath = join(this.options.backupRoot, name);
       await this.#unavailableBarrier();
       await this.options.backups.create(backupPath);
       try { await this.options.target.apply(plan.currentVersion, plan.targetVersion); }

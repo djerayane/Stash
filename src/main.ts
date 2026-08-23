@@ -39,6 +39,7 @@ import { WorkspaceSearchService } from "./workspace-search.js";
 import { AgentGrantService } from "./agent-grants.js";
 import { InstanceUpgradeService } from "./instance-upgrade.js";
 import { PostgresInstanceUpgradeTarget } from "./postgres-instance-upgrade.js";
+import { readStashReleaseVersion } from "./release-version.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -78,7 +79,7 @@ async function main(): Promise<void> {
   }), { masterKey: requiredEnvironment("INSTANCE_MASTER_KEY") });
   const instanceBackupRoot = process.env.INSTANCE_BACKUP_PATH?.trim();
   const instanceBackupRestoreTarget = new PostgresLocalInstanceRestoreTarget({ databaseUrl: requiredEnvironment("DATABASE_URL"), attachmentRoot: attachmentStoragePath, publicOrigin });
-  const instanceUpgrades = instanceBackupRoot ? new InstanceUpgradeService({ backups: instanceBackups, backupRoot: instanceBackupRoot, targetVersion: "0.1.0",
+  const instanceUpgrades = instanceBackupRoot ? new InstanceUpgradeService({ backups: instanceBackups, backupRoot: instanceBackupRoot, targetVersion: await readStashReleaseVersion(),
     target: new PostgresInstanceUpgradeTarget(requiredEnvironment("DATABASE_URL"), async (backupPath) => { await instanceBackups.restore(backupPath, instanceBackupRestoreTarget, { dryRun: false }); }) }) : undefined;
   const smtpUrl = process.env.SMTP_URL?.trim();
   const emailRecoveryFrom = process.env.EMAIL_RECOVERY_FROM?.trim();
