@@ -56,6 +56,13 @@ function ids(items: unknown[], key = "id"): string[] {
   return items.map((item) => object(item) && typeof item[key] === "string" ? item[key] : "");
 }
 const onlyKeys = (value: Record<string, unknown>, allowed: string[]) => Object.keys(value).every((key) => allowed.includes(key));
+function exact(value: unknown, allowed: string[], kind: string): asserts value is Record<string, unknown> {
+  if (!object(value) || !onlyKeys(value, allowed)) throw new InvalidPortableWorkspaceImport(`invalid_${kind}`);
+}
+function exactIdentity(value: unknown, kind: string): asserts value is { localAccountId: string; displayName: string } {
+  exact(value,["localAccountId","displayName"],kind); if (!portableIdentity(value) || !uuid.test(value.localAccountId))
+    throw new InvalidPortableWorkspaceImport(`invalid_${kind}`);
+}
 
 function unzipStored(archive: Buffer, limits: { maxEntries: number; maxFileBytes: number }): Entry[] {
   if (archive.length < 22) throw new InvalidPortableWorkspaceImport("missing_zip_directory");
@@ -172,32 +179,74 @@ function parseState(content: Buffer): PortableWorkspaceCanonicalState {
   for (const link of value.noteLinks) if (!object(link) || !notes.has(String(link.sourceNoteId))
     || link.targetNoteId !== undefined && link.targetNoteId !== null && !notes.has(String(link.targetNoteId))
     || !Number.isInteger(link.revision ?? 1) || Number(link.revision ?? 1) < 1) throw new InvalidPortableWorkspaceImport("invalid_note_link");
-  const allowedDurable = new Map([["Project", "stash.project.v1"], ["Workflow", "stash.workflow.v1"],
-    ["GuestProjectAccess", "stash.guest-project-access.v1"], ["RepositoryConnection", "stash.repository-connection.v1"],
-    ["Discussion", "stash.discussion.v1"], ["DiscussionWorkLink", "stash.discussion-work-link.v1"]]);
+  const allowedDurable = new Map([["Project", ["stash.project.v1"]], ["Workflow", ["stash.workflow.v1"]],
+    ["GuestProjectAccess", ["stash.guest-project-access.v1"]], ["RepositoryConnection", ["stash.repository-connection.v1","stash.disconnected-repository-connection.v1"]],
+    ["Discussion", ["stash.discussion.v1"]], ["DiscussionWorkLink", ["stash.discussion-work-link.v1"]]]);
+  const sanitizedDurable: PortableWorkspaceCanonicalState["durableObjects"] = [];
   for (const item of value.durableObjects) {
-    if (!object(item) || allowedDurable.get(String(item.kind)) !== item.schema || !object(item.payload) || item.payload.schema !== item.schema
+    if (!object(item) || !onlyKeys(item,["kind","id","schema","payload"]) || !allowedDurable.get(String(item.kind))?.includes(String(item.schema)) || !object(item.payload) || item.payload.schema !== item.schema
       || item.payload.id !== undefined && item.payload.id !== item.id) throw new InvalidPortableWorkspaceImport("unsupported_durable_object");
     const payload = item.payload;
-    if (item.kind === "Project" && (payload.workspaceId !== workspaceId || payload.id !== item.id || typeof payload.name !== "string"
-      || typeof payload.key !== "string" || !portableIdentity(payload.createdBy))) throw new InvalidPortableWorkspaceImport("invalid_project");
+    let sanitized: unknown;
+    if (item.kind === "Project") { exact(payload,["schema","id","workspaceId","name","key","createdBy"],"project"); exactIdentity(payload.createdBy,"project_creator");
+      if (payload.workspaceId !== workspaceId || payload.id !== item.id || typeof payload.name !== "string" || typeof payload.key !== "string") throw new InvalidPortableWorkspaceImport("invalid_project");
+      sanitized={schema:payload.schema,id:payload.id,workspaceId:payload.workspaceId,name:payload.name,key:payload.key,createdBy:{...payload.createdBy}}; }
     if (item.kind === "Workflow" && (!projects.has(String(payload.projectId)) || !Array.isArray(payload.statuses)
       || payload.statuses.some((status) => !object(status) || !uuid.test(String(status.id)) || typeof status.name !== "string"
         || !["unstarted", "started", "completed"].includes(String(status.category)) || !Number.isInteger(status.position) || typeof status.archived !== "boolean")))
       throw new InvalidPortableWorkspaceImport("invalid_workflow");
+    if(item.kind==="Workflow") { exact(payload,["schema","projectId","revision","statuses"],"workflow");
+      for(const status of payload.statuses as unknown[]) exact(status,["id","name","category","position","archived"],"workflow_status");
+      if(!Number.isInteger(payload.revision)||Number(payload.revision)<0) throw new InvalidPortableWorkspaceImport("invalid_workflow");
+      sanitized={schema:payload.schema,projectId:payload.projectId,revision:payload.revision,statuses:(payload.statuses as Record<string,unknown>[]).map((s)=>({...s}))}; }
     if (item.kind === "Discussion" && (payload.workspaceId !== workspaceId || !object(payload.target)
       || payload.target.kind === "task" && !tasks.has(String(payload.target.taskId))
       || ["note", "block"].includes(String(payload.target.kind)) && !notes.has(String(payload.target.noteId))
       || !Array.isArray(payload.messages) || payload.messages.some((message) => !object(message) || !uuid.test(String(message.id))
         || typeof message.content !== "string" || !message.content || !portableIdentity(message.author) || !timestamp(message.createdAt))))
       throw new InvalidPortableWorkspaceImport("invalid_discussion");
+    if(item.kind==="Discussion") { exact(payload,["schema","id","workspaceId","target","messages","createdAt","resolvedAt"],"discussion");
+      if(object(payload.target)&&payload.target.kind==="note") exact(payload.target,["kind","noteId"],"discussion_target");
+      else if(object(payload.target)&&payload.target.kind==="task") exact(payload.target,["kind","taskId"],"discussion_target");
+      else if(object(payload.target)&&payload.target.kind==="block") { exact(payload.target,["kind","noteId","blockId"],"discussion_target"); if(!uuid.test(String(payload.target.blockId))) throw new InvalidPortableWorkspaceImport("invalid_discussion"); }
+      else throw new InvalidPortableWorkspaceImport("invalid_discussion");
+      for(const message of payload.messages as unknown[]) { exact(message,["id","content","author","createdAt"],"discussion_message"); exactIdentity(message.author,"discussion_author"); }
+      if(!timestamp(payload.createdAt)||(payload.resolvedAt!==undefined&&!timestamp(payload.resolvedAt))) throw new InvalidPortableWorkspaceImport("invalid_discussion");
+      sanitized=structuredClone(payload); }
     if (item.kind === "DiscussionWorkLink" && (payload.workspaceId !== workspaceId || !object(payload.work)
       || payload.work.kind === "note" && !notes.has(String(payload.work.id)) || payload.work.kind === "task" && !tasks.has(String(payload.work.id))))
       throw new InvalidPortableWorkspaceImport("invalid_discussion_link");
+    if(item.kind==="DiscussionWorkLink") { exact(payload,["schema","id","workspaceId","discussionId","work","selectedMessages","createdAt","createdBy"],"discussion_link");
+      exact(payload.work,["kind","id"],"discussion_work"); exactIdentity(payload.createdBy,"discussion_link_creator");
+      if(!uuid.test(String(payload.discussionId))||!value.durableObjects.some((candidate)=>object(candidate)&&candidate.kind==="Discussion"&&candidate.id===payload.discussionId)
+        ||!Array.isArray(payload.selectedMessages)||!timestamp(payload.createdAt)) throw new InvalidPortableWorkspaceImport("invalid_discussion_link");
+      const discussion=value.durableObjects.find((candidate)=>object(candidate)&&candidate.kind==="Discussion"&&candidate.id===payload.discussionId);
+      const discussionMessageIds=new Set(object(discussion)&&object(discussion.payload)&&Array.isArray(discussion.payload.messages)?ids(discussion.payload.messages):[]);
+      for(const message of payload.selectedMessages) { exact(message,["id","content","author","createdAt"],"discussion_selected_message"); exactIdentity(message.author,"discussion_selected_author"); if(!timestamp(message.createdAt)) throw new InvalidPortableWorkspaceImport("invalid_discussion_link"); }
+      if(payload.selectedMessages.some((message)=>!discussionMessageIds.has(String(message.id)))) throw new InvalidPortableWorkspaceImport("invalid_discussion_link");
+      sanitized=structuredClone(payload); }
     if (item.kind === "GuestProjectAccess" && (!Array.isArray(payload.projects) || payload.projects.some((project) => !object(project)
       || project.workspaceId !== workspaceId || !projects.has(String(project.projectId))))) throw new InvalidPortableWorkspaceImport("invalid_permission");
+    if(item.kind==="GuestProjectAccess") { exact(payload,["schema","id","organizationId","guest","projects","acceptedAt","invitedBy"],"permission");
+      exactIdentity(payload.guest,"guest"); exactIdentity(payload.invitedBy,"inviter");
+      for(const project of payload.projects as unknown[]) exact(project,["projectId","workspaceId"],"guest_project");
+      if(!uuid.test(String(payload.organizationId))||!timestamp(payload.acceptedAt)) throw new InvalidPortableWorkspaceImport("invalid_permission"); sanitized=structuredClone(payload); }
     if (item.kind === "RepositoryConnection" && (!Array.isArray(payload.projectIds) || payload.projectIds.some((id) => !projects.has(String(id)))))
       throw new InvalidPortableWorkspaceImport("invalid_repository_connection");
+    if(item.kind==="RepositoryConnection") { const disconnected=item.schema==="stash.disconnected-repository-connection.v1";
+      exact(payload,disconnected?["schema","id","provider","repositoryUrl","organization","createdBy","projectIds","state","reason"]
+        :["schema","id","provider","repositoryUrl","organization","createdBy","projectIds"],"repository_connection");
+      exact(payload.organization,["localOrganizationId","displayName"],"repository_organization");
+      exact(payload.createdBy,["localAccountId","displayName","attribution"],"repository_creator");
+      if(payload.provider!=="github"||typeof payload.repositoryUrl!=="string"||!/^https:\/\//.test(payload.repositoryUrl)
+        ||!uuid.test(String(payload.organization.localOrganizationId))||typeof payload.organization.displayName!=="string"
+        ||value.workspace.owner.type!=="organization"||!object(value.workspace.owner.identity)
+        ||payload.organization.localOrganizationId!==value.workspace.owner.identity.localOrganizationId
+        ||!uuid.test(String(payload.createdBy.localAccountId))||typeof payload.createdBy.displayName!=="string"
+        ||!["recorded","inferred-during-upgrade"].includes(String(payload.createdBy.attribution))
+        ||!Array.isArray(payload.projectIds)||(disconnected&&(payload.state!=="disconnected"||payload.reason!=="credentials_not_portable")))
+        throw new InvalidPortableWorkspaceImport("invalid_repository_connection"); sanitized=structuredClone(payload); }
+    sanitizedDurable.push({kind:String(item.kind),id:String(item.id),schema:String(item.schema),payload:sanitized!});
   }
   const workflowStatuses = new Set(value.durableObjects.filter((item) => object(item) && item.kind === "Workflow" && object(item.payload))
     .flatMap((item) => object(item) && object(item.payload) && Array.isArray(item.payload.statuses) ? ids(item.payload.statuses) : []));
@@ -228,7 +277,7 @@ function parseState(content: Buffer): PortableWorkspaceCanonicalState {
   if ([...value.notes, ...value.tasks, ...value.attachments].some((item) => !object(item) || !portableIdentity(item.createdBy))
     || value.activities.some((item) => !object(item) || !portableIdentity(item.actor))
     || value.noteHistory.some((item) => !object(item) || !portableIdentity(item.actor))) throw new InvalidPortableWorkspaceImport("invalid_canonical_state");
-  return value as unknown as PortableWorkspaceCanonicalState;
+  return { ...(value as unknown as PortableWorkspaceCanonicalState), durableObjects:sanitizedDurable };
 }
 function identities(state: PortableWorkspaceCanonicalState): IdentityStub[] {
   const values = new Map<string, string>();

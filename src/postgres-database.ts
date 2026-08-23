@@ -3314,7 +3314,7 @@ export class PostgresDatabase implements
         "SELECT archive_sha256,report FROM stash_workspace_imports WHERE import_id=$1", [importId]);
       if (receipt.rows[0]) return receipt.rows[0].archive_sha256 === bundle.archiveSha256
         ? { status: "duplicate" as const, report: receipt.rows[0].report } : { status: "workspace_conflict" as const };
-      const owner = await client.query("SELECT 1 FROM stash_accounts WHERE id=$1", [bundle.destinationOwnerAccountId]);
+      const owner = await client.query<{name:string}>("SELECT name FROM stash_accounts WHERE id=$1", [bundle.destinationOwnerAccountId]);
       if (!owner.rowCount) return { status: "forbidden" as const };
       const state = bundle.state;
       if ((await client.query("SELECT 1 FROM stash_workspaces WHERE id=$1", [state.workspace.id])).rowCount)
@@ -3334,7 +3334,8 @@ export class PostgresDatabase implements
       const accountFor = (identity: { localAccountId: string }) => identityAccounts.get(identity.localAccountId)!;
       await client.query(`INSERT INTO stash_workspaces(id,name,owner_type,personal_owner_id,created_by_account_id)
         VALUES($1,$2,'personal',$3,$4)`, [state.workspace.id, state.workspace.name, bundle.destinationOwnerAccountId, accountFor(state.workspace.createdBy)]);
-      await this.#recordPortableProjection(client, "Workspace", state.workspace.id, state.workspace.schema, state.workspace);
+      const importedWorkspace: PortableWorkspaceProjection = {...state.workspace,owner:{type:"personal",identity:{localAccountId:bundle.destinationOwnerAccountId,displayName:owner.rows[0]!.name}}};
+      await this.#recordPortableProjection(client, "Workspace", state.workspace.id, importedWorkspace.schema, importedWorkspace);
       const durable = state.durableObjects.map((item) => ({ ...item, payload: item.payload as any }));
       for (const item of durable.filter(({ kind }) => kind === "Project")) {
         const project = item.payload;
@@ -3419,12 +3420,26 @@ export class PostgresDatabase implements
         for (const project of access.projects) await client.query("INSERT INTO stash_project_guests(project_id,account_id) VALUES($1,$2) ON CONFLICT DO NOTHING",
           [project.projectId,guestAccount]);
       }
-      for (const item of durable.filter(({ kind }) => !["Project","Workflow"].includes(kind)))
+      const integrationTransformations: ImportTransformation[] = [];
+      for (const item of durable.filter(({kind})=>kind==="RepositoryConnection")) {
+        const source=item.payload as any; const disconnected=source.schema==="stash.disconnected-repository-connection.v1"?source:{...source,
+          schema:"stash.disconnected-repository-connection.v1",state:"disconnected",reason:"credentials_not_portable"};
+        await client.query(`INSERT INTO stash_disconnected_repository_connections(id,workspace_id,payload) VALUES($1,$2,$3::jsonb)`,
+          [item.id,state.workspace.id,JSON.stringify(disconnected)]);
+        await this.#recordPortableProjection(client,"RepositoryConnection",item.id,disconnected.schema,disconnected);
+        integrationTransformations.push({kind:source.schema===disconnected.schema?"skipped":"transformed",object:`RepositoryConnection:${item.id}`,
+          reason:source.schema===disconnected.schema?"already_disconnected":"credentials_not_portable"});
+      }
+      for (const item of durable.filter(({ kind }) => !["Project","Workflow","RepositoryConnection"].includes(kind)))
         await this.#recordPortableProjection(client,item.kind as any,item.id,item.schema as any,item.payload);
-      const transformed: ImportTransformation[] = bundle.identityStubs.map((identity) => ({ kind:"transformed",object:identity.sourceAccountId,reason:"identity_stub_created" }));
+      const ownership: ImportTransformation = {kind:"transformed",object:`Workspace:${state.workspace.id}`,
+        reason:`ownership_mapped:${bundle.destinationOwnerAccountId}`};
+      const transformations: ImportTransformation[] = [ownership,...bundle.identityStubs.map((identity) => ({ kind:"transformed" as const,
+        object:`Identity:${identity.sourceAccountId}`,reason:"identity_stub_created" })),...integrationTransformations];
       const report: PortableWorkspaceImportReport = { schema:"stash.portable-workspace-import-report.v1",importId,
         workspaceId:state.workspace.id,archiveSha256:bundle.archiveSha256,identityStubs:bundle.identityStubs,
-        transformations:transformed,transformed,skipped:[],ambiguous:[] };
+        transformations,transformed:transformations.filter(({kind})=>kind==="transformed"),skipped:transformations.filter(({kind})=>kind==="skipped"),
+        ambiguous:transformations.filter(({kind})=>kind==="ambiguous") };
       await client.query("INSERT INTO stash_workspace_imports(import_id,archive_sha256,workspace_id,report) VALUES($1,$2,$3,$4::jsonb)",
         [importId,bundle.archiveSha256,state.workspace.id,JSON.stringify(report)]);
       return { status:"imported" as const,report };
@@ -3660,6 +3675,9 @@ export class PostgresDatabase implements
     CREATE TABLE IF NOT EXISTS stash_workspace_imports (
       import_id UUID PRIMARY KEY, archive_sha256 TEXT NOT NULL, workspace_id UUID NOT NULL UNIQUE REFERENCES stash_workspaces(id),
       report JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS stash_disconnected_repository_connections (
+      id UUID PRIMARY KEY, workspace_id UUID NOT NULL REFERENCES stash_workspaces(id), payload JSONB NOT NULL
     )`);
   }
 

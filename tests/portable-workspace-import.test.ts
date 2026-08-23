@@ -121,6 +121,13 @@ describe("Portable Workspace import", () => {
       ...snapshot.attachments[0]!.projection, relativePath: `./attachments/${snapshot.attachments[0]!.projection.id}/different.bin` } }] };
     const aliasedArchive = await archiveFor(aliased);
     await assert.rejects(() => service.import(randomUUID(), "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", aliasedArchive), /invalid_attachment_path/);
+    const projectId="44444444-4444-4444-8444-444444444444";
+    const secretBearing={...snapshot,durableObjects:[
+      {kind:"Project",id:projectId,schema:"stash.project.v1",payload:{schema:"stash.project.v1",id:projectId,workspaceId,name:"Project",key:"PRJ",createdBy:actor}},
+      {kind:"RepositoryConnection",id:"55555555-5555-4555-8555-555555555555",schema:"stash.repository-connection.v1",payload:{schema:"stash.repository-connection.v1",id:"55555555-5555-4555-8555-555555555555",provider:"github",repositoryUrl:"https://github.example/org/repo",organization:{localOrganizationId:"66666666-6666-4666-8666-666666666666",displayName:"Org"},createdBy:{...actor,attribution:"recorded"},projectIds:[projectId],installationId:12345}},
+    ]};
+    const secretArchive=await archiveFor(secretBearing);
+    await assert.rejects(()=>service.import(randomUUID(),"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",secretArchive),/invalid_repository_connection/);
     assert.equal(repository.committed,undefined);
   });
 });
@@ -145,6 +152,7 @@ describe("PostgreSQL Portable Workspace import", { skip: postgresUrl ? false : "
       const linkId = "88888888-8888-4888-8888-888888888888"; const activityId = "99999999-9999-4999-8999-999999999999";
       const guest = { localAccountId:"cccccccc-cccc-4ccc-8ccc-cccccccccccc",displayName:"Guest" };
       const rich: PortableWorkspaceExportSnapshot = { ...snapshot,
+        workspace:{...snapshot.workspace,owner:{type:"organization",identity:{localOrganizationId:"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",displayName:"Source"}}},
         notes:[{...snapshot.notes[0]!,projectId}],
         tasks:[{schema:"stash.task.v1",id:taskId,workspaceId,projectId,key:"PRJ-1",title:"Round trip",status:{id:statusId,name:"Ready",category:"unstarted"},
           sourceNoteIds:[noteId],linkedNoteIds:[noteId],dependencies:[],createdAt:"2026-01-02T00:00:00.000Z",createdBy:actor}],
@@ -157,17 +165,22 @@ describe("PostgreSQL Portable Workspace import", { skip: postgresUrl ? false : "
           {kind:"Project",id:projectId,schema:"stash.project.v1",payload:{schema:"stash.project.v1",id:projectId,workspaceId,name:"Project",key:"PRJ",createdBy:actor}},
           {kind:"Workflow",id:projectId,schema:"stash.workflow.v1",payload:{schema:"stash.workflow.v1",projectId,revision:1,statuses:[{id:statusId,name:"Ready",category:"unstarted",position:0,archived:false}]}},
           {kind:"GuestProjectAccess",id:"dddddddd-dddd-4ddd-8ddd-dddddddddddd",schema:"stash.guest-project-access.v1",payload:{schema:"stash.guest-project-access.v1",id:"dddddddd-dddd-4ddd-8ddd-dddddddddddd",organizationId:"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",guest,projects:[{projectId,workspaceId}],acceptedAt:"2026-01-01T00:00:00.000Z",invitedBy:actor}},
+          {kind:"RepositoryConnection",id:"ffffffff-ffff-4fff-8fff-ffffffffffff",schema:"stash.repository-connection.v1",payload:{schema:"stash.repository-connection.v1",id:"ffffffff-ffff-4fff-8fff-ffffffffffff",provider:"github",repositoryUrl:"https://github.example/org/repo",organization:{localOrganizationId:"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",displayName:"Source"},createdBy:{...actor,attribution:"recorded"},projectIds:[projectId]}},
         ] };
       const exported = await archiveFor(rich); const importId = randomUUID();
       const imported = await fetch(`${instance.url}/api/workspace-imports`, { method: "POST", headers: { authorization: "Bearer admin",
         "idempotency-key": importId, "x-stash-import-owner-account-id": ownerId }, body: new Uint8Array(exported) });
-      assert.equal(imported.status, 201); assert.equal((await imported.json() as any).report.identityStubs.length, 1);
+      assert.equal(imported.status, 201); const importBody=await imported.json() as any; assert.equal(importBody.report.identityStubs.length, 2);
+      assert.ok(importBody.report.transformed.some(({object,reason}:any)=>object===`Workspace:${workspaceId}`&&reason===`ownership_mapped:${ownerId}`));
+      assert.ok(importBody.report.transformed.some(({object,reason}:any)=>object==="RepositoryConnection:ffffffff-ffff-4fff-8fff-ffffffffffff"&&reason==="credentials_not_portable"));
       const reexport = await fetch(`${instance.url}/api/workspaces/${workspaceId}/export`, { headers: { authorization: "Bearer owner" } });
       assert.equal(reexport.status, 200); const files = storedFiles(Buffer.from(await reexport.arrayBuffer()));
-      assert.deepEqual(JSON.parse(files.get("objects/workspace.json")!.toString()), { workspace: rich.workspace, notes: rich.notes,
+      const disconnected={...(rich.durableObjects!.find(({kind})=>kind==="RepositoryConnection")!.payload as any),schema:"stash.disconnected-repository-connection.v1",state:"disconnected",reason:"credentials_not_portable"};
+      assert.deepEqual(JSON.parse(files.get("objects/workspace.json")!.toString()), { workspace: {...rich.workspace,owner:{type:"personal",identity:{localAccountId:ownerId,displayName:"Grace"}}}, notes: rich.notes,
         tasks: rich.tasks, boards: rich.boards, attachments: rich.attachments.map(({ projection }) => projection), noteLocations: rich.noteLocations,
         noteLinks: rich.noteLinks, activities: rich.activities, noteHistory: rich.noteHistory,
-        durableObjects: [...rich.durableObjects!].sort((left,right) => `${left.kind}:${left.id}`.localeCompare(`${right.kind}:${right.id}`)) });
+        durableObjects: rich.durableObjects!.map((item)=>item.kind==="RepositoryConnection"?{...item,schema:disconnected.schema,payload:disconnected}:item)
+          .sort((left,right) => `${left.kind}:${left.id}`.localeCompare(`${right.kind}:${right.id}`)) });
       assert.deepEqual(files.get(snapshot.attachments[0]!.projection.relativePath.slice(2)), Buffer.from([1,2,3]));
       const duplicate = await fetch(`${instance.url}/api/workspace-imports`, { method:"POST", headers:{ authorization:"Bearer admin",
         "idempotency-key":importId,"x-stash-import-owner-account-id":ownerId },body:new Uint8Array(exported) });
