@@ -12,7 +12,6 @@ import { PostgresDatabase } from "../src/postgres-database.js";
 import { RepositoryConnectionService, type GitHubApp } from "../src/repository-connections.js";
 import { TaskService } from "../src/tasks.js";
 import { WorkspaceProjectService } from "../src/workspaces-projects.js";
-import { AutomationService } from "../src/automations.js";
 import { NotificationService, type NotificationDelivery } from "../src/notifications.js";
 
 const databaseUrl = process.env.STASH_TEST_DATABASE_URL;
