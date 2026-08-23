@@ -19,6 +19,7 @@ import { GitHubAppClient } from "./github-app.js";
 import { RepositoryConnectionService } from "./repository-connections.js";
 import { TaskService } from "./tasks.js";
 import { AttachmentService, LocalAttachmentStorage } from "./attachments.js";
+import { s3AttachmentStorageFromEnvironment } from "./s3-attachment-storage.js";
 import { MobileCaptureService } from "./mobile-captures.js";
 import { DiscussionService } from "./discussions.js";
 import { ProjectWorkflowService } from "./project-workflows.js";
@@ -67,7 +68,9 @@ async function main(): Promise<void> {
   const notifications = new NotificationService(database);
   const automations = new AutomationService(database, notifications);
   const attachmentStoragePath = process.env.ATTACHMENT_STORAGE_PATH?.trim() || "/var/lib/stash/attachments";
-  const attachmentStorage = new LocalAttachmentStorage(attachmentStoragePath);
+  const s3AttachmentStorage = s3AttachmentStorageFromEnvironment(process.env);
+  const attachmentStorage = s3AttachmentStorage ?? new LocalAttachmentStorage(attachmentStoragePath);
+  const attachmentStorageKind = s3AttachmentStorage ? "s3" as const : "local" as const;
   const githubAppId = process.env.GITHUB_APP_ID?.trim();
   const githubAppPrivateKey = process.env.GITHUB_APP_PRIVATE_KEY?.replace(/\\n/g, "\n").trim();
   if (Boolean(githubAppId) !== Boolean(githubAppPrivateKey)) throw new Error("GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY must be configured together");
@@ -75,10 +78,12 @@ async function main(): Promise<void> {
   const githubWebhookSecret = process.env.GITHUB_WEBHOOK_SECRET?.trim();
   const publicOrigin = requiredEnvironment("PUBLIC_ORIGIN");
   const instanceBackups = new InstanceBackupService(new PostgresLocalInstanceBackupSource({
-    databaseUrl: requiredEnvironment("DATABASE_URL"), attachmentRoot: attachmentStoragePath, publicOrigin,
+    databaseUrl: requiredEnvironment("DATABASE_URL"), attachmentRoot: attachmentStoragePath, ...(s3AttachmentStorage ? { attachmentStorage: s3AttachmentStorage } : {}),
+    attachmentStorageKind, publicOrigin,
   }), { masterKey: requiredEnvironment("INSTANCE_MASTER_KEY") });
   const instanceBackupRoot = process.env.INSTANCE_BACKUP_PATH?.trim();
-  const instanceBackupRestoreTarget = new PostgresLocalInstanceRestoreTarget({ databaseUrl: requiredEnvironment("DATABASE_URL"), attachmentRoot: attachmentStoragePath, publicOrigin });
+  const instanceBackupRestoreTarget = new PostgresLocalInstanceRestoreTarget({ databaseUrl: requiredEnvironment("DATABASE_URL"), attachmentRoot: attachmentStoragePath,
+    ...(s3AttachmentStorage ? { attachmentStorage: s3AttachmentStorage } : {}), attachmentStorageKind, publicOrigin });
   const instanceUpgrades = instanceBackupRoot ? new InstanceUpgradeService({ backups: instanceBackups, backupRoot: instanceBackupRoot, targetVersion: await readStashReleaseVersion(),
     target: new PostgresInstanceUpgradeTarget(requiredEnvironment("DATABASE_URL"), async (backupPath) => { await instanceBackups.restore(backupPath, instanceBackupRestoreTarget, { dryRun: false }); }) }) : undefined;
   const smtpUrl = process.env.SMTP_URL?.trim();

@@ -28,11 +28,12 @@
     "backup": "node --import tsx src/backup-command.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1116.0",
     "@simplewebauthn/server": "^13.3.2",
     "@stash/domain-types": "workspace:*",
-    "@stash/validation": "workspace:*",
     "@stash/rich-text": "workspace:*",
     "@stash/sync": "workspace:*",
+    "@stash/validation": "workspace:*",
     "gsap": "^3.15.0",
     "nodemailer": "^9.0.5",
     "pg": "^8.16.3",

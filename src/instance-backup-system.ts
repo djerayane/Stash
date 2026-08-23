@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
-import { cp, lstat, mkdir, opendir, rename, rm } from "node:fs/promises";
+import { cp, lstat, mkdir, opendir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 
-import type { InstanceBackupRestoreTarget, InstanceBackupSource } from "./instance-backup.js";
+import { UnsafeAttachmentRollbackError, type InstanceBackupRestoreTarget, type InstanceBackupSource } from "./instance-backup.js";
+import type { AttachmentStorage } from "./attachments.js";
 
 async function command(program: string, arguments_: string[], environment: NodeJS.ProcessEnv): Promise<void> {
   await new Promise<void>((resolvePromise, reject) => {
@@ -50,13 +51,30 @@ async function regularFiles(root: string): Promise<string[]> {
 }
 
 export class PostgresLocalInstanceBackupSource implements InstanceBackupSource {
-  constructor(private readonly options: { databaseUrl: string; attachmentRoot: string; publicOrigin: string }) {}
+  constructor(private readonly options: {
+    databaseUrl: string;
+    attachmentRoot: string;
+    attachmentStorage?: AttachmentStorage;
+    attachmentStorageKind?: "local" | "s3";
+    publicOrigin: string;
+  }) {}
   async captureDatabase(destination: string): Promise<void> {
     await mkdir(dirname(destination), { recursive: true });
     await command("pg_dump", ["--format=custom", "--serializable-deferrable", "--no-password", "--file", destination],
       postgresEnvironment(this.options.databaseUrl).environment);
   }
   async captureAttachments(destination: string): Promise<ReadonlyArray<string>> {
+    if (this.options.attachmentStorage) {
+      const storage = this.options.attachmentStorage;
+      if (!storage.listKeys) throw new Error("Attachment storage does not support coordinated backup");
+      const files = [...await storage.listKeys()].sort();
+      for (const file of files) {
+        const target = join(destination, ...file.split("/"));
+        await mkdir(dirname(target), { recursive: true });
+        await writeFile(target, await storage.get(file), { mode: 0o600 });
+      }
+      return files;
+    }
     const files = await regularFiles(this.options.attachmentRoot);
     for (const file of files) {
       const target = join(destination, ...file.split("/"));
@@ -66,14 +84,21 @@ export class PostgresLocalInstanceBackupSource implements InstanceBackupSource {
     return files;
   }
   async captureConfiguration() {
-    return { publicOrigin: this.options.publicOrigin, attachmentStorage: "local", masterKeyRequired: true, redisIncluded: false };
+    return { publicOrigin: this.options.publicOrigin, attachmentStorage: this.options.attachmentStorageKind ?? "local", masterKeyRequired: true, redisIncluded: false };
   }
 }
 
 export class PostgresLocalInstanceRestoreTarget implements InstanceBackupRestoreTarget {
-  constructor(private readonly options: { databaseUrl: string; attachmentRoot: string; publicOrigin: string }) {}
+  constructor(private readonly options: {
+    databaseUrl: string;
+    attachmentRoot: string;
+    attachmentStorage?: AttachmentStorage;
+    attachmentStorageKind?: "local" | "s3";
+    publicOrigin: string;
+  }) {}
   async validateConfiguration(configuration: Record<string, unknown>): Promise<void> {
-    if (configuration.attachmentStorage !== "local") throw new Error("Instance Backup requires an unsupported Attachment storage adapter");
+    if (configuration.attachmentStorage !== (this.options.attachmentStorageKind ?? "local"))
+      throw new Error("Instance Backup Attachment storage adapter does not match this restore environment");
     if (configuration.masterKeyRequired !== true) throw new Error("Instance Backup does not declare its master-key requirement");
     if (configuration.publicOrigin !== this.options.publicOrigin) throw new Error("Instance Backup PUBLIC_ORIGIN does not match this restore environment");
   }
@@ -105,6 +130,10 @@ export class PostgresLocalInstanceRestoreTarget implements InstanceBackupRestore
   }
   async commitAttachments(prepared: unknown): Promise<void> {
     if (typeof prepared !== "string") throw new Error("invalid prepared Attachment restore");
+    if (this.options.attachmentStorage) {
+      await this.commitStoredAttachments(prepared, this.options.attachmentStorage);
+      return;
+    }
     const destination = resolve(this.options.attachmentRoot);
     const staged = prepared;
     const previous = `${destination}.restore-previous-${process.pid}`;
@@ -123,5 +152,28 @@ export class PostgresLocalInstanceRestoreTarget implements InstanceBackupRestore
   }
   async discardPreparedAttachments(prepared: unknown): Promise<void> {
     if (typeof prepared === "string") await rm(prepared, { recursive: true, force: true });
+  }
+
+  private async commitStoredAttachments(staged: string, storage: AttachmentStorage): Promise<void> {
+    if (!storage.listKeys) throw new Error("Attachment storage does not support coordinated restore");
+    const previousKeys = [...await storage.listKeys()];
+    const desiredKeys = await regularFiles(staged);
+    const rollback = `${staged}-rollback`;
+    await rm(rollback, { recursive: true, force: true }); await mkdir(rollback, { recursive: true, mode: 0o700 });
+    try {
+      for (const key of previousKeys) { const target = join(rollback, ...key.split("/")); await mkdir(dirname(target), { recursive: true });
+        await writeFile(target, await storage.get(key), { mode: 0o600 }); }
+      for (const key of desiredKeys) await storage.put(key, await readFile(join(staged, ...key.split("/"))));
+      const desired = new Set(desiredKeys);
+      for (const key of previousKeys) if (!desired.has(key)) await storage.delete(key);
+    } catch (error) {
+      const currentKeys = await storage.listKeys().catch(() => []);
+      const rollbackErrors: unknown[] = [];
+      for (const key of previousKeys) try { await storage.put(key, await readFile(join(rollback, ...key.split("/")))); } catch (rollbackError) { rollbackErrors.push(rollbackError); }
+      const previous = new Set(previousKeys);
+      for (const key of currentKeys) if (!previous.has(key)) try { await storage.delete(key); } catch (rollbackError) { rollbackErrors.push(rollbackError); }
+      if (rollbackErrors.length) throw new UnsafeAttachmentRollbackError([error, ...rollbackErrors], "S3 Attachment restore and rollback both failed");
+      throw error;
+    } finally { await rm(staged, { recursive: true, force: true }).catch(() => undefined); await rm(rollback, { recursive: true, force: true }).catch(() => undefined); }
   }
 }
