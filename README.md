@@ -2,6 +2,8 @@
 
 Stash is a self-hosted application that connects early project thinking with the development work that follows. The current minimal Instance provides an operator-visible browser page, health endpoints, and a protected Instance API backed by PostgreSQL readiness.
 
+Member-facing integrations use the versioned, permission-aware [public domain API](docs/public-domain-api.md).
+
 ## Run an Instance
 
 Docker Compose starts the supported baseline: one Stash application container and PostgreSQL.
