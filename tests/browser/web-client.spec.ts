@@ -276,6 +276,8 @@ test("announces and focuses a session failure, then retries by keyboard without 
 
 test("issues and revokes an Agent Grant with visible credential and accessible recovery", async ({ page }) => {
   await installMemberSession(page); await page.emulateMedia({ reducedMotion: "reduce" }); let loadAttempts = 0; let created = false; let revoked = false; let navigations = 0; let submitted: any;
+  await page.addInitScript(() => { (window as any).__stashRejectClipboard = true; Object.defineProperty(navigator, "clipboard", { configurable: true,
+    value: { writeText: async () => { if ((window as any).__stashRejectClipboard) throw new DOMException("Denied", "NotAllowedError"); } } }); });
   page.on("framenavigated", (frame) => { if (frame === page.mainFrame()) navigations += 1; });
   await page.route("**/api/agent-grant-options", (route) => route.fulfill({ json: { organizations: [{ organizationId: "44444444-4444-4444-8444-444444444444", organizationName: "Acceptance Organization", projects: [{ id: "22222222-2222-4222-8222-222222222222", name: "Release planning" }] }] } }));
   await page.route("**/api/organizations/44444444-4444-4444-8444-444444444444/agent-grants**", async (route) => {
@@ -291,7 +293,10 @@ test("issues and revokes an Agent Grant with visible credential and accessible r
   await page.getByLabel("Agent name").fill("Research assistant"); await page.getByLabel("Project scope").selectOption("22222222-2222-4222-8222-222222222222"); await page.getByLabel("Create Notes").check(); await page.getByLabel("Create Notes policy").selectOption("propose"); await page.getByLabel("Lifetime").selectOption("1"); await page.getByRole("button", { name: "Issue Agent Grant" }).focus(); await page.keyboard.press("Enter");
   const credential = page.getByRole("region", { name: "Copy this credential now" }); await expect(credential).toBeFocused(); await expect(credential).toContainText("stash_agent_");
   expect(submitted.projectId).toBe("22222222-2222-4222-8222-222222222222"); expect(submitted.scopes).toEqual([{ capability: "note.read", mode: "direct" }, { capability: "note.write", mode: "propose" }]); expect(new Date(submitted.expiresAt).getTime()-Date.now()).toBeLessThanOrEqual(86_400_000);
-  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]); await page.getByRole("button", { name: "Revoke" }).click(); await expect(page.getByRole("button", { name: "Revoked" })).toBeDisabled();
+  const copy = page.getByRole("button", { name: "Copy credential" }); await copy.focus(); await page.keyboard.press("Enter"); const copyError = page.getByRole("alert"); await expect(copyError).toBeFocused(); await expect(copyError).toContainText("copy it manually");
+  const code = credential.locator("code"); await expect(code).toContainText("stash_agent_"); await expect(code).toHaveCSS("user-select", "text"); expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  await page.evaluate(() => { (window as any).__stashRejectClipboard = false; }); await copy.focus(); await page.keyboard.press("Enter"); const copied = credential.getByRole("status"); await expect(copied).toHaveText("Credential copied."); await expect(copied).toBeFocused();
+  await page.getByRole("button", { name: "Revoke" }).click(); await expect(page.getByRole("button", { name: "Revoked" })).toBeDisabled();
   expect(navigations).toBe(0);
 });
 

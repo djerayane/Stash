@@ -20,7 +20,10 @@
 .credential { padding: 2rem; margin-top: 2rem; background: var(--stash-color-accent-soft); border: 1px solid var(--stash-color-accent); border-radius: var(--stash-radius-md); }
 .credential p { color: var(--stash-color-ink); }
 .credential code { overflow-wrap: anywhere; align-self: center; }
+.credential code { user-select: text; cursor: text; }
 .credential button { color: var(--stash-color-ink); background: var(--stash-color-surface); border: 1px solid var(--stash-border-strong); }
+.copyError { padding-left: .75rem; color: var(--stash-color-ink) !important; border-left: 3px solid var(--stash-color-error); font-weight: 650; }
+.copySuccess { color: var(--stash-color-ink) !important; font-weight: 650; }
 .list ul { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
 .list li { display: flex; gap: 1rem; align-items: center; justify-content: space-between; padding: 1.3rem 0; border-top: 1px solid var(--stash-border-subtle); }
 .list li div { display: grid; gap: .3rem; }
