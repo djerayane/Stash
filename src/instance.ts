@@ -66,6 +66,7 @@ import { automationRoutes } from "./automation-routes.js";
 import type { AutomationService } from "./automations.js";
 import { noteCollaborationRoutes } from "./note-collaboration-routes.js";
 import type { NoteCollaborationService } from "./note-collaboration.js";
+import { importedIdentityAdministrationRoutes, type ImportedIdentityAdministration } from "./imported-identity-administration-routes.js";
 
 export interface DatabaseProbe {
   verifyConnection(): Promise<void>;
@@ -129,6 +130,7 @@ export interface InstanceOptions {
   instanceBackupRoot?: string;
   notifications?: NotificationService;
   automations?: AutomationService;
+  importedIdentityAdministration?: ImportedIdentityAdministration;
 }
 
 const browserSurface = `<!doctype html>
@@ -229,6 +231,7 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
     ...(options.githubArtifacts ? [githubArtifactRoutes(options.githubArtifacts, memberAccess)] : []),
     ...(options.githubSignals ? [githubSignalRoutes(options.githubSignals, memberAccess)] : []),
     ...(options.automations ? [automationRoutes(options.automations, memberAccess)] : []),
+    ...(options.importedIdentityAdministration ? [importedIdentityAdministrationRoutes(options.importedIdentityAdministration, memberAccess)] : []),
   ] : [];
   const applicationRoutes = [
     boardSurfaceRoute(),

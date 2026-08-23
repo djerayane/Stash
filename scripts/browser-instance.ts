@@ -66,6 +66,7 @@ let task: TaskPlanningReadModel = {
   createdBy: { localAccountId: "browser-member", displayName: "Browser Member" }, revision: 1, dependencyWarnings: [],
 };
 const memberships = new Map<string, BuiltInOrganizationRole>([[browserMemberId, "Admin"], [departedMemberId, "Member"]]);
+const pendingImportedIdentities = new Map([["77777777-7777-4777-8777-777777777777", { importId: "66666666-6666-4666-8666-666666666666", workspaceId: "browser-workspace", workspaceName: "Imported Atlas", sourceAccountId: "77777777-7777-4777-8777-777777777777", displayName: "Grace Hopper" }]]);
 const organizationRoleRepository = {
   async organizationRole(requestedOrganizationId: string, accountId: string) {
     return requestedOrganizationId === organizationId ? memberships.get(accountId) : undefined;
@@ -142,6 +143,14 @@ const instance = await startInstance({
   }; } } as any,
   noteCollaboration: new NoteCollaborationService(collaborationRepository),
   organizationRoles: new OrganizationRoleService(organizationRoleRepository),
+  importedIdentityAdministration: {
+    async listPendingImportedIdentities(memberId: string) { return memberId === browserMemberId ? [...pendingImportedIdentities.values()] : []; },
+    async mapImportedIdentityAsMember(memberId: string, input: { sourceAccountId: string; localAccountId: string }) {
+      if (memberId !== browserMemberId || !memberships.has(input.localAccountId)) return { status: "forbidden" as const };
+      if (!pendingImportedIdentities.has(input.sourceAccountId)) return { status: "not_found" as const };
+      pendingImportedIdentities.delete(input.sourceAccountId); return { status: "mapped" as const };
+    },
+  },
   tasks: new TaskService(taskRepository, { async findPortableMemberIdentity() { return undefined; } }),
   webClientRoot: fileURLToPath(new URL("../apps/web/dist", import.meta.url)),
 });

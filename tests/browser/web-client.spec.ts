@@ -180,6 +180,19 @@ test("removes a Member, revokes authority, and keeps former assignment repair ac
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 });
 
+test("maps imported attribution to a verified local Member by keyboard without exposing administrator credentials", async ({ page }) => {
+  await installMemberSession(page); await page.emulateMedia({ reducedMotion: "reduce" }); await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/app/settings/imported-identities");
+  await expect(page.getByRole("heading", { name: "Reconnect imported people." })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Grace Hopper" })).toBeVisible();
+  const confirm = page.getByRole("button", { name: "Confirm mapping" }); await expect(confirm).toBeDisabled();
+  await page.getByRole("combobox", { name: "Local Member" }).selectOption("11111111-1111-4111-8111-111111111111");
+  await confirm.focus(); await page.keyboard.press("Enter");
+  const status = page.getByRole("status"); await expect(status).toBeFocused(); await expect(status).toContainText("Grace Hopper now resolves to Browser Member");
+  await expect(page.getByRole("heading", { name: "No unresolved Identity Stubs" })).toBeVisible();
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+});
+
 test("announces and focuses a session failure, then retries by keyboard without reloading", async ({ page }) => {
   await installMemberSession(page);
   let sessionAttempts = 0;

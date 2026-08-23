@@ -9,6 +9,7 @@ import { NoteEditor } from "./note-editor";
 import { TaskDetailPage } from "./task-detail";
 import { MemberAdministrationPage, type OrganizationAdministration } from "./member-administration";
 import { ProjectNotificationsPage } from "./project-notifications";
+import { ImportedIdentitiesPage } from "./imported-identities";
 
 export type SessionState =
   | { readonly status: "loading" }
@@ -47,6 +48,7 @@ function Icon({ name }: { readonly name: string }) {
     task: <><rect x="4" y="4" width="16" height="16" rx="2" /><path d="m8 12 2.5 2.5L16 9" /></>,
     pulse: <path d="M3 12h4l2-6 4 12 2-6h6" />,
     members: <><circle cx="9" cy="8" r="3" /><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 4a3 3 0 0 1 0 6M17 14a5 5 0 0 1 4 5" /></>,
+    import: <><circle cx="12" cy="12" r="8" /><path d="M8 12h8M12 8v8" /></>,
     plus: <path d="M12 5v14M5 12h14" />,
     search: <><circle cx="11" cy="11" r="6" /><path d="m16 16 4 4" /></>,
   };
@@ -134,6 +136,7 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
       <NavigationMenu.Root className={styles.navigationRoot} orientation="vertical" aria-label="Workspace"><NavigationMenu.List className={styles.navigation}>
         {navigation.map((item) => <NavigationMenu.Item key={item.to}><NavigationMenu.Link asChild><NavLink className={styles.navLink} end={item.to === "/app"} to={item.to}><Icon name={item.icon} />{item.label}</NavLink></NavigationMenu.Link></NavigationMenu.Item>)}
         {session.organizationAdministrations?.length ? <NavigationMenu.Item><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/members"><Icon name="members" />Members</NavLink></NavigationMenu.Link></NavigationMenu.Item> : null}
+        <NavigationMenu.Item><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/imported-identities"><Icon name="import" />Imported identities</NavLink></NavigationMenu.Link></NavigationMenu.Item>
       </NavigationMenu.List></NavigationMenu.Root>
       <div className={styles.sidebarFooter}><span className={styles.avatar} aria-hidden="true">{initials(memberName, "M")}</span><span><strong>{memberName}</strong><small>{memberEmail}</small></span></div>
     </aside>
@@ -151,6 +154,7 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
           <Route path="/app/projects/:projectId/tasks/:taskKey" element={<TaskDetailPage memberId={session.member.id} token={session.token} />} />
           <Route path="/app/projects/:projectId/notifications" element={<ProjectNotificationsPage token={session.token} />} />
           <Route path="/app/settings/members" element={<MemberAdministrationPage administrations={session.organizationAdministrations} activeOrganizationId={session.activeOrganizationId} currentMemberId={session.member.id} token={session.token} />} />
+          <Route path="/app/settings/imported-identities" element={<ImportedIdentitiesPage administrations={session.organizationAdministrations} currentMember={session.member} token={session.token} />} />
           <Route path="/app/activity" element={<PlaceholderPage workspaceName={workspaceName} title="Activity" description="Meaningful changes, explained without unnecessary noise." action="Filter" />} />
           <Route path="*" element={<PlaceholderPage workspaceName={workspaceName} title="Not found" description="This Workspace route does not exist." action="Go home" actionTo="/app" />} />
         </Routes>
