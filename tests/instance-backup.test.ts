@@ -217,13 +217,19 @@ describe("coordinated Instance Backup", () => {
     const root = await mkdtemp(join(tmpdir(), "stash-backup-diagnostics-")); const backupRoot = join(root, "scheduled");
     const service = new InstanceBackupService(new FakeSource(), { masterKey }); await service.create(join(backupRoot, "corrupt"));
     await mkdir(join(backupRoot, "missing-manifest"));
+    await mkdir(join(backupRoot, "metadata-missing")); await writeFile(join(backupRoot, "metadata-missing", "manifest.json"), "{}");
     await writeFile(join(backupRoot, "corrupt", "database.dump"), "tampered");
     const instance = await startInstance({ database: new Probe(), host: "127.0.0.1", port: 0,
       instanceAdminToken: "admin", instanceBackups: service, instanceBackupRoot: backupRoot, instanceBackupRestoreTarget: new FakeRestoreTarget() });
     instances.push(instance); const headers = { authorization: "Bearer admin", "content-type": "application/json" };
 
     const listing = await fetch(`${instance.url}/api/instance/backups`, { headers });
-    assert.equal((await listing.json() as { backups: Array<{ name: string; status: string }> }).backups.find(({ name }) => name === "missing-manifest")?.status, "invalid");
+    const candidates = (await listing.json() as { backups: Array<{ name: string; status: string }> }).backups;
+    assert.equal(candidates.find(({ name }) => name === "missing-manifest")?.status, "invalid");
+    assert.equal(candidates.find(({ name }) => name === "metadata-missing")?.status, "invalid");
+    const malformed = await fetch(`${instance.url}/api/instance/backups/metadata-missing/restore`, { method: "POST", headers, body: JSON.stringify({ dryRun: true }) });
+    assert.equal(malformed.status, 422); assert.deepEqual(await malformed.json(), { error: "invalid_manifest",
+      message: "The backup manifest is missing or invalid. No Instance data was changed." });
 
     const corrupt = await fetch(`${instance.url}/api/instance/backups/corrupt/restore`, { method: "POST", headers, body: JSON.stringify({ dryRun: true }) });
     assert.equal(corrupt.status, 422); assert.deepEqual(await corrupt.json(), { error: "integrity_failed",

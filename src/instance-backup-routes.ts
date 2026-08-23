@@ -30,8 +30,8 @@ async function listBackups(root: string) {
       if (!entry.isDirectory() || !backupName(entry.name)) continue;
       try {
         const value = JSON.parse(await readFile(join(root, entry.name, "manifest.json"), "utf8")) as { schema?: unknown; createdAt?: unknown; verification?: { verifiedAt?: unknown } };
-        if (typeof value.schema !== "string" || typeof value.createdAt !== "string") continue;
-        backups.push({ name: entry.name, schema: value.schema, createdAt: value.createdAt, status: "readable",
+        if (typeof value.schema !== "string" || typeof value.createdAt !== "string") backups.push({ name: entry.name, status: "invalid" });
+        else backups.push({ name: entry.name, schema: value.schema, createdAt: value.createdAt, status: "readable",
           ...(typeof value.verification?.verifiedAt === "string" ? { verifiedAt: value.verification.verifiedAt } : {}) });
       } catch { backups.push({ name: entry.name, status: "invalid" }); }
     }

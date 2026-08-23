@@ -54,6 +54,18 @@ test("verifies and confirms an Instance restore through the operator console", a
   expect(operations).toEqual([{ dryRun: true }, { dryRun: false, confirmation: "release-ready" }]);
 });
 
+test("keeps a malformed backup visible and announces its verification diagnosis", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("stash.instance-admin-session", JSON.stringify({ token: "browser-acceptance-admin-token" })));
+  await page.route("**/api/instance/backups", (route) => route.fulfill({ json: { backups: [{ name: "metadata-missing", status: "invalid" }] } }));
+  await page.route("**/api/instance/backups/metadata-missing/restore", (route) => route.fulfill({ status: 422, json: { error: "invalid_manifest",
+    message: "The backup manifest is missing or invalid. No Instance data was changed." } }));
+  await page.emulateMedia({ reducedMotion: "reduce" }); await page.goto("/instance-admin/backups");
+  await expect(page.getByText("Manifest details unavailable")).toBeVisible();
+  await page.getByRole("button", { name: "Verify metadata-missing" }).press("Enter");
+  const diagnosis = page.getByRole("alert"); await expect(diagnosis).toBeFocused(); await expect(diagnosis).toContainText("manifest is missing or invalid");
+  await expect(page.getByRole("button", { name: "Restore metadata-missing" })).toBeDisabled();
+});
+
 test("supports keyboard navigation and focuses changed route content", async ({ page }) => {
   await installMemberSession(page);
   await page.goto("/app");

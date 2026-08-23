@@ -144,8 +144,9 @@ export class InstanceBackupService {
     let manifest: BackupManifest;
     try { manifest = JSON.parse(await readFile(join(source, "manifest.json"), "utf8")) as BackupManifest; }
     catch { throw new Error("Instance Backup manifest is missing or invalid"); }
-    if (manifest.schema !== instanceBackupSchema) throw new Error(`unsupported Instance Backup version: ${String(manifest.schema)}`);
-    if (manifest.consistency !== "coordinated" || manifest.database?.path !== "database.dump"
+    if (typeof manifest.schema !== "string" || typeof manifest.createdAt !== "string") throw new Error("Instance Backup manifest is invalid");
+    if (manifest.schema !== instanceBackupSchema) throw new Error(`unsupported Instance Backup version: ${manifest.schema}`);
+    if (!Number.isFinite(Date.parse(manifest.createdAt)) || manifest.consistency !== "coordinated" || manifest.database?.path !== "database.dump"
       || manifest.database?.format !== "postgresql-custom" || manifest.masterKey?.included !== false || manifest.masterKey?.required !== true) {
       throw new Error("Instance Backup manifest is invalid");
     }

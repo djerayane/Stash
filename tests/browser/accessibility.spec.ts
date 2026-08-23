@@ -25,6 +25,16 @@ test("the Instance Backup restore confirmation has no detectable accessibility v
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 });
 
+test("an invalid Instance Backup diagnosis has no detectable accessibility violations @a11y", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("stash.instance-admin-session", JSON.stringify({ token: "browser-acceptance-admin-token" })));
+  await page.route("**/api/instance/backups", (route) => route.fulfill({ json: { backups: [{ name: "metadata-missing", status: "invalid" }] } }));
+  await page.route("**/api/instance/backups/metadata-missing/restore", (route) => route.fulfill({ status: 422, json: { error: "invalid_manifest",
+    message: "The backup manifest is missing or invalid. No Instance data was changed." } }));
+  await page.emulateMedia({ reducedMotion: "reduce" }); await page.goto("/instance-admin/backups");
+  await page.getByRole("button", { name: "Verify metadata-missing" }).click(); await expect(page.getByRole("alert")).toBeFocused();
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+});
+
 test("the development Signal confirmation flow has no detectable accessibility violations @a11y", async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem("stash.member-session", JSON.stringify({ token: "browser-acceptance-member-token" })));
   const projectId = "11111111-1111-4111-8111-111111111111";

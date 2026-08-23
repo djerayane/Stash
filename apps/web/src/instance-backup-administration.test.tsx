@@ -50,3 +50,16 @@ test("focuses a recoverable backup-list failure", async () => {
   expect(screen.getByRole("alert")).toHaveFocus();
   expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
 });
+
+test("keeps an invalid manifest selectable and announces its diagnosis", async () => {
+  const fetcher = vi.fn<typeof fetch>()
+    .mockResolvedValueOnce(Response.json({ backups: [{ name: "metadata-missing", status: "invalid" }] }))
+    .mockResolvedValueOnce(Response.json({ error: "invalid_manifest", message: "The backup manifest is missing or invalid. No Instance data was changed." }, { status: 422 }));
+  renderPage(fetcher);
+  expect(await screen.findByText("Manifest details unavailable")).toBeInTheDocument();
+  expect(screen.getByText(/Select Verify for a precise diagnosis/)).toBeInTheDocument();
+  act(() => screen.getByRole("button", { name: "Verify metadata-missing" }).click());
+  expect(await screen.findByRole("alert")).toHaveTextContent("manifest is missing or invalid");
+  expect(screen.getByRole("alert")).toHaveFocus();
+  expect(screen.getByRole("button", { name: "Restore metadata-missing" })).toBeDisabled();
+});
