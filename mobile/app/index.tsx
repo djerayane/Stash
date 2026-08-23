@@ -45,6 +45,10 @@ export default function CaptureScreen() {
   const [optionsError, setOptionsError] = useState(false);
   const [optionsReload, setOptionsReload] = useState(0);
   const [quarantinedShares, setQuarantinedShares] = useState(0);
+  const syncStatus = useCallback(async (result: Parameters<typeof presentMobileSyncResult>[0]) => {
+    const [captures, mutations] = await Promise.all([client.outbox(), client.pendingMutations()]);
+    return presentMobileSyncResult(result, [...captures, ...mutations]);
+  }, [client]);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useFocusEffect(useCallback(() => loadCachedOptionsOnFocus(client, (value) => {
     if (!mounted.current) return;
@@ -74,17 +78,17 @@ export default function CaptureScreen() {
   useEffect(() => client.watchConnectivity(
     (listener) => NetInfo.addEventListener((state) => listener(Boolean(state.isConnected && state.isInternetReachable !== false))),
     (result) => {
-      if (mounted.current) void client.outbox().then((outbox) => { if (mounted.current) setStatus(presentMobileSyncResult(result, outbox)); });
+      if (mounted.current) void syncStatus(result).then((message) => { if (mounted.current) setStatus(message); });
     },
-  ), [client]);
+  ), [client, syncStatus]);
   useEffect(() => {
     const synchronize = () => { void client.sync().then((result) => {
-      if (mounted.current) void client.outbox().then((outbox) => { if (mounted.current) setStatus(presentMobileSyncResult(result, outbox)); });
+      if (mounted.current) void syncStatus(result).then((message) => { if (mounted.current) setStatus(message); });
     }); };
     synchronize();
     const subscription = AppState.addEventListener("change", (state) => { if (state === "active") synchronize(); else client.cancelRequests(); });
     return () => { subscription.remove(); client.cancelRequests(); };
-  }, [client]);
+  }, [client, syncStatus]);
   useEffect(() => {
     const handle = async (url: string | null, delivery: "initial" | "event") => {
       if (!url || !incomingGate.current.accept(url, delivery)) return;
@@ -95,13 +99,13 @@ export default function CaptureScreen() {
         await client.captureSharedContent(incoming.capture.content, incoming.capture.source);
         if (mounted.current) setStatus(incoming.capture.source === "widget" ? "Widget input saved securely on this device." : "Shared content saved securely on this device.");
         const result = await client.sync();
-        if (mounted.current) setStatus(presentMobileSyncResult(result, await client.outbox()));
+        if (mounted.current) setStatus(await syncStatus(result));
       } catch (error) { if (mounted.current) setStatus(error instanceof Error ? error.message : "Shared content could not be saved."); }
     };
     void Linking.getInitialURL().then((url) => handle(url, "initial"));
     const subscription = Linking.addEventListener("url", ({ url }) => { void handle(url, "event"); });
     return () => subscription.remove();
-  }, [client]);
+  }, [client, syncStatus]);
   const shareDrain = useMemo(() => new SerializedIncomingShareDrain(async () => {
         await drainIncomingShares(store, async ({ id, payload }) => {
             if (payload.shareType === "text" || payload.shareType === "url") {
@@ -118,9 +122,9 @@ export default function CaptureScreen() {
         if (mounted.current) {
           setQuarantinedShares(blocked.length);
           setStatus(blocked.length ? `${blocked.length} shared item needs attention. Other items continue saving.`
-            : presentMobileSyncResult(result, await client.outbox()));
+            : await syncStatus(result));
         }
-  }, (error) => { if (mounted.current) setStatus(error instanceof Error ? error.message : "Shared content could not be saved."); }), [client, store]);
+  }, (error) => { if (mounted.current) setStatus(error instanceof Error ? error.message : "Shared content could not be saved."); }), [client, store, syncStatus]);
   useEffect(() => {
     if (incomingShare.error && mounted.current) setStatus("Shared content could not be read and was not saved.");
     shareDrain.request();
@@ -141,7 +145,7 @@ export default function CaptureScreen() {
       setContent(""); setStatus("Saved securely on this device.");
       const result = await client.sync();
       if (!mounted.current) return;
-      setStatus(presentMobileSyncResult(result, await client.outbox()));
+      setStatus(await syncStatus(result));
     } catch (error) { if (mounted.current) setStatus(error instanceof Error ? error.message : "The capture could not be saved."); }
   };
   const structure = () => ({
@@ -154,7 +158,7 @@ export default function CaptureScreen() {
     if (!mounted.current) return capture;
     setContent(""); setStatus(`${media.filename} saved securely on this device.`);
     const result = await client.sync();
-    if (mounted.current) setStatus(presentMobileSyncResult(result, await client.outbox()));
+    if (mounted.current) setStatus(await syncStatus(result));
     return capture;
   };
 

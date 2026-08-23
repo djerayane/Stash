@@ -1,3 +1,6 @@
+import type { NoteEditOperation } from "./notes.js";
+import type { TaskPlanningUpdate } from "./tasks.js";
+
 export interface MobileCapturePairing {
   instanceUrl: string;
   memberToken: string;
@@ -33,6 +36,19 @@ export interface MobileCapture {
   };
 }
 
+interface MobileSyncMutationBase {
+  id: string;
+  origin: { instanceUrl: string; workspaceId: string; memberId: string };
+  attempts: number;
+  nextRetryAt?: string;
+  lastError?: string;
+}
+
+export type MobileSyncMutation = MobileSyncMutationBase & (
+  | { kind: "note_edit"; noteId: string; baseRevision: number; operations: NoteEditOperation[] }
+  | { kind: "task_edit"; projectId: string; taskKey: string; baseRevision: number; changes: TaskPlanningUpdate }
+);
+
 export interface IncomingShareDelivery {
   id: string;
   payload: { value: string; shareType: string; mimeType?: string };
@@ -46,6 +62,9 @@ export interface EncryptedMobileCaptureStore {
   listCaptures(): Promise<MobileCapture[]>;
   saveCapture(capture: MobileCapture): Promise<void>;
   removeCapture(id: string): Promise<void>;
+  listMutations(): Promise<MobileSyncMutation[]>;
+  saveMutation(mutation: MobileSyncMutation): Promise<void>;
+  removeMutation(mutation: Pick<MobileSyncMutation, "id" | "origin">): Promise<void>;
   loadOptions(scope: string): Promise<MobileCaptureOptions>;
   saveOptions(scope: string, options: MobileCaptureOptions): Promise<void>;
   stageIncomingShares(fingerprint: string, deliveries: IncomingShareDelivery[]): Promise<IncomingShareDelivery[]>;
@@ -105,17 +124,16 @@ export class MobileCaptureClient {
       const body = await response.json().catch(() => ({})) as MobileCaptureOptions & { memberId?: string; message?: string };
       if (!response.ok || !body.memberId) throw new Error(body.message ?? "The Member pairing could not be authenticated.");
       const previous = await this.#store.loadPairing();
-      const authenticated = { ...pairing, instanceUrl: url.origin, memberId: body.memberId };
-      const preservesLegacyIdentity = previous?.instanceUrl === authenticated.instanceUrl
-        && previous.workspaceId === authenticated.workspaceId && previous.memberToken === authenticated.memberToken;
+      const authenticated = { ...pairing, instanceUrl: url.origin, workspaceId: canonicalUuid(pairing.workspaceId),
+        memberId: canonicalUuid(body.memberId) };
+      const preservesLegacyIdentity = previous && sameDestination(previous, authenticated)
+        && previous.memberToken === authenticated.memberToken;
       const replacingLegacy = previous && !previous.memberId && !preservesLegacyIdentity
         && (await this.#legacyCaptures(previous)).length > 0;
       if (replacingLegacy && (!options.replaceLegacy || !acknowledgedLegacyExport)) throw new LegacyRecoveryRequired();
-      if (previous?.instanceUrl === authenticated.instanceUrl && previous.workspaceId === authenticated.workspaceId
-        && previous.memberToken === authenticated.memberToken) {
+      if (previous && sameDestination(previous, authenticated) && previous.memberToken === authenticated.memberToken) {
         for (const capture of await this.#store.listCaptures()) {
-          if (!capture.origin || (!capture.origin.memberId && capture.origin.instanceUrl === authenticated.instanceUrl
-            && capture.origin.workspaceId === authenticated.workspaceId)) {
+          if (!capture.origin || (!capture.origin.memberId && sameDestination(capture.origin, authenticated))) {
             await this.#store.saveCapture({ ...capture, origin: { instanceUrl: authenticated.instanceUrl,
               workspaceId: authenticated.workspaceId, memberId: authenticated.memberId } });
           }
@@ -129,8 +147,12 @@ export class MobileCaptureClient {
   async outbox() {
     const pairing = await this.#store.loadPairing();
     if (!pairing?.memberId) return [];
-    return (await this.#store.listCaptures()).filter((capture) => capture.origin?.instanceUrl === pairing.instanceUrl
-      && capture.origin.workspaceId === pairing.workspaceId && capture.origin.memberId === pairing.memberId);
+    return (await this.#store.listCaptures()).filter((capture) => capture.origin && samePairingIdentity(capture.origin, pairing));
+  }
+  async pendingMutations() {
+    const pairing = await this.#store.loadPairing();
+    if (!pairing?.memberId) return [];
+    return (await this.#store.listMutations()).filter((mutation) => samePairingIdentity(mutation.origin, pairing));
   }
   async legacyRecoveryStatus(): Promise<{ available: boolean; count: number }> {
     const pairing = await this.#store.loadPairing();
@@ -256,6 +278,30 @@ export class MobileCaptureClient {
     return sourced;
   }
 
+  async queueNoteEdit(noteId: string, baseRevision: number, operations: NoteEditOperation[], mutationId = crypto.randomUUID()) {
+    if (!isUuid(noteId) || !Number.isSafeInteger(baseRevision) || baseRevision < 1 || !operations.length
+      || operations.some(({ id }) => !isUuid(id))) throw new Error("A mobile Note edit requires a valid Note, revision, and operations.");
+    const pairing = await this.#pairingForCapture();
+    const mutation: MobileSyncMutation = { id: canonicalUuid(requireUuid(mutationId)), kind: "note_edit",
+      noteId: canonicalUuid(noteId), baseRevision, operations: operations.map(canonicalNoteOperation),
+      attempts: 0, origin: pairingOrigin(pairing) };
+    await this.#store.saveMutation(mutation);
+    return mutation;
+  }
+
+  async queueTaskEdit(projectId: string, taskKey: string, baseRevision: number, changes: TaskPlanningUpdate,
+    mutationId = crypto.randomUUID()) {
+    if (!isUuid(projectId) || !/^[A-Za-z][A-Za-z0-9-]{1,19}-[1-9][0-9]*$/.test(taskKey)
+      || !Number.isSafeInteger(baseRevision) || baseRevision < 1 || !changes || typeof changes !== "object"
+      || Array.isArray(changes) || !Object.keys(changes).length) throw new Error("A mobile Task edit requires a valid Task, revision, and changes.");
+    const pairing = await this.#pairingForCapture();
+    const mutation: MobileSyncMutation = { id: canonicalUuid(requireUuid(mutationId)), kind: "task_edit",
+      projectId: canonicalUuid(projectId), taskKey: taskKey.toUpperCase(), baseRevision,
+      changes: canonicalTaskChanges(changes), attempts: 0, origin: pairingOrigin(pairing) };
+    await this.#store.saveMutation(mutation);
+    return mutation;
+  }
+
   async #enqueue(kind: MobileCapture["kind"], content: string, checklist: MobileCapture["checklist"], structure: Pick<MobileCapture, "projectId" | "tags" | "reminder">, captureId: string = crypto.randomUUID()) {
     if (!content.trim()) throw new Error("A capture requires content.");
     const pairing = await this.#pairingForCapture();
@@ -295,10 +341,8 @@ export class MobileCaptureClient {
     let count = 0;
     let attentionError: string | undefined;
     let retryPending = false;
-    const activeMemberId = pairing.memberId;
     for (const capture of await this.#store.listCaptures()) {
-      if (capture.origin?.memberId && (capture.origin.instanceUrl !== pairing.instanceUrl
-        || capture.origin.workspaceId !== pairing.workspaceId || capture.origin.memberId !== activeMemberId)) continue;
+      if (capture.origin?.memberId && !samePairingIdentity(capture.origin, pairing)) continue;
       if (!capture.origin?.memberId) {
         attentionError ??= "capture_origin_unknown";
         continue;
@@ -355,6 +399,43 @@ export class MobileCaptureClient {
       await this.#store.saveCapture(failed);
       if (retriable) retryPending = true; else attentionError ??= body.error ?? "sync_rejected";
     }
+    for (const mutation of await this.#store.listMutations()) {
+      if (!samePairingIdentity(mutation.origin, pairing)) continue;
+      if (mutation.nextRetryAt && Date.parse(mutation.nextRetryAt) > this.#now()) { retryPending = true; continue; }
+      let response: Response;
+      try {
+        const target = mutation.kind === "note_edit"
+          ? `${pairing.instanceUrl}/api/notes/${encodeURIComponent(mutation.noteId)}`
+          : `${pairing.instanceUrl}/api/projects/${encodeURIComponent(mutation.projectId)}/tasks/${encodeURIComponent(mutation.taskKey)}/edits`;
+        response = await this.#fetch(target, {
+          method: mutation.kind === "note_edit" ? "PUT" : "POST",
+          headers: { authorization: `Bearer ${pairing.memberToken}`, "content-type": "application/json" },
+          body: JSON.stringify(mutation.kind === "note_edit"
+            ? { baseRevision: mutation.baseRevision, operations: mutation.operations }
+            : { operationId: mutation.id, baseRevision: mutation.baseRevision, changes: mutation.changes }),
+          signal: controller.signal,
+        });
+      } catch {
+        if (controller.signal.aborted) return { status: "cancelled", count };
+        if (attentionError) return { status: "attention_required", count, error: attentionError, retryPending: true };
+        return { status: "offline", count };
+      }
+      const body = await response.json().catch(() => ({})) as { error?: string; message?: string };
+      const preservedConflict = response.status === 409 && (body.error === "revision_conflict" || body.error === "task_edit_conflict");
+      if (response.ok || preservedConflict) {
+        await this.#store.removeMutation(mutation);
+        count += 1;
+        if (preservedConflict) attentionError ??= "conflicts_preserved";
+        continue;
+      }
+      const attempts = mutation.attempts + 1;
+      const retriable = response.status >= 500 || response.status === 429;
+      const { nextRetryAt: _staleRetryAt, ...mutationWithoutRetry } = mutation;
+      await this.#store.saveMutation({ ...mutationWithoutRetry, attempts, lastError: body.message ?? "Synchronization failed.",
+        ...(retriable ? { nextRetryAt: new Date(this.#now()
+          + retryDelay(response.headers.get("retry-after"), attempts, this.#now())).toISOString() } : {}) });
+      if (retriable) retryPending = true; else attentionError ??= body.error ?? "sync_rejected";
+    }
     return attentionError ? { status: "attention_required", count, error: attentionError,
       ...(retryPending ? { retryPending: true } : {}) }
       : retryPending ? { status: "retry_pending", count } : { status: "synced", count };
@@ -369,8 +450,7 @@ export class MobileCaptureClient {
 
   async #legacyCaptures(pairing: MobileCapturePairing): Promise<MobileCapture[]> {
     return (await this.#store.listCaptures()).filter((capture) => !capture.origin
-      || (!capture.origin.memberId && capture.origin.instanceUrl === pairing.instanceUrl
-        && capture.origin.workspaceId === pairing.workspaceId));
+      || (!capture.origin.memberId && sameDestination(capture.origin, pairing)));
   }
 }
 
@@ -404,7 +484,44 @@ function decodeBase64(value: string) { const binary = atob(value); return Uint8A
 function encodePortableFilename(value: string) { return encodeURIComponent(value).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`); }
 
 function emptyOptions(): MobileCaptureOptions { return { projects: [], tags: [], reminders: [] }; }
-function pairingScope(pairing: MobileCapturePairing): string { return `${pairing.instanceUrl}\n${pairing.workspaceId}\n${pairing.memberId}`; }
+function pairingScope(pairing: MobileCapturePairing): string {
+  return `${new URL(pairing.instanceUrl).origin}\n${canonicalUuid(pairing.workspaceId)}\n${pairing.memberId ? canonicalUuid(pairing.memberId) : ""}`;
+}
+function pairingOrigin(pairing: MobileCapturePairing & { memberId: string }) {
+  return { instanceUrl: new URL(pairing.instanceUrl).origin, workspaceId: canonicalUuid(pairing.workspaceId),
+    memberId: canonicalUuid(pairing.memberId) };
+}
+
+function canonicalUuid(value: string) { return isUuid(value) ? value.toLowerCase() : value; }
+function sameDestination(left: Pick<MobileCapturePairing, "instanceUrl" | "workspaceId">,
+  right: Pick<MobileCapturePairing, "instanceUrl" | "workspaceId">) {
+  return new URL(left.instanceUrl).origin === new URL(right.instanceUrl).origin
+    && canonicalUuid(left.workspaceId) === canonicalUuid(right.workspaceId);
+}
+function samePairingIdentity(left: Pick<MobileCapturePairing, "instanceUrl" | "workspaceId" | "memberId">,
+  right: Pick<MobileCapturePairing, "instanceUrl" | "workspaceId" | "memberId">) {
+  return sameDestination(left, right) && Boolean(left.memberId && right.memberId)
+    && canonicalUuid(left.memberId!) === canonicalUuid(right.memberId!);
+}
+function canonicalNoteOperation(operation: NoteEditOperation): NoteEditOperation {
+  const normalized = structuredClone(operation);
+  normalized.id = canonicalUuid(normalized.id); normalized.blockKey = canonicalUuid(normalized.blockKey);
+  if (normalized.type === "insert_block" && normalized.afterBlockKey) normalized.afterBlockKey = canonicalUuid(normalized.afterBlockKey);
+  if (normalized.type !== "delete_block") {
+    if (normalized.block.blockKey) normalized.block.blockKey = canonicalUuid(normalized.block.blockKey);
+    if (normalized.block.id) normalized.block.id = canonicalUuid(normalized.block.id);
+  }
+  return normalized;
+}
+function canonicalTaskChanges(changes: TaskPlanningUpdate): TaskPlanningUpdate {
+  const normalized = structuredClone(changes);
+  if (normalized.statusId) normalized.statusId = canonicalUuid(normalized.statusId);
+  if (normalized.assigneeIds) normalized.assigneeIds = normalized.assigneeIds.map(canonicalUuid);
+  if (normalized.linkedNoteIds) normalized.linkedNoteIds = normalized.linkedNoteIds.map(canonicalUuid);
+  if (normalized.dependencies) normalized.dependencies = normalized.dependencies.map((dependency) => ({ ...dependency,
+    taskId: canonicalUuid(dependency.taskId) }));
+  return normalized;
+}
 
 function retryDelay(retryAfter: string | null, attempts: number, now: number): number {
   if (retryAfter) {
