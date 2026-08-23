@@ -579,12 +579,16 @@ export class PostgresDatabase implements
         createdBy: { localAccountId: row.created_by_account_id, displayName: row.created_by_name },
         ...(row.project_id ? { projectId: row.project_id } : {}), ...(row.reminder_at ? { reminder: { at: new Date(row.reminder_at).toISOString() } } : {}) });
       if (!block.id) {
+        const before = this.#noteFromRow({ ...row, id: noteId, workspace_id: row.workspace_id });
         block.id = blockId;
         const content = richTextToMarkdown(row.document);
         await client.query("UPDATE stash_notes SET document = $2::jsonb, content = $3, revision = revision + 1 WHERE id = $1",
           [noteId, JSON.stringify(row.document), content]);
         row.content = content;
+        row.revision = Number(row.revision) + 1;
         await this.#recordPortableProjection(client, "Note", noteId, "stash.note.v1", noteProjection());
+        await this.#recordNoteRevisionAndActivity(client, memberId, before, this.#noteFromRow({ ...row, id: noteId,
+          workspace_id: row.workspace_id }), "note_block_identified", { kind: "member" });
       }
       const task = await this.#createTask(client, { ...draft, workspaceId: row.workspace_id, sourceNoteIds: [noteId],
         sourceBlocks: [{ noteId, blockId }] });
@@ -641,6 +645,7 @@ export class PostgresDatabase implements
           if (block.id && blocks.filter((candidate) => candidate.id === blockId).length !== 1)
             return { status: "ambiguous_block" as const };
           if (!block.id) {
+            const before = this.#noteFromRow(row);
             block.id = blockId;
             const content = richTextToMarkdown(row.document);
             await client.query("UPDATE stash_notes SET document = $2::jsonb, content = $3, revision = revision + 1 WHERE id = $1",
@@ -651,6 +656,9 @@ export class PostgresDatabase implements
               ...(row.project_id ? { projectId: row.project_id } : {}),
               ...(row.reminder_at ? { reminder: { at: new Date(row.reminder_at).toISOString() } } : {}) };
             await this.#recordPortableProjection(client, "Note", draft.target.noteId, "stash.note.v1", noteProjection);
+            row.content = content; row.revision = Number(row.revision) + 1;
+            await this.#recordNoteRevisionAndActivity(client, memberId, before, this.#noteFromRow(row),
+              "note_block_identified", { kind: "member" });
           }
           target = { kind: "block", noteId: draft.target.noteId, blockId };
         }
@@ -774,14 +782,18 @@ export class PostgresDatabase implements
       let workProjection: { schema: "stash.note.v1" | "stash.task.v1" };
       if (draft.kind === "note") {
         const content = selectedMessages.map(({ content }) => content).join("\n\n");
+        const document = paragraphDocument(content, randomUUID());
         await client.query(`INSERT INTO stash_notes
           (id, workspace_id, project_id, content, document, revision, tags, reminder_at, created_by_account_id, created_at)
           VALUES ($1,$2,NULL,$3,$4::jsonb,1,'[]'::jsonb,NULL,$5,$6)`,
-        [draft.workId, discussion.workspaceId, content, JSON.stringify(paragraphDocument(content, randomUUID())), memberId, draft.createdAt]);
+        [draft.workId, discussion.workspaceId, content, JSON.stringify(document), memberId, draft.createdAt]);
         await this.#recordInitialNoteLocation(client, draft.workId, discussion.workspaceId);
         const projection = { schema: "stash.note.v1" as const, id: draft.workId, workspaceId: discussion.workspaceId,
           content, tags: [], createdAt: draft.createdAt, createdBy: draft.createdBy };
         await this.#recordPortableProjection(client, "Note", draft.workId, projection.schema, projection);
+        await this.#recordNoteRevisionAndActivity(client, memberId, undefined, { id: draft.workId, workspaceId: discussion.workspaceId,
+          content, document, revision: 1, tags: [], createdByMemberId: memberId,
+          createdAt: draft.createdAt }, "note_created", { kind: "member" });
         work = { kind: "note", id: draft.workId, workspaceId: discussion.workspaceId, content,
           source: { discussionId, messageIds: selectedMessages.map(({ id }) => id) } };
         workProjection = { schema: projection.schema };
@@ -878,6 +890,7 @@ export class PostgresDatabase implements
       const sourceBlock: TaskSourceBlockReference = { noteId, blockId };
       if (!existing.rowCount) {
         if (!block.id) {
+          const before = this.#noteFromRow(noteRow);
           block.id = blockId;
           const content = richTextToMarkdown(noteRow.document);
           await client.query("UPDATE stash_notes SET document = $2::jsonb, content = $3, revision = revision + 1 WHERE id = $1",
@@ -888,6 +901,9 @@ export class PostgresDatabase implements
             ...(noteRow.project_id ? { projectId: noteRow.project_id } : {}),
             ...(noteRow.reminder_at ? { reminder: { at: new Date(noteRow.reminder_at).toISOString() } } : {}) };
           await this.#recordPortableProjection(client, "Note", noteId, noteProjection.schema, noteProjection);
+          noteRow.content = content; noteRow.revision = Number(noteRow.revision) + 1;
+          await this.#recordNoteRevisionAndActivity(client, memberId, before, this.#noteFromRow(noteRow),
+            "note_block_identified", { kind: "member" });
         }
         await client.query("INSERT INTO stash_task_note_sources (task_id, note_id) VALUES ($1,$2) ON CONFLICT DO NOTHING", [taskId, noteId]);
         await client.query("INSERT INTO stash_task_block_sources (task_id, note_id, block_id) VALUES ($1,$2,$3)", [taskId, noteId, blockId]);
@@ -1073,6 +1089,9 @@ export class PostgresDatabase implements
       if (board.rows[0]!.group_by !== "status") return { status: "unsupported_group" as const };
       const status = await client.query<any>("SELECT id, name, category FROM stash_workflow_statuses WHERE id = $1 AND project_id = $2 AND archived = FALSE", [statusId, projectId]);
       if (!status.rowCount) return { status: "invalid_status" as const };
+      const beforeResult = await client.query<any>(taskPlanningSelect, [projectId, taskKey, memberId]);
+      if (!beforeResult.rows[0]) return { status: "not_found" as const };
+      const before = taskPlanningReadModelFromRow(beforeResult.rows[0]);
       const changed = await client.query<any>(`UPDATE stash_tasks SET workflow_status_id = $3, revision = revision + 1,
         field_revisions = jsonb_set(field_revisions, '{statusId}', to_jsonb(revision + 1), true) WHERE project_id = $1 AND task_key = $2
         RETURNING id, task_key, title, assignee_ids, priority, label_names`, [projectId, taskKey, statusId]);
@@ -1080,7 +1099,11 @@ export class PostgresDatabase implements
       const row = changed.rows[0]; const task: BoardTask = { id: row.id, key: row.task_key, title: row.title,
         status: status.rows[0], assigneeIds: row.assignee_ids, priority: row.priority, labelNames: row.label_names };
       const projection = await client.query<any>(taskPlanningSelectById, [task.id, memberId]);
-      if (projection.rows[0]) await this.#recordPortableProjection(client, "Task", task.id, "stash.task.v1", taskProjectionFromRow(projection.rows[0]));
+      if (projection.rows[0]) {
+        const after = taskPlanningReadModelFromRow(projection.rows[0]);
+        await this.#recordPortableProjection(client, "Task", task.id, "stash.task.v1", taskProjectionFromRow(projection.rows[0]));
+        await this.#recordTaskActivity(client, memberId, before.workspaceId, task.id, "task_status_changed", before, after);
+      }
       return { status: "moved" as const, task };
     });
   }
@@ -1157,6 +1180,8 @@ export class PostgresDatabase implements
       const saved = await client.query<any>(taskPlanningSelect, [projectId, taskKey, memberId]);
       const task = taskPlanningReadModelFromRow(saved.rows[0]);
       await this.#recordPortableProjection(client, "Task", task.id, task.schema, taskProjectionFromRow(saved.rows[0]));
+      await this.#recordTaskActivity(client, memberId, task.workspaceId, task.id, "task_planning_updated",
+        taskPlanningReadModelFromRow(row), task);
       for (const affectedId of (row.affected_dependency_task_ids ?? []).filter((id: string) => id !== task.id)) {
         await client.query(`UPDATE stash_tasks SET revision=revision+1,
           field_revisions=jsonb_set(field_revisions,'{dependencies}',to_jsonb(revision+1),true) WHERE id=$1`, [affectedId]);
@@ -1831,14 +1856,13 @@ export class PostgresDatabase implements
             WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2))) FOR UPDATE OF note`, [noteId, memberId]);
       const row = found.rows[0];
       if (!row) return { status: "not_found" as const };
-      const receipt = await client.query<any>(`SELECT receipt.target_revision, receipt.activity_id, activity.*, actor.name AS actor_name
+      const receipt = await client.query<any>(`SELECT receipt.target_revision, receipt.activity_id, receipt.restore_result, activity.*, actor.name AS actor_name
         FROM stash_note_restore_receipts receipt JOIN stash_workspace_activity activity ON activity.id=receipt.activity_id
         JOIN stash_accounts actor ON actor.id=activity.actor_account_id WHERE receipt.note_id=$1 AND receipt.idempotency_key=$2`, [noteId, idempotencyKey]);
       if (receipt.rows[0]) {
         if (Number(receipt.rows[0].target_revision) !== targetRevision) return { status: "idempotency_conflict" as const };
-        const current = await client.query<any>("SELECT revision,content,document FROM stash_notes WHERE id=$1", [noteId]);
         const row = receipt.rows[0];
-        return { status: "duplicate" as const, note: { revision: Number(current.rows[0].revision), content: current.rows[0].content, document: current.rows[0].document },
+        return { status: "duplicate" as const, note: row.restore_result,
           activity: { schema: "stash.activity.v1", id: row.activity_id, workspaceId: row.workspace_id,
             object: { kind: row.object_kind, id: row.object_id }, action: row.action,
             actor: { localAccountId: row.actor_account_id, displayName: row.actor_name }, cause: this.#parseActivityCause(row.cause),
@@ -1859,9 +1883,10 @@ export class PostgresDatabase implements
       await this.#recordPortableProjection(client, "Note", noteId, "stash.note.v2", projection);
       const activity = await this.#recordNoteRevisionAndActivity(client, memberId, before, note, "note_restored",
         { kind: "member", restorationOfRevision: targetRevision });
-      await client.query("INSERT INTO stash_note_restore_receipts (note_id,idempotency_key,target_revision,activity_id) VALUES ($1,$2,$3,$4)",
-        [noteId, idempotencyKey, targetRevision, activity.id]);
-      return { status: "restored" as const, note: { revision: note.revision, content: note.content, document: note.document }, activity };
+      const restoreResult = { revision: note.revision, content: note.content, document: note.document };
+      await client.query("INSERT INTO stash_note_restore_receipts (note_id,idempotency_key,target_revision,activity_id,restore_result) VALUES ($1,$2,$3,$4,$5::jsonb)",
+        [noteId, idempotencyKey, targetRevision, activity.id, JSON.stringify(restoreResult)]);
+      return { status: "restored" as const, note: restoreResult, activity };
     });
   }
   async close(): Promise<void> {
@@ -3294,6 +3319,14 @@ export class PostgresDatabase implements
     return value === "member" ? { kind: "member" } : { kind: "member" };
   }
 
+  #noteFromRow(row: any): NoteRecord {
+    return { id: row.id, workspaceId: row.workspace_id, content: row.content, document: row.document,
+      revision: Number(row.revision), tags: row.tags ?? [], createdByMemberId: row.created_by_account_id,
+      createdAt: new Date(row.created_at).toISOString(), ...(row.project_id ? { projectId: row.project_id } : {}),
+      ...(row.reminder_at ? { reminder: { at: new Date(row.reminder_at).toISOString() } } : {}),
+      ...(row.archived_at ? { archivedAt: new Date(row.archived_at).toISOString() } : {}) };
+  }
+
   async #ensureNoteHistorySchema(client: PoolClient): Promise<void> {
     await this.#ensureNoteSchema(client);
     await client.query(`
@@ -3313,8 +3346,20 @@ export class PostgresDatabase implements
         idempotency_key UUID NOT NULL,
         target_revision INTEGER NOT NULL CHECK (target_revision > 0),
         activity_id UUID NOT NULL REFERENCES stash_workspace_activity(id),
+        restore_result JSONB NOT NULL,
         PRIMARY KEY (note_id, idempotency_key)
       );
+      ALTER TABLE stash_note_restore_receipts ADD COLUMN IF NOT EXISTS restore_result JSONB;
+      INSERT INTO stash_note_history (note_id,workspace_id,revision,content,document,actor_account_id,cause,recorded_at)
+      SELECT note.id,note.workspace_id,note.revision,note.content,note.document,note.created_by_account_id,
+        '{"kind":"migration","source":"existing_note"}',note.created_at FROM stash_notes note
+      ON CONFLICT (note_id,revision) DO NOTHING;
+      UPDATE stash_note_restore_receipts receipt SET restore_result=jsonb_build_object('revision',history.revision,
+        'content',history.content,'document',history.document) FROM stash_workspace_activity activity
+      JOIN stash_note_history history ON history.note_id=activity.object_id
+        AND history.revision=(activity.after_state->>'revision')::integer
+      WHERE receipt.activity_id=activity.id AND receipt.restore_result IS NULL;
+      ALTER TABLE stash_note_restore_receipts ALTER COLUMN restore_result SET NOT NULL;
     `);
   }
 
@@ -3339,6 +3384,20 @@ export class PostgresDatabase implements
       memberId, JSON.stringify(cause), occurredAt, JSON.stringify(activity.before), JSON.stringify(activity.after)]);
     await this.#recordPortableProjection(client, "Activity", activity.id, activity.schema, activity);
     return activity;
+  }
+
+  async #recordTaskActivity(client: PoolClient, memberId: string, workspaceId: string, taskId: string,
+    action: string, before: TaskPlanningReadModel, after: TaskPlanningReadModel): Promise<void> {
+    const actor = await client.query<{ name: string }>("SELECT name FROM stash_accounts WHERE id=$1", [memberId]);
+    if (!actor.rows[0]) throw new Error("member_identity_unavailable");
+    const activity: ActivityRecord = { schema: "stash.activity.v1", id: randomUUID(), workspaceId,
+      object: { kind: "Task", id: taskId }, action, actor: { localAccountId: memberId, displayName: actor.rows[0].name },
+      cause: { kind: "member" }, occurredAt: new Date().toISOString(), before: { ...before }, after: { ...after } };
+    await client.query(`INSERT INTO stash_workspace_activity
+      (id,workspace_id,object_kind,object_id,action,actor_account_id,cause,occurred_at,before_state,after_state)
+      VALUES ($1,$2,'Task',$3,$4,$5,'member',$6,$7::jsonb,$8::jsonb)`, [activity.id, workspaceId, taskId, action,
+      memberId, activity.occurredAt, JSON.stringify(before), JSON.stringify(after)]);
+    await this.#recordPortableProjection(client, "Activity", activity.id, activity.schema, activity);
   }
 }
 

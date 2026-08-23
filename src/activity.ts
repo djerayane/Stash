@@ -5,7 +5,8 @@ export type ActivityCause =
   | { kind: "member"; restorationOfRevision?: number }
   | { kind: "automation"; automationId: string }
   | { kind: "signal"; signalId: string }
-  | { kind: "agent"; agentGrantId: string; sponsoringMemberId: string };
+  | { kind: "agent"; agentGrantId: string; sponsoringMemberId: string }
+  | { kind: "migration"; source: "existing_note" };
 
 export interface ActivityRecord {
   schema: "stash.activity.v1";

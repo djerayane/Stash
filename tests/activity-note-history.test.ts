@@ -29,7 +29,7 @@ class ProtocolCompatibleActivityDatabase implements DatabaseProbe, ActivityRepos
   currentContent = "Changed";
   currentDocument: RichTextDocument = this.revisions[1]!.document;
   fail = false;
-  readonly receipts = new Map<string, { targetRevision: number; activity: ActivityRecord }>();
+  readonly receipts = new Map<string, { targetRevision: number; activity: ActivityRecord; note: { revision: number; content: string; document: RichTextDocument } }>();
 
   async verifyConnection() {}
   async close() {}
@@ -46,7 +46,7 @@ class ProtocolCompatibleActivityDatabase implements DatabaseProbe, ActivityRepos
     if (memberId !== "ada" || requestedNoteId !== noteId) return { status: "not_found" as const };
     const receipt = this.receipts.get(idempotencyKey);
     if (receipt) return receipt.targetRevision === targetRevision
-      ? { status: "duplicate" as const, note: { revision: this.currentRevision, content: this.currentContent, document: this.currentDocument }, activity: receipt.activity }
+      ? { status: "duplicate" as const, note: receipt.note, activity: receipt.activity }
       : { status: "idempotency_conflict" as const };
     if (expectedRevision !== this.currentRevision) return { status: "revision_conflict" as const, currentRevision: this.currentRevision };
     const target = this.revisions.find((revision) => revision.revision === targetRevision);
@@ -59,8 +59,9 @@ class ProtocolCompatibleActivityDatabase implements DatabaseProbe, ActivityRepos
       occurredAt: "2026-08-22T10:00:00.000Z", before, after: { revision: this.currentRevision, content: this.currentContent } };
     this.activities.push(activity);
     this.revisions.push({ ...target, revision: this.currentRevision, recordedAt: activity.occurredAt, actor, cause: activity.cause });
-    this.receipts.set(idempotencyKey, { targetRevision, activity });
-    return { status: "restored" as const, note: { revision: this.currentRevision, content: this.currentContent, document: this.currentDocument }, activity };
+    const note = { revision: this.currentRevision, content: this.currentContent, document: this.currentDocument };
+    this.receipts.set(idempotencyKey, { targetRevision, activity, note });
+    return { status: "restored" as const, note, activity };
   }
 }
 
@@ -120,5 +121,18 @@ describe("Activity and Note history", () => {
     assert.equal((await post("2", { expectedRevision: 3, idempotencyKey: restoreKey })).status, 409);
     database.fail = true;
     assert.equal((await post("2", { expectedRevision: 3, idempotencyKey: "88888888-8888-4888-8888-888888888888" })).status, 503);
+  });
+
+  it("returns the exact original restore result when its retry arrives after another edit", async () => {
+    const { baseUrl, database } = await run();
+    const request = () => fetch(`${baseUrl}/api/notes/${noteId}/history/1/restore`, { method: "POST", headers,
+      body: JSON.stringify({ expectedRevision: 2, idempotencyKey: restoreKey }) });
+    const original = await request(); assert.equal(original.status, 200); const originalBody = await original.json();
+    database.currentRevision = 4; database.currentContent = "Later edit";
+    database.currentDocument = paragraphDocument("Later edit", "99999999-9999-4999-8999-999999999999");
+    const retry = await request(); assert.equal(retry.status, 200);
+    const retryBody = await retry.json() as { duplicate: boolean };
+    assert.equal(retryBody.duplicate, true);
+    assert.deepEqual({ ...retryBody, duplicate: false }, originalBody);
   });
 });
