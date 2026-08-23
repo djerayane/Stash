@@ -121,6 +121,9 @@ export interface NoteRepository {
   listInboxNotes(memberId: string, workspaceId: string): Promise<
     { status: "found"; notes: NoteRecord[] } | { status: "workspace_forbidden" }
   >;
+  listNotes?(memberId: string, workspaceId: string): Promise<
+    { status: "found"; notes: NoteRecord[] } | { status: "workspace_forbidden" }
+  >;
   listNotesByTag?(memberId: string, workspaceId: string, tag: string): Promise<
     { status: "found"; notes: NoteRecord[] } | { status: "workspace_forbidden" }
   >;
@@ -255,6 +258,12 @@ export class NoteService {
     if (!isUuid(workspaceId)) throw new InvalidNoteInput();
     if (!this.#repository.listNotesByTag) throw new Error("note_filters_unavailable");
     return this.#repository.listNotesByTag(memberId, workspaceId, "decision");
+  }
+
+  async listNotes(memberId: string, workspaceId: string) {
+    if (!isUuid(workspaceId)) throw new InvalidNoteInput();
+    if (!this.#repository.listNotes) throw new Error("note_listing_unavailable");
+    return this.#repository.listNotes(memberId, workspaceId);
   }
 
   async listInbox(memberId: string, workspaceId: string) {

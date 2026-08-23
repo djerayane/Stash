@@ -31,6 +31,12 @@ class TemplateNoteDatabase implements DatabaseProbe, NoteRepository {
     return { status: "found" as const, notes: [...this.notes.values()].filter((note) => !note.archivedAt && note.tags.includes(tag)
       && (memberId === "ada" || note.projectId === projectId)) };
   }
+  async listNotes(memberId: string, requestedWorkspaceId: string) {
+    if (this.failure) throw this.failure;
+    if (!["ada", "grace"].includes(memberId) || requestedWorkspaceId !== workspaceId) return { status: "workspace_forbidden" as const };
+    return { status: "found" as const, notes: [...this.notes.values()].filter((note) => !note.archivedAt
+      && (memberId === "ada" || note.projectId === projectId)) };
+  }
   async listInboxNotes() { return { status: "found" as const, notes: [] }; }
   async triageNote() { return { status: "note_not_found" as const }; }
   async findNoteForMember(memberId: string, noteId: string) { return memberId === "ada" ? this.notes.get(noteId) : undefined; }
@@ -128,6 +134,23 @@ describe("Note Templates and Decision Notes", () => {
     const guestBody = await guestResponse.json() as { notes: NoteRecord[] };
     assert.deepEqual(guestBody.notes.map(({ content }) => content), ["Manual decision"]);
     assert.doesNotMatch(JSON.stringify(guestBody), /Ordinary|Unshared/);
+  });
+
+  it("lists every active permitted Note while keeping guest Project boundaries intact", async () => {
+    const { database, baseUrl } = await run();
+    for (const body of [{ content: "Workspace ordinary" }, { content: "Shared ordinary", projectId },
+      { content: "Shared decision", projectId, tags: ["decision"] }]) {
+      assert.equal((await fetch(`${baseUrl}/api/workspaces/${workspaceId}/notes`, { method: "POST",
+        headers: { ...authorized, "content-type": "application/json" }, body: JSON.stringify(body) })).status, 201);
+    }
+    const member = await fetch(`${baseUrl}/api/workspaces/${workspaceId}/notes`, { headers: authorized });
+    assert.equal(member.status, 200);
+    assert.deepEqual((await member.json() as { notes: NoteRecord[] }).notes.map(({ content }) => content), ["Workspace ordinary", "Shared ordinary", "Shared decision"]);
+    const guest = await fetch(`${baseUrl}/api/workspaces/${workspaceId}/notes`, { headers: { authorization: "Bearer guest-grace" } });
+    assert.equal(guest.status, 200);
+    const guestBody = await guest.json() as { notes: NoteRecord[] };
+    assert.deepEqual(guestBody.notes.map(({ content }) => content), ["Shared ordinary", "Shared decision"]);
+    assert.doesNotMatch(JSON.stringify(guestBody), /createdByMemberId|Workspace ordinary/);
   });
 
   it("makes authentication, invalid templates, inaccessible Workspaces, and failures visible", async () => {

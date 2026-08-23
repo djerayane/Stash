@@ -49,7 +49,10 @@ test("navigates Notes, Boards, Discussions, notifications, and Activity through 
   await page.goto("/app/tasks"); const workspace = page.getByRole("combobox", { name: "Workspace" }); await workspace.focus(); await workspace.selectOption({ label: "Shared Workspace" }); await page.getByRole("button", { name: /Shared roadmap/ }).press("Enter"); await expect(page).toHaveURL(/\/app\/projects\/66666666-6666-4666-8666-666666666665\/boards$/);
   await page.goto("/app/notes");
   await expect(page.getByRole("button", { name: /Decision/ })).toBeVisible();
-  await expect(page.getByRole("link", { name: /Release collaboration plan/ })).toBeVisible();
+  const ordinary = page.getByRole("link", { name: /Authoritative second Note/ }); await expect(ordinary).toBeVisible(); await ordinary.click();
+  await expect(page).toHaveURL(/\/app\/notes\/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa$/); await expect(page.getByRole("textbox", { name: "Note content" })).toContainText("Authoritative second Note");
+  await page.goto("/app/notes");
+  await expect(page.getByRole("heading", { name: "All Notes" }).locator("..").getByRole("link", { name: /Release collaboration plan/ })).toBeVisible();
 
   await page.goto("/app/projects/22222222-2222-4222-8222-222222222222/boards/abababab-abab-4bab-8bab-abababababa1");
   const move = page.getByRole("combobox", { name: /Move Task/ }); await move.focus();
@@ -95,12 +98,15 @@ test("@a11y exposes email recovery and OpenID Connect errors without losing inpu
 test("creates a Task from a Note Block and preserves the durable relationship while planning", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   await authenticate(page); await page.goto("/app/notes/99999999-9999-4999-8999-999999999999");
+  await page.evaluate(() => window.addEventListener("beforeunload", () => sessionStorage.setItem("stash.acceptance-unloaded", "yes")));
   const editor = page.getByRole("textbox", { name: "Note content" }); await editor.getByText("Preserve this linked Block").click();
   await page.getByRole("button", { name: "Create Task from current Block" }).press("Enter");
   await page.getByRole("combobox", { name: "Project" }).selectOption("22222222-2222-4222-8222-222222222222");
   await page.getByRole("textbox", { name: "Task title" }).fill("Ship linked release plan"); await page.getByRole("button", { name: "Create linked Task" }).click();
   const relationship = page.getByRole("link", { name: /STASH-32 · Ship linked release plan/ }); await expect(relationship).toBeVisible(); await expect(page.getByText("Ready · linked")).toBeVisible(); await relationship.click();
   await expect(page.getByRole("heading", { name: "Ship linked release plan" })).toBeVisible(); await expect(page.getByRole("link", { name: /Note 99999999/ })).toBeVisible();
+  await page.getByRole("link", { name: /Note 99999999/ }).click(); await expect(page.getByRole("textbox", { name: "Note content" })).toBeVisible(); await expect.poll(() => page.evaluate(() => sessionStorage.getItem("stash.acceptance-unloaded"))).toBeNull();
+  await relationship.click(); await expect(page.getByRole("heading", { name: "Ship linked release plan" })).toBeVisible();
   let planningAttempts = 0;
   await page.route("**/api/projects/22222222-2222-4222-8222-222222222222/tasks/STASH-32", async (route) => {
     if (route.request().method() === "PATCH" && planningAttempts++ === 0) {

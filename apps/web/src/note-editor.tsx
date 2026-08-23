@@ -1,6 +1,6 @@
 import { Collaboration } from "@tiptap/extension-collaboration";
 import Image from "@tiptap/extension-image";
-import Link from "@tiptap/extension-link";
+import TiptapLink from "@tiptap/extension-link";
 import TaskItem from "@tiptap/extension-task-item";
 import TaskList from "@tiptap/extension-task-list";
 import { TableKit } from "@tiptap/extension-table";
@@ -10,6 +10,7 @@ import { Plugin } from "@tiptap/pm/state";
 import StarterKit from "@tiptap/starter-kit";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router";
 import { useGSAP } from "@gsap/react";
 import gsap from "gsap";
 import * as Y from "yjs";
@@ -137,7 +138,7 @@ function NoteEditorDocument({ noteId, memberId, fetcher = globalThis.fetch, toke
 
   const editor = useEditor({ immediatelyRender: false, onSelectionUpdate: () => refreshToolbar((revision) => revision + 1),
     onTransaction: () => refreshToolbar((revision) => revision + 1), extensions: [
-    StarterKit.configure({ undoRedo: false, link: false }), blockIdentity(ydoc), TaskList, TaskItem.configure({ nested: true }), Image, Link.configure({ openOnClick: false }),
+    StarterKit.configure({ undoRedo: false, link: false }), blockIdentity(ydoc), TaskList, TaskItem.configure({ nested: true }), Image, TiptapLink.configure({ openOnClick: false }),
     TableKit, Callout, WorkspaceAttachment, Collaboration.configure({ document: ydoc }),
   ], content: undefined, editorProps: { attributes: { "aria-label": "Note content", role: "textbox", "aria-multiline": "true" } } }, [ydoc]);
   const canEdit = collaboration.data?.access === "edit";
@@ -242,7 +243,7 @@ function NoteEditorDocument({ noteId, memberId, fetcher = globalThis.fetch, toke
     <aside ref={asideRef} className={styles.aside} aria-label="Note context"><h2>Collaboration</h2><p ref={statusRef} className={styles.status} role="status">{status}</p>
       {error ? <><p className={styles.error} role="alert">{error}</p><button className={styles.retry} type="button" onClick={() => void synchronize()}>Retry saving</button></> : null}
       <p>Changes merge with contributions from other Members. Offline work remains on this device until the Instance accepts it.</p>
-      <h2>Linked Tasks</h2>{linkedTasks.isError ? <p role="alert">{linkedTasks.error.message}</p> : linkedTasks.data?.tasks?.length ? <ul>{linkedTasks.data.tasks.map((task) => <li key={task.id}><a href={`/app/projects/${task.projectId}/tasks/${task.key}`}>{task.key} · {task.title}</a><span>{task.status.name} · {task.relationshipState}</span></li>)}</ul> : <p>No Tasks are linked to this Note yet.</p>}
+      <h2>Linked Tasks</h2>{linkedTasks.isError ? <p role="alert">{linkedTasks.error.message}</p> : linkedTasks.data?.tasks?.length ? <ul>{linkedTasks.data.tasks.map((task) => <li key={task.id}><Link to={`/app/projects/${task.projectId}/tasks/${task.key}`}>{task.key} · {task.title}</Link><span>{task.status.name} · {task.relationshipState}</span></li>)}</ul> : <p>No Tasks are linked to this Note yet.</p>}
       {taskComposerOpen ? <form onSubmit={(event) => { event.preventDefault(); createTask.mutate(); }}><label>Project<select required value={taskProjectId} onChange={(event) => setTaskProjectId(event.target.value)}><option value="">Choose a Project</option>{workspaces.data?.workspaces.flatMap((workspace) => workspace.projects).map((project) => <option key={project.id} value={project.id}>{project.name} · {project.key}</option>)}</select></label><label>Task title<input required value={taskTitle} onChange={(event) => setTaskTitle(event.target.value)} /></label><button disabled={createTask.isPending} type="submit">Create linked Task</button><button type="button" onClick={() => setTaskComposerOpen(false)}>Cancel</button>{createTask.isError ? <p role="alert">{createTask.error.message}</p> : null}</form> : null}
     </aside>
   </main>;

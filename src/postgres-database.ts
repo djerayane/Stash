@@ -596,6 +596,33 @@ export class PostgresDatabase implements
     } finally { client.release(); }
   }
 
+  async listNotes(memberId: string, workspaceId: string) {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureNoteSchema(client);
+      const access = await client.query(`SELECT 1 FROM stash_workspaces workspace WHERE workspace.id = $1 AND (
+        (workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR
+        (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)) OR
+        EXISTS (SELECT 1 FROM stash_projects project JOIN stash_project_guests guest ON guest.project_id = project.id
+          WHERE project.workspace_id = workspace.id AND guest.account_id = $2))`, [workspaceId, memberId]);
+      if (!access.rowCount) return { status: "workspace_forbidden" as const };
+      const result = await client.query<any>(`SELECT note.id, note.workspace_id, note.project_id, note.content, note.document, note.revision,
+        note.tags, note.reminder_at, note.created_by_account_id, note.created_at, note.archived_at
+        FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id = note.workspace_id
+        WHERE note.workspace_id = $1 AND note.archived_at IS NULL AND (
+          (workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR
+          (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+            WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)) OR
+          (note.project_id IS NOT NULL AND EXISTS (SELECT 1 FROM stash_project_guests guest
+            WHERE guest.project_id = note.project_id AND guest.account_id = $2))) ORDER BY note.created_at, note.id`, [workspaceId, memberId]);
+      return { status: "found" as const, notes: result.rows.map((row: any) => ({ id: row.id, workspaceId: row.workspace_id,
+        content: row.content, document: row.document, revision: row.revision, tags: row.tags, createdByMemberId: row.created_by_account_id,
+        createdAt: new Date(row.created_at).toISOString(), ...(row.project_id ? { projectId: row.project_id } : {}),
+        ...(row.reminder_at ? { reminder: { at: new Date(row.reminder_at).toISOString() } } : {}) })) };
+    } finally { client.release(); }
+  }
+
   async findAttachmentReceipt(memberId: string, workspaceId: string, operationKey: string) {
     const client = await this.#pool.connect();
     try {
