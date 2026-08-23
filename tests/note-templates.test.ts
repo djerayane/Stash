@@ -154,5 +154,6 @@ describe("Note Templates and Decision Notes", () => {
     assert.match(html, /Decision Notes/);
     assert.match(html, /aria-live="polite"/);
     assert.match(html, /prefers-reduced-motion/);
+    assert.match(html, /window\.gsap\.from/);
   });
 });
