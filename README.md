@@ -56,8 +56,18 @@ The application fails at startup with a clear error when required configuration 
 | `GITHUB_WEBHOOK_SECRET` | no | Shared secret used to verify GitHub webhook deliveries before development Signals are accepted |
 | `MCP_ENABLED` | no | Set to `true` to expose `/mcp`; disabled by default and always requires an active Agent Grant credential |
 | `INSTANCE_BACKUP_PATH` | no | Operator-owned directory for backups created through the protected Instance administration API |
+| `ATTACHMENT_STORAGE_PATH` | no | Local Attachment directory, used by default (`/var/lib/stash/attachments`) |
+| `S3_ENDPOINT` | no | S3-compatible HTTP(S) endpoint; enables remote Attachment storage when all required `S3_*` values below are set |
+| `S3_REGION` | with `S3_ENDPOINT` | S3 signing region |
+| `S3_BUCKET` | with `S3_ENDPOINT` | Existing bucket used for Attachment objects |
+| `S3_ACCESS_KEY_ID` | with `S3_ENDPOINT` | S3 access-key identifier; keep it outside PostgreSQL and exports |
+| `S3_SECRET_ACCESS_KEY` | with `S3_ENDPOINT` | S3 secret access key; keep it outside PostgreSQL and exports |
+| `S3_PREFIX` | no | Optional object-key prefix within the bucket |
+| `S3_FORCE_PATH_STYLE` | no | Set to `false` for virtual-hosted bucket addressing; defaults to path-style for broad provider compatibility |
 
 Never commit production secrets or include them in a Portable Workspace Export.
+
+S3-compatible Attachment storage is opt-in and fails closed on partial configuration. Attachment keys remain portable across local and S3 adapters. Coordinated Instance backups download the selected objects into the encrypted backup, and restore requires the destination Instance to use the same adapter kind.
 
 ### Optional MCP access
 

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { mkdir, open, opendir, readFile, rename, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { PortableIdentity } from "./workspaces-projects.js";
 
@@ -21,6 +21,7 @@ export interface AttachmentStorage {
   get(key: string): Promise<Buffer>;
   getBounded?(key: string, maxBytes: number): Promise<Buffer>;
   delete(key: string): Promise<void>;
+  listKeys?(): Promise<ReadonlyArray<string>>;
 }
 export class LocalAttachmentStorage implements AttachmentStorage {
   constructor(private readonly root: string) {}
@@ -44,6 +45,15 @@ export class LocalAttachmentStorage implements AttachmentStorage {
     } finally { await file.close(); }
   }
   async delete(key: string) { await rm(this.path(key), { force: true }); }
+  async listKeys(): Promise<ReadonlyArray<string>> {
+    const keys: string[] = [];
+    try { for await (const workspace of await opendir(this.root)) {
+      if (!workspace.isDirectory()) continue;
+      for await (const attachment of await opendir(join(this.root, workspace.name)))
+        if (attachment.isFile()) keys.push(`${workspace.name}/${attachment.name}`);
+    } } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    return keys.sort();
+  }
 }
 export class InvalidAttachment extends Error { constructor(readonly kind: "filename" | "content_type" | "size") { super(kind); } }
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;

@@ -21,6 +21,7 @@ export interface InstanceBackupRestoreTarget {
   commitAttachments(prepared: unknown): Promise<void>;
   discardPreparedAttachments(prepared: unknown): Promise<void>;
 }
+export class UnsafeAttachmentRollbackError extends AggregateError {}
 
 interface BackupFile { path: string; bytes: number; sha256: string; kind: "database" | "attachment" | "configuration" }
 interface BackupManifest {
@@ -213,6 +214,7 @@ export class InstanceBackupService {
       await target.restoreDatabase(childPath(source, "database.dump"));
       try { await target.commitAttachments(prepared); }
       catch (error) {
+        if (error instanceof UnsafeAttachmentRollbackError) unsafeToResume = true;
         try { await target.restoreDatabase(rollbackDatabase); }
         catch (rollbackError) { unsafeToResume = true; throw new AggregateError([error, rollbackError], "Attachment restore failed and database rollback also failed"); }
         throw error;
