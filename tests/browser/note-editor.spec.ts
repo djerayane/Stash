@@ -49,5 +49,24 @@ test("the collaborative editor is keyboard operable and axe-clean @a11y", async 
   await page.emulateMedia({ reducedMotion: "reduce" }); await page.goto(`/notes/${noteId}`);
   await page.getByRole("button", { name: "Bold" }).focus(); await page.keyboard.press("Enter");
   await expect(page.getByRole("button", { name: "Bold" })).toHaveAttribute("aria-pressed", "true");
+  const editor = page.getByRole("textbox", { name: "Note content" }); await editor.focus();
+  await expect(editor).toBeFocused();
+  expect(await editor.evaluate((element) => getComputedStyle(element).outlineStyle)).not.toBe("none");
   const results = await new AxeBuilder({ page }).analyze(); expect(results.violations).toEqual([]);
+});
+
+test("initial collaboration errors preserve landmarks and recover accessibly @a11y", async ({ page }) => {
+  let unavailable = true;
+  await page.route("**/api/notes/**/collaboration", async (route) => {
+    if (unavailable) await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "unavailable" }) });
+    else await route.continue();
+  });
+  await page.goto(`/notes/${noteId}`);
+  await expect(page.getByRole("main")).toBeVisible();
+  const alert = page.getByRole("alert"); await expect(alert).toBeFocused({ timeout: 15_000 });
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  await page.keyboard.press("Tab"); const retry = page.getByRole("button", { name: "Try again" }); await expect(retry).toBeFocused();
+  unavailable = false; await page.keyboard.press("Enter");
+  await expect(page.getByRole("heading", { name: "Release collaboration plan" })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "Note content" })).toBeVisible();
 });

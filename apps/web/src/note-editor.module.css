@@ -9,6 +9,7 @@
 .toolbar button:focus-visible, .retry:focus-visible { outline: 3px solid var(--stash-color-accent); outline-offset: 2px; }
 .editor { min-height: 34rem; padding: clamp(1.5rem, 4vw, 4rem); font-size: 1.08rem; line-height: 1.75; }
 .editor :global(.tiptap) { min-height: 28rem; outline: none; }
+.editor :global(.tiptap:focus-visible) { outline: 3px solid var(--stash-color-accent); outline-offset: 4px; }
 .editor :global(.tiptap > * + *) { margin-top: 1.15rem; }
 .editor :global(.tiptap h1), .editor :global(.tiptap h2), .editor :global(.tiptap h3) { line-height: 1.15; letter-spacing: -.025em; }
 .editor :global(.tiptap blockquote) { margin-left: 0; padding-left: 1.25rem; border-left: 3px solid var(--stash-color-accent); color: var(--stash-color-muted); }
@@ -19,5 +20,8 @@
 .status { min-height: 3rem; color: var(--stash-color-muted); }
 .retry { border: 0; padding: .65rem .8rem; color: var(--stash-color-surface); background: var(--stash-color-ink); font: inherit; font-weight: 700; }
 .error { color: var(--stash-color-error); }
+.errorState { display: grid; min-height: 60vh; place-items: center; padding: var(--stash-space-6); }
+.errorPanel { width: min(100%, 42rem); border-left: 4px solid var(--stash-color-error); padding: clamp(1.5rem, 4vw, 3rem); color: var(--stash-color-ink); background: var(--stash-color-surface); }
+.errorPanel:focus-visible { outline: 3px solid var(--stash-color-accent); outline-offset: 4px; }
 @media (max-width: 54rem) { .layout { grid-template-columns: 1fr; } .aside { position: static; grid-row: 1; } }
 @media (prefers-reduced-motion: reduce) { .toolbar button { transition: none; } }
