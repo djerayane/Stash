@@ -5,14 +5,17 @@ import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/
 import type { MemberAccessResolver } from "../src/workspaces-projects.js";
 import { directAuthorityConfirmation } from "@stash/domain-types";
 import { McpSessionStore } from "../src/mcp-route.js";
+import { NotificationService, requestedReviewNotificationInput, type NotificationDelivery, type NotificationPreferences, type NotificationRepository } from "../src/notifications.js";
+import type { ActivityRecord } from "../src/activity.js";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
-class RepositoryFake implements AgentGrantRepository {
+class RepositoryFake implements AgentGrantRepository, NotificationRepository {
   grants: StoredAgentGrant[] = [];
   proposals: import("../src/agent-grants.js").AgentProposal[] = [];
   directWrites: unknown[] = [];
   activities: unknown[] = [];
   operatorAudit: unknown[] = [];
+  notifications: NotificationDelivery[] = [];
   failNextProposalWrite = false;
   failNextProposalFinish = false;
   noteOperationResults = new Map<string, unknown>();
@@ -24,7 +27,23 @@ class RepositoryFake implements AgentGrantRepository {
   async revokeAgentGrant(actorId: string, organization: string, id: string) { const grant = this.grants.find((candidate) => candidate.id === id && candidate.organizationId === organization); if (!grant) return "not_found" as const; if (grant.sponsoringMemberId !== actorId) return "forbidden" as const; grant.revokedAt ??= new Date().toISOString(); return "revoked" as const; }
   async findActiveAgentGrant(lookup: string) { return this.grants.find((grant) => grant.tokenLookup === lookup && !grant.revokedAt); }
   async agentGrantOptions(actorId: string) { return actorId === "member" ? [{ organizationId, organizationName: "Test Organization", projects: [] }] : []; }
-  async createAgentProposal(proposal: import("../src/agent-grants.js").AgentProposal) { this.proposals.push(proposal); }
+  async createAgentProposal(proposal: import("../src/agent-grants.js").AgentProposal) {
+    const activity: ActivityRecord = { schema: "stash.activity.v1", id: proposal.id,
+      workspaceId: (proposal.input as any).workspaceId, object: { kind: "Proposal", id: proposal.id },
+      action: "proposal_review_requested", actor: { localAccountId: proposal.sponsoringMemberId, displayName: "Ada Lovelace" },
+      cause: { kind: "agent", agentGrantId: proposal.grantId, sponsoringMemberId: proposal.sponsoringMemberId, agentName: proposal.agentName },
+      occurredAt: proposal.createdAt, before: {}, after: { capability: proposal.capability, status: "pending" } };
+    const input = requestedReviewNotificationInput(activity, proposal.sponsoringMemberId, proposal.projectId, proposal.agentName, proposal.capability);
+    this.notifications.push({ schema: "stash.notification.v1", id: proposal.id, workspaceId: activity.workspaceId,
+      ...input, createdAt: proposal.createdAt, delivery: "immediate" });
+    this.proposals.push(proposal);
+  }
+  async saveNotification(delivery: NotificationDelivery) { const existing = this.notifications.find((item) => item.memberId === delivery.memberId && item.activity.id === delivery.activity.id && item.trigger === delivery.trigger); if (existing) return existing; this.notifications.push(delivery); return delivery; }
+  async listNotifications(memberId: string) { return this.notifications.filter((item) => item.memberId === memberId); }
+  async markNotificationRead(memberId: string, id: string, readAt: string) { const found = this.notifications.find((item) => item.memberId === memberId && item.id === id); if (!found) return undefined; found.readAt = readAt; return found; }
+  async getNotificationPreferences(_memberId: string, _projectId: string): Promise<NotificationPreferences | undefined> { return { activity: "followed", digest: "off" }; }
+  async saveNotificationPreferences(_memberId: string, _projectId: string, value: NotificationPreferences) { return value; }
+  async claimDigestNotifications() { return []; }
   async listAgentProposals(actorId: string, requestedOrganizationId: string) { return actorId === "member" && requestedOrganizationId === organizationId ? this.proposals : undefined; }
   async findAgentProposal(actorId: string, requestedOrganizationId: string, proposalId: string) { if (actorId !== "member" || requestedOrganizationId !== organizationId) return "forbidden" as const; return this.proposals.find(({ id }) => id === proposalId); }
   async claimAgentProposal(actorId: string, requestedOrganizationId: string, proposalId: string, operationId: string) { const proposal = await this.findAgentProposal(actorId, requestedOrganizationId, proposalId); if (proposal === "forbidden") return { status: "forbidden" as const }; if (!proposal) return { status: "not_found" as const };
@@ -49,7 +68,7 @@ describe("Agent Grants and MCP", () => {
           if (repository.failNextProposalWrite) { repository.failNextProposalWrite = false; repository.directWrites.pop(); throw new Error("temporary write failure"); }
           repository.activities.push({ actor: memberId, cause }); repository.operatorAudit.push({ action: "agent_note_created", actor: memberId, cause });
           const result = { status: "created", note: { id: "33333333-3333-4333-8333-333333333333" } }; if (operationId) repository.noteOperationResults.set(operationId, result); return result; } } as any,
-      tasks: { async findByKey() { return { status: "found", task: { revision: repository.taskRevision } }; },
+      notifications: new NotificationService(repository), tasks: { async findByKey() { return { status: "found", task: { revision: repository.taskRevision } }; },
         async updateByKey(memberId: string, projectId: string, taskKey: string, input: unknown, cause: unknown) {
         repository.directWrites.push({ memberId, projectId, taskKey, input, cause });
         repository.activities.push({ action: "task_planning_updated", actor: memberId, cause },
@@ -109,6 +128,13 @@ describe("Agent Grants and MCP", () => {
     assert.equal((await proposal.json() as any).result.structuredContent.status, "pending"); assert.equal(repository.proposals.length, 1);
     const proposals = await fetch(`${instance!.url}/api/organizations/${organizationId}/agent-grants/proposals`, { headers: { authorization: "Bearer member-session" } });
     assert.deepEqual((await proposals.json() as any).proposals.map((item: any) => item.status), ["pending"]);
+    const inbox = await fetch(`${instance!.url}/api/notifications`, { headers: { authorization: "Bearer member-session" } });
+    const delivered = (await inbox.json() as any).notifications;
+    assert.equal(delivered.length, 1); assert.equal(delivered[0].trigger, "requested_review");
+    assert.equal(delivered[0].activity.object.kind, "Proposal"); assert.equal(delivered[0].activity.action, "proposal_review_requested");
+    assert.deepEqual(delivered[0].activity.cause, { kind: "agent", agentGrantId: body.grant.id, sponsoringMemberId: "member", agentName: "Planning assistant" });
+    const hidden = await fetch(`${instance!.url}/api/notifications`, { headers: { authorization: "Bearer other-session" } });
+    assert.deepEqual((await hidden.json() as any).notifications, []);
     const extra = await mcp(body.token, sessionId, { jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "stash.note.read", arguments: { noteId: "22222222-2222-4222-8222-222222222222", unexpected: true } } });
     assert.equal((await extra.json() as any).error.code, -32602);
     const denied = await mcp(body.token, sessionId, { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "stash.task.write" } });

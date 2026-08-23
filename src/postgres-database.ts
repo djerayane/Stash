@@ -37,7 +37,7 @@ import type { NoteLinkRecord, NoteLocationRecord, PortableNoteLinkStateProjectio
 import type { ActivityCause, ActivityRecord, ActivityRepository, NoteHistoryRevision } from "./activity.js";
 import type { DevelopmentArtifact, GitHubArtifactRepository } from "./github-artifacts.js";
 import type { GitHubSignal, GitHubSignalRepository, SignalCandidate } from "./github-signals.js";
-import { assignmentNotificationInputs, directMentionMemberIds, directMentionNotificationInputs, notificationDeliveryMode, type NotificationDelivery, type NotificationPreferences, type NotificationRepository } from "./notifications.js";
+import { assignmentNotificationInputs, directMentionMemberIds, directMentionNotificationInputs, notificationDeliveryMode, requestedReviewNotificationInput, type NotificationDelivery, type NotificationPreferences, type NotificationRepository } from "./notifications.js";
 import type { AutomationCandidate, AutomationFailureNotification, AutomationRecipe, AutomationRepository, AutomationState, AutomationTransition, AutomationTrigger } from "./automations.js";
 import * as Y from "yjs";
 import { prosemirrorJSONToYDoc, yDocToProsemirrorJSON } from "y-prosemirror";
@@ -4753,9 +4753,45 @@ export class PostgresDatabase implements
   }
 
   async createAgentProposal(proposal: AgentProposal): Promise<void> {
-    await this.#pool.query(`INSERT INTO stash_agent_proposals (id,grant_id,sponsoring_member_id,capability,input,status,created_at,base_revision)
-      VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8)`, [proposal.id, proposal.grantId, proposal.sponsoringMemberId, proposal.capability,
-      JSON.stringify(proposal.input), proposal.status, proposal.createdAt, proposal.baseRevision ?? null]);
+    await this.#withTransaction(async (client) => {
+      await this.#ensureMemberDepartureSchema(client); await this.#ensureNotificationSchema(client);
+      const input = proposal.input as { workspaceId?: unknown };
+      const scope = await client.query<{ workspace_id: string; actor_name: string }>(`SELECT workspace.id workspace_id,account.name actor_name
+        FROM stash_agent_grants grant JOIN stash_accounts account ON account.id=grant.sponsoring_member_id
+        JOIN stash_workspaces workspace ON workspace.organization_owner_id=grant.organization_id
+        LEFT JOIN stash_projects project ON project.workspace_id=workspace.id AND project.id=$4
+        WHERE grant.id=$1 AND grant.sponsoring_member_id=$2 AND grant.organization_id=$3
+          AND EXISTS (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id=grant.organization_id AND membership.account_id=$2)
+          AND (($4::uuid IS NOT NULL AND project.id=$4) OR ($4::uuid IS NULL AND workspace.id=$5)) LIMIT 1`,
+      [proposal.grantId, proposal.sponsoringMemberId, proposal.organizationId, proposal.projectId ?? null,
+        typeof input?.workspaceId === "string" ? input.workspaceId : null]);
+      const authorized = scope.rows[0]; if (!authorized) throw new Error("proposal_notification_scope_forbidden");
+      const activity: ActivityRecord = { schema: "stash.activity.v1", id: proposal.id, workspaceId: authorized.workspace_id,
+        object: { kind: "Proposal", id: proposal.id }, action: "proposal_review_requested",
+        actor: { localAccountId: proposal.sponsoringMemberId, displayName: authorized.actor_name },
+        cause: { kind: "agent", agentGrantId: proposal.grantId, sponsoringMemberId: proposal.sponsoringMemberId, agentName: proposal.agentName },
+        occurredAt: proposal.createdAt, before: {}, after: { proposalId: proposal.id, capability: proposal.capability, status: proposal.status } };
+      await client.query(`INSERT INTO stash_agent_proposals (id,grant_id,sponsoring_member_id,capability,input,status,created_at,base_revision)
+        VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8)`, [proposal.id, proposal.grantId, proposal.sponsoringMemberId, proposal.capability,
+        JSON.stringify(proposal.input), proposal.status, proposal.createdAt, proposal.baseRevision ?? null]);
+      await client.query(`INSERT INTO stash_workspace_activity
+        (id,workspace_id,object_kind,object_id,action,actor_account_id,cause,occurred_at,before_state,after_state)
+        VALUES ($1,$2,'Proposal',$1,$3,$4,$5::jsonb,$6,$7::jsonb,$8::jsonb)`, [activity.id, activity.workspaceId, activity.action,
+        activity.actor.localAccountId, JSON.stringify(activity.cause), activity.occurredAt, JSON.stringify(activity.before), JSON.stringify(activity.after)]);
+      await this.#recordPortableProjection(client, "Activity", activity.id, activity.schema, activity);
+      const requested = requestedReviewNotificationInput(activity, proposal.sponsoringMemberId, proposal.projectId, proposal.agentName, proposal.capability);
+      let preferences: NotificationPreferences = { activity: "followed", digest: "off" };
+      if (proposal.projectId) { const settings = await client.query<any>(`SELECT preference.* FROM stash_projects project
+        LEFT JOIN stash_notification_preferences preference ON preference.project_id=project.id AND preference.member_id=$1 WHERE project.id=$2`,
+      [proposal.sponsoringMemberId, proposal.projectId]); const row = settings.rows[0]; if (row?.member_id) preferences = { activity: row.activity, digest: row.digest,
+        ...(row.quiet_start ? { quietHours: { start: row.quiet_start, end: row.quiet_end, timeZone: row.quiet_time_zone } } : {}) }; }
+      await client.query(`INSERT INTO stash_notifications
+        (id,member_id,workspace_id,project_id,trigger,summary,activity,created_at,delivery)
+        VALUES ($1,$2,$3,$4,'requested_review',$5,$6::jsonb,$7,$8)
+        ON CONFLICT (member_id,activity_id,trigger) DO NOTHING`, [randomUUID(), requested.memberId, activity.workspaceId,
+        proposal.projectId ?? null, requested.summary, JSON.stringify(activity), activity.occurredAt,
+        notificationDeliveryMode(new Date(activity.occurredAt), preferences)]);
+    });
   }
 
   async listAgentProposals(actorId: string, organizationId: string): Promise<AgentProposal[] | undefined> {
@@ -4795,12 +4831,17 @@ export class PostgresDatabase implements
   }
 
   async finishAgentProposal(actorId: string, proposalId: string, operationId: string, update: any): Promise<AgentProposal> {
-    const result = await this.#pool.query<any>(`UPDATE stash_agent_proposals proposal SET status=$4,reviewed_at=$5,reviewed_by_account_id=$1,
-      result=$6::jsonb,conflict=$7::jsonb WHERE proposal.id=$2 AND proposal.sponsoring_member_id=$1 AND proposal.operation_id=$3
-      RETURNING proposal.*,(SELECT organization_id FROM stash_agent_grants WHERE id=proposal.grant_id),(SELECT project_id FROM stash_agent_grants WHERE id=proposal.grant_id),
-      (SELECT name FROM stash_agent_grants WHERE id=proposal.grant_id) agent_name`, [actorId, proposalId, operationId, update.status, update.reviewedAt,
-      JSON.stringify(update.result ?? null), JSON.stringify(update.conflict ?? null)]);
-    if (!result.rows[0]) throw new Error("proposal_claim_lost"); return agentProposalFromRow(result.rows[0]);
+    return this.#withTransaction(async (client) => {
+      const result = await client.query<any>(`UPDATE stash_agent_proposals proposal SET status=$4,reviewed_at=$5,reviewed_by_account_id=$1,
+        result=$6::jsonb,conflict=$7::jsonb WHERE proposal.id=$2 AND proposal.sponsoring_member_id=$1 AND proposal.operation_id=$3
+        RETURNING proposal.*,(SELECT organization_id FROM stash_agent_grants WHERE id=proposal.grant_id),(SELECT project_id FROM stash_agent_grants WHERE id=proposal.grant_id),
+        (SELECT name FROM stash_agent_grants WHERE id=proposal.grant_id) agent_name`, [actorId, proposalId, operationId, update.status, update.reviewedAt,
+        JSON.stringify(update.result ?? null), JSON.stringify(update.conflict ?? null)]);
+      if (!result.rows[0]) throw new Error("proposal_claim_lost");
+      await client.query(`UPDATE stash_notifications SET read_at=CASE WHEN $3='conflict' THEN NULL ELSE COALESCE(read_at,$4::timestamptz) END
+        WHERE member_id=$1 AND activity_id=$2 AND trigger='requested_review'`, [actorId, proposalId, update.status, update.reviewedAt]);
+      return agentProposalFromRow(result.rows[0]);
+    });
   }
 
   async releaseAgentProposal(actorId: string, proposalId: string, operationId: string): Promise<void> {
