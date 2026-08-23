@@ -206,7 +206,7 @@ function parseState(content: Buffer): PortableWorkspaceCanonicalState {
     if (typeof note.content !== "string" || !note.content.length
     || !Array.isArray(note.tags) || !note.tags.every((tag) => typeof tag === "string") || !timestamp(note.createdAt)
     || note.projectId !== undefined && !projects.has(String(note.projectId))) throw new InvalidPortableWorkspaceImport("invalid_note"); }
-  for (const task of value.tasks) { exact(task,["schema","id","workspaceId","projectId","title","key","status","keyAliases","sourceNoteIds","createdAt","createdBy","sourceBlocks","assigneeIds","priority","labelNames","dueDate","estimate","linkedNoteIds","dependencies","developmentLinks"],"task");
+  for (const task of value.tasks) { exact(task,["schema","id","workspaceId","projectId","title","key","status","keyAliases","sourceNoteIds","createdAt","createdBy","sourceBlocks","assigneeIds","formerAssigneeIds","priority","labelNames","dueDate","estimate","linkedNoteIds","dependencies","developmentLinks"],"task");
     exactIdentity(task.createdBy,"task_creator"); exact(task.status,["id","name","category"],"task_status");
     if (!projects.has(String(task.projectId)) || typeof task.title !== "string" || !task.title
     || typeof task.key !== "string" || !object(task.status) || !uuid.test(String(task.status.id)) || !timestamp(task.createdAt)
@@ -217,6 +217,7 @@ function parseState(content: Buffer): PortableWorkspaceCanonicalState {
       || !notes.has(String(source.noteId)) || !uuid.test(String(source.blockId))))
     || typeof task.status.name !== "string" || !["unstarted","started","completed"].includes(String(task.status.category))
     || task.assigneeIds !== undefined && (!Array.isArray(task.assigneeIds) || task.assigneeIds.some((id)=>!uuid.test(String(id))))
+    || task.formerAssigneeIds !== undefined && (!Array.isArray(task.formerAssigneeIds) || task.formerAssigneeIds.some((id)=>!uuid.test(String(id))))
     || task.labelNames !== undefined && (!Array.isArray(task.labelNames) || task.labelNames.some((label)=>typeof label!=="string"))
     || task.priority !== undefined && !["none","low","medium","high","urgent"].includes(String(task.priority))
     || task.dueDate !== undefined && !timestamp(task.dueDate) || task.estimate !== undefined && (!Number.isFinite(task.estimate) || Number(task.estimate)<0)
@@ -292,8 +293,8 @@ function parseState(content: Buffer): PortableWorkspaceCanonicalState {
     if (item.kind === "RepositoryConnection" && (!Array.isArray(payload.projectIds) || payload.projectIds.some((id) => !projects.has(String(id)))))
       throw new InvalidPortableWorkspaceImport("invalid_repository_connection");
     if(item.kind==="RepositoryConnection") { const disconnected=item.schema==="stash.disconnected-repository-connection.v1";
-      exact(payload,disconnected?["schema","id","provider","repositoryUrl","organization","createdBy","projectIds","state","reason"]
-        :["schema","id","provider","repositoryUrl","organization","createdBy","projectIds"],"repository_connection");
+      exact(payload,disconnected?["schema","id","provider","repositoryUrl","organization","createdBy","projectIds","ownership","state","reason"]
+        :["schema","id","provider","repositoryUrl","organization","createdBy","projectIds","ownership","state"],"repository_connection");
       exact(payload.organization,["localOrganizationId","displayName"],"repository_organization");
       exact(payload.createdBy,["localAccountId","displayName","attribution"],"repository_creator");
       if(payload.provider!=="github"||typeof payload.repositoryUrl!=="string"||!/^https:\/\//.test(payload.repositoryUrl)
@@ -302,7 +303,10 @@ function parseState(content: Buffer): PortableWorkspaceCanonicalState {
         ||payload.organization.localOrganizationId!==(value.workspace.owner.identity as Record<string, unknown>).localOrganizationId
         ||!uuid.test(String(payload.createdBy.localAccountId))||typeof payload.createdBy.displayName!=="string"
         ||!["recorded","inferred-during-upgrade"].includes(String(payload.createdBy.attribution))
-        ||!Array.isArray(payload.projectIds)||(disconnected&&(payload.state!=="disconnected"||payload.reason!=="credentials_not_portable")))
+        ||!Array.isArray(payload.projectIds)
+        ||payload.ownership!==undefined&&!["organization","personal"].includes(String(payload.ownership))
+        ||(disconnected ? payload.state!=="disconnected"||payload.reason!=="credentials_not_portable"
+          :payload.state!==undefined&&!["active","degraded"].includes(String(payload.state))))
         throw new InvalidPortableWorkspaceImport("invalid_repository_connection"); sanitized=structuredClone(payload); }
     sanitizedDurable.push({kind:String(item.kind),id:String(item.id),schema:String(item.schema),payload:sanitized!});
   }

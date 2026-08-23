@@ -3992,10 +3992,12 @@ export class PostgresDatabase implements
       }
       for (const task of state.tasks) {
         await client.query(`INSERT INTO stash_tasks(id,workspace_id,project_id,task_key,workflow_status_id,title,created_by_account_id,created_at,
-          assignee_ids,priority,label_names,due_date,estimate,linked_note_ids,development_links) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11::jsonb,$12,$13,$14::jsonb,$15::jsonb)`,
+          assignee_ids,former_assignee_ids,priority,label_names,due_date,estimate,linked_note_ids,development_links)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11,$12::jsonb,$13,$14,$15::jsonb,$16::jsonb)`,
         [task.id,state.workspace.id,task.projectId,task.key,task.status.id,task.title,accountFor(task.createdBy),task.createdAt,
-          JSON.stringify(task.assigneeIds ?? []),task.priority ?? "none",JSON.stringify(task.labelNames ?? []),task.dueDate ?? null,
-          task.estimate ?? null,JSON.stringify(task.linkedNoteIds ?? []),JSON.stringify(task.developmentLinks ?? [])]);
+          JSON.stringify(task.assigneeIds ?? []),JSON.stringify(task.formerAssigneeIds ?? []),task.priority ?? "none",
+          JSON.stringify(task.labelNames ?? []),task.dueDate ?? null,task.estimate ?? null,
+          JSON.stringify(task.linkedNoteIds ?? []),JSON.stringify(task.developmentLinks ?? [])]);
         for (const noteId of task.sourceNoteIds) await client.query("INSERT INTO stash_task_note_sources(task_id,note_id) VALUES($1,$2)",[task.id,noteId]);
         for (const source of task.sourceBlocks ?? []) await client.query("INSERT INTO stash_task_block_sources(task_id,note_id,block_id) VALUES($1,$2,$3)",[task.id,source.noteId,source.blockId]);
         for (const alias of task.keyAliases ?? []) await client.query("INSERT INTO stash_task_key_aliases(project_id,task_key,task_id) VALUES($1,$2,$3)",[alias.projectId,alias.key,task.id]);
