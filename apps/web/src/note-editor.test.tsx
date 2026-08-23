@@ -4,7 +4,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { Schema } from "@tiptap/pm/model";
 import { prosemirrorJSONToYDoc } from "y-prosemirror";
 import * as Y from "yjs";
-import { applyAcknowledgedUpdate, encodeUpdateBase64, NoteEditor } from "./note-editor";
+import { applyAcknowledgedUpdate, createSerializedSynchronization, encodeUpdateBase64, NoteEditor } from "./note-editor";
 
 const emptyUpdate = () => btoa(String.fromCharCode(...Y.encodeStateAsUpdate(new Y.Doc())));
 const collaborationSchema = new Schema({ nodes: {
@@ -121,6 +121,20 @@ it("keeps unsaved Yjs updates locally and offers recovery when the Instance is o
   await vi.waitFor(() => expect(screen.getByRole("button", { name: "Retry saving" })).toBeInTheDocument());
   expect(localStorage.getItem("stash.pending-note-update:note")).toBeTruthy();
   vi.useRealTimers();
+});
+
+it("serializes autosaves even when an older acknowledgement and newer failure resolve out of order", async () => {
+  let releaseFirst!: () => void; let calls = 0; let pending = "newer update";
+  const firstResponse = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const synchronize = createSerializedSynchronization(async () => {
+    calls += 1;
+    if (calls === 1) { await firstResponse; pending = ""; return; }
+    pending = "newer update"; throw new TypeError("offline");
+  });
+  const first = synchronize(); const second = synchronize();
+  await Promise.resolve(); expect(calls).toBe(1);
+  releaseFirst(); await first; await expect(second).rejects.toThrow("offline");
+  expect(calls).toBe(2); expect(pending).toBe("newer update");
 });
 
 it("reports tab-only recovery and still sends changes when browser storage is unavailable", async () => {

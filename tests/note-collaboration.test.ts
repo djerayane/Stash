@@ -5,7 +5,7 @@ import { NoteCollaborationService, type CollaborationSnapshot, type NoteCollabor
 import { yDocToProsemirrorJSON } from "y-prosemirror";
 import { collaborativeDocumentFromRichText, richTextFromCollaborativeDocument, validatedRichTextFromCollaborativeDocument } from "../src/postgres-database.js";
 import { InvalidCollaborationUpdate } from "../src/note-collaboration.js";
-import { richTextToMarkdown, type RichTextDocument } from "../src/rich-text.js";
+import { proseMirrorToMarkdown, proseMirrorToRichText, richTextToMarkdown, type RichTextDocument } from "../src/rich-text.js";
 
 class MemoryRepository implements NoteCollaborationRepository {
   snapshot?: CollaborationSnapshot;
@@ -52,6 +52,35 @@ describe("self-hosted Note collaboration", () => {
       blockKey: "44444444-4444-4444-8444-444444444444", id: "55555555-5555-4555-8555-555555555555",
       content: [{ text: "Edited together" }] }] });
     document.destroy();
+  });
+
+  it("materializes every list item and callout paragraph with its stable identity", () => {
+    const source = { type: "doc", content: [
+      { type: "bulletList", content: [
+        { type: "listItem", attrs: { blockKey: "11111111-1111-4111-8111-111111111111", blockId: "21111111-1111-4111-8111-111111111111" }, content: [{ type: "paragraph", content: [{ type: "text", text: "First item" }] }] },
+        { type: "listItem", attrs: { blockKey: "22222222-2222-4222-8222-222222222222", blockId: "32222222-2222-4222-8222-222222222222" }, content: [{ type: "paragraph", content: [{ type: "text", text: "Second item" }] }] },
+      ] },
+      { type: "taskList", content: [
+        { type: "taskItem", attrs: { checked: false, blockKey: "33333333-3333-4333-8333-333333333333" }, content: [{ type: "paragraph", content: [{ type: "text", text: "First task" }] }] },
+        { type: "taskItem", attrs: { checked: true, blockKey: "44444444-4444-4444-8444-444444444444" }, content: [{ type: "paragraph", content: [{ type: "text", text: "Second task" }] }] },
+      ] },
+      { type: "callout", attrs: { kind: "warning", blockKey: "55555555-5555-4555-8555-555555555555" }, content: [
+        { type: "paragraph", content: [{ type: "text", text: "First warning" }] },
+        { type: "paragraph", attrs: { blockKey: "66666666-6666-4666-8666-666666666666" }, content: [{ type: "text", text: "Second warning" }] },
+      ] },
+    ] };
+    const materialized = proseMirrorToRichText(source);
+    assert.deepEqual(materialized.blocks.map((block) => [block.type, block.blockKey, "content" in block ? block.content[0]?.text : undefined]), [
+      ["bullet", "11111111-1111-4111-8111-111111111111", "First item"],
+      ["bullet", "22222222-2222-4222-8222-222222222222", "Second item"],
+      ["check", "33333333-3333-4333-8333-333333333333", "First task"],
+      ["check", "44444444-4444-4444-8444-444444444444", "Second task"],
+      ["callout", "55555555-5555-4555-8555-555555555555", "First warning"],
+      ["callout", "66666666-6666-4666-8666-666666666666", "Second warning"],
+    ]);
+    const markdown = proseMirrorToMarkdown(source);
+    for (const contribution of ["First item", "Second item", "First task", "Second task", "First warning", "Second warning"])
+      assert.match(markdown, new RegExp(contribution));
   });
 
   it("round-trips expressive blocks into portable Markdown without losing stable identity", () => {

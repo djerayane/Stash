@@ -6,6 +6,7 @@ import TaskList from "@tiptap/extension-task-list";
 import { TableKit } from "@tiptap/extension-table";
 import { Extension, Node, mergeAttributes } from "@tiptap/core";
 import { EditorContent, useEditor } from "@tiptap/react";
+import { Plugin } from "@tiptap/pm/state";
 import StarterKit from "@tiptap/starter-kit";
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -21,12 +22,24 @@ interface Note { id: string; content: string; document: NoteDocument; revision: 
 interface Snapshot { sequence: number; update: string; updatedAt: string; updatedByMemberId: string }
 interface NoteEditorProps { noteId: string; fetcher?: typeof fetch; token?: string }
 
-const BlockIdentity = Extension.create({
+const blockIdentity = (document: Y.Doc) => Extension.create({
   name: "blockIdentity",
-  addGlobalAttributes() { return [{ types: ["paragraph", "heading", "blockquote", "codeBlock", "bulletList", "taskList", "callout", "workspaceAttachment", "image", "table"], attributes: {
+  addGlobalAttributes() { return [{ types: ["paragraph", "heading", "blockquote", "codeBlock", "bulletList", "listItem", "taskList", "taskItem", "callout", "workspaceAttachment", "image", "table"], attributes: {
     blockKey: { default: null, parseHTML: (element) => element.dataset.blockKey, renderHTML: (attributes) => attributes.blockKey ? { "data-block-key": attributes.blockKey } : {} },
     blockId: { default: null, parseHTML: (element) => element.dataset.blockId, renderHTML: (attributes) => attributes.blockId ? { "data-block-id": attributes.blockId } : {} },
   } }]; },
+  addProseMirrorPlugins() { return [new Plugin({ appendTransaction: (transactions, _previous, current) => {
+    if (!transactions.some((transaction) => transaction.docChanged) || document.getXmlFragment("default").length === 0) return null;
+    const transaction = current.tr; const seen = new Set<string>(); let changed = false;
+    current.doc.descendants((node, position) => {
+      if (!("blockKey" in node.attrs)) return;
+      const blockKey = typeof node.attrs.blockKey === "string" ? node.attrs.blockKey : "";
+      if (blockKey && !seen.has(blockKey)) { seen.add(blockKey); return; }
+      const replacement = crypto.randomUUID(); seen.add(replacement);
+      transaction.setNodeMarkup(position, undefined, { ...node.attrs, blockKey: replacement }); changed = true;
+    });
+    return changed ? transaction : null;
+  } })]; },
 });
 
 const Callout = Node.create({
@@ -72,6 +85,15 @@ export function applyAcknowledgedUpdate(localDocument: Y.Doc, update: Uint8Array
   return acknowledgedVector;
 }
 
+export function createSerializedSynchronization(run: () => Promise<void>): () => Promise<void> {
+  let queue = Promise.resolve();
+  return () => {
+    const synchronization = queue.then(run, run);
+    queue = synchronization.catch(() => undefined);
+    return synchronization;
+  };
+}
+
 export function NoteEditor(props: NoteEditorProps) {
   return <NoteEditorDocument key={props.noteId} {...props} />;
 }
@@ -82,6 +104,7 @@ function NoteEditorDocument({ noteId, fetcher = globalThis.fetch, token = localS
   const [, refreshToolbar] = useState(0);
   const persistedVector = useRef<Uint8Array>(new Uint8Array());
   const restoredPendingUpdate = useRef(false);
+  const shouldSeedCanonicalDocument = useRef(false);
   const layoutRef = useRef<HTMLElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
   const asideRef = useRef<HTMLElement>(null);
@@ -100,6 +123,7 @@ function NoteEditorDocument({ noteId, fetcher = globalThis.fetch, token = localS
 
   if (collaboration.data && persistedVector.current.byteLength === 0) {
     persistedVector.current = applyAcknowledgedUpdate(ydoc, decode(collaboration.data.update));
+    shouldSeedCanonicalDocument.current = ydoc.getXmlFragment("default").length === 0;
     try {
       const pending = readPendingUpdate(`stash.pending-note-update:${noteId}`);
       if (pending) { Y.applyUpdate(ydoc, decode(pending)); restoredPendingUpdate.current = true; }
@@ -108,7 +132,7 @@ function NoteEditorDocument({ noteId, fetcher = globalThis.fetch, token = localS
 
   const editor = useEditor({ immediatelyRender: false, onSelectionUpdate: () => refreshToolbar((revision) => revision + 1),
     onTransaction: () => refreshToolbar((revision) => revision + 1), extensions: [
-    StarterKit.configure({ undoRedo: false, link: false }), BlockIdentity, TaskList, TaskItem.configure({ nested: true }), Image, Link.configure({ openOnClick: false }),
+    StarterKit.configure({ undoRedo: false, link: false }), blockIdentity(ydoc), TaskList, TaskItem.configure({ nested: true }), Image, Link.configure({ openOnClick: false }),
     TableKit, Callout, WorkspaceAttachment, Collaboration.configure({ document: ydoc }),
   ], content: undefined, editorProps: { attributes: { "aria-label": "Note content", role: "textbox", "aria-multiline": "true" } } }, [ydoc]);
 
@@ -125,11 +149,11 @@ function NoteEditorDocument({ noteId, fetcher = globalThis.fetch, token = localS
 
   useEffect(() => {
     if (!editor || !note.data || !collaboration.data) return;
-    if (ydoc.getXmlFragment("default").length === 0) editor.commands.setContent(toTiptap(note.data.document));
+    if (shouldSeedCanonicalDocument.current) { shouldSeedCanonicalDocument.current = false; editor.commands.setContent(toTiptap(note.data.document)); }
     setStatus(restoredPendingUpdate.current ? "Restoring changes from this device" : "All changes saved"); setError("");
   }, [editor, note.data, collaboration.data, ydoc]);
 
-  const synchronize = useCallback(async () => {
+  const performSynchronization = useCallback(async () => {
     const update = Y.encodeStateAsUpdate(ydoc, persistedVector.current);
     if (update.byteLength <= 2) return;
     const key = `stash.pending-note-update:${noteId}`;
@@ -146,6 +170,8 @@ function NoteEditorDocument({ noteId, fetcher = globalThis.fetch, token = localS
     } catch (cause) { setStatus(storedOnDevice ? "Changes kept on this device" : "Changes remain only in this open tab");
       setError(cause instanceof Error ? cause.message : "The update could not be saved."); }
   }, [fetcher, headers, noteId, ydoc]);
+
+  const synchronize = useMemo(() => createSerializedSynchronization(performSynchronization), [performSynchronization]);
 
   useEffect(() => { if (!editor) return; let timer = 0; const changed = () => { clearTimeout(timer); timer = window.setTimeout(() => void synchronize(), 350); };
     ydoc.on("update", changed); return () => { clearTimeout(timer); ydoc.off("update", changed); }; }, [editor, synchronize, ydoc]);

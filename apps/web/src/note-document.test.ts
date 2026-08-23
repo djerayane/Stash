@@ -9,7 +9,7 @@ describe("Note Markdown round trips", () => {
       { type: "code", blockKey: "code-key", language: "ts", text: "const ready = true" },
     ] });
     expect(document.content?.[0]?.attrs).toMatchObject({ blockKey: "stable-key", blockId: "linked-block" });
-    expect(markdownFromTiptap(document)).toBe("## [**Decision**](<https://stash.example/decision>)\n\n- [x] Ship it\n\n```ts\nconst ready = true\n```");
+    expect(markdownFromTiptap(document)).toBe("## [**Decision**](<https://stash.example/decision>)\n<!-- stash-block:linked-block -->\n\n- [x] Ship it\n\n```ts\nconst ready = true\n```");
   });
 
   it("projects tables and images to readable portable Markdown", () => {
