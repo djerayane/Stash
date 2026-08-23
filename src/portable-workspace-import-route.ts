@@ -13,9 +13,10 @@ export function portableWorkspaceImportRoute(service: PortableWorkspaceImportSer
   return { matches(request, url) { return request.method === "POST" && url.pathname === "/api/workspace-imports"; },
     async handle(request, response) {
       const importId = request.headers["idempotency-key"];
-      if (typeof importId !== "string") { json(response, 422, { error: "invalid_import_request", message: "A UUID Idempotency-Key is required." }); return true; }
+      const ownerAccountId = request.headers["x-stash-import-owner-account-id"];
+      if (typeof importId !== "string" || typeof ownerAccountId !== "string") { json(response, 422, { error: "invalid_import_request", message: "UUID Idempotency-Key and X-Stash-Import-Owner-Account-Id headers are required." }); return true; }
       try {
-        const result = await service.import(importId, await body(request));
+        const result = await service.import(importId, ownerAccountId, await body(request));
         if (result.status === "forbidden") { json(response, 403, { error: "import_forbidden", message: "Workspace import permission is required." }); return true; }
         if (result.status === "workspace_conflict") { json(response, 409, { error: "workspace_conflict", message: "The Workspace identity already exists with different content." }); return true; }
         json(response, result.status === "imported" ? 201 : 200, { status: result.status, report: result.report });

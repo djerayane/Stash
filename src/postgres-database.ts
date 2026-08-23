@@ -3,7 +3,7 @@ import { Pool, type PoolClient } from "pg";
 
 import type { DatabaseProbe } from "./instance.js";
 import { noteOperationDigest, type NoteConflictResolution, type NoteEditBatch, type NoteEditConflict, type NoteRecord, type NoteRepository, type NoteTriageChange, type NoteTriageResult, type PortableNoteLinkProjection, type PortableNoteProjection, type PortableTaskProjection, type TaskCreation } from "./notes.js";
-import { paragraphDocument, richTextToMarkdown } from "./rich-text.js";
+import { markdownToRichText, paragraphDocument, richTextToMarkdown } from "./rich-text.js";
 import type { BootstrapRecord, OwnerBootstrapRepository } from "./owner-bootstrap.js";
 import type { AccountAuthenticationRecord, PasswordAuthRepository, SessionRecord } from "./password-auth.js";
 import type { OidcAuthRepository, OidcIdentityKey, OidcIdentityRecord, OidcOrganizationConfiguration } from "./oidc-auth.js";
@@ -31,6 +31,7 @@ import type { MobileCaptureRepository } from "./mobile-captures.js";
 import type { CreateDiscussionWorkDraft, DiscussionDraft, DiscussionMessage, DiscussionRecord, DiscussionRepository, DiscussionTarget, DiscussionWorkActivity, DiscussionWorkOutcome, PortableDiscussionProjection, PortableDiscussionTarget, PortableDiscussionWorkLinkProjection } from "./discussions.js";
 import { initialWorkflowStatus, type ProjectWorkflow, type ProjectWorkflowRepository, type WorkflowStatus } from "./project-workflows.js";
 import type { PortableWorkspaceExportRepository, PortableWorkspaceExportSnapshot } from "./portable-workspace-export.js";
+import type { ImportTransformation, PortableWorkspaceImportBundle, PortableWorkspaceImportReport, PortableWorkspaceImportRepository } from "./portable-workspace-import.js";
 import type { Board, BoardRepository, BoardTask } from "./boards.js";
 import type { NoteLinkRecord, NoteLocationRecord, PortableNoteLinkStateProjection, PortableNoteLocationProjection } from "./note-links.js";
 import type { ActivityCause, ActivityRecord, ActivityRepository, NoteHistoryRevision } from "./activity.js";
@@ -134,6 +135,7 @@ export class PostgresDatabase implements
   DiscussionRepository,
   ProjectWorkflowRepository,
   PortableWorkspaceExportRepository,
+  PortableWorkspaceImportRepository,
   BoardRepository,
   ActivityRepository
 {
@@ -3294,6 +3296,141 @@ export class PostgresDatabase implements
     );
   }
 
+  async findWorkspaceImport(importId: string) {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureWorkspaceImportSchema(client);
+      const found = await client.query<{ archive_sha256: string; report: PortableWorkspaceImportReport }>(
+        "SELECT archive_sha256,report FROM stash_workspace_imports WHERE import_id=$1", [importId]);
+      return found.rows[0] ? { archiveSha256: found.rows[0].archive_sha256, report: found.rows[0].report } : undefined;
+    } finally { client.release(); }
+  }
+
+  async importWorkspace(importId: string, bundle: PortableWorkspaceImportBundle) {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureWorkspaceImportSchema(client);
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`workspace-import:${importId}`]);
+      const receipt = await client.query<{ archive_sha256: string; report: PortableWorkspaceImportReport }>(
+        "SELECT archive_sha256,report FROM stash_workspace_imports WHERE import_id=$1", [importId]);
+      if (receipt.rows[0]) return receipt.rows[0].archive_sha256 === bundle.archiveSha256
+        ? { status: "duplicate" as const, report: receipt.rows[0].report } : { status: "workspace_conflict" as const };
+      const owner = await client.query("SELECT 1 FROM stash_accounts WHERE id=$1", [bundle.destinationOwnerAccountId]);
+      if (!owner.rowCount) return { status: "forbidden" as const };
+      const state = bundle.state;
+      if ((await client.query("SELECT 1 FROM stash_workspaces WHERE id=$1", [state.workspace.id])).rowCount)
+        return { status: "workspace_conflict" as const };
+      const identityAccounts = new Map<string, string>();
+      for (const identity of bundle.identityStubs) {
+        const existing = await client.query<{ account_id: string }>("SELECT account_id FROM stash_identity_stubs WHERE source_account_id=$1", [identity.sourceAccountId]);
+        const accountId = existing.rows[0]?.account_id ?? randomUUID();
+        if (!existing.rows[0]) {
+          await client.query("INSERT INTO stash_accounts(id,name,email,password_hash) VALUES($1,$2,$3,$4)", [accountId, identity.displayName,
+            `identity-stub+${accountId}@invalid`, this.#authenticationSecrets.encrypt(randomUUID())]);
+          await client.query("INSERT INTO stash_identity_stubs(source_account_id,account_id,display_name) VALUES($1,$2,$3)",
+            [identity.sourceAccountId, accountId, identity.displayName]);
+        }
+        identityAccounts.set(identity.sourceAccountId, accountId);
+      }
+      const accountFor = (identity: { localAccountId: string }) => identityAccounts.get(identity.localAccountId)!;
+      await client.query(`INSERT INTO stash_workspaces(id,name,owner_type,personal_owner_id,created_by_account_id)
+        VALUES($1,$2,'personal',$3,$4)`, [state.workspace.id, state.workspace.name, bundle.destinationOwnerAccountId, accountFor(state.workspace.createdBy)]);
+      await this.#recordPortableProjection(client, "Workspace", state.workspace.id, state.workspace.schema, state.workspace);
+      const durable = state.durableObjects.map((item) => ({ ...item, payload: item.payload as any }));
+      for (const item of durable.filter(({ kind }) => kind === "Project")) {
+        const project = item.payload;
+        await client.query("INSERT INTO stash_projects(id,workspace_id,name,project_key,created_by_account_id,workflow_revision) VALUES($1,$2,$3,$4,$5,$6)",
+          [project.id, state.workspace.id, project.name, project.key, accountFor(project.createdBy), 0]);
+        await this.#recordPortableProjection(client, "Project", item.id, item.schema as any, project);
+      }
+      for (const item of durable.filter(({ kind }) => kind === "Workflow")) {
+        const workflow = item.payload as ProjectWorkflow;
+        await client.query("UPDATE stash_projects SET workflow_revision=$2 WHERE id=$1", [workflow.projectId, workflow.revision]);
+        for (const status of workflow.statuses) await client.query(`INSERT INTO stash_workflow_statuses
+          (id,project_id,name,category,position,archived) VALUES($1,$2,$3,$4,$5,$6)`,
+        [status.id, workflow.projectId, status.name, status.category, status.position, status.archived]);
+        await this.#recordPortableProjection(client, "Workflow", item.id, item.schema as any, workflow);
+      }
+      for (const note of state.notes) {
+        const history = state.noteHistory.filter((revision) => revision.noteId === note.id).sort((a,b) => a.revision-b.revision);
+        const latest = history.at(-1); const location = state.noteLocations.find(({ noteId }) => noteId === note.id)!;
+        await client.query(`INSERT INTO stash_notes(id,workspace_id,project_id,content,document,revision,tags,reminder_at,
+          created_by_account_id,created_at,portable_path,location_revision) VALUES($1,$2,$3,$4,$5::jsonb,$6,$7::jsonb,$8,$9,$10,$11,$12)`,
+        [note.id,state.workspace.id,note.projectId ?? null,note.content,JSON.stringify(latest?.document ?? markdownToRichText(note.content)),
+          latest?.revision ?? 1,JSON.stringify(note.tags),note.reminder?.at ?? null,accountFor(note.createdBy),note.createdAt,location.path,location.revision]);
+        for (const alias of location.aliases) await client.query("INSERT INTO stash_note_path_aliases(workspace_id,note_id,path) VALUES($1,$2,$3)",
+          [state.workspace.id,note.id,alias]);
+        await this.#recordPortableProjection(client,"Note",note.id,note.schema,note);
+        await this.#recordPortableProjection(client,"NoteLocation",note.id,location.schema,location);
+      }
+      for (const task of state.tasks) {
+        await client.query(`INSERT INTO stash_tasks(id,workspace_id,project_id,task_key,workflow_status_id,title,created_by_account_id,created_at,
+          assignee_ids,priority,label_names,due_date,estimate,linked_note_ids,development_links) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11::jsonb,$12,$13,$14::jsonb,$15::jsonb)`,
+        [task.id,state.workspace.id,task.projectId,task.key,task.status.id,task.title,accountFor(task.createdBy),task.createdAt,
+          JSON.stringify(task.assigneeIds ?? []),task.priority ?? "none",JSON.stringify(task.labelNames ?? []),task.dueDate ?? null,
+          task.estimate ?? null,JSON.stringify(task.linkedNoteIds ?? []),JSON.stringify(task.developmentLinks ?? [])]);
+        for (const noteId of task.sourceNoteIds) await client.query("INSERT INTO stash_task_note_sources(task_id,note_id) VALUES($1,$2)",[task.id,noteId]);
+        for (const source of task.sourceBlocks ?? []) await client.query("INSERT INTO stash_task_block_sources(task_id,note_id,block_id) VALUES($1,$2,$3)",[task.id,source.noteId,source.blockId]);
+        for (const alias of task.keyAliases ?? []) await client.query("INSERT INTO stash_task_key_aliases(project_id,task_key,task_id) VALUES($1,$2,$3)",[alias.projectId,alias.key,task.id]);
+        await this.#recordPortableProjection(client,"Task",task.id,task.schema,task);
+      }
+      for (const task of state.tasks) for (const edge of task.dependencies ?? []) if (edge.type === "depends_on")
+        await client.query("INSERT INTO stash_task_dependencies(dependent_task_id,prerequisite_task_id) VALUES($1,$2) ON CONFLICT DO NOTHING",[task.id,edge.taskId]);
+      for (const project of durable.filter(({ kind }) => kind === "Project").map(({ id }) => id)) {
+        const numbers = state.tasks.filter(({ projectId }) => projectId === project).map(({ key }) => Number(key.slice(key.lastIndexOf("-") + 1)))
+          .filter(Number.isSafeInteger);
+        await client.query("UPDATE stash_projects SET next_task_number=$2 WHERE id=$1",[project,Math.max(0,...numbers)+1]);
+      }
+      for (const board of state.boards) { await client.query("INSERT INTO stash_boards(id,project_id,name,group_by,created_at) VALUES($1,$2,$3,$4,$5)",
+        [board.id,board.projectId,board.name,board.groupBy,board.createdAt]); await this.#recordPortableProjection(client,"Board",board.id,board.schema,board); }
+      for (const attachment of state.attachments) {
+        await client.query(`INSERT INTO stash_attachments(id,workspace_id,filename,content_type,byte_size,relative_path,storage_key,source,created_by_account_id,created_at)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,[attachment.id,state.workspace.id,attachment.filename,attachment.contentType,attachment.size,
+          attachment.relativePath,bundle.attachmentStorageKeys.get(attachment.id),attachment.source,accountFor(attachment.createdBy),attachment.createdAt]);
+        await this.#recordPortableProjection(client,"Attachment",attachment.id,attachment.schema,attachment);
+      }
+      for (const link of state.noteLinks) { await client.query(`INSERT INTO stash_note_links(id,workspace_id,source_note_id,target_note_id,target_path,candidate_note_ids,label,revision)
+        VALUES($1,$2,$3,$4,$5,$6::uuid[],$7,$8)`,[link.id,state.workspace.id,link.sourceNoteId,link.targetNoteId ?? null,
+        "targetPath" in link ? link.targetPath : null,"candidateNoteIds" in link ? link.candidateNoteIds : [],"label" in link ? link.label : "Note","revision" in link ? link.revision : 1]);
+        await this.#recordPortableProjection(client,"NoteLink",link.id,link.schema,link); }
+      for (const revision of state.noteHistory) await client.query(`INSERT INTO stash_note_history(note_id,workspace_id,revision,content,document,actor_account_id,cause,recorded_at)
+        VALUES($1,$2,$3,$4,$5::jsonb,$6,$7,$8)`,[revision.noteId,state.workspace.id,revision.revision,revision.content,JSON.stringify(revision.document),
+        accountFor(revision.actor),JSON.stringify(revision.cause),revision.recordedAt]);
+      for (const activity of state.activities) { await client.query(`INSERT INTO stash_workspace_activity(id,workspace_id,object_kind,object_id,action,actor_account_id,cause,occurred_at,before_state,after_state)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb)`,[activity.id,state.workspace.id,activity.object.kind,activity.object.id,activity.action,
+        accountFor(activity.actor),JSON.stringify(activity.cause),activity.occurredAt,JSON.stringify(activity.before),JSON.stringify(activity.after)]);
+        await this.#recordPortableProjection(client,"Activity",activity.id,activity.schema,activity); }
+      for (const item of durable.filter(({ kind }) => kind === "Discussion")) {
+        const discussion = item.payload as PortableDiscussionProjection; const target = discussion.target;
+        await client.query(`INSERT INTO stash_discussions(id,workspace_id,target_kind,note_id,block_id,task_id,created_at,resolved_at)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,[discussion.id,state.workspace.id,target.kind,
+          target.kind === "note" || target.kind === "block" ? target.noteId : null,target.kind === "block" ? target.blockId : null,
+          target.kind === "task" ? target.taskId : null,discussion.createdAt,discussion.resolvedAt ?? null]);
+        for (const message of discussion.messages) await client.query(`INSERT INTO stash_discussion_messages(id,discussion_id,content,author_account_id,created_at)
+          VALUES($1,$2,$3,$4,$5)`,[message.id,discussion.id,message.content,accountFor(message.author),message.createdAt]);
+      }
+      for (const item of durable.filter(({ kind }) => kind === "DiscussionWorkLink")) {
+        const link = item.payload as PortableDiscussionWorkLinkProjection;
+        await client.query(`INSERT INTO stash_discussion_work_links(id,discussion_id,work_kind,note_id,task_id,selected_message_ids,created_by_account_id,created_at)
+          VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8)`,[link.id,link.discussionId,link.work.kind,link.work.kind === "note" ? link.work.id : null,
+          link.work.kind === "task" ? link.work.id : null,JSON.stringify(link.selectedMessages.map(({ id }) => id)),accountFor(link.createdBy),link.createdAt]);
+      }
+      for (const item of durable.filter(({ kind }) => kind === "GuestProjectAccess")) {
+        const access = item.payload as any; const guestAccount = accountFor(access.guest);
+        for (const project of access.projects) await client.query("INSERT INTO stash_project_guests(project_id,account_id) VALUES($1,$2) ON CONFLICT DO NOTHING",
+          [project.projectId,guestAccount]);
+      }
+      for (const item of durable.filter(({ kind }) => !["Project","Workflow"].includes(kind)))
+        await this.#recordPortableProjection(client,item.kind as any,item.id,item.schema as any,item.payload);
+      const transformed: ImportTransformation[] = bundle.identityStubs.map((identity) => ({ kind:"transformed",object:identity.sourceAccountId,reason:"identity_stub_created" }));
+      const report: PortableWorkspaceImportReport = { schema:"stash.portable-workspace-import-report.v1",importId,
+        workspaceId:state.workspace.id,archiveSha256:bundle.archiveSha256,identityStubs:bundle.identityStubs,
+        transformations:transformed,transformed,skipped:[],ambiguous:[] };
+      await client.query("INSERT INTO stash_workspace_imports(import_id,archive_sha256,workspace_id,report) VALUES($1,$2,$3,$4::jsonb)",
+        [importId,bundle.archiveSha256,state.workspace.id,JSON.stringify(report)]);
+      return { status:"imported" as const,report };
+    });
+  }
+
   async readExportSnapshot(memberId: string, workspaceId: string): Promise<
     { status: "found"; snapshot: PortableWorkspaceExportSnapshot }
     | { status: "workspace_forbidden" | "workspace_not_found" }
@@ -3379,8 +3516,10 @@ export class PostgresDatabase implements
         FROM stash_workspace_activity activity JOIN LATERAL (SELECT payload FROM stash_portable_projection_outbox
           WHERE object_kind='Activity' AND object_id=activity.id ORDER BY revision DESC LIMIT 1) projection ON TRUE
         WHERE activity.workspace_id=$1 ORDER BY activity.occurred_at,activity.id`, [workspaceId]) : { rows: [] };
-      const histories = await client.query<any>(`SELECT history.*, actor.name AS actor_name FROM stash_note_history history
-        JOIN stash_accounts actor ON actor.id=history.actor_account_id JOIN stash_notes note ON note.id=history.note_id
+      const histories = await client.query<any>(`SELECT history.*, actor.name AS actor_name,
+        COALESCE(stub.source_account_id,history.actor_account_id::text) AS portable_actor_id FROM stash_note_history history
+        JOIN stash_accounts actor ON actor.id=history.actor_account_id LEFT JOIN stash_identity_stubs stub ON stub.account_id=actor.id
+        JOIN stash_notes note ON note.id=history.note_id
         WHERE history.workspace_id=$1 AND ($2::boolean OR note.project_id=ANY($3::uuid[]))
         ORDER BY history.note_id,history.revision`, [workspaceId, permission.member, guestProjectIds]);
       const durableObjects = await client.query<{ object_kind: string; object_id: string; projection_schema: string; payload: unknown }>(
@@ -3391,9 +3530,12 @@ export class PostgresDatabase implements
            AND (
              (projection.object_kind='Project' AND projection.payload->>'workspaceId'=$1
                AND ($2::boolean OR projection.object_id=ANY($3::uuid[])))
-             OR (projection.object_kind IN ('Workflow','GuestProjectAccess')
+             OR (projection.object_kind='Workflow'
                AND (projection.payload->>'projectId')::uuid IN (SELECT id FROM stash_projects WHERE workspace_id=$1)
                AND ($2::boolean OR (projection.payload->>'projectId')::uuid=ANY($3::uuid[])))
+             OR (projection.object_kind='GuestProjectAccess' AND $2::boolean AND EXISTS (
+               SELECT 1 FROM jsonb_array_elements(projection.payload->'projects') selected
+               WHERE selected->>'workspaceId'=$1))
              OR (projection.object_kind IN ('Discussion','DiscussionWorkLink') AND projection.payload->>'workspaceId'=$1
                AND $2::boolean)
              OR (projection.object_kind='RepositoryConnection' AND $2::boolean AND EXISTS (
@@ -3430,7 +3572,7 @@ export class PostgresDatabase implements
         activities: activities.rows.map(({ payload }) => payload),
         noteHistory: histories.rows.map((row): NoteHistoryRevision => ({ noteId: row.note_id, workspaceId: row.workspace_id,
           revision: Number(row.revision), content: row.content, document: row.document, recordedAt: new Date(row.recorded_at).toISOString(),
-          actor: { localAccountId: row.actor_account_id, displayName: row.actor_name }, cause: this.#parseActivityCause(row.cause) })),
+          actor: { localAccountId: row.portable_actor_id, displayName: row.actor_name }, cause: this.#parseActivityCause(row.cause) })),
         durableObjects: durableObjects.rows.map((row) => ({ kind: row.object_kind, id: row.object_id,
           schema: row.projection_schema, payload: row.payload })),
       } };
@@ -3485,6 +3627,9 @@ export class PostgresDatabase implements
         recorded_at TIMESTAMPTZ NOT NULL,
         PRIMARY KEY (note_id, revision)
       );
+      CREATE TABLE IF NOT EXISTS stash_identity_stubs (
+        source_account_id TEXT PRIMARY KEY, account_id UUID NOT NULL UNIQUE REFERENCES stash_accounts(id), display_name TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS stash_note_restore_receipts (
         note_id UUID NOT NULL REFERENCES stash_notes(id) ON DELETE CASCADE,
         idempotency_key UUID NOT NULL,
@@ -3501,6 +3646,21 @@ export class PostgresDatabase implements
       WHERE receipt.activity_id=activity.id AND receipt.restore_result IS NULL;
       ALTER TABLE stash_note_restore_receipts ALTER COLUMN restore_result SET NOT NULL;
     `);
+  }
+
+  async #ensureWorkspaceImportSchema(client: PoolClient): Promise<void> {
+    await this.#ensureNoteHistorySchema(client);
+    await this.#ensureAttachmentSchema(client);
+    await this.#ensureBoardSchema(client);
+    await this.#ensureDiscussionSchema(client);
+    await this.#ensureInvitationSchema(client);
+    await client.query(`CREATE TABLE IF NOT EXISTS stash_identity_stubs (
+      source_account_id TEXT PRIMARY KEY, account_id UUID NOT NULL UNIQUE REFERENCES stash_accounts(id), display_name TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS stash_workspace_imports (
+      import_id UUID PRIMARY KEY, archive_sha256 TEXT NOT NULL, workspace_id UUID NOT NULL UNIQUE REFERENCES stash_workspaces(id),
+      report JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`);
   }
 
   async #backfillLegacyNoteHistory(client: PoolClient): Promise<void> {
