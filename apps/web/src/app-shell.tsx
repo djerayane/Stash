@@ -112,7 +112,7 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
   const memberEmail = displayLabel(session.member.email, "Signed in");
   useGSAP(() => {
     if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
-    gsap.from(`.${styles.sidebar}, .${styles.topbar}`, { opacity: 0, y: 8, duration: 0.45, stagger: 0.06, ease: "power2.out", clearProps: "all" });
+    gsap.from(`.${styles.sidebar} > *, .${styles.topbar} > *`, { opacity: 0, y: 8, duration: 0.45, stagger: 0.06, ease: "power2.out", clearProps: "all" });
   }, { scope: shellRef });
   useGSAP(() => {
     const content = mainRef.current?.firstElementChild;

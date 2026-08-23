@@ -56,6 +56,7 @@ test("uses the responsive bottom navigation at a true narrow viewport", async ({
   await expect(page.getByRole("link", { name: "Stash home" })).toBeHidden();
   const sidebar = navigation.locator("xpath=ancestor::aside");
   await expect(sidebar).toHaveCSS("position", "fixed");
+  expect(await sidebar.evaluate((element) => getComputedStyle(element).transform)).toBe("none");
   const box = await sidebar.boundingBox();
   expect(box).not.toBeNull();
   expect(Math.abs((box!.y + box!.height) - 844)).toBeLessThanOrEqual(1);
