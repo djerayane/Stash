@@ -23,7 +23,7 @@ interface NoteEditorProps { noteId: string; fetcher?: typeof fetch; token?: stri
 
 const BlockIdentity = Extension.create({
   name: "blockIdentity",
-  addGlobalAttributes() { return [{ types: ["paragraph", "heading", "blockquote", "codeBlock", "bulletList", "taskList", "callout", "workspaceAttachment"], attributes: {
+  addGlobalAttributes() { return [{ types: ["paragraph", "heading", "blockquote", "codeBlock", "bulletList", "taskList", "callout", "workspaceAttachment", "image", "table"], attributes: {
     blockKey: { default: null, parseHTML: (element) => element.dataset.blockKey, renderHTML: (attributes) => attributes.blockKey ? { "data-block-key": attributes.blockKey } : {} },
     blockId: { default: null, parseHTML: (element) => element.dataset.blockId, renderHTML: (attributes) => attributes.blockId ? { "data-block-id": attributes.blockId } : {} },
   } }]; },
@@ -60,6 +60,7 @@ export function NoteEditor({ noteId, fetcher = globalThis.fetch, token = localSt
   const [error, setError] = useState("");
   const [, refreshToolbar] = useState(0);
   const persistedVector = useRef<Uint8Array>(new Uint8Array());
+  const restoredPendingUpdate = useRef(false);
   const layoutRef = useRef<HTMLElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
   const asideRef = useRef<HTMLElement>(null);
@@ -80,7 +81,7 @@ export function NoteEditor({ noteId, fetcher = globalThis.fetch, token = localSt
     persistedVector.current = applyAcknowledgedUpdate(ydoc, decode(collaboration.data.update));
     try {
       const pending = localStorage.getItem(`stash.pending-note-update:${noteId}`);
-      if (pending) Y.applyUpdate(ydoc, decode(pending));
+      if (pending) { Y.applyUpdate(ydoc, decode(pending)); restoredPendingUpdate.current = true; }
     } catch { /* Browser storage may be disabled; the live Y.Doc still retains this session's contribution. */ }
   }
 
@@ -104,7 +105,7 @@ export function NoteEditor({ noteId, fetcher = globalThis.fetch, token = localSt
   useEffect(() => {
     if (!editor || !note.data || !collaboration.data) return;
     if (ydoc.getXmlFragment("default").length === 0) editor.commands.setContent(toTiptap(note.data.document));
-    setStatus("All changes saved"); setError("");
+    setStatus(restoredPendingUpdate.current ? "Restoring changes from this device" : "All changes saved"); setError("");
   }, [editor, note.data, collaboration.data, ydoc]);
 
   const synchronize = useCallback(async () => {
@@ -127,13 +128,20 @@ export function NoteEditor({ noteId, fetcher = globalThis.fetch, token = localSt
     ydoc.on("update", changed); return () => { clearTimeout(timer); ydoc.off("update", changed); }; }, [editor, synchronize, ydoc]);
 
   useEffect(() => {
+    if (!editor || !collaboration.data || !restoredPendingUpdate.current) return;
+    restoredPendingUpdate.current = false;
+    void synchronize();
+  }, [collaboration.data, editor, synchronize]);
+
+  useEffect(() => {
     if (!collaboration.data) return;
     const refresh = window.setInterval(() => { void fetcher(`/api/notes/${encodeURIComponent(noteId)}/collaboration`, { headers })
       .then(async (response) => { if (!response.ok) return; const snapshot = await response.json() as Snapshot;
-        persistedVector.current = applyAcknowledgedUpdate(ydoc, decode(snapshot.update)); })
+        persistedVector.current = applyAcknowledgedUpdate(ydoc, decode(snapshot.update));
+        if (localStorage.getItem(`stash.pending-note-update:${noteId}`)) void synchronize(); })
       .catch(() => undefined); }, 2_000);
     return () => clearInterval(refresh);
-  }, [collaboration.data, fetcher, headers, noteId, ydoc]);
+  }, [collaboration.data, fetcher, headers, noteId, synchronize, ydoc]);
 
   const isUnavailable = note.isError || collaboration.isError;
   useEffect(() => {

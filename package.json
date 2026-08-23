@@ -7,7 +7,7 @@
   "type": "module",
   "scripts": {
     "build": "pnpm --recursive --if-present build && pnpm run build:server",
-    "build:shared": "pnpm --filter @stash/sync... build",
+    "build:shared": "pnpm --filter @stash/sync... --filter @stash/rich-text... build",
     "build:web": "pnpm --filter @stash/web build",
     "build:server": "tsc -p tsconfig.build.json",
     "check": "pnpm run check:server && pnpm --recursive --if-present check",
@@ -30,6 +30,7 @@
   "dependencies": {
     "@simplewebauthn/server": "^13.3.2",
     "@stash/domain-types": "workspace:*",
+    "@stash/rich-text": "workspace:*",
     "@stash/sync": "workspace:*",
     "gsap": "^3.15.0",
     "nodemailer": "^9.0.5",

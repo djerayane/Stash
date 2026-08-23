@@ -14,6 +14,9 @@ importers:
       '@stash/domain-types':
         specifier: workspace:*
         version: link:packages/domain-types
+      '@stash/rich-text':
+        specifier: workspace:*
+        version: link:packages/rich-text
       '@stash/sync':
         specifier: workspace:*
         version: link:packages/sync
@@ -184,6 +187,9 @@ importers:
       '@stash/domain-types':
         specifier: workspace:*
         version: link:../../packages/domain-types
+      '@stash/rich-text':
+        specifier: workspace:*
+        version: link:../../packages/rich-text
       '@stash/tokens':
         specifier: workspace:*
         version: link:../../packages/tokens
@@ -284,6 +290,19 @@ importers:
         version: 3.2.7(@types/node@24.13.3)(jsdom@29.1.1)(lightningcss@1.33.0)(terser@5.50.0)(tsx@4.23.12)(yaml@2.9.0)
 
   packages/domain-types:
+    devDependencies:
+      typescript:
+        specifier: ~5.9.2
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/node@24.13.3)(jsdom@29.1.1)(lightningcss@1.33.0)(terser@5.50.0)(tsx@4.23.12)(yaml@2.9.0)
+
+  packages/rich-text:
+    dependencies:
+      '@stash/domain-types':
+        specifier: workspace:*
+        version: link:../domain-types
     devDependencies:
       typescript:
         specifier: ~5.9.2

@@ -16,7 +16,7 @@ describe("Note Markdown round trips", () => {
     expect(markdownFromTiptap({ type: "doc", content: [{ type: "table", content: [
       { type: "tableRow", content: [{ type: "tableHeader", content: [{ type: "paragraph", content: [{ type: "text", text: "Owner" }] }] }, { type: "tableHeader", content: [{ type: "paragraph", content: [{ type: "text", text: "State" }] }] }] },
       { type: "tableRow", content: [{ type: "tableCell", content: [{ type: "paragraph", content: [{ type: "text", text: "Ada" }] }] }, { type: "tableCell", content: [{ type: "paragraph", content: [{ type: "text", text: "Ready" }] }] }] },
-    ] }, { type: "image", attrs: { alt: "Diagram", src: "attachments/diagram.png" } }] })).toBe("| Owner | State |\n| --- | --- |\n| Ada | Ready |\n\n![Diagram](attachments/diagram.png)");
+    ] }, { type: "image", attrs: { alt: "Diagram", src: "attachments/diagram.png" } }] })).toBe("| Owner | State |\n| --- | --- |\n| Ada | Ready |\n\n![Diagram](<attachments/diagram.png>)");
   });
 
   it("projects callouts and Workspace Attachments to portable Markdown", () => {

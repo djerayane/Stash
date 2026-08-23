@@ -30,6 +30,8 @@ it("loads an authorized collaborative Note and exposes keyboard-operable rich-te
     if (url.endsWith("/collaboration")) return new Response(JSON.stringify({ sequence: 0, update: emptyUpdate(), updatedAt: new Date(0).toISOString(), updatedByMemberId: "ada" }));
     return new Response(JSON.stringify({ id: "note", revision: 1, content: "Release plan", document: { type: "doc", blocks: [
       { type: "paragraph", blockKey: "stable-key", id: "linked-block", content: [{ text: "Preserve this Block" }] },
+      { type: "image", blockKey: "image-key", id: "linked-image", src: "/diagram.png", alt: "Diagram" },
+      { type: "table", blockKey: "table-key", id: "linked-table", rows: [[{ header: true, content: [{ text: "Owner" }] }]] },
     ] } }));
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -40,8 +42,28 @@ it("loads an authorized collaborative Note and exposes keyboard-operable rich-te
   expect(screen.getByRole("button", { name: "Insert link" })).toBeEnabled();
   expect(screen.getByRole("button", { name: "Insert callout" })).toBeEnabled();
   expect(screen.getByRole("button", { name: "Insert Workspace Attachment" })).toBeEnabled();
+  expect(document.querySelector("[data-block-id='linked-image']")).toHaveAttribute("data-block-key", "image-key");
+  expect(document.querySelector("table[data-block-id='linked-table']")).toHaveAttribute("data-block-key", "table-key");
   fireEvent.click(screen.getByRole("button", { name: "Bold" }));
   expect(fetcher).toHaveBeenCalledWith("/api/notes/note", expect.objectContaining({ headers: { authorization: "Bearer member-token" } }));
+});
+
+it("replays a restored offline update as soon as collaboration reconnects", async () => {
+  const pendingDocument = new Y.Doc(); pendingDocument.getText("offline").insert(0, "Kept contribution");
+  localStorage.setItem("stash.pending-note-update:note", btoa(String.fromCharCode(...Y.encodeStateAsUpdate(pendingDocument))));
+  const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+    const url = String(input);
+    if (init?.method === "POST") {
+      const body = JSON.parse(String(init.body)) as { update: string };
+      return new Response(JSON.stringify({ sequence: 1, update: body.update, updatedAt: new Date(0).toISOString(), updatedByMemberId: "ada" }));
+    }
+    if (url.endsWith("/collaboration")) return new Response(JSON.stringify({ sequence: 0, update: emptyUpdate(), updatedAt: new Date(0).toISOString(), updatedByMemberId: "ada" }));
+    return new Response(JSON.stringify({ id: "note", revision: 1, content: "Offline plan", document: { type: "doc", blocks: [{ type: "paragraph", blockKey: "key", content: [{ text: "Draft" }] }] } }));
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}><NoteEditor noteId="note" fetcher={fetcher} token="token" /></QueryClientProvider>);
+  await waitFor(() => expect(fetcher.mock.calls.some(([, init]) => init?.method === "POST")).toBe(true));
+  await waitFor(() => expect(localStorage.getItem("stash.pending-note-update:note")).toBeNull());
 });
 
 it("keeps unsaved Yjs updates locally and offers recovery when the Instance is offline", async () => {

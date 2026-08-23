@@ -43,6 +43,7 @@ import * as Y from "yjs";
 import { prosemirrorJSONToYDoc, yDocToProsemirrorJSON } from "y-prosemirror";
 import { Schema } from "prosemirror-model";
 import type { CollaborationSnapshot, NoteCollaborationRepository } from "./note-collaboration.js";
+import { proseMirrorToRichText, richTextToProseMirror } from "@stash/rich-text";
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
@@ -141,55 +142,11 @@ const collaborationSchema = new Schema({
 });
 
 export function collaborativeDocumentFromRichText(document: import("./rich-text.js").RichTextDocument): Y.Doc {
-  const inline = (spans: import("./rich-text.js").RichTextSpan[]) => spans.map((span) => ({ type: "text", text: span.text,
-    ...(span.marks?.length || span.href ? { marks: [...(span.marks ?? []).map((type) => ({ type })), ...(span.href ? [{ type: "link", attrs: { href: span.href } }] : [])] } : {}) }));
-  const content = document.blocks.map((block) => {
-    const attrs = { blockKey: block.blockKey ?? null, blockId: block.id ?? null };
-    if (block.type === "heading") return { type: "heading", attrs: { ...attrs, level: block.level }, content: inline(block.content) };
-    if (block.type === "code") return { type: "codeBlock", attrs: { ...attrs, language: block.language ?? null }, content: [{ type: "text", text: block.text }] };
-    if (block.type === "quote") return { type: "blockquote", attrs, content: [{ type: "paragraph", content: inline(block.content) }] };
-    if (block.type === "bullet") return { type: "bulletList", attrs, content: [{ type: "listItem", content: [{ type: "paragraph", content: inline(block.content) }] }] };
-    if (block.type === "check") return { type: "taskList", attrs, content: [{ type: "taskItem", attrs: { checked: block.checked }, content: [{ type: "paragraph", content: inline(block.content) }] }] };
-    if (block.type === "callout") return { type: "callout", attrs: { ...attrs, kind: block.kind }, content: [{ type: "paragraph", content: inline(block.content) }] };
-    if (block.type === "attachment") return { type: "workspaceAttachment", attrs: { ...attrs, href: block.href, label: block.label } };
-    if (block.type === "image") return { type: "image", attrs: { ...attrs, src: block.src, alt: block.alt, title: block.title ?? null } };
-    if (block.type === "table") return { type: "table", attrs, content: block.rows.map((row) => ({ type: "tableRow",
-      content: row.map((cell) => ({ type: cell.header ? "tableHeader" : "tableCell", content: [{ type: "paragraph", content: inline(cell.content) }] })) })) };
-    return { type: "paragraph", attrs, content: inline(block.content) };
-  });
-  return prosemirrorJSONToYDoc(collaborationSchema, { type: "doc", content }, "default");
+  return prosemirrorJSONToYDoc(collaborationSchema, richTextToProseMirror(document), "default");
 }
 
 export function richTextFromCollaborativeDocument(document: Y.Doc): import("./rich-text.js").RichTextDocument {
-  const source = yDocToProsemirrorJSON(document, "default") as any;
-  const inline = (nodes: any[] | undefined): import("./rich-text.js").RichTextSpan[] => {
-    const spans = (nodes ?? []).filter(({ type }) => type === "text").map((node) => {
-      const marks = (node.marks ?? []).map(({ type }: { type: string }) => type).filter((type: string) => ["bold", "italic", "code"].includes(type));
-      const link = (node.marks ?? []).find(({ type }: { type: string }) => type === "link");
-      return { text: node.text ?? "", ...(marks.length ? { marks } : {}), ...(link?.attrs?.href ? { href: link.attrs.href } : {}) };
-    });
-    return spans.length ? spans : [{ text: "" }];
-  };
-  const identity = (node: any) => ({ ...(node.attrs?.blockKey ? { blockKey: node.attrs.blockKey } : {}),
-    ...(node.attrs?.blockId ? { id: node.attrs.blockId } : {}) });
-  const blocks = (source.content ?? []).map((node: any): import("./rich-text.js").RichTextBlock => {
-    if (node.type === "heading") return { type: "heading", level: node.attrs?.level ?? 1, ...identity(node), content: inline(node.content) };
-    if (node.type === "codeBlock") return { type: "code", ...identity(node), ...(node.attrs?.language ? { language: node.attrs.language } : {}),
-      text: (node.content ?? []).map(({ text }: { text?: string }) => text ?? "").join("") };
-    if (node.type === "blockquote") return { type: "quote", ...identity(node), content: inline(node.content?.[0]?.content) };
-    if (node.type === "bulletList") return { type: "bullet", ...identity(node), content: inline(node.content?.[0]?.content?.[0]?.content) };
-    if (node.type === "taskList") return { type: "check", checked: Boolean(node.content?.[0]?.attrs?.checked), ...identity(node),
-      content: inline(node.content?.[0]?.content?.[0]?.content) };
-    if (node.type === "callout") return { type: "callout", kind: ["note", "tip", "warning"].includes(node.attrs?.kind) ? node.attrs.kind : "note",
-      ...identity(node), content: inline(node.content?.[0]?.content) };
-    if (node.type === "workspaceAttachment") return { type: "attachment", ...identity(node), href: node.attrs?.href ?? "", label: node.attrs?.label ?? "Attachment" };
-    if (node.type === "image") return { type: "image", ...identity(node), src: node.attrs?.src ?? "", alt: node.attrs?.alt ?? "",
-      ...(node.attrs?.title ? { title: node.attrs.title } : {}) };
-    if (node.type === "table") return { type: "table", ...identity(node), rows: (node.content ?? []).map((row: any) =>
-      (row.content ?? []).map((cell: any) => ({ header: cell.type === "tableHeader", content: inline(cell.content?.[0]?.content) }))) };
-    return { type: "paragraph", ...identity(node), content: inline(node.content) };
-  });
-  return { type: "doc", blocks: blocks.length ? blocks : [{ type: "paragraph", content: [{ text: "" }] }] };
+  return proseMirrorToRichText(yDocToProsemirrorJSON(document, "default"));
 }
 
 export class PostgresDatabase implements

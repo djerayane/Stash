@@ -17,6 +17,7 @@
     "@radix-ui/react-navigation-menu": "^1.2.14",
     "@stash/api-client": "workspace:*",
     "@stash/domain-types": "workspace:*",
+    "@stash/rich-text": "workspace:*",
     "@stash/tokens": "workspace:*",
     "@stash/validation": "workspace:*",
     "@tanstack/react-query": "^5.90.2",
