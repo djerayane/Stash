@@ -24,7 +24,10 @@ class ProtocolCompatibleActivityDatabase implements DatabaseProbe, ActivityRepos
   readonly activities: ActivityRecord[] = [{ schema: "stash.activity.v1", id: "66666666-6666-4666-8666-666666666666",
     workspaceId, object: { kind: "Note", id: noteId }, action: "note_edited", actor: this.identities.get("grace")!,
     cause: { kind: "member" }, occurredAt: "2026-08-22T09:00:00.000Z", before: { revision: 1, content: "Original" },
-    after: { revision: 2, content: "Changed" } }];
+    after: { revision: 2, content: "Changed" } }, { schema: "stash.activity.v1", id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    workspaceId, object: { kind: "Note", id: noteId }, action: "note_organized", actor: this.identities.get("ada")!,
+    cause: { kind: "member" }, occurredAt: "2026-08-22T09:30:00.000Z", before: { projectId: null, tags: [] },
+    after: { projectId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", tags: ["planning"] } }];
   currentRevision = 2;
   currentContent = "Changed";
   currentDocument: RichTextDocument = this.revisions[1]!.document;
@@ -89,6 +92,8 @@ describe("Activity and Note history", () => {
     assert.deepEqual(body.activities[0]!.actor, { localAccountId: "grace", displayName: "Grace Hopper" });
     assert.deepEqual(body.activities[0]!.cause, { kind: "member" });
     assert.deepEqual(body.activities[0]!.before, { revision: 1, content: "Original" });
+    assert.deepEqual(body.activities[1]!.before, { projectId: null, tags: [] });
+    assert.deepEqual(body.activities[1]!.after, { projectId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", tags: ["planning"] });
     const denied = await fetch(`${baseUrl}/api/workspaces/${workspaceId}/activity`, { headers: { authorization: "Bearer member-grace" } });
     assert.equal(denied.status, 404);
   });

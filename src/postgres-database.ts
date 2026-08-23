@@ -1424,7 +1424,8 @@ export class PostgresDatabase implements
     if (!project.rowCount) return { status: "project_forbidden" as const };
     const before=await client.query<any>("SELECT project_id,tags FROM stash_notes WHERE id=$1",[noteId]);
     await client.query("UPDATE stash_notes SET project_id = $2, tags = $3::jsonb WHERE id = $1", [noteId, change.note.projectId, JSON.stringify(change.note.tags)]);
-    await this.#recordDomainActivity(client,memberId,workspaceId,"Note",noteId,"note_organized",before.rows[0]??{},
+    await this.#recordDomainActivity(client,memberId,workspaceId,"Note",noteId,"note_organized",
+      {projectId:before.rows[0]?.project_id??null,tags:before.rows[0]?.tags??[]},
       {projectId:change.note.projectId,tags:change.note.tags});
     return { result: change };
   }
