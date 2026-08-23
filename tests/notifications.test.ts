@@ -52,6 +52,13 @@ class NotificationFake implements DatabaseProbe, NotificationRepository, TaskPla
     if (!this.visibleProjects.has(`${requestedMemberId}:${requestedProjectId}`)) return undefined;
     this.preferences.set(`${requestedMemberId}:${requestedProjectId}`, structuredClone(value)); return value;
   }
+  async claimDigestNotifications(requestedMemberId: string, cadence: "daily" | "weekly", since: string, until: string, claimedAt: string) {
+    const claimed = this.deliveries.filter((entry) => entry.memberId === requestedMemberId && !entry.readAt && !entry.digestedAt
+      && entry.createdAt >= since && entry.createdAt <= until
+      && this.visibleProjects.has(`${requestedMemberId}:${entry.projectId}`)
+      && this.preferences.get(`${requestedMemberId}:${entry.projectId}`)?.digest === cadence);
+    claimed.forEach((entry) => { entry.digestedAt = claimedAt; }); return structuredClone(claimed);
+  }
   async findTaskByKey(requestedMemberId: string, requestedProjectId: string, key: string) {
     return [memberId, otherMemberId].includes(requestedMemberId) && requestedProjectId === projectId && key === this.task.key
       ? { status: "found" as const, task: structuredClone(this.task) } : { status: "not_found" as const };
@@ -93,7 +100,7 @@ describe("Member notifications", () => {
 
   it("delivers only relevant Activity and suppresses self-authored or disabled changes", async () => {
     const triggers: NotificationTrigger[] = ["direct_mention", "assignment", "requested_review", "automation_failure", "followed_change"];
-    for (const [index, trigger] of triggers.entries()) await service.notify({ activity: { ...activity, id: `66666666-6666-4666-8666-66666666666${index}` }, projectId, memberId, trigger, summary: trigger });
+    for (const [index, trigger] of triggers.entries()) await service.notify({ activity: { ...activity, id: `66666666-6666-4666-8666-66666666666${index}` }, projectId, memberId, trigger, summary: trigger, followed: true });
     await service.notify({ activity, projectId, memberId: otherMemberId, trigger: "direct_mention", summary: "self mention" });
     await service.setPreferences(memberId, projectId, { activity: "muted", digest: "daily", quietHours: { start: "22:00", end: "07:00", timeZone: "Europe/Paris" } });
     assert.equal((await service.notify({ activity: { ...activity, id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }, projectId, memberId, trigger: "followed_change", summary: "noise" })).status, "suppressed");
@@ -109,13 +116,53 @@ describe("Member notifications", () => {
     assert.equal(inbox.status, 200); const listed = await inbox.json() as { notifications: NotificationDelivery[] };
     assert.equal(listed.notifications.length, 7); assert.ok(listed.notifications.every(({ activity: item }) => item.before !== undefined && item.after !== undefined));
     const digest = await request("/api/v1/notifications/digest");
-    assert.equal(digest.status, 200); assert.equal((await digest.json() as { notifications: NotificationDelivery[] }).notifications.length, 7);
+    assert.equal(digest.status, 200); assert.equal((await digest.json() as { notifications: NotificationDelivery[] }).notifications.length, 6,
+      "digest excludes entries timestamped after the delivery window");
+    assert.deepEqual((await (await request("/api/v1/notifications/digest")).json() as { notifications: NotificationDelivery[] }).notifications, [],
+      "a cadence window must be claimed only once");
     const read = await request(`/api/v1/notifications/${listed.notifications[0]!.id}/read`, "POST", {});
     assert.equal(read.status, 200); assert.equal((await read.json() as { notification: NotificationDelivery }).notification.readAt, "2026-08-23T12:30:00.000Z");
     assert.equal((await request(`/api/notifications/${listed.notifications[0]!.id}/read`, "POST", {}, "other-token")).status, 404);
     database.visibleProjects.clear();
     assert.deepEqual((await (await request("/api/notifications")).json() as { notifications: unknown[] }).notifications, []);
     database.visibleProjects.add(`${memberId}:${projectId}`);
+  });
+
+  it("produces every relevant notification source through the running Instance and honors all/followed/muted", async () => {
+    database.deliveries.length = 0; database.preferences.clear();
+    const event = async (trigger: NotificationTrigger, id: string, followed?: boolean) => request(`/api/projects/${projectId}/notification-events`, "POST", {
+      memberId, trigger, summary: trigger, ...(followed === undefined ? {} : { followed }),
+      activity: { ...activity, id, actor: { localAccountId: otherMemberId, displayName: "Grace Hopper" } },
+    }, "other-token");
+    for (const [index, trigger] of (["direct_mention", "requested_review", "automation_failure"] as NotificationTrigger[]).entries())
+      assert.equal((await event(trigger, `10000000-0000-4000-8000-00000000000${index}`)).status, 201);
+
+    await service.setPreferences(memberId, projectId, { activity: "followed", digest: "off" });
+    assert.equal((await event("followed_change", "20000000-0000-4000-8000-000000000001", false)).status, 200);
+    assert.equal((await event("followed_change", "20000000-0000-4000-8000-000000000002", true)).status, 201);
+    await service.setPreferences(memberId, projectId, { activity: "all", digest: "off" });
+    assert.equal((await event("followed_change", "20000000-0000-4000-8000-000000000003", false)).status, 201);
+    await service.setPreferences(memberId, projectId, { activity: "muted", digest: "off" });
+    assert.equal((await event("followed_change", "20000000-0000-4000-8000-000000000004", true)).status, 200);
+    assert.equal(database.deliveries.length, 5);
+    const forged = await request(`/api/projects/${projectId}/notification-events`, "POST", {
+      memberId, trigger: "direct_mention", summary: "forged", activity,
+    }, "member-token");
+    assert.equal(forged.status, 422, "the authenticated actor must own the attributed Activity");
+  });
+
+  it("uses distinct daily and weekly windows and does not redeliver a claimed digest", async () => {
+    database.deliveries.length = 0; database.preferences.clear();
+    await service.setPreferences(memberId, projectId, { activity: "all", digest: "daily" });
+    await service.notify({ activity: { ...activity, id: "30000000-0000-4000-8000-000000000001" }, projectId, memberId, trigger: "assignment", summary: "today" });
+    const older = { ...database.deliveries[0]!, id: "30000000-0000-4000-8000-000000000002",
+      activity: { ...activity, id: "30000000-0000-4000-8000-000000000002" }, createdAt: "2026-08-22T12:00:00.000Z" };
+    delete older.digestedAt; database.deliveries.push(older);
+    assert.equal((await service.digest(memberId)).length, 1, "daily includes only the current UTC day");
+    assert.equal((await service.digest(memberId)).length, 0);
+    database.deliveries.forEach((entry) => { delete entry.digestedAt; });
+    await service.setPreferences(memberId, projectId, { activity: "all", digest: "weekly" });
+    assert.equal((await service.digest(memberId)).length, 2, "weekly includes entries since Monday");
   });
 
   it("validates and persists per-Project activity, digest, and quiet-hour controls", async () => {

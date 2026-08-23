@@ -248,7 +248,7 @@ describe("the versioned public domain API", () => {
       "/api/projects/project/boards", "/api/workspaces/workspace/attachments", "/api/discussions/discussion",
       "/api/workspaces/workspace/export", "/api/workspaces/workspace/activity", "/api/organizations/org/repository-connections",
       "/api/projects/project/tasks/TASK-1/development-artifacts",
-      "/api/notifications", "/api/projects/project/notification-settings",
+      "/api/notifications", "/api/projects/project/notification-settings", "/api/projects/project/notification-events",
     ];
     const delegates = examples.map((pathname) => ({ matches: (_request: object, url: URL) => url.pathname === pathname,
       handle: (_request: object, response: import("node:http").ServerResponse) => { response.writeHead(204); response.end(); return true; } }));

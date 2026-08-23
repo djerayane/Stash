@@ -1878,9 +1878,12 @@ export class PostgresDatabase implements
         (workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
         (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
           WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2)))
+      AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$10) OR
+        (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships actor_membership
+          WHERE actor_membership.organization_id=workspace.organization_owner_id AND actor_membership.account_id=$10)))
       ON CONFLICT (member_id, activity_id, trigger) DO UPDATE SET summary=EXCLUDED.summary
       RETURNING *`, [delivery.id, delivery.memberId, delivery.workspaceId, delivery.projectId, delivery.trigger,
-      delivery.summary, JSON.stringify(delivery.activity), delivery.createdAt, delivery.delivery]);
+      delivery.summary, JSON.stringify(delivery.activity), delivery.createdAt, delivery.delivery, delivery.activity.actor.localAccountId]);
     const row = result.rows[0];
     if (!row) throw new Error("notification_recipient_forbidden");
     return this.#notificationFromRow(row);
@@ -1939,10 +1942,26 @@ export class PostgresDatabase implements
     return result.rowCount ? preferences : undefined;
   }
 
+  async claimDigestNotifications(memberId: string, cadence: "daily" | "weekly", since: string, until: string, claimedAt: string) {
+    await this.#ensureNotificationSchema();
+    const result = await this.#pool.query<any>(`UPDATE stash_notifications notification SET digested_at=$5
+      FROM stash_notification_preferences preference, stash_projects project, stash_workspaces workspace
+      WHERE notification.member_id=$1 AND notification.read_at IS NULL AND notification.digested_at IS NULL
+        AND notification.created_at >= $3 AND notification.created_at <= $4
+        AND preference.member_id=$1 AND preference.project_id=notification.project_id AND preference.digest=$2
+        AND project.id=notification.project_id AND workspace.id=project.workspace_id
+        AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$1) OR
+          (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+            WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$1)))
+      RETURNING notification.*`, [memberId, cadence, since, until, claimedAt]);
+    return result.rows.map((row) => this.#notificationFromRow(row));
+  }
+
   #notificationFromRow(row: any): NotificationDelivery {
     return { schema: "stash.notification.v1", id: row.id, memberId: row.member_id, workspaceId: row.workspace_id,
       projectId: row.project_id, trigger: row.trigger, summary: row.summary, activity: row.activity, delivery: row.delivery,
-      createdAt: new Date(row.created_at).toISOString(), ...(row.read_at ? { readAt: new Date(row.read_at).toISOString() } : {}) };
+      createdAt: new Date(row.created_at).toISOString(), ...(row.read_at ? { readAt: new Date(row.read_at).toISOString() } : {}),
+      ...(row.digested_at ? { digestedAt: new Date(row.digested_at).toISOString() } : {}) };
   }
 
   async listWorkspaceActivity(memberId: string, workspaceId: string) {
@@ -2938,8 +2957,10 @@ export class PostgresDatabase implements
         created_at TIMESTAMPTZ NOT NULL,
         delivery TEXT NOT NULL CHECK (delivery IN ('immediate','quiet_hours')),
         read_at TIMESTAMPTZ,
+        digested_at TIMESTAMPTZ,
         UNIQUE (member_id,activity_id,trigger)
       );
+      ALTER TABLE stash_notifications ADD COLUMN IF NOT EXISTS digested_at TIMESTAMPTZ;
       CREATE INDEX IF NOT EXISTS stash_notifications_member_created_idx ON stash_notifications(member_id,created_at DESC)`);
     } finally { if (!transactionClient) client.release(); }
   }
