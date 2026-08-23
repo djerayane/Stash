@@ -10,10 +10,12 @@ import {
 } from "../src/github-signals.js";
 import { startInstance, type RunningInstance } from "../src/instance.js";
 import { AutomationService, type AutomationRepository, type AutomationState } from "../src/automations.js";
+import { ActivityService, type ActivityRecord, type ActivityRepository } from "../src/activity.js";
 
 const projectId = "11111111-1111-4111-8111-111111111111";
 const organizationId = "33333333-3333-4333-8333-333333333333";
 const secret = "github-webhook-secret";
+const workspaceId = "77777777-7777-4777-8777-777777777777";
 
 class RepositoryFake implements GitHubSignalRepository {
   signals = new Map<string, GitHubSignal>();
@@ -55,8 +57,9 @@ class RepositoryFake implements GitHubSignalRepository {
   }
 }
 
-class AutomationFake implements AutomationRepository {
+class AutomationFake implements AutomationRepository, ActivityRepository {
   state: AutomationState = { recipes: [], transitions: [], availableStatuses: [{ id: "22222222-2222-4222-8222-222222222222", name: "In progress" }] };
+  activities: ActivityRecord[] = [];
   async listAutomationState() { return structuredClone(this.state); }
   async enableAutomation(_memberId: string, _projectId: string, trigger: "branch_created" | "pull_request_completed", targetStatusId: string) {
     const recipe = this.state.recipes.find((value) => value.trigger === trigger) ?? { id: "33333333-3333-4333-8333-333333333333", trigger, targetStatus: { id: targetStatusId, name: "In progress" }, enabled: true };
@@ -65,13 +68,24 @@ class AutomationFake implements AutomationRepository {
   }
   async reverseAutomation(_memberId: string, _projectId: string, _taskKey: string, transitionId: string) {
     const transition = this.state.transitions.find((value) => value.id === transitionId); if (!transition) return "not_found" as const;
-    transition.reversedAt ??= new Date().toISOString(); return { status: "reversed" as const, transition };
+    if (!transition.reversedAt) { transition.reversedAt = new Date().toISOString(); this.activities.push(this.activity("automation_status_transition_reversed",
+      { kind: "member", automationId: transition.automationId, signalId: transition.signalId }, transition.after, transition.before)); }
+    return { status: "reversed" as const, transition };
   }
   async applySignalAutomations(signal: { id: string; trigger?: "branch_created" | "pull_request_completed" }, candidates: ReadonlyArray<{ status: "confirmed" | "pending_confirmation" }>) {
     const recipe = this.state.recipes.find((value) => value.trigger === signal.trigger);
     if (!recipe || !candidates.some(({ status }) => status === "confirmed") || this.state.transitions.some((value) => value.signalId === signal.id)) return;
     this.state.transitions.push({ id: "44444444-4444-4444-8444-444444444444", automationId: recipe.id, signalId: signal.id,
       before: { id: "66666666-6666-4666-8666-666666666666", name: "Ready" }, after: recipe.targetStatus, occurredAt: new Date().toISOString() });
+    this.activities.push(this.activity("task_status_automated", { kind: "automation", automationId: recipe.id, signalId: signal.id },
+      { id: "66666666-6666-4666-8666-666666666666", name: "Ready" }, recipe.targetStatus));
+  }
+  async listWorkspaceActivity() { return { status: "found" as const, activities: structuredClone(this.activities) }; }
+  async listNoteHistory() { return { status: "not_found" as const }; }
+  async restoreNote() { return { status: "not_found" as const }; }
+  private activity(action: string, cause: ActivityRecord["cause"], before: { id: string; name: string }, after: { id: string; name: string }): ActivityRecord {
+    return { schema: "stash.activity.v1", id: crypto.randomUUID(), workspaceId, object: { kind: "Task", id: "88888888-8888-4888-8888-888888888888" }, action,
+      actor: { localAccountId: "member", displayName: "Configuring Member" }, cause, occurredAt: new Date().toISOString(), before: { status: before }, after: { status: after } };
   }
 }
 
@@ -89,7 +103,7 @@ describe("GitHub development Signals", () => {
     instance = await startInstance({
       database: { async verifyConnection() {}, async close() {} }, host: "127.0.0.1", port: 0, instanceAdminToken: "admin",
       memberAccess: { async authenticateBearer(value) { return value === "Bearer member" ? { accountId: "member", sessionId: "session" } : undefined; } },
-      githubSignals: new GitHubSignalService(repository, secret, automations), automations,
+      githubSignals: new GitHubSignalService(repository, secret, automations), automations, activities: new ActivityService(automationRepository),
     });
     return { repository, automationRepository, baseUrl: instance.url };
   }
@@ -120,6 +134,11 @@ describe("GitHub development Signals", () => {
     const transitionId = automation.automation.transitions[0]!.id;
     assert.equal((await fetch(`${baseUrl}/api/projects/${projectId}/tasks/STASH-36/automations/${transitionId}/reverse`, { method: "POST", headers: { authorization: "Bearer member" } })).status, 200);
     assert.ok(automationRepository.state.transitions[0]?.reversedAt);
+    const activity = await (await fetch(`${baseUrl}/api/workspaces/${workspaceId}/activity`, { headers: { authorization: "Bearer member" } })).json() as { activities: ActivityRecord[] };
+    assert.deepEqual(activity.activities.map(({ actor, cause, before, after }) => ({ actor, cause, before, after })), [
+      { actor: { localAccountId: "member", displayName: "Configuring Member" }, cause: { kind: "automation", automationId: automation.automation.recipes[0]!.id, signalId: automation.automation.transitions[0]!.signalId }, before: { status: { id: "66666666-6666-4666-8666-666666666666", name: "Ready" } }, after: { status: { id: "22222222-2222-4222-8222-222222222222", name: "In progress" } } },
+      { actor: { localAccountId: "member", displayName: "Configuring Member" }, cause: { kind: "member", automationId: automation.automation.recipes[0]!.id, signalId: automation.automation.transitions[0]!.signalId }, before: { status: { id: "22222222-2222-4222-8222-222222222222", name: "In progress" } }, after: { status: { id: "66666666-6666-4666-8666-666666666666", name: "Ready" } } },
+    ]);
   });
 
   it("requires explicit confirmation when one textual key can identify multiple Tasks", async () => {

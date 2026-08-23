@@ -159,12 +159,12 @@ test("focuses a development Signal load failure and retries by keyboard without 
 
 test("configures and reverses a visible Task status Automation by keyboard without reloading", async ({ page }) => {
   await installMemberSession(page);
-  const projectId = "11111111-1111-4111-8111-111111111111"; let configured = false; let reversed = false; let navigations = 0;
+  const projectId = "11111111-1111-4111-8111-111111111111"; let configured = false; let reversed = false; let reverseAttempts = 0; let navigations = 0;
   page.on("framenavigated", (frame) => { if (frame === page.mainFrame()) navigations += 1; });
   await page.route("**/development-signals", (route) => route.fulfill({ json: { signals: [] } }));
   await page.route("**/automations**", async (route) => {
     if (route.request().method() === "POST" && route.request().url().endsWith("/automations")) { configured = true; await route.fulfill({ json: { recipe: {} } }); return; }
-    if (route.request().method() === "POST") { reversed = true; await route.fulfill({ json: { transition: {} } }); return; }
+    if (route.request().method() === "POST") { reverseAttempts += 1; if (reverseAttempts === 1) { await route.fulfill({ status: 503, json: { message: "The status could not be restored." } }); return; } reversed = true; await route.fulfill({ json: { transition: {} } }); return; }
     await route.fulfill({ json: { automation: { availableStatuses: [{ id: "progress", name: "In progress" }],
       recipes: configured ? [{ id: "recipe", trigger: "branch_created", targetStatus: { id: "progress", name: "In progress" }, enabled: true }] : [],
       transitions: configured ? [{ id: "transition", automationId: "recipe", signalId: "signal-123", before: { id: "ready", name: "Ready" }, after: { id: "progress", name: "In progress" }, occurredAt: "2026-08-23T09:00:00.000Z", ...(reversed ? { reversedAt: "2026-08-23T10:00:00.000Z" } : {}) }] : [] } } });
@@ -175,5 +175,7 @@ test("configures and reverses a visible Task status Automation by keyboard witho
   await dialog.getByRole("button", { name: "Enable recipe" }).click();
   await expect(page.getByText("When a branch is created")).toBeVisible();
   await page.getByRole("button", { name: "Undo status change" }).focus(); await page.keyboard.press("Enter");
+  const alert = page.getByRole("alert"); await expect(alert).toContainText("The status could not be restored."); await expect(alert).toBeFocused();
+  await alert.getByRole("button", { name: "Try again" }).focus(); await page.keyboard.press("Enter");
   await expect(page.getByText("Reversed")).toBeVisible(); expect(navigations).toBe(0);
 });

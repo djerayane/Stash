@@ -17,6 +17,8 @@
 .empty { padding: var(--stash-space-5); color: var(--stash-color-muted); background: var(--stash-color-surface); border-left: 3px solid var(--stash-color-accent); }
 .error, .inlineError { padding: var(--stash-space-4); color: var(--stash-color-ink); background: var(--stash-color-error-soft); border-left: 3px solid #843f31; }
 .error:focus { outline: none; }
+.inlineError:focus { outline: 3px solid var(--stash-color-focus); outline-offset: 3px; }
+.inlineError button { display: block; margin-top: var(--stash-space-3); }
 .backdrop { position: fixed; inset: 0; z-index: 20; background: #101714b8; }
 .dialog { position: fixed; z-index: 21; top: 50%; left: 50%; width: min(34rem, calc(100vw - 2rem)); padding: var(--stash-space-8); transform: translate(-50%, -50%); background: var(--stash-color-surface); border-radius: var(--stash-radius-md); box-shadow: 0 1.5rem 5rem #0d171250; }
 .dialog h2 { margin: 0; font-size: clamp(1.6rem, 4vw, 2.4rem); letter-spacing: -.04em; }

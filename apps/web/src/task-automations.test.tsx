@@ -34,4 +34,18 @@ describe("Task Automations", () => {
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(await screen.findByText("When a branch is created")).toBeVisible();
   });
+
+  it("focuses a failed reversal and retries it without losing the transition", async () => {
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json({ automation: state }))
+      .mockResolvedValueOnce(Response.json({ message: "The status could not be restored." }, { status: 503 }))
+      .mockResolvedValueOnce(Response.json({ transition: { ...state.transitions[0], reversedAt: "2026-08-23T10:00:00.000Z" } }))
+      .mockResolvedValueOnce(Response.json({ automation: { ...state, transitions: [{ ...state.transitions[0], reversedAt: "2026-08-23T10:00:00.000Z" }] } }));
+    setup(fetcher);
+    fireEvent.click(await screen.findByRole("button", { name: "Undo status change" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveFocus();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Reversed")).toBeVisible();
+  });
 });
