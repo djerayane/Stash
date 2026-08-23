@@ -56,6 +56,8 @@ import type { ActivityService } from "./activity.js";
 import { githubArtifactRoutes } from "./github-artifact-routes.js";
 import type { GitHubArtifactService } from "./github-artifacts.js";
 import { publicDomainApiRoute } from "./public-domain-api.js";
+import { instanceBackupRoute } from "./instance-backup-routes.js";
+import type { InstanceBackupService } from "./instance-backup.js";
 
 export interface DatabaseProbe {
   verifyConnection(): Promise<void>;
@@ -100,6 +102,8 @@ export interface InstanceOptions {
   activities?: ActivityService;
   githubArtifacts?: GitHubArtifactService;
   webClientRoot?: string;
+  instanceBackups?: InstanceBackupService;
+  instanceBackupRoot?: string;
 }
 
 const browserSurface = `<!doctype html>
@@ -211,6 +215,7 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
     diagnosticsSchemaRoute(diagnostics),
     requireInstanceAdministrator(options.instanceAdminToken, diagnosticsAdminRoute(diagnostics)),
     requireInstanceAdministrator(options.instanceAdminToken, instanceAdminRoute(acceleration)),
+    ...(options.instanceBackups ? [requireInstanceAdministrator(options.instanceAdminToken, instanceBackupRoute(options.instanceBackups, options.instanceBackupRoot))] : []),
     requireInstanceAdministrator(
       options.instanceAdminToken,
       ownerBootstrapRoute(options.ownerBootstrap),
@@ -259,6 +264,13 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
         return;
       }
       json(response, 401, { error: "unauthorized", message: "Authentication is required." });
+      return;
+    }
+
+    // PostgreSQL supplies the consistent database snapshot. Holding mutating public boundaries
+    // while immutable Attachment files are copied makes their combined state coordinated too.
+    if (options.instanceBackups?.isRunning() && request.method !== "GET" && request.method !== "HEAD") {
+      json(response, 503, { error: "backup_in_progress", message: "This Instance is temporarily read-only while a coordinated backup is created." });
       return;
     }
 

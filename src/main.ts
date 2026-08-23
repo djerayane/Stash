@@ -29,6 +29,8 @@ import { NoteLinkService } from "./note-links.js";
 import { ActivityService } from "./activity.js";
 import { GitHubArtifactService } from "./github-artifacts.js";
 import { fileURLToPath } from "node:url";
+import { InstanceBackupService } from "./instance-backup.js";
+import { PostgresLocalInstanceBackupSource } from "./instance-backup-system.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -53,12 +55,16 @@ async function main(): Promise<void> {
   }
 
   const passwordAuth = new PasswordAuthService(database);
-  const attachmentStorage = new LocalAttachmentStorage(process.env.ATTACHMENT_STORAGE_PATH?.trim() || "/var/lib/stash/attachments");
+  const attachmentStoragePath = process.env.ATTACHMENT_STORAGE_PATH?.trim() || "/var/lib/stash/attachments";
+  const attachmentStorage = new LocalAttachmentStorage(attachmentStoragePath);
   const githubAppId = process.env.GITHUB_APP_ID?.trim();
   const githubAppPrivateKey = process.env.GITHUB_APP_PRIVATE_KEY?.replace(/\\n/g, "\n").trim();
   if (Boolean(githubAppId) !== Boolean(githubAppPrivateKey)) throw new Error("GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY must be configured together");
   const githubApp = githubAppId && githubAppPrivateKey ? new GitHubAppClient(githubAppId, githubAppPrivateKey) : undefined;
   const publicOrigin = requiredEnvironment("PUBLIC_ORIGIN");
+  const instanceBackups = new InstanceBackupService(new PostgresLocalInstanceBackupSource({
+    databaseUrl: requiredEnvironment("DATABASE_URL"), attachmentRoot: attachmentStoragePath, publicOrigin,
+  }), { masterKey: requiredEnvironment("INSTANCE_MASTER_KEY") });
   const smtpUrl = process.env.SMTP_URL?.trim();
   const emailRecoveryFrom = process.env.EMAIL_RECOVERY_FROM?.trim();
   const recoveryEmail = createRecoveryEmailSender({
@@ -90,6 +96,8 @@ async function main(): Promise<void> {
     mobileCaptures: new MobileCaptureService(database),
     discussions: new DiscussionService(database),
     activities: new ActivityService(database),
+    instanceBackups,
+    ...(process.env.INSTANCE_BACKUP_PATH?.trim() ? { instanceBackupRoot: process.env.INSTANCE_BACKUP_PATH.trim() } : {}),
     memberLocalization: new MemberLocalizationService(database),
     oidcAuth: new OidcAuthService(database),
     oidcManagement: new OidcManagementService(database),
