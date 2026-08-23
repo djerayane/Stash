@@ -81,13 +81,38 @@ export class EncryptedStateMobileCaptureStore implements EncryptedMobileCaptureS
 }
 
 function mutationKey(mutation: Pick<MobileSyncMutation, "id" | "origin">) {
-  return `${new URL(mutation.origin.instanceUrl).origin}\n${mutation.origin.workspaceId.toLowerCase()}\n${mutation.origin.memberId}\n${mutation.id.toLowerCase()}`;
+  return `${new URL(mutation.origin.instanceUrl).origin}\n${canonicalUuid(mutation.origin.workspaceId)}\n${canonicalUuid(mutation.origin.memberId)}\n${canonicalUuid(mutation.id)}`;
 }
 
 function mutationContribution(mutation: MobileSyncMutation) {
   const { attempts: _, nextRetryAt: __, lastError: ___, ...contribution } = mutation;
-  return JSON.stringify(canonicalJson({ ...contribution, origin: { ...contribution.origin,
-    instanceUrl: new URL(contribution.origin.instanceUrl).origin, workspaceId: contribution.origin.workspaceId.toLowerCase() } }));
+  const canonical = contribution.kind === "note_edit" ? { ...contribution, id: canonicalUuid(contribution.id),
+    noteId: canonicalUuid(contribution.noteId), operations: contribution.operations.map((operation) => {
+      const normalized = { ...operation, id: canonicalUuid(operation.id), blockKey: canonicalUuid(operation.blockKey) };
+      if (normalized.type === "insert_block" && normalized.afterBlockKey) normalized.afterBlockKey = canonicalUuid(normalized.afterBlockKey);
+      if (normalized.type !== "delete_block") normalized.block = { ...normalized.block,
+        ...(normalized.block.blockKey ? { blockKey: canonicalUuid(normalized.block.blockKey) } : {}),
+        ...(normalized.block.id ? { id: canonicalUuid(normalized.block.id) } : {}) };
+      return normalized;
+    }) }
+    : { ...contribution, id: canonicalUuid(contribution.id), projectId: canonicalUuid(contribution.projectId),
+      changes: canonicalTaskChanges(contribution.changes) };
+  return JSON.stringify(canonicalJson({ ...canonical, origin: { ...canonical.origin,
+    instanceUrl: new URL(canonical.origin.instanceUrl).origin, workspaceId: canonicalUuid(canonical.origin.workspaceId),
+    memberId: canonicalUuid(canonical.origin.memberId) } }));
+}
+
+function canonicalUuid(value: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+    ? value.toLowerCase() : value;
+}
+function canonicalTaskChanges(changes: Extract<MobileSyncMutation, { kind: "task_edit" }>["changes"]) {
+  return { ...changes,
+    ...(changes.statusId ? { statusId: canonicalUuid(changes.statusId) } : {}),
+    ...(changes.assigneeIds ? { assigneeIds: changes.assigneeIds.map(canonicalUuid) } : {}),
+    ...(changes.linkedNoteIds ? { linkedNoteIds: changes.linkedNoteIds.map(canonicalUuid) } : {}),
+    ...(changes.dependencies ? { dependencies: changes.dependencies.map((dependency) => ({ ...dependency,
+      taskId: canonicalUuid(dependency.taskId) })) } : {}) };
 }
 
 function canonicalJson(value: unknown): unknown {

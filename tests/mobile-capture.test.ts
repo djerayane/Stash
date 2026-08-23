@@ -350,6 +350,42 @@ describe("offline mobile capture synchronization", () => {
     assert.deepEqual(await store.listMutations(), [{ ...ordered, changes: { priority: "urgent", labelNames: ["mobile"] } }]);
   });
 
+  it("treats mixed-case UUID replay and re-pairing as one synchronization identity", async () => {
+    const repository = new RecordingCiphertextRepository();
+    const store = new EncryptedStateMobileCaptureStore(repository, testCipher);
+    const memberId = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA";
+    const mutationId = "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB";
+    const noteId = "CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCCC";
+    const blockKey = "DDDDDDDD-DDDD-4DDD-8DDD-DDDDDDDDDDDD";
+    const operationId = "EEEEEEEE-EEEE-4EEE-8EEE-EEEEEEEEEEEE";
+    const mutation: MobileSyncMutation = { id: mutationId, kind: "note_edit", noteId, baseRevision: 1,
+      operations: [{ id: operationId, type: "delete_block", blockKey }], attempts: 0,
+      origin: { instanceUrl: "https://stash.example/", workspaceId: workspaceId.toUpperCase(), memberId } };
+    await store.saveMutation(mutation);
+    await store.saveMutation({ ...mutation, id: mutationId.toLowerCase(), noteId: noteId.toLowerCase(),
+      operations: [{ id: operationId.toLowerCase(), type: "delete_block", blockKey: blockKey.toLowerCase() }],
+      origin: { instanceUrl: "https://stash.example", workspaceId, memberId: memberId.toLowerCase() } });
+    assert.equal((await store.listMutations()).length, 1);
+
+    let pairedMemberId = memberId;
+    let synchronizedUrl = "";
+    let synchronizedBody: any;
+    const client = new MobileCaptureClient(store, async (input, init) => {
+      if (String(input).endsWith("capture-options")) return new Response(JSON.stringify({ memberId: pairedMemberId,
+        projects: [], tags: [], reminders: [] }), { status: 200 });
+      synchronizedUrl = String(input); synchronizedBody = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ revision: 2 }), { status: 200 });
+    });
+    await client.pair({ instanceUrl: "https://stash.example", memberToken: "token", workspaceId: workspaceId.toUpperCase() });
+    pairedMemberId = memberId.toLowerCase();
+    await client.pair({ instanceUrl: "https://stash.example", memberToken: "token", workspaceId });
+    assert.equal((await client.pendingMutations()).length, 1, "same-identity re-pairing cannot orphan an encrypted mutation");
+    assert.deepEqual(await client.sync(), { status: "synced", count: 1 });
+    assert.equal(synchronizedUrl, `https://stash.example/api/notes/${noteId.toLowerCase()}`);
+    assert.equal(synchronizedBody.operations[0].id, operationId.toLowerCase());
+    assert.deepEqual(await client.pendingMutations(), []);
+  });
+
   it("reruns a serialized drain when B is staged while A is awaiting a failed write", async () => {
     const pending = ["A"];
     const captured: string[] = [];
