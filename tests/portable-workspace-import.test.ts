@@ -111,6 +111,11 @@ describe("Portable Workspace import", () => {
       assert.equal((await fetch(`${instance.url}/api/workspace-imports`, { method: "POST", body: new Uint8Array(exported) })).status, 401);
       assert.equal((await fetch(`${instance.url}/api/v1/workspace-imports`, { method: "POST", headers, body: new Uint8Array(exported) })).status, 404);
       assert.equal((await fetch(`${instance.url}/api/v1/workspace-import-identity-mappings`, { method:"POST",headers:{authorization:"Bearer admin","idempotency-key":randomUUID(),"content-type":"application/json"},body:"{}"})).status,404);
+      const unsafeActivity={...snapshot,activities:[{schema:"stash.activity.v1" as const,id:"99999999-9999-4999-8999-999999999999",workspaceId,
+        object:{kind:"Note" as const,id:noteId},action:"note_created",actor,cause:{kind:"member" as const},occurredAt:"2026-01-01T00:00:00.000Z",
+        before:{metadata:{client_secret:"must-not-cross"}},after:{}}]};
+      const unsafeResponse=await fetch(`${instance.url}/api/workspace-imports`,{method:"POST",headers:{...headers,"idempotency-key":randomUUID()},body:new Uint8Array(await archiveFor(unsafeActivity))});
+      assert.equal(unsafeResponse.status,422); assert.equal(repository.committed,undefined);
       const corrupt = Buffer.from(exported); const marker = corrupt.indexOf(Buffer.from("objects/workspace.json")); assert.ok(marker > 0);
       corrupt.writeUInt8(corrupt.readUInt8(marker + 2) ^ 1, marker + 2);
       assert.equal((await fetch(`${instance.url}/api/workspace-imports`, { method: "POST", headers, body: new Uint8Array(corrupt) })).status, 422);
@@ -140,6 +145,27 @@ describe("Portable Workspace import", () => {
     const secretArchive=await archiveFor(secretBearing);
     await assert.rejects(()=>service.import(randomUUID(),"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",secretArchive),/invalid_repository_connection/);
     assert.equal(repository.committed,undefined);
+  });
+
+  it("rejects normalized credential-bearing keys in free-form Activity state while preserving ordinary domain keys", async () => {
+    const activity = { schema:"stash.activity.v1" as const,id:"99999999-9999-4999-8999-999999999999",workspaceId,
+      object:{kind:"Note" as const,id:noteId},action:"note_created",actor,cause:{kind:"member" as const},
+      occurredAt:"2026-01-01T00:00:00.000Z",before:{},after:{} };
+    const credentialKeys = ["clientSecret","client_secret","CLIENT-SECRET","apiKey","api_token","Authorization",
+      "x_api_key","oidc-client-secret","auth-header","cookie_header","session_cookie","sessionId","private.key",
+      "privateCredential","oauthToken","githubAccessToken","refresh-token"];
+    for (const key of credentialKeys) {
+      const repository=new ImportMemory(); const service=new PortableWorkspaceImportService(repository,{async put(){},async get(){return Buffer.alloc(0);},async delete(){}});
+      const unsafe={...snapshot,activities:[{...activity,before:{metadata:{[key]:"must-not-cross"}}}]};
+      const unsafeArchive=await archiveFor(unsafe);
+      await assert.rejects(()=>service.import(randomUUID(),"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",unsafeArchive),/non_portable_secret/);
+      assert.equal(repository.committed,undefined,`${key} must be rejected before persistence`);
+    }
+    const repository=new ImportMemory(); const service=new PortableWorkspaceImportService(repository,{async put(){},async get(){return Buffer.alloc(0);},async delete(){}});
+    const safe={...snapshot,activities:[{...activity,before:{sessionDuration:30,authenticationMethod:"member",cookiePolicy:"strict",
+      privateProject:true,tokenEstimate:8,apiVersion:"v1"}}]};
+    assert.equal((await service.import(randomUUID(),"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",await archiveFor(safe))).status,"imported");
+    assert.deepEqual(repository.committed?.state.activities[0]?.before,safe.activities[0]!.before);
   });
 });
 
