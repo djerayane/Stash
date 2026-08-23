@@ -28,4 +28,5 @@ export class PostgresInstanceUpgradeTarget implements InstanceUpgradeTarget {
     } catch (error) { await client.query("ROLLBACK").catch(() => undefined); throw error; } finally { client.release(); }
   }
   async rollback(backupPath: string): Promise<void> { await this.restore(backupPath); }
+  async close(): Promise<void> { await this.#pool.end(); }
 }

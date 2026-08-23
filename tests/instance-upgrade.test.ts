@@ -15,10 +15,11 @@ class Source implements InstanceBackupSource {
   async captureConfiguration() { return { publicOrigin: "https://stash.test", attachmentStorage: "local" }; }
 }
 class Target implements InstanceUpgradeTarget {
-  current = "0.1.0"; applied = 0; rolledBack = 0; fail = true; checks: UpgradeCheck[] = [{ id: "database", status: "pass", message: "PostgreSQL is reachable." }];
+  current = "0.1.0"; applied = 0; rolledBack = 0; closed = 0; fail = true; checks: UpgradeCheck[] = [{ id: "database", status: "pass", message: "PostgreSQL is reachable." }];
   async inspect() { return { currentVersion: this.current, checks: this.checks }; }
   async apply() { this.applied += 1; if (this.fail) throw new Error("migration failed"); }
   async rollback() { this.rolledBack += 1; }
+  async close() { this.closed += 1; }
 }
 
 describe("Instance upgrades", () => {
@@ -62,5 +63,6 @@ describe("Instance upgrades", () => {
     const readiness = await fetch(`${instance.url}/health/ready`); assert.equal(readiness.status, 503);
     assert.equal((await readiness.json() as { error: string }).error, "upgrade_restart_required");
     assert.equal((await fetch(`${instance.url}/api/client-session`)).status, 503);
+    await instance.close(); instances.splice(instances.indexOf(instance), 1); assert.equal(target.closed, 1);
   });
 });

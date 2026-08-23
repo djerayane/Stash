@@ -1,28 +1,27 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, useEffect, useRef, useState } from "react";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { useGSAP } from "@gsap/react";
+import gsap from "gsap";
+import { useEffect, useRef, useState } from "react";
 import styles from "./instance-backup-administration.module.css";
+import { InstanceAdminNavigation, InstanceAdminSignIn, useInstanceAdminSession } from "./instance-admin-session";
 
 interface Plan { status: "ready" | "blocked" | "current"; currentVersion: string; targetVersion: string; checks: Array<{ id: string; status: "pass" | "fail"; message: string }> }
-const sessionKey = "stash.instance-admin-session";
-function storedToken(): string { try { const value = JSON.parse(localStorage.getItem(sessionKey) ?? "null") as { token?: unknown }; return typeof value?.token === "string" ? value.token : ""; } catch { return ""; } }
 async function request<T>(fetcher: typeof fetch, token: string, method = "GET", body?: unknown): Promise<T> { const response = await fetcher("/api/instance/upgrade", { method, headers: { authorization: `Bearer ${token}`, ...(body ? { "content-type": "application/json" } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
   const value = await response.json() as T & { message?: string }; if (!response.ok) throw new Error(value.message ?? "Upgrade operation failed."); return value; }
 
 export function InstanceUpgradeAdministration({ fetcher = fetch }: { fetcher?: typeof fetch }) {
-  const queryClient = useQueryClient(); const [token, setToken] = useState(storedToken); const [draftToken, setDraftToken] = useState("");
+  const session = useInstanceAdminSession("instance-upgrade-plan"); const { token } = session;
   const [confirmation, setConfirmation] = useState(""); const feedback = useRef<HTMLDivElement>(null);
+  const page = useRef<HTMLElement>(null);
   const plan = useQuery({ queryKey: ["instance-upgrade-plan", token], enabled: Boolean(token), retry: false, queryFn: () => request<Plan>(fetcher, token) });
   const upgrade = useMutation({ mutationFn: (targetVersion: string) => request<{ status: string; restartRequired: boolean }>(fetcher, token, "POST", { confirmation: targetVersion }) });
   useEffect(() => { if (upgrade.isError || upgrade.isSuccess || plan.isError) feedback.current?.focus(); }, [upgrade.isError, upgrade.isSuccess, plan.isError]);
-  const authenticate = (event: FormEvent) => { event.preventDefault(); const next = draftToken.trim(); if (!next) return;
-    localStorage.setItem(sessionKey, JSON.stringify({ token: next })); setToken(next); setDraftToken(""); };
-  if (!token) return <main className={styles.signIn}><section aria-labelledby="operator-title"><span className={styles.mark}>S</span><p className={styles.kicker}>Instance operations</p>
-    <h1 id="operator-title">Administrator access</h1><p>Use the operator credential configured for this Instance. It never grants Workspace membership.</p>
-    <form onSubmit={authenticate}><label htmlFor="operator-token">Instance Administrator token</label><input id="operator-token" type="password" autoComplete="current-password" value={draftToken} onChange={(event) => setDraftToken(event.target.value)} />
-      <button type="submit" disabled={!draftToken.trim()}>Continue</button></form></section></main>;
-  const signOut = () => { localStorage.removeItem(sessionKey); setToken(""); void queryClient.removeQueries({ queryKey: ["instance-upgrade-plan"] }); };
+  useGSAP(() => { if (!plan.data || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+    gsap.from(`.${styles.inventory}, .${styles.safety}`, { opacity: 0, y: 12, duration: .4, stagger: .08, ease: "power2.out", clearProps: "all" });
+  }, { scope: page, dependencies: [plan.data?.status] });
+  if (!token) return <InstanceAdminSignIn {...session} />;
   const ready = plan.data?.status === "ready"; const target = plan.data?.targetVersion ?? "the target version";
-  return <main className={styles.page}><nav className={styles.navigation} aria-label="Instance administration"><a href="/instance-admin/backups">Stash operations</a><button type="button" onClick={signOut}>Lock console</button></nav>
+  return <main className={styles.page} ref={page}><InstanceAdminNavigation signOut={session.signOut} />
     <header className={styles.header}><p className={styles.eyebrow}>Instance administration</p><h1>Upgrade with a way back.</h1><p>Stash verifies requirements and publishes a coordinated rollback point before any migration changes Instance data.</p></header>
     {plan.isPending ? <p className={styles.loading} aria-live="polite">Running upgrade preflight…</p> : null}
     {plan.isError ? <div className={styles.error} role="alert" tabIndex={-1} ref={feedback}>{plan.error.message}</div> : null}

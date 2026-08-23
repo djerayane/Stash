@@ -8,6 +8,7 @@ export interface InstanceUpgradeTarget {
   inspect(): Promise<{ currentVersion: string; checks: UpgradeCheck[] }>;
   apply(fromVersion: string, targetVersion: string): Promise<void>;
   rollback(backupPath: string): Promise<void>;
+  close?(): Promise<void>;
 }
 export type InstanceUpgradePlan = { status: "ready" | "blocked" | "current"; currentVersion: string; targetVersion: string; checks: UpgradeCheck[] };
 
@@ -22,6 +23,7 @@ export class InstanceUpgradeService {
     return this.#operation === "upgrading" ? "upgrade_in_progress" : this.#operation === "restart_required" ? "upgrade_restart_required" : "available";
   }
   setUnavailableBarrier(barrier: () => Promise<void>): void { this.#unavailableBarrier = barrier; }
+  async close(): Promise<void> { await this.options.target.close?.(); }
   async plan(): Promise<InstanceUpgradePlan> {
     const inspected = await this.options.target.inspect();
     const checks = [...inspected.checks];

@@ -417,6 +417,7 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
       await new Promise<void>((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve())),
       );
+      await options.instanceUpgrades?.close();
       await options.database.close();
     },
   };

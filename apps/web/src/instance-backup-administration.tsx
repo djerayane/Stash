@@ -1,17 +1,12 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { useGSAP } from "@gsap/react";
 import gsap from "gsap";
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import styles from "./instance-backup-administration.module.css";
+import { InstanceAdminNavigation, InstanceAdminSignIn, useInstanceAdminSession } from "./instance-admin-session";
 
 interface BackupSummary { readonly name: string; readonly schema?: string; readonly createdAt?: string; readonly verifiedAt?: string; readonly status?: "readable" | "invalid" }
-const sessionKey = "stash.instance-admin-session";
-
-function storedToken(): string {
-  try { const value = JSON.parse(localStorage.getItem(sessionKey) ?? "null") as { token?: unknown } | null; return typeof value?.token === "string" ? value.token : ""; }
-  catch { return ""; }
-}
 function dateTime(value: string) {
   const date = new Date(value); return Number.isNaN(date.valueOf()) ? "Unknown time" : new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(date);
 }
@@ -21,7 +16,7 @@ async function message(response: Response, fallback: string) {
 }
 
 export function InstanceBackupAdministration({ fetcher = fetch }: { readonly fetcher?: typeof fetch }) {
-  const queryClient = useQueryClient(); const [token, setToken] = useState(storedToken); const [draftToken, setDraftToken] = useState("");
+  const session = useInstanceAdminSession("instance-backups"); const { token } = session;
   const [verified, setVerified] = useState<string>(); const [selected, setSelected] = useState<BackupSummary>(); const [confirmation, setConfirmation] = useState("");
   const pageRef = useRef<HTMLElement>(null); const feedbackRef = useRef<HTMLDivElement>(null);
   const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
@@ -43,15 +38,9 @@ export function InstanceBackupAdministration({ fetcher = fetch }: { readonly fet
   useGSAP(() => { if (!backups.data?.length || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
     gsap.from(`.${styles.backup}`, { opacity: 0, y: 12, duration: .4, stagger: .06, ease: "power2.out", clearProps: "all" });
   }, { scope: pageRef, dependencies: [backups.data?.length] });
-  const authenticate = (event: FormEvent) => { event.preventDefault(); const next = draftToken.trim(); if (!next) return;
-    localStorage.setItem(sessionKey, JSON.stringify({ token: next })); setToken(next); setDraftToken(""); };
-  if (!token) return <main className={styles.signIn}><section aria-labelledby="operator-title"><span className={styles.mark}>S</span><p className={styles.kicker}>Instance operations</p>
-    <h1 id="operator-title">Administrator access</h1><p>Use the operator credential configured for this Instance. It never grants Workspace membership.</p>
-    <form onSubmit={authenticate}><label htmlFor="operator-token">Instance Administrator token</label><input id="operator-token" type="password" autoComplete="current-password" value={draftToken} onChange={(event) => setDraftToken(event.target.value)} />
-      <button type="submit" disabled={!draftToken.trim()}>Continue</button></form></section></main>;
-  const signOut = () => { localStorage.removeItem(sessionKey); setToken(""); void queryClient.removeQueries({ queryKey: ["instance-backups"] }); };
+  if (!token) return <InstanceAdminSignIn {...session} />;
   return <main className={styles.page} ref={pageRef}>
-    <nav className={styles.navigation} aria-label="Instance administration"><a href="/instance-admin/backups">Stash operations</a><button type="button" onClick={signOut}>Lock console</button></nav>
+    <InstanceAdminNavigation signOut={session.signOut} />
     <header className={styles.header}><div><p className={styles.kicker}>Disaster recovery</p><h1>Restore with evidence, not hope.</h1></div>
       <p>Verification reads every signed manifest entry, checksum, master-key requirement, and runtime constraint. Only a passing dry-run unlocks restore in this console.</p></header>
     <section className={styles.safety} aria-labelledby="safety-title"><div><h2 id="safety-title">The safe sequence</h2><p>Verify, inspect the result, then type the exact backup name. Restore snapshots the current database and stages Attachments before changing either.</p></div>
