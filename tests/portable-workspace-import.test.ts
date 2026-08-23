@@ -99,6 +99,7 @@ describe("Portable Workspace import", () => {
     try {
       const exported = await archive(); const headers = { authorization: "Bearer admin", "idempotency-key": randomUUID(), "x-stash-import-owner-account-id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" };
       assert.equal((await fetch(`${instance.url}/api/workspace-imports`, { method: "POST", body: new Uint8Array(exported) })).status, 401);
+      assert.equal((await fetch(`${instance.url}/api/v1/workspace-imports`, { method: "POST", headers, body: new Uint8Array(exported) })).status, 404);
       const corrupt = Buffer.from(exported); const marker = corrupt.indexOf(Buffer.from("objects/workspace.json")); assert.ok(marker > 0);
       corrupt.writeUInt8(corrupt.readUInt8(marker + 2) ^ 1, marker + 2);
       assert.equal((await fetch(`${instance.url}/api/workspace-imports`, { method: "POST", headers, body: new Uint8Array(corrupt) })).status, 422);
