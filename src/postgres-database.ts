@@ -1556,6 +1556,7 @@ export class PostgresDatabase implements
       if (!inserted.rowCount) return { status: "already_linked" as const };
       const projection: PortableNoteLinkStateProjection = { schema: "stash.note-link.v2", ...saved };
       await this.#recordPortableProjection(client, "NoteLink", saved.id, projection.schema, projection);
+      await this.#recordDomainActivity(client,memberId,saved.workspaceId,"NoteLink",saved.id,"note_link_created",{},saved);
       return { status: "created" as const, link: saved };
     });
   }
@@ -1578,6 +1579,7 @@ export class PostgresDatabase implements
       [saved.id, saved.workspaceId, saved.sourceNoteId, saved.targetPath, candidateIds, saved.label]);
       const projection: PortableNoteLinkStateProjection = { schema: "stash.note-link.v2", ...saved };
       await this.#recordPortableProjection(client, "NoteLink", saved.id, projection.schema, projection);
+      await this.#recordDomainActivity(client,memberId,saved.workspaceId,"NoteLink",saved.id,"note_link_imported",{},saved);
       return { status: "created" as const, link: saved };
     });
   }
@@ -1637,6 +1639,7 @@ export class PostgresDatabase implements
       await client.query("UPDATE stash_note_links SET target_note_id=$2,target_path=$3,candidate_note_ids='{}'::uuid[],revision=revision+1 WHERE id=$1", [linkId, targetNoteId, target.rows[0].portable_path]);
       const projection: PortableNoteLinkStateProjection = { schema: "stash.note-link.v2", ...repaired };
       await this.#recordPortableProjection(client, "NoteLink", linkId, projection.schema, projection);
+      await this.#recordDomainActivity(client,memberId,current.workspaceId,"NoteLink",linkId,"note_link_repaired",current,repaired);
       return { status: "repaired" as const, link: repaired };
     });
   }

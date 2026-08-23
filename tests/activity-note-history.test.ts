@@ -27,7 +27,12 @@ class ProtocolCompatibleActivityDatabase implements DatabaseProbe, ActivityRepos
     after: { revision: 2, content: "Changed" } }, { schema: "stash.activity.v1", id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     workspaceId, object: { kind: "Note", id: noteId }, action: "note_organized", actor: this.identities.get("ada")!,
     cause: { kind: "member" }, occurredAt: "2026-08-22T09:30:00.000Z", before: { projectId: null, tags: [] },
-    after: { projectId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", tags: ["planning"] } }];
+    after: { projectId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", tags: ["planning"] } },
+  { schema: "stash.activity.v1", id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", workspaceId,
+    object: { kind: "NoteLink", id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" }, action: "note_link_repaired", actor: this.identities.get("ada")!,
+    cause: { kind: "member" }, occurredAt: "2026-08-22T09:45:00.000Z",
+    before: { revision: 1, targetPath: "old/missing.md", candidateNoteIds: [] },
+    after: { revision: 2, targetNoteId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" } }];
   currentRevision = 2;
   currentContent = "Changed";
   currentDocument: RichTextDocument = this.revisions[1]!.document;
@@ -94,6 +99,9 @@ describe("Activity and Note history", () => {
     assert.deepEqual(body.activities[0]!.before, { revision: 1, content: "Original" });
     assert.deepEqual(body.activities[1]!.before, { projectId: null, tags: [] });
     assert.deepEqual(body.activities[1]!.after, { projectId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", tags: ["planning"] });
+    assert.equal(body.activities[2]!.object.kind, "NoteLink");
+    assert.deepEqual(body.activities[2]!.before, { revision: 1, targetPath: "old/missing.md", candidateNoteIds: [] });
+    assert.deepEqual(body.activities[2]!.after, { revision: 2, targetNoteId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" });
     const denied = await fetch(`${baseUrl}/api/workspaces/${workspaceId}/activity`, { headers: { authorization: "Bearer member-grace" } });
     assert.equal(denied.status, 404);
   });
