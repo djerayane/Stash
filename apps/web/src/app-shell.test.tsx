@@ -98,14 +98,25 @@ test("provides an empty dashboard with one clear next action", () => {
   expect(screen.getAllByRole("link", { name: "Capture a note" })[0]).toHaveAttribute("href", "/app/notes/new");
 });
 
-test("exposes the implemented search, capture, and notification actions", () => {
+test("exposes the implemented search, capture, and notification actions", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ workspaces: [{ id: "workspace-1", name: "Engine Room", projects: [{ id: "project-1", name: "Launch", key: "LAUNCH" }] }] }));
   renderShell("/app/tasks");
   expect(screen.queryByRole("link", { name: "New task" })).not.toBeInTheDocument();
-  expect(screen.getByRole("textbox", { name: "Project ID" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Open Project boards" })).toBeDisabled();
+  expect(await screen.findByRole("combobox", { name: "Workspace" })).toBeInTheDocument();
   expect(screen.getByRole("searchbox", { name: "Search Workspace" })).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "Notifications" })).toHaveAttribute("href", "/app/notifications");
   expect(screen.getByRole("link", { name: "Capture" })).toHaveAttribute("href", "/app/inbox");
+});
+
+test("offers password, passkey, recovery code, email recovery, and OIDC sign-in", async () => {
+  renderShell("/sign-in", { status: "anonymous" });
+  for (const name of ["Password", "Passkey", "Recovery code", "Email recovery", "OpenID Connect"]) expect(screen.getByRole("button", { name })).toBeInTheDocument();
+  act(() => screen.getByRole("button", { name: "Recovery code" }).click());
+  expect(screen.getByRole("textbox", { name: "Recovery code" })).toBeInTheDocument();
+  act(() => screen.getByRole("button", { name: "Email recovery" }).click());
+  expect(screen.getByRole("button", { name: "Send recovery email" })).toBeInTheDocument();
+  act(() => screen.getByRole("button", { name: "OpenID Connect" }).click());
+  expect(screen.getByRole("textbox", { name: "Organization ID" })).toBeInTheDocument();
 });
 
 test.each([

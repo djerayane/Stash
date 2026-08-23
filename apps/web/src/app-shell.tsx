@@ -84,20 +84,27 @@ function StateScreen({ state }: { readonly state: Extract<SessionState, { status
 }
 
 function SignIn({ returnTo }: { readonly returnTo: string }) {
-  const [email, setEmail] = useState(""); const [password, setPassword] = useState("");
+  const [email, setEmail] = useState(""); const [password, setPassword] = useState(""); const [code, setCode] = useState(""); const [organizationId, setOrganizationId] = useState(""); const [method, setMethod] = useState<"password" | "passkey" | "recovery" | "email" | "emailToken" | "oidc">("password");
+  const complete = (body: { token?: string; message?: string }) => { if (!body.token) throw new Error(body.message || "Sign-in could not be completed."); localStorage.setItem("stash.member-session", JSON.stringify({ token: body.token })); window.location.assign(returnTo); };
+  const post = async (path: string, value: unknown) => { const response = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(value) }); const body = await response.json() as { token?: string; message?: string; status?: string }; if (!response.ok) throw new Error(body.message || "Authentication could not be completed."); return body; };
   const signIn = useMutation({ mutationFn: async () => {
+    if (method === "recovery") { complete(await post("/api/auth/recovery-code-sessions", { email, code })); return; }
+    if (method === "email") { await post("/api/auth/email-recovery", { email }); return; }
+    if (method === "emailToken") { complete(await post("/api/auth/email-recovery-sessions", { token: code })); return; }
+    if (method === "oidc") { const response = await fetch(`/api/auth/oidc/${encodeURIComponent(organizationId)}`); const body = await response.json() as { authorizationUrl?: string; message?: string }; if (!response.ok || !body.authorizationUrl) throw new Error(body.message || "OpenID Connect is unavailable."); window.location.assign(body.authorizationUrl); return; }
+    if (method === "passkey") { const options = await post("/api/auth/passkey-sessions/options", { email }) as Record<string, unknown>; const parser = (PublicKeyCredential as unknown as { parseRequestOptionsFromJSON?: (value: unknown) => PublicKeyCredentialRequestOptions }).parseRequestOptionsFromJSON; const credential = await navigator.credentials.get({ publicKey: parser ? parser(options) : options as unknown as PublicKeyCredentialRequestOptions }); if (!credential) throw new Error("Passkey sign-in was cancelled."); const serializable = "toJSON" in credential && typeof credential.toJSON === "function" ? credential.toJSON() : credential; complete(await post("/api/auth/passkey-sessions", serializable)); return; }
     const response = await fetch("/api/auth/sessions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email, password }) });
     const body = await response.json() as { token?: string; message?: string };
     if (!response.ok || !body.token) throw new Error(body.message || "Sign-in could not be completed.");
-    localStorage.setItem("stash.member-session", JSON.stringify({ token: body.token }));
-    window.location.assign(returnTo);
+    complete(body);
   } });
   return <main className={styles.signIn}>
     <div className={styles.signInBrand}><span className={styles.brandMark}>S</span><span>Stash</span></div>
     <section className={styles.signInPanel} aria-labelledby="sign-in-title">
       <p className={styles.kicker}>Welcome back</p><h1 id="sign-in-title">Sign in to Stash</h1>
       <p>Your Instance manages access. Use the authentication method configured by your administrator.</p>
-      <form className={styles.signInForm} onSubmit={(event) => { event.preventDefault(); signIn.mutate(); }}><label>Email<input autoComplete="email" required type="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label><label>Password<input autoComplete="current-password" minLength={12} required type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label><button className={styles.primaryButton} disabled={signIn.isPending} type="submit">{signIn.isPending ? "Signing in…" : "Sign in"}</button>{signIn.isError ? <p className={styles.authenticationNotice} role="alert">{signIn.error.message}</p> : null}</form>
+      <div className={styles.authMethods} role="group" aria-label="Authentication method">{(["password", "passkey", "recovery", "email", "emailToken", "oidc"] as const).map((item) => <button aria-pressed={method === item} key={item} onClick={() => setMethod(item)} type="button">{item === "recovery" ? "Recovery code" : item === "email" ? "Email recovery" : item === "emailToken" ? "Recovery link" : item === "oidc" ? "OpenID Connect" : item[0]!.toUpperCase() + item.slice(1)}</button>)}</div>
+      <form className={styles.signInForm} onSubmit={(event) => { event.preventDefault(); signIn.mutate(); }}>{method !== "oidc" && method !== "emailToken" ? <label>Email<input autoComplete="email" required type="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label> : method === "oidc" ? <label>Organization ID<input required value={organizationId} onChange={(event) => setOrganizationId(event.target.value)} /></label> : null}{method === "password" ? <label>Password<input autoComplete="current-password" minLength={12} required type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label> : method === "recovery" ? <label>Recovery code<input autoComplete="one-time-code" required value={code} onChange={(event) => setCode(event.target.value)} /></label> : method === "emailToken" ? <label>Email recovery token<input autoComplete="one-time-code" required value={code} onChange={(event) => setCode(event.target.value)} /></label> : null}<button className={styles.primaryButton} disabled={signIn.isPending} type="submit">{signIn.isPending ? "Working…" : method === "email" ? "Send recovery email" : method === "oidc" ? "Continue with OpenID Connect" : "Sign in"}</button>{method === "email" && signIn.isSuccess ? <p className={styles.authenticationNotice} role="status">If the account exists, recovery instructions have been queued.</p> : null}{signIn.isError ? <p className={styles.authenticationNotice} role="alert">{signIn.error.message}</p> : null}</form>
     </section>
   </main>;
 }
@@ -164,7 +171,7 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
           <Route path="/app/inbox" element={<InboxPage workspaceId={session.workspace.id ?? ""} token={session.token ?? ""} />} />
           <Route path="/app/notes" element={<NotesPage workspaceId={session.workspace.id ?? ""} token={session.token ?? ""} />} />
           <Route path="/app/notes/new" element={<Navigate replace to="/app/notes" />} />
-          <Route path="/app/tasks" element={<ProjectGatewayPage />} />
+          <Route path="/app/tasks" element={<ProjectGatewayPage workspaceId={session.workspace.id ?? ""} token={session.token ?? ""} />} />
           <Route path="/app/projects/:projectId/boards" element={<BoardsPage token={session.token ?? ""} />} />
           <Route path="/app/projects/:projectId/boards/:boardId" element={<BoardsPage token={session.token ?? ""} />} />
           <Route path="/app/notes/:targetId/discussions" element={<DiscussionsPage targetKind="note" token={session.token ?? ""} />} />

@@ -8,6 +8,9 @@ import { richTextToMarkdown } from "../src/rich-text.js";
 import { TaskService, type TaskPlanningReadModel, type TaskPlanningUpdate } from "../src/tasks.js";
 import { OrganizationRoleService, type BuiltInOrganizationRole } from "../src/organization-roles.js";
 import { WorkspaceSearchService } from "../src/workspace-search.js";
+import { WorkspaceProjectService } from "../src/workspaces-projects.js";
+import { EmailRecoveryUnavailable } from "../src/account-recovery.js";
+import { InvalidOidcRequest } from "../src/oidc-auth.js";
 
 const noteId = "99999999-9999-4999-8999-999999999999";
 const secondNoteId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -129,6 +132,11 @@ const instance = await startInstance({
   host: "127.0.0.1",
   port: Number.parseInt(process.env.STASH_BROWSER_PORT ?? "4173", 10),
   instanceAdminToken: "browser-acceptance-admin-token",
+  passwordAuth: { authenticateBearer: async (authorization: string | undefined) => { const accountId = activeTokens.get(authorization?.replace(/^Bearer /, "") || ""); return accountId ? { accountId, sessionId: `session-${accountId}` } : undefined; }, signIn: async () => { throw new Error("invalid_credentials"); } } as any,
+  accountRecovery: { async authenticationOptions() { return { challenge: "cHJvb2Y", rpId: "127.0.0.1", userVerification: "required", allowCredentials: [] }; }, async signInWithPasskey() { return { token: "browser-acceptance-member-token" }; }, async signInWithRecoveryCode() { return { token: "browser-acceptance-member-token" }; }, async requestEmailRecovery() { throw new EmailRecoveryUnavailable(); }, async signInWithEmailRecovery() { return { token: "browser-acceptance-member-token" }; } } as any,
+  oidcAuth: { async begin() { throw new InvalidOidcRequest(); }, async complete() { throw new InvalidOidcRequest(); } } as any,
+  oidcCallbackOrigin: "http://127.0.0.1:4173",
+  allowInsecureOidcCallbackOriginForTest: true,
   memberAccess: {
     async authenticateBearer(authorization) {
       const token = authorization?.replace(/^Bearer /, "");
@@ -136,6 +144,7 @@ const instance = await startInstance({
       return accountId ? { accountId, sessionId: `session-${accountId}` } : undefined;
     },
   },
+  workspaceProjects: new WorkspaceProjectService({ async findPortableMemberIdentity() { return { localAccountId: browserMemberId, displayName: "Browser Member" }; }, async createWorkspace() { return { status: "organization_forbidden" }; }, async createProject() { return "workspace_forbidden"; }, async listAccessibleWorkspaces() { return [{ id: browserWorkspaceId, name: "Acceptance Workspace", projects: [{ id: projectId, name: "Stash", key: "STASH" }] }, { id: "77777777-7777-4777-8777-777777777777", name: "Shared Workspace", projects: [{ id: "66666666-6666-4666-8666-666666666665", name: "Shared roadmap", key: "SHARED" }] }]; } }),
   notes: { async listInbox(memberId: string, workspaceId: string) { return memberId === browserMemberId && workspaceId === browserWorkspaceId ? { status: "found", notes: inboxNotes } : { status: "workspace_forbidden" }; },
     async listTemplates() { return { status: "found", templates: [{ id: "abababab-abab-4bab-8bab-abababababa5", name: "Decision", description: "Record context and outcome." }] }; },
     async listDecisions() { return { status: "found", notes: [{ id: noteId, workspaceId: browserWorkspaceId, content: "Release collaboration plan", createdAt: new Date(0).toISOString() }] }; },
@@ -168,7 +177,7 @@ const instance = await startInstance({
   discussions: { async listForNote() { return { status: "found", discussions: browserDiscussions }; }, async listForTask() { return { status: "found", discussions: browserDiscussions }; }, async create(_memberId: string, value: any) { const discussion = { id: crypto.randomUUID(), workspaceId: browserWorkspaceId, target: value.target, createdAt: new Date().toISOString(), messages: [{ id: crypto.randomUUID(), content: value.message, author: { displayName: "Browser Member" }, createdAt: new Date().toISOString() }] }; browserDiscussions = [...browserDiscussions, discussion]; return { status: "created", discussion, projection: {} }; }, async reply(_memberId: string, id: string, value: any) { const discussion = browserDiscussions.find((item) => item.id === id); discussion.messages.push({ id: crypto.randomUUID(), content: value.content, author: { displayName: "Browser Member" }, createdAt: new Date().toISOString() }); return { status: "updated", discussion, projection: {} }; }, async resolve(_memberId: string, id: string) { const discussion = browserDiscussions.find((item) => item.id === id); discussion.resolvedAt = new Date().toISOString(); return { status: "resolved", discussion, projection: {} }; }, async createWork() { return { status: "created", work: { kind: "note" }, activity: {}, projections: [] }; } } as any,
   activities: { async listWorkspace() { return { status: "found", activities: [{ id: "abababab-abab-4bab-8bab-abababababa6", summary: "Release plan updated", actor: { name: "Browser Member" }, occurredAt: new Date(0).toISOString() }] }; } } as any,
   notifications: { async list() { return browserNotifications; }, async markRead(_memberId: string, id: string) { const notification = browserNotifications.find((item) => item.id === id); if (notification) notification.readAt = new Date().toISOString(); return notification; } } as any,
-  searches: new WorkspaceSearchService({ async searchWorkspace(memberId, workspaceId, query) { return memberId === browserMemberId && workspaceId === browserWorkspaceId ? { status: "found", results: [{ id: noteId, kind: "note", title: "Release collaboration plan", excerpt: `Matched ${query.q}`, href: `/app/notes/${noteId}` }] } : { status: "forbidden" }; } }),
+  searches: new WorkspaceSearchService({ async searchWorkspace(memberId, workspaceId, query) { return memberId === browserMemberId && workspaceId === browserWorkspaceId ? { status: "found", results: query.q === "discussion" ? [{ id: browserDiscussions[0].id, kind: "discussion", title: "Keep this release context", href: `/app/notes/${noteId}/discussions` }] : [{ id: noteId, kind: "note", title: "Release collaboration plan", excerpt: `Matched ${query.q}`, href: `/app/notes/${noteId}` }] } : { status: "forbidden" }; } }),
   webClientRoot: fileURLToPath(new URL("../apps/web/dist", import.meta.url)),
 });
 

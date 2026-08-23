@@ -43,6 +43,10 @@ class ProtocolCompatibleDatabase implements DatabaseProbe, WorkspaceProjectRepos
     return this.members.get(memberId);
   }
 
+  async listAccessibleWorkspaces(memberId: string) {
+    return [...this.workspaces.values()].filter((workspace) => workspace.owner.type === "personal" ? workspace.owner.id === memberId : this.organizationMembers.get(workspace.owner.id)?.has(memberId)).map((workspace) => ({ id: workspace.id, name: workspace.name, projects: [...this.projects.values()].filter((project) => project.workspaceId === workspace.id).map((project) => ({ id: project.id, name: project.name, key: project.key })) }));
+  }
+
   async createWorkspace(
     record: WorkspaceRecord,
     createdBy: PortableIdentity,
@@ -152,6 +156,15 @@ describe("creating Workspaces and Projects", () => {
       body: JSON.stringify(body),
     });
   }
+
+  it("lists only the Member's accessible Workspaces and Projects for discovery", async () => {
+    const { baseUrl, database } = await run();
+    const workspace = await (await createWorkspace(baseUrl, "member-ada", { name: "Engine Room", owner: { type: "personal" } })).json() as { id: string };
+    await createProject(baseUrl, workspace.id, "member-ada", { name: "Launch", key: "LAUNCH" });
+    const response = await fetch(`${baseUrl}/api/workspaces`, { headers: { authorization: "Bearer member-ada" } });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { workspaces: [{ id: workspace.id, name: "Engine Room", projects: [{ id: [...database.projects.keys()][0], name: "Launch", key: "LAUNCH" }] }] });
+  });
 
   it("lets a Member create a personal Workspace owned only by that Member", async () => {
     const { baseUrl } = await run();

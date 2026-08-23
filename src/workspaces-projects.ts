@@ -52,6 +52,7 @@ export interface PortableProjectProjection {
 }
 
 export interface WorkspaceProjectRepository {
+  listAccessibleWorkspaces?(memberId: string): Promise<Array<{ id: string; name: string; projects: Array<{ id: string; name: string; key: string }> }>>;
   findPortableMemberIdentity(memberId: string): Promise<PortableIdentity | undefined>;
   createWorkspace(
     record: WorkspaceRecord,
@@ -116,6 +117,11 @@ export class WorkspaceProjectService {
 
   constructor(repository: WorkspaceProjectRepository) {
     this.#repository = repository;
+  }
+
+  async listAccessible(memberId: string) {
+    if (!this.#repository.listAccessibleWorkspaces) throw new Error("workspace_discovery_unavailable");
+    return this.#repository.listAccessibleWorkspaces(memberId);
   }
 
   async createWorkspace(memberId: string, value: unknown): Promise<

@@ -113,10 +113,11 @@ test("configures followed Project notifications by keyboard without accessibilit
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 });
 
-test("keeps unavailable Task actions non-interactive and navigates implemented shell actions", async ({ page }) => {
+test("discovers Projects without raw identifiers and navigates implemented shell actions", async ({ page }) => {
   await installMemberSession(page);
   await page.goto("/app/tasks");
-  await expect(page.getByRole("button", { name: "Open Project boards" })).toBeDisabled();
+  await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveValue("88888888-8888-4888-8888-888888888888");
+  await expect(page.getByRole("button", { name: /Stash/ })).toBeVisible();
   await page.getByRole("link", { name: "Capture" }).click();
   await expect(page).toHaveURL(/\/app\/inbox$/);
   await page.goto("/app/missing");

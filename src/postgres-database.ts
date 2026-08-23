@@ -370,6 +370,28 @@ export class PostgresDatabase implements
     });
   }
 
+  async listAccessibleWorkspaces(memberId: string) {
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureWorkspaceProjectSchema(client);
+      const result = await client.query<{ workspace_id: string; workspace_name: string; project_id: string | null; project_name: string | null; project_key: string | null }>(`
+        SELECT workspace.id AS workspace_id, workspace.name AS workspace_name,
+          project.id AS project_id, project.name AS project_name, project.project_key
+        FROM stash_workspaces workspace
+        LEFT JOIN stash_projects project ON project.workspace_id=workspace.id AND (
+          (workspace.owner_type='personal' AND workspace.personal_owner_id=$1)
+          OR (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$1))
+          OR EXISTS (SELECT 1 FROM stash_project_guests guest WHERE guest.project_id=project.id AND guest.account_id=$1))
+        WHERE (workspace.owner_type='personal' AND workspace.personal_owner_id=$1)
+          OR (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$1))
+          OR EXISTS (SELECT 1 FROM stash_projects visible JOIN stash_project_guests guest ON guest.project_id=visible.id WHERE visible.workspace_id=workspace.id AND guest.account_id=$1)
+        ORDER BY workspace.name, project.name`, [memberId]);
+      const workspaces = new Map<string, { id: string; name: string; projects: Array<{ id: string; name: string; key: string }> }>();
+      for (const row of result.rows) { const workspace = workspaces.get(row.workspace_id) ?? { id: row.workspace_id, name: row.workspace_name, projects: [] }; if (row.project_id) workspace.projects.push({ id: row.project_id, name: row.project_name!, key: row.project_key! }); workspaces.set(row.workspace_id, workspace); }
+      return [...workspaces.values()];
+    } finally { client.release(); }
+  }
+
   async createProject(
     memberId: string,
     record: WorkspaceProjectRecord,
@@ -2126,7 +2148,7 @@ export class PostgresDatabase implements
           JOIN stash_workflow_statuses status ON status.id=task.workflow_status_id WHERE task.workspace_id=$1 AND task.project_id IN (SELECT id FROM visible_projects)
           UNION ALL
           SELECT discussion.id::text,'discussion',left(message.content,120),left(message.content,240),
-            CASE discussion.target_kind WHEN 'task' THEN '/app/tasks/'||discussion.task_id ELSE '/app/notes/'||discussion.note_id END,
+            CASE discussion.target_kind WHEN 'task' THEN '/app/tasks/'||discussion.task_id||'/discussions' ELSE '/app/notes/'||discussion.note_id||'/discussions' END,
             COALESCE(note.project_id,task.project_id),author.name,NULL,CASE WHEN discussion.resolved_at IS NULL THEN 'open' ELSE 'resolved' END,
             message.created_at,message.content
           FROM stash_discussions discussion JOIN stash_discussion_messages message ON message.discussion_id=discussion.id

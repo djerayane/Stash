@@ -46,6 +46,7 @@ test("keeps topbar actions visible and keyboard focus distinct at a narrow viewp
 
 test("navigates Notes, Boards, Discussions, notifications, and Activity through the running Instance", async ({ page }) => {
   await authenticate(page);
+  await page.goto("/app/tasks"); const workspace = page.getByRole("combobox", { name: "Workspace" }); await workspace.focus(); await workspace.selectOption({ label: "Shared Workspace" }); await page.getByRole("button", { name: /Shared roadmap/ }).press("Enter"); await expect(page).toHaveURL(/\/app\/projects\/66666666-6666-4666-8666-666666666665\/boards$/);
   await page.goto("/app/notes");
   await expect(page.getByRole("button", { name: /Decision/ })).toBeVisible();
   await expect(page.getByRole("link", { name: /Release collaboration plan/ })).toBeVisible();
@@ -65,6 +66,7 @@ test("navigates Notes, Boards, Discussions, notifications, and Activity through 
   await page.goto("/app/activity"); await expect(page.getByText("Release plan updated")).toBeVisible();
   const search = page.getByRole("searchbox", { name: "Search Workspace" }); await search.fill("release"); await search.press("Enter");
   await expect(page).toHaveURL(/\/app\/search\?q=release/); await expect(page.getByRole("link", { name: /Release collaboration plan/ })).toBeVisible();
+  await search.fill("discussion"); await search.press("Enter"); const discussionResult = page.getByRole("link", { name: /Keep this release context/ }); await expect(discussionResult).toHaveAttribute("href", `/app/notes/99999999-9999-4999-8999-999999999999/discussions`);
 });
 
 test("@a11y keeps every migrated core route free of detectable accessibility violations", async ({ page }) => {
@@ -73,4 +75,19 @@ test("@a11y keeps every migrated core route free of detectable accessibility vio
     await page.goto(path); await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
     expect((await new AxeBuilder({ page }).analyze()).violations, path).toEqual([]);
   }
+});
+
+test("signs in with a passkey and a recovery code through accessible React flows", async ({ page }) => {
+  await page.addInitScript(() => Object.defineProperty(navigator, "credentials", { configurable: true, value: { get: async () => ({ toJSON: () => ({ id: "acceptance-passkey", rawId: "acceptance-passkey", type: "public-key", response: { clientDataJSON: "proof", authenticatorData: "proof", signature: "proof" } }) }) } }));
+  await page.goto("/sign-in"); await page.getByRole("button", { name: "Passkey" }).click(); await page.getByRole("textbox", { name: "Email" }).fill("member@stash.test"); await page.getByRole("button", { name: "Sign in" }).click(); await expect(page).toHaveURL(/\/app$/);
+  await page.evaluate(() => localStorage.removeItem("stash.member-session")); await page.goto("/sign-in");
+  await page.getByRole("button", { name: "Recovery code" }).click(); await page.getByRole("textbox", { name: "Email" }).fill("member@stash.test"); await page.getByRole("textbox", { name: "Recovery code" }).fill("12345678-12345678"); await page.getByRole("button", { name: "Sign in" }).click(); await expect(page).toHaveURL(/\/app$/);
+});
+
+test("@a11y exposes email recovery and OpenID Connect errors without losing input", async ({ page }) => {
+  await page.goto("/sign-in"); await page.getByRole("button", { name: "Email recovery" }).click(); await page.getByRole("textbox", { name: "Email" }).fill("member@stash.test");
+  await page.getByRole("button", { name: "Send recovery email" }).click(); await expect(page.getByRole("alert")).toContainText("not configured"); await expect(page.getByRole("textbox", { name: "Email" })).toHaveValue("member@stash.test");
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  await page.getByRole("button", { name: "OpenID Connect" }).click(); await page.getByRole("textbox", { name: "Organization ID" }).fill("not-configured");
+  await page.getByRole("button", { name: "Continue with OpenID Connect" }).click(); await expect(page.getByRole("alert")).toContainText("invalid or expired");
 });
