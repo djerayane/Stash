@@ -45,6 +45,8 @@ import type { PortableWorkspaceExportService } from "./portable-workspace-export
 import { boardRoutes } from "./board-routes.js";
 import type { BoardService } from "./boards.js";
 import { boardSurfaceRoute } from "./board-surface.js";
+import { noteLinkRoutes } from "./note-link-routes.js";
+import type { NoteLinkService } from "./note-links.js";
 
 export interface DatabaseProbe {
   verifyConnection(): Promise<void>;
@@ -84,6 +86,7 @@ export interface InstanceOptions {
   projectWorkflows?: ProjectWorkflowService;
   portableWorkspaceExports?: PortableWorkspaceExportService;
   boards?: BoardService;
+  noteLinks?: NoteLinkService;
 }
 
 const browserSurface = `<!doctype html>
@@ -165,6 +168,8 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
     ...(options.notes && (options.memberAccess ?? options.passwordAuth)
       ? [noteRoutes(options.notes, (options.memberAccess ?? options.passwordAuth)!)]
       : []),
+    ...(options.noteLinks && (options.memberAccess ?? options.passwordAuth)
+      ? [noteLinkRoutes(options.noteLinks, (options.memberAccess ?? options.passwordAuth)!)] : []),
     ...(options.tasks && (options.memberAccess ?? options.passwordAuth)
       ? [taskRoutes(options.tasks, (options.memberAccess ?? options.passwordAuth)!)]
       : []),

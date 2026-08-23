@@ -196,6 +196,49 @@ The Note row and its `stash.note.v1` outbox event commit in one transaction. A c
 reports the projection as `recorded` only after both writes succeed; it does not claim that a full
 Portable Workspace Export has already been generated.
 
+## `stash.note-location.v1` and `stash.note-link.v2`
+
+Every Note has a Workspace-relative Markdown `path` and a stable Note identity. Moving or renaming a
+Note increments its location `revision` and permanently reserves every former path in `aliases`.
+Paths are readable (for example `notes/design.md`), but they are not relationship identity and are
+never reused for another Note.
+
+```json
+{
+  "schema": "stash.note-location.v1",
+  "noteId": "d7289ce8-b0bb-4f44-971d-9b373fc34962",
+  "workspaceId": "89fa5772-0439-4cc1-b67a-bdeb12ae0ed5",
+  "path": "decisions/system-design.md",
+  "aliases": ["notes/design.md"],
+  "revision": 2
+}
+```
+
+A Note link stores `sourceNoteId` and `targetNoteId` as its durable relationship and projects a
+normal relative Markdown link from the Notes' current paths. Portable Workspace Exports write each
+Note at its current `path` and append its resolved links with a stable identity comment, so the link
+remains both readable outside Stash and reconstructable after another move.
+
+An unresolved imported link omits `targetNoteId`, retains its last readable `targetPath`, and stores
+the stable `candidateNoteIds` reported by the importer. No candidates is a broken link; one or more
+is an ambiguous repair state even when only one candidate remains available, because Stash never
+promotes a candidate without confirmation. Candidate identities must already belong to the same
+accessible Workspace. Broken and ambiguous states reveal no inaccessible Note or candidate. Repair
+and move requests use expected revisions, so concurrent changes are returned for review rather than
+overwritten.
+
+```json
+{
+  "schema": "stash.note-link.v2",
+  "id": "30f39bcc-bcd2-44dd-89f6-3be05772784b",
+  "workspaceId": "89fa5772-0439-4cc1-b67a-bdeb12ae0ed5",
+  "sourceNoteId": "d7289ce8-b0bb-4f44-971d-9b373fc34962",
+  "targetNoteId": "9d12af44-e8d7-4162-86ce-b2ea194e4e21",
+  "label": "System design",
+  "revision": 1
+}
+```
+
 ## `stash.discussion-work-link.v1`
 
 Creating durable work from a Discussion records the new `stash.note.v1` or `stash.task.v1`

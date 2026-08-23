@@ -1,9 +1,12 @@
 import { createHash } from "node:crypto";
+import { posix } from "node:path";
 
 import type { AttachmentStorage, PortableAttachmentProjection } from "./attachments.js";
 import type { PortableNoteProjection, PortableTaskProjection } from "./notes.js";
 import type { PortableWorkspaceProjection } from "./workspaces-projects.js";
 import type { Board } from "./boards.js";
+import type { PortableNoteLinkProjection } from "./notes.js";
+import type { PortableNoteLinkStateProjection, PortableNoteLocationProjection } from "./note-links.js";
 
 export interface PortableExportAttachment {
   projection: PortableAttachmentProjection;
@@ -18,6 +21,8 @@ export interface PortableWorkspaceExportSnapshot {
   tasks: PortableTaskProjection[];
   boards: Board[];
   attachments: PortableExportAttachment[];
+  noteLocations: PortableNoteLocationProjection[];
+  noteLinks: Array<PortableNoteLinkProjection | PortableNoteLinkStateProjection>;
 }
 
 export interface PortableWorkspaceExportRepository {
@@ -48,11 +53,24 @@ function metadata(properties: Record<string, unknown>): string {
   return Object.entries(properties).map(([key, value]) => `${key}: ${typeof value === "string" ? JSON.stringify(value) : JSON.stringify(stable(value))}`).join("\n");
 }
 
-function noteMarkdown(note: PortableNoteProjection): string {
+function markdownPath(from: string, to: string): string {
+  const relative = posix.relative(posix.dirname(from), to);
+  const rooted = relative.startsWith(".") ? relative : `./${relative}`;
+  return rooted.split("/").map((part) => encodeURIComponent(part)).join("/");
+}
+
+function noteMarkdown(note: PortableNoteProjection, path: string,
+  links: Array<PortableNoteLinkProjection | PortableNoteLinkStateProjection>, locations: Map<string, PortableNoteLocationProjection>): string {
   const { content, ...properties } = note;
-  // Notes live one directory below the archive root; make root-relative Attachment links remain valid.
-  const portableContent = content.replaceAll("(<./attachments/", "(<../attachments/");
-  return `---\n${metadata(properties)}\n---\n\n${portableContent.trimEnd()}\n`;
+  const attachmentPrefix = markdownPath(path, "attachments/_").slice(0, -1);
+  const portableContent = content.replaceAll("(<./attachments/", `(<${attachmentPrefix}`);
+  const readableLinks = links.flatMap((link) => {
+    if (!link.targetNoteId) return [];
+    const target = locations.get(link.targetNoteId); if (!target) return [];
+    const label = "label" in link ? link.label : "Note";
+    return [`[${label}](${markdownPath(path, target.path)})\n<!-- stash-note-link:${link.id}:${link.targetNoteId} -->`];
+  });
+  return `---\n${metadata(properties)}\n---\n\n${portableContent.trimEnd()}${readableLinks.length ? `\n\n## Linked Notes\n\n${readableLinks.join("\n")}` : ""}\n`;
 }
 
 function taskMarkdown(task: PortableTaskProjection): string {
@@ -129,19 +147,32 @@ export class PortableWorkspaceExportService {
     const { snapshot } = result;
     if (snapshot.workspace.id !== workspaceId || snapshot.notes.some((note) => note.workspaceId !== workspaceId)
       || snapshot.tasks.some((task) => task.workspaceId !== workspaceId)
-      || snapshot.attachments.some(({ projection }) => projection.workspaceId !== workspaceId)) {
+      || snapshot.attachments.some(({ projection }) => projection.workspaceId !== workspaceId)
+      || snapshot.noteLocations.some((location) => location.workspaceId !== workspaceId)
+      || snapshot.noteLinks.some((link) => link.workspaceId !== workspaceId)) {
       throw new Error("inconsistent_export_snapshot");
     }
-    const readme = "# Stash Portable Workspace Export\n\nFormat: `stash.portable-workspace-export.v1`\n\nNotes and Tasks are readable Markdown. Board view configurations are deterministic JSON in `boards/`. `manifest.json` contains the Workspace identity, file checksums, and the schemas needed by importers. Attachment paths and bytes are preserved exactly.\n";
-    const noteTexts = snapshot.notes.map((note) => ({ path: `notes/${note.id}.md`, text: noteMarkdown(note) }));
+    const readme = "# Stash Portable Workspace Export\n\nFormat: `stash.portable-workspace-export.v1`\n\nNotes and Tasks are readable Markdown. Board view configurations are deterministic JSON in `boards/`. Stable Note locations and links are deterministic JSON under `relationships/`, and links are also readable relative Markdown in their source Notes. `manifest.json` contains the Workspace identity, file checksums, and the schemas needed by importers. Attachment paths and bytes are preserved exactly.\n";
+    const locationByNote = new Map(snapshot.noteLocations.map((location) => [location.noteId, location]));
+    if (locationByNote.size !== snapshot.notes.length || snapshot.notes.some((note) => !locationByNote.has(note.id)))
+      throw new Error("inconsistent_note_locations");
+    const linksBySource = new Map<string, Array<PortableNoteLinkProjection | PortableNoteLinkStateProjection>>();
+    for (const link of snapshot.noteLinks) linksBySource.set(link.sourceNoteId, [...(linksBySource.get(link.sourceNoteId) ?? []), link]);
+    const noteTexts = snapshot.notes.map((note) => ({ path: locationByNote.get(note.id)!.path,
+      text: noteMarkdown(note, locationByNote.get(note.id)!.path, linksBySource.get(note.id) ?? [], locationByNote) }));
     const taskTexts = snapshot.tasks.map((task) => ({ path: `tasks/${task.key}--${task.id}.md`, text: taskMarkdown(task) }));
     const boardTexts = snapshot.boards.map((board) => ({ path: `boards/${board.id}.json`, text: stableJson(board) }));
+    const relationshipTexts = [
+      { path: "relationships/note-locations.json", text: stableJson(snapshot.noteLocations) },
+      { path: "relationships/note-links.json", text: stableJson(snapshot.noteLinks) },
+    ];
     const planned = [
       { path: "README.md", bytes: Buffer.byteLength(readme) },
       ...snapshot.attachments.map(({ projection }) => ({ path: attachmentPath(projection), bytes: projection.size })),
       ...noteTexts.map(({ path, text }) => ({ path, bytes: Buffer.byteLength(text) })),
       ...taskTexts.map(({ path, text }) => ({ path, bytes: Buffer.byteLength(text) })),
       ...boardTexts.map(({ path, text }) => ({ path, bytes: Buffer.byteLength(text) })),
+      ...relationshipTexts.map(({ path, text }) => ({ path, bytes: Buffer.byteLength(text) })),
     ].sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
     const seen = new Set<string>();
     if (planned.some(({ path, bytes }) => !isSafeArchivePath(path) || !Number.isSafeInteger(bytes) || bytes < 0 || seen.has(path) || !seen.add(path)))
@@ -163,6 +194,7 @@ export class PortableWorkspaceExportService {
       ...noteTexts.map(({ path, text }) => ({ path, content: Buffer.from(text) })),
       ...taskTexts.map(({ path, text }) => ({ path, content: Buffer.from(text) })),
       ...boardTexts.map(({ path, text }) => ({ path, content: Buffer.from(text) })),
+      ...relationshipTexts.map(({ path, text }) => ({ path, content: Buffer.from(text) })),
     ].sort(comparePaths);
     const manifestFiles: ManifestEntry[] = files.map(({ path, content }) => ({ path, bytes: content.length, sha256: createHash("sha256").update(content).digest("hex") }));
     files.push({ path: "manifest.json", content: Buffer.from(stableJson({ schema: "stash.portable-workspace-export.v1", workspace: snapshot.workspace, files: manifestFiles })) });

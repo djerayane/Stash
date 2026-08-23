@@ -24,6 +24,7 @@ import { DiscussionService } from "./discussions.js";
 import { ProjectWorkflowService } from "./project-workflows.js";
 import { PortableWorkspaceExportService } from "./portable-workspace-export.js";
 import { BoardService } from "./boards.js";
+import { NoteLinkService } from "./note-links.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -73,6 +74,7 @@ async function main(): Promise<void> {
     invitations: new InvitationService(database),
     ...(githubApp ? { repositoryConnections: new RepositoryConnectionService(database, githubApp) } : {}),
     notes: new NoteService(database),
+    noteLinks: new NoteLinkService(database),
     tasks: new TaskService(database, database),
     projectWorkflows: new ProjectWorkflowService(database),
     boards: new BoardService(database),
