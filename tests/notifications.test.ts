@@ -33,6 +33,7 @@ const activity: ActivityRecord = {
 class NotificationFake implements DatabaseProbe, NotificationRepository, TaskPlanningRepository, DiscussionRepository {
   readonly deliveries: NotificationDelivery[] = [];
   readonly preferences = new Map<string, NotificationPreferences>();
+  readonly follows = new Set<string>();
   readonly visibleProjects = new Set([`${memberId}:${projectId}`]);
   fail = false;
   task: TaskPlanningReadModel = { schema: "stash.task.v1", id: "77777777-7777-4777-8777-777777777777", workspaceId, projectId,
@@ -71,6 +72,21 @@ class NotificationFake implements DatabaseProbe, NotificationRepository, TaskPla
       && this.visibleProjects.has(`${requestedMemberId}:${entry.projectId}`)
       && this.preferences.get(`${requestedMemberId}:${entry.projectId}`)?.digest === cadence);
     claimed.forEach((entry) => { entry.digestedAt = claimedAt; }); return structuredClone(claimed);
+  }
+  async getProjectFollow(requestedMemberId: string, requestedProjectId: string) {
+    if (!this.visibleProjects.has(`${requestedMemberId}:${requestedProjectId}`)) return undefined;
+    return this.follows.has(`${requestedMemberId}:${requestedProjectId}`);
+  }
+  async saveProjectFollow(requestedMemberId: string, requestedProjectId: string, followed: boolean) {
+    if (!this.visibleProjects.has(`${requestedMemberId}:${requestedProjectId}`)) return undefined;
+    const key = `${requestedMemberId}:${requestedProjectId}`;
+    if (followed) this.follows.add(key); else this.follows.delete(key);
+    return followed;
+  }
+  async listProjectNotificationAudience(requestedProjectId: string, actorId: string) {
+    if (requestedProjectId !== projectId) return [];
+    return [memberId].filter((id) => id !== actorId && this.visibleProjects.has(`${id}:${requestedProjectId}`))
+      .map((id) => ({ memberId: id, followed: this.follows.has(`${id}:${requestedProjectId}`) }));
   }
   async findTaskByKey(requestedMemberId: string, requestedProjectId: string, key: string) {
     return [memberId, otherMemberId].includes(requestedMemberId) && requestedProjectId === projectId && key === this.task.key
@@ -216,6 +232,43 @@ describe("Member notifications", () => {
     await service.setPreferences(memberId, projectId, { activity: "muted", digest: "off" });
     assert.equal((await event("followed_change", "20000000-0000-4000-8000-000000000004", true)).status, "suppressed");
     assert.equal(database.deliveries.length, 5);
+  });
+
+  it("derives followed Project recipients from persisted follow state", async () => {
+    database.deliveries.length = 0; database.preferences.clear(); database.follows.clear();
+    await service.setPreferences(memberId, projectId, { activity: "followed", digest: "off" });
+    assert.deepEqual(await service.publishProjectActivity(projectId, activity, "Task planning changed"), { created: 0, suppressed: 1 });
+    assert.deepEqual(await service.setProjectFollow(memberId, projectId, { followed: true }), { status: "saved", followed: true });
+    assert.deepEqual(await service.publishProjectActivity(projectId, activity, "Task planning changed"), { created: 1, suppressed: 0 });
+    assert.equal(database.deliveries[0]?.activity.actor.displayName, "Grace Hopper");
+    assert.equal(database.deliveries[0]?.summary, "Task planning changed");
+    assert.deepEqual(await service.publishProjectActivity(projectId, activity, "Tampered retry"), { created: 1, suppressed: 0 });
+    assert.equal(database.deliveries.length, 1, "the canonical Activity identity makes delivery idempotent");
+    assert.equal(database.deliveries[0]?.summary, "Task planning changed", "a retry cannot replace immutable attribution or summary");
+  });
+
+  it("delivers canonical Project-scoped Note and relationship Activity with preserved attribution", async () => {
+    database.deliveries.length = 0; database.preferences.clear(); database.follows.add(`${memberId}:${projectId}`);
+    const noteActivity: ActivityRecord = { ...activity, id: "21000000-0000-4000-8000-000000000001",
+      object: { kind: "Note", id: "22000000-0000-4000-8000-000000000001" }, action: "note_edited",
+      before: { revision: 1 }, after: { revision: 2 } };
+    const linkActivity: ActivityRecord = { ...activity, id: "21000000-0000-4000-8000-000000000002",
+      object: { kind: "NoteLink", id: "22000000-0000-4000-8000-000000000002" }, action: "note_link_repaired",
+      before: { target: "old" }, after: { target: "new" } };
+    assert.deepEqual(await service.publishProjectActivity(projectId, noteActivity, "Grace Hopper changed a Note"), { created: 1, suppressed: 0 });
+    assert.deepEqual(await service.publishProjectActivity(projectId, linkActivity, "Grace Hopper changed Project content"), { created: 1, suppressed: 0 });
+    assert.deepEqual(database.deliveries.map(({ activity: delivered }) => [delivered.object.kind, delivered.actor.displayName]),
+      [["Note", "Grace Hopper"], ["NoteLink", "Grace Hopper"]]);
+  });
+
+  it("persists follow state through a running authenticated Instance", async () => {
+    database.follows.clear();
+    const saved = await request(`/api/projects/${projectId}/follow`, "PUT", { followed: true });
+    assert.equal(saved.status, 200); assert.deepEqual(await saved.json(), { followed: true });
+    assert.deepEqual(await (await request(`/api/projects/${projectId}/follow`)).json(), { followed: true });
+    assert.equal((await request(`/api/projects/${otherProjectId}/follow`, "PUT", { followed: true })).status, 404);
+    assert.equal((await request(`/api/projects/${projectId}/follow`, "PUT", { followed: "yes" })).status, 422);
+    assert.equal((await request(`/api/projects/${projectId}/follow`, "PUT", { followed: true }, "other-token")).status, 404);
   });
 
   it("uses distinct daily and weekly windows and does not redeliver a claimed digest", async () => {

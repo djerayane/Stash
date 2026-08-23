@@ -2,7 +2,7 @@ import { useGSAP } from "@gsap/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import gsap from "gsap";
 import { useRef } from "react";
-import { useParams } from "react-router";
+import { Link, useParams } from "react-router";
 import styles from "./task-detail.module.css";
 
 interface TaskDetail {
@@ -67,7 +67,7 @@ export function TaskDetailPage({ memberId, token }: { readonly memberId?: string
   return <article className={styles.taskPage} aria-labelledby="task-title">
     <header className={styles.taskHeader}>
       <div><p className={styles.taskKey}>{task.key}</p><h1 id="task-title">{task.title}</h1></div>
-      <span className={styles.status}>{task.status.name}</span>
+      <div><span className={styles.status}>{task.status.name}</span><Link to={`/app/projects/${encodeURIComponent(projectId)}/notifications`}>Notification settings</Link></div>
     </header>
     <section className={styles.assignmentPanel} aria-labelledby="assignment-title">
       <div><h2 id="assignment-title">Assignment</h2><p>Ownership stays visible when a Member leaves, so responsibility never disappears silently.</p></div>
