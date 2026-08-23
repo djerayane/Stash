@@ -25,9 +25,17 @@ describe("remaining product settings", () => {
   it("keeps import input intact after a recoverable server failure", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ message: "Archive rejected. Nothing was imported." }), { status: 422 })));
     view(<WorkspaceDataPage token="member-token" workspaceId="workspace-1" memberId="account-1" />);
-    const file = new File(["archive"], "workspace.zip", { type: "application/zip" }); const archive = screen.getByLabelText("Archive"); fireEvent.change(archive, { target: { files: [file] } }); await waitFor(() => expect((archive as HTMLInputElement).files?.[0]).toBe(file));
+    const file = new File(["archive"], "workspace.zip", { type: "application/zip" }); const archive = screen.getByLabelText("ZIP archive"); fireEvent.change(archive, { target: { files: [file] } }); await waitFor(() => expect((archive as HTMLInputElement).files?.[0]).toBe(file));
     fireEvent.submit(screen.getByRole("button", { name: "Validate and import" }).closest("form")!);
     expect(await screen.findByRole("alert")).toHaveTextContent("Nothing was imported");
+  });
+
+  it("submits an Obsidian vault through the dedicated client boundary and presents its report",async()=>{
+    vi.stubGlobal("matchMedia",vi.fn(()=>({matches:true,addEventListener(){},removeEventListener(){}})));
+    let request:{path:string;init?:RequestInit}|undefined;vi.stubGlobal("fetch",vi.fn(async(path:string,init?:RequestInit)=>{request={path,init};return Response.json({status:"imported",report:{transformed:[{object:"Note:Home.md",reason:"wikilink_resolved"}],skipped:[],ambiguous:[{object:"Link:Home.md->Idea",reason:"multiple_note_targets"}]}})}));
+    view(<WorkspaceDataPage token="member-token" workspaceId="workspace-1" memberId="account-1"/>);fireEvent.click(screen.getByLabelText("Markdown or Obsidian vault"));
+    fireEvent.change(screen.getByLabelText("ZIP archive"),{target:{files:[new File(["vault"],"vault.zip",{type:"application/zip"})]}});fireEvent.submit(screen.getByRole("button",{name:"Validate and import"}).closest("form")!);
+    expect(await screen.findByRole("heading",{name:"Import committed"})).toBeVisible();expect(request?.path).toBe("/api/workspace-imports/markdown");expect(request?.init?.headers).toMatchObject({"x-stash-import-owner-account-id":"account-1"});expect(screen.getByText(/multiple note targets/)).toBeVisible();
   });
 
   it("exposes Organization-only roles, invitations, connections, and OIDC controls", async () => {

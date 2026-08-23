@@ -10,7 +10,7 @@ async function body(request: IncomingMessage): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 export function portableWorkspaceImportRoute(service: PortableWorkspaceImportService): HttpRoute {
-  return { matches(request, url) { return request.method === "POST" && ["/api/workspace-imports","/api/workspace-import-identity-mappings"].includes(url.pathname); },
+  return { matches(request, url) { return request.method === "POST" && ["/api/workspace-imports","/api/workspace-imports/markdown","/api/workspace-import-identity-mappings"].includes(url.pathname); },
     async handle(request, response, url) {
       if(url.pathname==="/api/workspace-import-identity-mappings") { try { const value=await readJson(request);
         if(!value||typeof value!=="object"||Array.isArray(value)||Object.keys(value).some((key)=>!["importId","sourceAccountId","localAccountId"].includes(key))) throw new InvalidPortableWorkspaceImport();
@@ -26,7 +26,8 @@ export function portableWorkspaceImportRoute(service: PortableWorkspaceImportSer
       const ownerAccountId = request.headers["x-stash-import-owner-account-id"];
       if (typeof importId !== "string" || typeof ownerAccountId !== "string") { json(response, 422, { error: "invalid_import_request", message: "UUID Idempotency-Key and X-Stash-Import-Owner-Account-Id headers are required." }); return true; }
       try {
-        const result = await service.import(importId, ownerAccountId, await body(request));
+        const archive=await body(request); const result = url.pathname==="/api/workspace-imports/markdown"
+          ? await service.importMarkdown(importId,ownerAccountId,archive) : await service.import(importId, ownerAccountId, archive);
         if (result.status === "forbidden") { json(response, 403, { error: "import_forbidden", message: "Workspace import permission is required." }); return true; }
         if (result.status === "workspace_conflict") { json(response, 409, { error: "workspace_conflict", message: "The Workspace identity already exists with different content." }); return true; }
         json(response, result.status === "imported" ? 201 : 200, { status: result.status, report: result.report });

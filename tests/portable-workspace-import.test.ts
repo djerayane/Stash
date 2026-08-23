@@ -9,7 +9,7 @@ import { Pool } from "pg";
 
 import { startInstance } from "../src/instance.js";
 import { PortableWorkspaceExportService, type PortableWorkspaceExportSnapshot } from "../src/portable-workspace-export.js";
-import { PortableWorkspaceImportService, publishedPortableWorkspaceExportSchemas, type PortableWorkspaceImportBundle, type PortableWorkspaceImportReport, type PortableWorkspaceImportRepository } from "../src/portable-workspace-import.js";
+import { InvalidPortableWorkspaceImport, PortableWorkspaceImportService, publishedPortableWorkspaceExportSchemas, type PortableWorkspaceImportBundle, type PortableWorkspaceImportReport, type PortableWorkspaceImportRepository } from "../src/portable-workspace-import.js";
 import { LocalAttachmentStorage } from "../src/attachments.js";
 import { PostgresDatabase } from "../src/postgres-database.js";
 import { createAuthenticationSecretCodec } from "../src/authentication-secrets.js";
@@ -81,8 +81,29 @@ function storedFiles(archive: Buffer): Map<string, Buffer> {
     cursor += 46 + nameLength + extraLength + commentLength; }
   return files;
 }
+function markdownZip(files:Record<string,string|Buffer>):Buffer{
+  const locals:Buffer[]=[];const centrals:Buffer[]=[];let offset=0;
+  for(const [path,value] of Object.entries(files)){const name=Buffer.from(path);const content=Buffer.isBuffer(value)?value:Buffer.from(value);const local=Buffer.alloc(30+name.length);local.writeUInt32LE(0x04034b50);local.writeUInt16LE(20,4);local.writeUInt16LE(0x800,6);local.writeUInt32LE(content.length,18);local.writeUInt32LE(content.length,22);local.writeUInt16LE(name.length,26);name.copy(local,30);locals.push(local,content);const central=Buffer.alloc(46+name.length);central.writeUInt32LE(0x02014b50);central.writeUInt16LE(20,4);central.writeUInt16LE(20,6);central.writeUInt16LE(0x800,8);central.writeUInt32LE(content.length,20);central.writeUInt32LE(content.length,24);central.writeUInt16LE(name.length,28);central.writeUInt32LE(offset,42);name.copy(central,46);centrals.push(central);offset+=local.length+content.length;}
+  const directory=Buffer.concat(centrals);const end=Buffer.alloc(22);end.writeUInt32LE(0x06054b50);end.writeUInt16LE(centrals.length,8);end.writeUInt16LE(centrals.length,10);end.writeUInt32LE(directory.length,12);end.writeUInt32LE(offset,16);return Buffer.concat([...locals,directory,end]);
+}
 
 describe("Portable Workspace import", () => {
+  it("preflights an Obsidian vault and reports tags, links, attachments, ambiguity, and skipped metadata",async()=>{
+    const repository=new ImportMemory();const storage={async put(){},async get(){return Buffer.alloc(0)},async delete(){}};
+    const service=new PortableWorkspaceImportService(repository,storage);const result=await service.importMarkdown(randomUUID(),actor.localAccountId,markdownZip({
+      "Vault/Home.md":"---\ntags: [start, knowledge]\n---\n# Home\n[[Folder/Target]] [[Same]] ![[image.png]]",
+      "Vault/Folder/Target.md":"# Target","Vault/A/Same.md":"# A","Vault/B/Same.md":"# B","Vault/image.png":Buffer.from([1,2,3]),"Vault/.obsidian/config":"{}",
+    }));
+    assert.equal(result.status,"imported");assert.equal(repository.committed?.state.notes.length,4);assert.deepEqual(repository.committed?.state.notes[0]?.tags,["start","knowledge"]);
+    assert.equal(repository.committed?.state.attachments.length,1);assert.equal(repository.committed?.state.noteLinks.length,2);
+    assert.ok(repository.committed?.transformations?.some(({kind,reason})=>kind==="ambiguous"&&reason==="multiple_note_targets"));
+    assert.ok(repository.committed?.transformations?.some(({kind,reason})=>kind==="skipped"&&reason==="hidden_vault_metadata"));
+  });
+  it("rejects unsafe Markdown ZIP paths without repository or Attachment side effects",async()=>{
+    const repository=new ImportMemory();let writes=0;const service=new PortableWorkspaceImportService(repository,{async put(){writes++},async get(){return Buffer.alloc(0)},async delete(){}});
+    await assert.rejects(service.importMarkdown(randomUUID(),actor.localAccountId,markdownZip({"../escape.md":"# no"})),InvalidPortableWorkspaceImport);
+    assert.equal(repository.committed,undefined);assert.equal(writes,0);
+  });
   it("keeps every published Portable Workspace Export schema in the compatibility registry", () => {
     assert.deepEqual(publishedPortableWorkspaceExportSchemas, ["stash.portable-workspace-export.v1"]);
   });
