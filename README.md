@@ -103,8 +103,11 @@ curl https://stash.example.com/api/instance/backups/health \
 ```
 
 The Instance remains readable but rejects writes while the coordinated database and Attachment
-snapshot is made. Scheduling and off-site copying remain operator responsibilities. Redis is an
-acceleration layer and is never included.
+snapshot is made. Verification rejects missing, changed, symbolic, unsupported, and unlisted files.
+Its signed verification timestamp is stored in the published manifest, so backup age and the latest
+verification remain visible after an Instance restart or a separate CLI verification process.
+Scheduling and off-site copying remain operator responsibilities. Redis is an acceleration layer
+and is never included.
 
 The operator command supports explicit creation and disaster-recovery preflight. Paths must be
 absolute. Use the protected HTTP command for a live coordinated backup; stop the application before
@@ -120,9 +123,12 @@ npm run backup -- restore /srv/stash-backups/2026-08-23 --dry-run
 npm run backup -- restore /srv/stash-backups/2026-08-23
 ```
 
-Restore uses `pg_restore --exit-on-error` and stages Attachment files before swapping them into
-place. Missing files, corruption, unsupported versions, a wrong master key, or an incompatible
-Attachment adapter fail visibly. A failed backup is never published under its destination name.
+Restore copies only the verified Attachment inventory into staging before touching PostgreSQL. It
+then snapshots the current database, uses `pg_restore --single-transaction --exit-on-error`, and
+atomically swaps the staged Attachment tree. A failed Attachment swap restores the pre-restore
+database snapshot. Missing files, corruption, unsupported versions, a wrong master key, or an
+incompatible Attachment adapter fail visibly. A failed backup is never published under its
+destination name.
 
 ### Optional Redis acceleration
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -33,9 +33,13 @@ class FakeSource implements InstanceBackupSource {
 class Probe implements DatabaseProbe { async verifyConnection() {} async close() {} }
 class FakeRestoreTarget implements InstanceBackupRestoreTarget {
   readonly calls: string[] = [];
+  commitFailure: Error | undefined;
   async validateConfiguration(configuration: Record<string, unknown>) { assert.equal(configuration.attachmentStorage, "local"); this.calls.push("configuration"); }
-  async restoreDatabase(path: string) { assert.match(path, /database\.dump$/); this.calls.push("database"); }
-  async restoreAttachments(path: string) { assert.match(path, /attachments$/); this.calls.push("attachments"); }
+  async prepareAttachments(path: string, paths: ReadonlyArray<string>) { assert.match(path, /attachments$/); assert.deepEqual(paths, ["workspace/attachment"]); this.calls.push("prepare"); return "prepared"; }
+  async snapshotDatabase(path: string) { await writeFile(path, "rollback"); this.calls.push("snapshot"); }
+  async restoreDatabase(path: string) { this.calls.push(path.endsWith("database.dump") ? "database" : "rollback"); }
+  async commitAttachments() { this.calls.push("commit"); if (this.commitFailure) throw this.commitFailure; }
+  async discardPreparedAttachments() { this.calls.push("discard"); }
 }
 
 describe("coordinated Instance Backup", () => {
@@ -91,26 +95,57 @@ describe("coordinated Instance Backup", () => {
     assert.deepEqual(await service.restore(path, target, { dryRun: true }), { status: "verified" });
     assert.deepEqual(target.calls, ["configuration"]);
     assert.deepEqual(await service.restore(path, target, { dryRun: false }), { status: "restored" });
-    assert.deepEqual(target.calls, ["configuration", "configuration", "database", "attachments"]);
+    assert.deepEqual(target.calls, ["configuration", "configuration", "prepare", "snapshot", "database", "commit", "discard"]);
+  });
+
+  it("stages Attachments before database mutation and rolls the database back if their atomic swap fails", async () => {
+    const root = await mkdtemp(join(tmpdir(), "stash-backup-rollback-"));
+    const path = join(root, "backup"); const service = new InstanceBackupService(new FakeSource(), { masterKey }); await service.create(path);
+    const target = new FakeRestoreTarget(); target.commitFailure = new Error("attachment swap unavailable");
+    await assert.rejects(service.restore(path, target, { dryRun: false }), /attachment swap unavailable/);
+    assert.deepEqual(target.calls, ["configuration", "prepare", "snapshot", "database", "commit", "rollback", "discard"]);
+  });
+
+  it("rejects unlisted files, symbolic links, and unlisted directories before restore", async () => {
+    const root = await mkdtemp(join(tmpdir(), "stash-backup-inventory-"));
+    const service = new InstanceBackupService(new FakeSource(), { masterKey });
+    for (const kind of ["file", "symlink", "directory"] as const) {
+      const path = join(root, kind); await service.create(path);
+      if (kind === "file") await writeFile(join(path, "unlisted"), "hidden");
+      if (kind === "symlink") await symlink("database.dump", join(path, "alias"));
+      if (kind === "directory") await mkdir(join(path, "empty"));
+      await assert.rejects(service.verify(path), /inventory|symbolic link/i);
+    }
   });
 
   it("publishes visible backup health only to the Instance Administrator", async () => {
     const root = await mkdtemp(join(tmpdir(), "stash-backup-health-"));
+    const backupRoot = join(root, "scheduled");
     const service = new InstanceBackupService(new FakeSource(), { masterKey, now: () => new Date("2026-08-23T10:00:00.000Z") });
-    await service.create(join(root, "backup"));
+    const firstBackup = join(backupRoot, "first"); await service.create(firstBackup);
+    // A separate CLI process can verify later; its signed timestamp remains observable after restart.
+    const cliVerifier = new InstanceBackupService(new FakeSource(), { masterKey, now: () => new Date("2026-08-23T10:05:00.000Z") });
+    await cliVerifier.verify(firstBackup);
     const instance = await startInstance({ database: new Probe(), host: "127.0.0.1", port: 0,
-      instanceAdminToken: "admin", instanceBackups: service, instanceBackupRoot: join(root, "scheduled") });
+      instanceAdminToken: "admin", instanceBackups: service, instanceBackupRoot: backupRoot });
     instances.push(instance);
 
     assert.equal((await fetch(`${instance.url}/api/instance/backups/health`)).status, 401);
     const response = await fetch(`${instance.url}/api/instance/backups/health`, { headers: { authorization: "Bearer admin" } });
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { status: "verified", createdAt: "2026-08-23T10:00:00.000Z",
-      verifiedAt: "2026-08-23T10:00:00.000Z", schema: "stash.instance-backup.v1" });
+      verifiedAt: "2026-08-23T10:05:00.000Z", schema: "stash.instance-backup.v1" });
 
-    const created = await fetch(`${instance.url}/api/instance/backups`, { method: "POST", headers: { authorization: "Bearer admin" } });
-    assert.equal(created.status, 201);
-    assert.equal((await created.json() as { status: string }).status, "created");
+    await instance.close(); instances.splice(instances.indexOf(instance), 1);
+    const restartedService = new InstanceBackupService(new FakeSource(), { masterKey });
+    const restarted = await startInstance({ database: new Probe(), host: "127.0.0.1", port: 0, instanceAdminToken: "admin",
+      instanceBackups: restartedService, instanceBackupRoot: backupRoot }); instances.push(restarted);
+    const persisted = await fetch(`${restarted.url}/api/instance/backups/health`, { headers: { authorization: "Bearer admin" } });
+    assert.deepEqual(await persisted.json(), { status: "verified", createdAt: "2026-08-23T10:00:00.000Z",
+      verifiedAt: "2026-08-23T10:05:00.000Z", schema: "stash.instance-backup.v1" });
+
+    const created = await fetch(`${restarted.url}/api/instance/backups`, { method: "POST", headers: { authorization: "Bearer admin" } });
+    assert.equal(created.status, 201); assert.equal((await created.json() as { status: string }).status, "created");
   });
 
   it("does not publish a partial backup when capture fails", async () => {

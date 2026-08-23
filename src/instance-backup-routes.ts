@@ -7,7 +7,7 @@ export function instanceBackupRoute(service: InstanceBackupService, backupRoot?:
     matches: (_request, url) => url.pathname === "/api/instance/backups/health" || url.pathname === "/api/instance/backups",
     async handle(request, response, url) {
       if (url.pathname.endsWith("/health") && request.method === "GET") {
-        json(response, 200, service.health()); return true;
+        json(response, 200, backupRoot ? await service.refreshHealth(backupRoot) : service.health()); return true;
       }
       if (url.pathname === "/api/instance/backups" && request.method === "POST") {
         if (!backupRoot) { json(response, 503, { error: "backup_storage_unavailable", message: "INSTANCE_BACKUP_PATH is not configured." }); return true; }

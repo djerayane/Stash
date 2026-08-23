@@ -77,27 +77,51 @@ export class PostgresLocalInstanceRestoreTarget implements InstanceBackupRestore
     if (configuration.masterKeyRequired !== true) throw new Error("Instance Backup does not declare its master-key requirement");
     if (configuration.publicOrigin !== this.options.publicOrigin) throw new Error("Instance Backup PUBLIC_ORIGIN does not match this restore environment");
   }
+  async prepareAttachments(source: string, paths: ReadonlyArray<string>): Promise<unknown> {
+    const destination = resolve(this.options.attachmentRoot);
+    const staged = `${destination}.restore-staged-${process.pid}`;
+    await rm(staged, { recursive: true, force: true });
+    await mkdir(staged, { recursive: false, mode: 0o700 });
+    try {
+      for (const path of paths) {
+        const sourcePath = join(source, ...path.split("/"));
+        const metadata = await lstat(sourcePath);
+        if (!metadata.isFile() || metadata.isSymbolicLink()) throw new Error(`Invalid verified Attachment: ${path}`);
+        const target = join(staged, ...path.split("/"));
+        await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+        await cp(sourcePath, target, { errorOnExist: true, preserveTimestamps: true });
+      }
+      return staged;
+    } catch (error) { await rm(staged, { recursive: true, force: true }); throw error; }
+  }
+  async snapshotDatabase(destination: string): Promise<void> {
+    await mkdir(dirname(destination), { recursive: true });
+    await command("pg_dump", ["--format=custom", "--serializable-deferrable", "--no-password", "--file", destination],
+      postgresEnvironment(this.options.databaseUrl).environment);
+  }
   async restoreDatabase(source: string): Promise<void> {
     const postgres = postgresEnvironment(this.options.databaseUrl);
-    await command("pg_restore", ["--clean", "--if-exists", "--exit-on-error", "--no-owner", "--no-privileges", "--no-password", "--dbname", postgres.database, source], postgres.environment);
+    await command("pg_restore", ["--clean", "--if-exists", "--exit-on-error", "--single-transaction", "--no-owner", "--no-privileges", "--no-password", "--dbname", postgres.database, source], postgres.environment);
   }
-  async restoreAttachments(source: string): Promise<void> {
+  async commitAttachments(prepared: unknown): Promise<void> {
+    if (typeof prepared !== "string") throw new Error("invalid prepared Attachment restore");
     const destination = resolve(this.options.attachmentRoot);
-    const staged = `${destination}.restore-staged`;
-    const previous = `${destination}.restore-previous`;
-    await rm(staged, { recursive: true, force: true });
+    const staged = prepared;
+    const previous = `${destination}.restore-previous-${process.pid}`;
     await rm(previous, { recursive: true, force: true });
-    await cp(source, staged, { recursive: true, errorOnExist: true });
     let movedPrevious = false;
     try {
       try { await rename(destination, previous); movedPrevious = true; } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
       await rename(staged, destination);
-      await rm(previous, { recursive: true, force: true });
     } catch (error) {
       if (movedPrevious) await rename(previous, destination).catch(() => undefined);
       throw error;
     }
+    await rm(previous, { recursive: true, force: true }).catch(() => undefined);
+  }
+  async discardPreparedAttachments(prepared: unknown): Promise<void> {
+    if (typeof prepared === "string") await rm(prepared, { recursive: true, force: true });
   }
 }
