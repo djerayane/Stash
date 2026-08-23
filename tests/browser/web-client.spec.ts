@@ -142,3 +142,15 @@ test("reviews and confirms an ambiguous GitHub Signal by keyboard without reload
   await expect(page.getByText("Relationship confirmed")).toBeVisible();
   expect(documentNavigations).toBe(0);
 });
+
+test("focuses a development Signal load failure and retries by keyboard without reloading", async ({ page }) => {
+  await installMemberSession(page);
+  const projectId = "11111111-1111-4111-8111-111111111111"; let attempts = 0; let documentNavigations = 0;
+  page.on("framenavigated", (frame) => { if (frame === page.mainFrame()) documentNavigations += 1; });
+  await page.route("**/development-signals", async (route) => { attempts += 1; await route.fulfill({ status: attempts === 1 ? 503 : 200, json: attempts === 1 ? { message: "Signals are temporarily unavailable." } : { signals: [] } }); });
+  await page.goto(`/app/projects/${projectId}/tasks/STASH-36/development`);
+  const alert = page.getByRole("alert"); await expect(alert).toBeVisible(); await expect(alert).toBeFocused();
+  documentNavigations = 0; await alert.getByRole("button", { name: "Try again" }).focus(); await page.keyboard.press("Enter");
+  await expect(page.getByText("No development activity yet")).toBeVisible();
+  expect(attempts).toBe(2); expect(documentNavigations).toBe(0);
+});

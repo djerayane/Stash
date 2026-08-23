@@ -6,6 +6,7 @@ export interface GitHubSignal {
   id: string;
   deliveryId: string;
   repositoryId: string;
+  installationId: number;
   kind: DevelopmentArtifactKind;
   providerId: string;
   url: string;
@@ -25,7 +26,7 @@ export interface SignalCandidate {
 }
 
 export interface GitHubSignalRepository {
-  matchingTasks(repositoryId: string, keys: string[]): Promise<Array<{ taskId: string; projectId: string; taskKey: string; title: string; matchedKey: string }>>;
+  matchingTasks(installationId: number, repositoryId: string, keys: string[]): Promise<Array<{ taskId: string; projectId: string; taskKey: string; title: string; matchedKey: string }>>;
   receive(signal: GitHubSignal, candidates: SignalCandidate[]): Promise<void>;
   list(memberId: string, projectId: string, taskKey: string): Promise<Array<{ signal: GitHubSignal; suggestions: SignalCandidate[] }> | undefined>;
   confirm(memberId: string, projectId: string, taskKey: string, suggestionId: string): Promise<"confirmed" | "forbidden" | "not_found">;
@@ -57,7 +58,7 @@ export class GitHubSignalService {
     try { payload = JSON.parse(rawBody.toString("utf8")); } catch { throw new InvalidGitHubSignalInput(); }
     const parsed = parseEvent(event, deliveryId, payload);
     const keys = [...new Set((parsed.evidence.match(taskKey) ?? []).map((value) => value.toUpperCase()))];
-    const matches = keys.length ? await this.repository.matchingTasks(parsed.signal.repositoryId, keys) : [];
+    const matches = keys.length ? await this.repository.matchingTasks(parsed.signal.installationId, parsed.signal.repositoryId, keys) : [];
     const counts = new Map(keys.map((key) => [key, matches.filter((match) => match.matchedKey === key).length]));
     const candidates = matches.map((match) => {
       const matchedKey = match.matchedKey;
@@ -91,26 +92,28 @@ export class GitHubSignalService {
 }
 
 function parseEvent(event: string | undefined, deliveryId: string, payload: unknown): { signal: GitHubSignal; evidence: string } {
-  if (!record(payload) || !record(payload.repository) || !positiveId(payload.repository.id)) throw new InvalidGitHubSignalInput();
+  if (!record(payload) || !record(payload.repository) || !positiveId(payload.repository.id)
+    || !record(payload.installation) || !positiveId(payload.installation.id)) throw new InvalidGitHubSignalInput();
   const repositoryId = String(payload.repository.id);
+  const installationId = Number(payload.installation.id);
   if (event === "push" && typeof payload.ref === "string" && /^[0-9a-f]{40}$/i.test(String(payload.after))) {
     const branch = payload.ref.replace(/^refs\/heads\//, "");
     const message = record(payload.head_commit) && typeof payload.head_commit.message === "string" ? payload.head_commit.message : "";
-    return { signal: signal(deliveryId, repositoryId, "commit", String(payload.after), githubUrl(payload.repository, `/commit/${payload.after}`), branch), evidence: `${branch} ${message}` };
+    return { signal: signal(deliveryId, installationId, repositoryId, "commit", String(payload.after), githubUrl(payload.repository, `/commit/${payload.after}`), branch), evidence: `${branch} ${message}` };
   }
   if (event === "create" && payload.ref_type === "branch" && typeof payload.ref === "string" && payload.ref.length > 0 && payload.ref.length <= 240) {
-    return { signal: signal(deliveryId, repositoryId, "branch", payload.ref, githubUrl(payload.repository, `/tree/${encodeURIComponent(payload.ref)}`), payload.ref), evidence: payload.ref };
+    return { signal: signal(deliveryId, installationId, repositoryId, "branch", payload.ref, githubUrl(payload.repository, `/tree/${encodeURIComponent(payload.ref)}`), payload.ref), evidence: payload.ref };
   }
   if (event === "pull_request" && record(payload.pull_request) && positiveId(payload.pull_request.number)
     && typeof payload.pull_request.title === "string" && typeof payload.pull_request.html_url === "string") {
     const pull = payload.pull_request; const title = String(pull.title); const url = String(pull.html_url);
-    return { signal: signal(deliveryId, repositoryId, "pull_request", String(pull.number), safeGitHubUrl(url), `#${pull.number} ${title}`), evidence: `${title} ${typeof pull.body === "string" ? pull.body : ""}` };
+    return { signal: signal(deliveryId, installationId, repositoryId, "pull_request", String(pull.number), safeGitHubUrl(url), `#${pull.number} ${title}`), evidence: `${title} ${typeof pull.body === "string" ? pull.body : ""}` };
   }
   throw new InvalidGitHubSignalInput();
 }
 
-function signal(deliveryId: string, repositoryId: string, kind: DevelopmentArtifactKind, providerId: string, url: string, label: string): GitHubSignal {
-  return { id: createHash("sha256").update(`github:${deliveryId}`).digest("hex").slice(0, 8) + "-0000-4000-8000-" + createHash("sha256").update(deliveryId).digest("hex").slice(8, 20), deliveryId, repositoryId, kind, providerId, url, label, occurredAt: new Date().toISOString() };
+function signal(deliveryId: string, installationId: number, repositoryId: string, kind: DevelopmentArtifactKind, providerId: string, url: string, label: string): GitHubSignal {
+  return { id: createHash("sha256").update(`github:${deliveryId}`).digest("hex").slice(0, 8) + "-0000-4000-8000-" + createHash("sha256").update(deliveryId).digest("hex").slice(8, 20), deliveryId, installationId, repositoryId, kind, providerId, url, label, occurredAt: new Date().toISOString() };
 }
 
 function githubUrl(repository: Record<string, unknown>, suffix: string) {

@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as Dialog from "@radix-ui/react-dialog";
 import { createStashApiClient } from "@stash/api-client";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router";
 
 import styles from "./development-signals.module.css";
@@ -29,6 +29,7 @@ export function DevelopmentSignalsRoute() {
 export function DevelopmentSignalsPage({ projectId, taskKey, fetcher = globalThis.fetch, token = storedToken() }: DevelopmentSignalsPageProps) {
   const client = useQueryClient();
   const [reviewing, setReviewing] = useState<Suggestion>();
+  const errorRef = useRef<HTMLDivElement>(null);
   const key = ["development-signals", projectId, taskKey];
   const api = createStashApiClient({ baseUrl: "", fetch: fetcher, memberToken: token });
   const query = useQuery({ queryKey: key, retry: false, queryFn: async () => {
@@ -37,6 +38,7 @@ export function DevelopmentSignalsPage({ projectId, taskKey, fetcher = globalThi
   const confirm = useMutation({ mutationFn: async (suggestion: Suggestion) => {
     await api.post(`/api/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskKey)}/development-signals/suggestions/${encodeURIComponent(suggestion.id)}/confirm`);
   }, onSuccess: async () => { setReviewing(undefined); await client.invalidateQueries({ queryKey: key }); } });
+  useEffect(() => { if (query.isError) errorRef.current?.focus(); }, [query.isError]);
 
   return <div className={styles.page}>
     <header className={styles.header}>
@@ -44,7 +46,7 @@ export function DevelopmentSignalsPage({ projectId, taskKey, fetcher = globalThi
       <Link className={styles.backLink} to="/app/tasks">Back to Tasks</Link>
     </header>
     {query.isPending ? <div className={styles.loading} role="status">Loading development activity…</div> : null}
-    {query.isError ? <div className={styles.error} role="alert" tabIndex={-1}><strong>Signals could not be loaded</strong><p>{query.error.message}</p><button type="button" onClick={() => void query.refetch()}>Try again</button></div> : null}
+    {query.isError ? <div className={styles.error} ref={errorRef} role="alert" tabIndex={-1}><strong>Signals could not be loaded</strong><p>{query.error.message}</p><button type="button" onClick={() => void query.refetch()}>Try again</button></div> : null}
     {query.data?.length === 0 ? <section className={styles.empty}><span aria-hidden="true" /><h2>No development activity yet</h2><p>Branches, commits, and pull requests from the connected repository will appear here after GitHub verifies their delivery.</p></section> : null}
     {query.data?.length ? <section className={styles.grid} aria-label="GitHub activity">
       {query.data.map(({ signal, suggestions }) => <article className={styles.signal} key={signal.id}>

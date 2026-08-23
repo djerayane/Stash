@@ -19,8 +19,8 @@ class RepositoryFake implements GitHubSignalRepository {
   readable = true;
   writable = true;
   fail = false;
-  async matchingTasks(repositoryId: string, keys: string[]) {
-    if (repositoryId !== "987") return [];
+  async matchingTasks(installationId: number, repositoryId: string, keys: string[]) {
+    if (installationId !== 42 || repositoryId !== "987") return [];
     return keys.flatMap((key) => key === "STASH-36"
       ? [{ taskId: "task-36", projectId, taskKey: key, title: "Receive GitHub development Signals", matchedKey: key }]
       : key === "OLD-1"
@@ -73,7 +73,7 @@ describe("GitHub development Signals", () => {
 
   it("receives verified duplicate-safe activity and exposes a unique Task-key relation", async () => {
     const { repository, baseUrl } = await run();
-    const body = JSON.stringify({ ref: "refs/heads/STASH-36-signals", repository: { id: 987, html_url: "https://github.com/acme/stash" }, after: "a".repeat(40), head_commit: { message: "Ship STASH-36" } });
+    const body = JSON.stringify({ ref: "refs/heads/STASH-36-signals", installation: { id: 42 }, repository: { id: 987, html_url: "https://github.com/acme/stash" }, after: "a".repeat(40), head_commit: { message: "Ship STASH-36" } });
     for (const _ of [1, 2]) {
       const response = await fetch(`${baseUrl}/api/github/webhooks`, { method: "POST", headers: { "content-type": "application/json", "x-github-event": "push", "x-github-delivery": "delivery-1", "x-hub-signature-256": signature(body) }, body });
       assert.equal(response.status, 202);
@@ -85,7 +85,7 @@ describe("GitHub development Signals", () => {
     assert.equal(result.signals[0]?.signal.kind, "commit");
     assert.equal(result.signals[0]?.suggestions[0]?.status, "confirmed");
 
-    const branchBody = JSON.stringify({ ref_type: "branch", ref: "STASH-36-signals", repository: { id: 987, html_url: "https://github.com/acme/stash" } });
+    const branchBody = JSON.stringify({ ref_type: "branch", ref: "STASH-36-signals", installation: { id: 42 }, repository: { id: 987, html_url: "https://github.com/acme/stash" } });
     assert.equal((await fetch(`${baseUrl}/api/github/webhooks`, { method: "POST", headers: { "x-github-event": "create", "x-github-delivery": "delivery-branch", "x-hub-signature-256": signature(branchBody) }, body: branchBody })).status, 202);
     const refreshed = await (await fetch(`${baseUrl}/api/projects/${projectId}/tasks/STASH-36/development-signals`, { headers: { authorization: "Bearer member" } })).json() as { signals: Array<{ signal: GitHubSignal }> };
     assert.deepEqual(refreshed.signals.map(({ signal }) => signal.kind).sort(), ["branch", "commit"]);
@@ -93,7 +93,7 @@ describe("GitHub development Signals", () => {
 
   it("requires explicit confirmation when one textual key can identify multiple Tasks", async () => {
     const { baseUrl } = await run();
-    const body = JSON.stringify({ action: "opened", repository: { id: 987, html_url: "https://github.com/acme/stash" }, pull_request: { id: 42, number: 42, html_url: "https://github.com/acme/stash/pull/42", title: "OLD-1 shared work", body: "Touches both surfaces", merged: false } });
+    const body = JSON.stringify({ action: "opened", installation: { id: 42 }, repository: { id: 987, html_url: "https://github.com/acme/stash" }, pull_request: { id: 42, number: 42, html_url: "https://github.com/acme/stash/pull/42", title: "OLD-1 shared work", body: "Touches both surfaces", merged: false } });
     assert.equal((await fetch(`${baseUrl}/api/github/webhooks`, { method: "POST", headers: { "content-type": "application/json", "x-github-event": "pull_request", "x-github-delivery": "delivery-2", "x-hub-signature-256": signature(body) }, body })).status, 202);
     const list = await fetch(`${baseUrl}/api/projects/${projectId}/tasks/STASH-36/development-signals`, { headers: { authorization: "Bearer member" } });
     const result = await list.json() as { signals: Array<{ suggestions: SignalCandidate[] }> };
@@ -106,16 +106,16 @@ describe("GitHub development Signals", () => {
 
   it("rejects forged or invalid payloads and makes permissions and recoverable storage failures visible", async () => {
     const { repository, baseUrl } = await run();
-    const body = JSON.stringify({ ref: "refs/heads/STASH-36", repository: { id: 987 }, after: "a".repeat(40) });
+    const body = JSON.stringify({ ref: "refs/heads/STASH-36", installation: { id: 42 }, repository: { id: 987 }, after: "a".repeat(40) });
     assert.equal((await fetch(`${baseUrl}/api/github/webhooks`, { method: "POST", headers: { "x-github-event": "push", "x-github-delivery": "delivery-3", "x-hub-signature-256": "sha256=forged" }, body })).status, 401);
     assert.equal((await fetch(`${baseUrl}/api/github/webhooks`, { method: "POST", headers: { "x-github-event": "push", "x-github-delivery": "delivery-3", "x-hub-signature-256": signature("{") }, body: "{" })).status, 400);
-    const invalidUrl = JSON.stringify({ repository: { id: 987 }, pull_request: { number: 42, title: "STASH-36", html_url: "not a URL" } });
+    const invalidUrl = JSON.stringify({ installation: { id: 42 }, repository: { id: 987 }, pull_request: { number: 42, title: "STASH-36", html_url: "not a URL" } });
     assert.equal((await fetch(`${baseUrl}/api/github/webhooks`, { method: "POST", headers: { "x-github-event": "pull_request", "x-github-delivery": "delivery-invalid-url", "x-hub-signature-256": signature(invalidUrl) }, body: invalidUrl })).status, 400);
     assert.equal((await fetch(`${baseUrl}/api/projects/${projectId}/tasks/STASH-36/development-signals`)).status, 401);
     repository.writable = false;
     assert.equal((await fetch(`${baseUrl}/api/projects/${projectId}/tasks/STASH-36/development-signals/suggestions/00000000-0000-4000-8000-000000000001/confirm`, { method: "POST", headers: { authorization: "Bearer member" } })).status, 403);
     repository.fail = true;
-    const valid = JSON.stringify({ ref: "refs/heads/STASH-36", repository: { id: 987 }, after: "a".repeat(40), head_commit: { message: "STASH-36" } });
+    const valid = JSON.stringify({ ref: "refs/heads/STASH-36", installation: { id: 42 }, repository: { id: 987 }, after: "a".repeat(40), head_commit: { message: "STASH-36" } });
     assert.equal((await fetch(`${baseUrl}/api/github/webhooks`, { method: "POST", headers: { "x-github-event": "push", "x-github-delivery": "delivery-4", "x-hub-signature-256": signature(valid) }, body: valid })).status, 503);
   });
 });

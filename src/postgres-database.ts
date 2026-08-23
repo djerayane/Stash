@@ -2235,17 +2235,7 @@ export class PostgresDatabase implements
           OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
             WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2))) FOR UPDATE`, [row.workspace_id, memberId]);
       if (!writable.rowCount) return "forbidden" as const;
-      const before = taskPlanningReadModelFromRow(row); const links = before.developmentLinks ?? [];
-      if (links.some(({ url }) => url === artifact.url)) return "linked" as const;
-      const nextLinks = [...links, { provider: "github", kind: artifact.kind, url: artifact.url }];
-      const nextRevision = Number(row.revision) + 1;
-      await client.query(`UPDATE stash_tasks SET development_links=$2::jsonb, revision=$3,
-        field_revisions=jsonb_set(field_revisions,'{developmentLinks}',to_jsonb($3::int),true) WHERE id=$1`,
-      [row.id, JSON.stringify(nextLinks), nextRevision]);
-      const saved = await client.query<any>(taskPlanningSelectById, [row.id, memberId]);
-      const after = taskPlanningReadModelFromRow(saved.rows[0]);
-      await this.#recordPortableProjection(client, "Task", after.id, after.schema, taskProjectionFromRow(saved.rows[0]));
-      await this.#recordTaskActivity(client, memberId, after.workspaceId, after.id, "task_planning_updated", before, after);
+      await this.#persistTaskDevelopmentArtifact(client, row, memberId, artifact, "task_planning_updated", { kind: "member" });
       return "linked" as const;
     });
   }
@@ -2256,19 +2246,25 @@ export class PostgresDatabase implements
     return (current.task.developmentLinks ?? []).flatMap(({ url }) => developmentArtifactFromUrl(url));
   }
 
-  async matchingTasks(repositoryId: string, keys: string[]) {
+  async matchingTasks(installationId: number, repositoryId: string, keys: string[]) {
     await this.#ensureGitHubSignalSchema();
     if (!keys.length) return [];
     const result = await this.#pool.query<{ task_id: string; project_id: string; task_key: string; title: string; matched_key: string }>(`
+      WITH eligible_connections AS (
+        SELECT connection.* FROM stash_repository_connections connection
+        WHERE connection.provider='github' AND connection.installation_id=$1 AND connection.repository_id=$2
+          AND 1 = (SELECT COUNT(DISTINCT candidate.organization_id) FROM stash_repository_connections candidate
+            WHERE candidate.provider='github' AND candidate.installation_id=$1 AND candidate.repository_id=$2)
+      )
       SELECT DISTINCT task.id AS task_id, task.project_id, task.task_key, task.title, matched.matched_key
-      FROM stash_repository_connections connection
+      FROM eligible_connections connection
       JOIN stash_repository_connection_projects link ON link.connection_id = connection.id
       JOIN stash_tasks task ON task.project_id = link.project_id
       JOIN LATERAL (
-        SELECT task.task_key AS matched_key WHERE task.task_key = ANY($2::text[])
-        UNION SELECT alias.task_key FROM stash_task_key_aliases alias WHERE alias.task_id = task.id AND alias.task_key = ANY($2::text[])
+        SELECT task.task_key AS matched_key WHERE task.task_key = ANY($3::text[])
+        UNION SELECT alias.task_key FROM stash_task_key_aliases alias WHERE alias.task_id = task.id AND alias.task_key = ANY($3::text[])
       ) matched ON true
-      WHERE connection.provider = 'github' AND connection.repository_id = $1`, [repositoryId, keys]);
+      `, [installationId, repositoryId, keys]);
     return result.rows.map((row) => ({ taskId: row.task_id, projectId: row.project_id, taskKey: row.task_key, title: row.title, matchedKey: row.matched_key }));
   }
 
@@ -2276,9 +2272,9 @@ export class PostgresDatabase implements
     await this.#ensureGitHubSignalSchema();
     await this.#withTransaction(async (client) => {
       const inserted = await client.query(`INSERT INTO stash_github_signals
-        (id, delivery_id, repository_id, kind, provider_id, url, label, occurred_at)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (delivery_id) DO NOTHING`,
-      [signal.id, signal.deliveryId, signal.repositoryId, signal.kind, signal.providerId, signal.url, signal.label, signal.occurredAt]);
+        (id, delivery_id, installation_id, repository_id, kind, provider_id, url, label, occurred_at)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (delivery_id) DO NOTHING`,
+      [signal.id, signal.deliveryId, signal.installationId, signal.repositoryId, signal.kind, signal.providerId, signal.url, signal.label, signal.occurredAt]);
       if (!inserted.rowCount) return;
       for (const candidate of candidates) {
         await client.query(`INSERT INTO stash_github_signal_suggestions
@@ -2317,20 +2313,34 @@ export class PostgresDatabase implements
         WHERE suggestion.id=$1 AND suggestion.project_id=$2 AND (suggestion.task_key=$3 OR task.task_key=$3) FOR UPDATE OF suggestion`, [suggestionId, projectId, taskKey]);
       const row = result.rows[0]; if (!row) return "not_found" as const;
       await client.query("UPDATE stash_github_signal_suggestions SET status='confirmed', confirmed_by_account_id=$2, confirmed_at=NOW() WHERE id=$1", [suggestionId, memberId]);
-      await this.#linkSignalArtifact(client, row.task_id, githubSignalFromRow(row));
+      await this.#linkSignalArtifact(client, row.task_id, githubSignalFromRow(row), memberId);
       return "confirmed" as const;
     });
   }
 
-  async #linkSignalArtifact(client: PoolClient, taskId: string, signal: GitHubSignal) {
-    const task = await client.query<any>("SELECT development_links, revision, field_revisions FROM stash_tasks WHERE id=$1 FOR UPDATE", [taskId]);
+  async #linkSignalArtifact(client: PoolClient, taskId: string, signal: GitHubSignal, confirmingMemberId?: string) {
+    const actor = confirmingMemberId ? { id: confirmingMemberId, cause: { kind: "member" } as ActivityCause }
+      : (await client.query<{ id: string }>(`SELECT created_by_account_id AS id FROM stash_repository_connections
+        WHERE installation_id=$1 AND repository_id=$2 ORDER BY id LIMIT 1`, [signal.installationId, signal.repositoryId])).rows[0];
+    if (!actor) return;
+    const task = await client.query<any>(`${taskPlanningSelectById} FOR UPDATE OF task`, [taskId, actor.id]);
     const row = task.rows[0]; if (!row) return;
-    const links = row.development_links ?? [];
-    if (links.some((link: { url: string }) => link.url === signal.url)) return;
+    await this.#persistTaskDevelopmentArtifact(client, row, actor.id, signal, "task_development_signal_linked",
+      confirmingMemberId ? { kind: "member" } : { kind: "signal", signalId: signal.id });
+  }
+
+  async #persistTaskDevelopmentArtifact(client: PoolClient, row: any, actorId: string,
+    artifact: Pick<DevelopmentArtifact, "kind" | "url">, action: string, cause: ActivityCause) {
+    const before = taskPlanningReadModelFromRow(row); const links = before.developmentLinks ?? [];
+    if (links.some(({ url }) => url === artifact.url)) return;
     const revision = Number(row.revision) + 1;
     await client.query(`UPDATE stash_tasks SET development_links=$2::jsonb, revision=$3,
       field_revisions=jsonb_set(field_revisions,'{developmentLinks}',to_jsonb($3::int),true) WHERE id=$1`,
-    [taskId, JSON.stringify([...links, { provider: "github", kind: signal.kind, url: signal.url }]), revision]);
+    [row.id, JSON.stringify([...links, { provider: "github", kind: artifact.kind, url: artifact.url }]), revision]);
+    const saved = await client.query<any>(taskPlanningSelectById, [row.id, actorId]);
+    const after = taskPlanningReadModelFromRow(saved.rows[0]);
+    await this.#recordPortableProjection(client, "Task", after.id, after.schema, taskProjectionFromRow(saved.rows[0]));
+    await this.#recordTaskActivity(client, actorId, after.workspaceId, after.id, action, before, after, cause);
   }
 
   async attachRepositoryConnectionToProject(actorId: string, organizationId: string, connectionId: string, projectId: string) {
@@ -2991,6 +3001,7 @@ export class PostgresDatabase implements
       CREATE TABLE IF NOT EXISTS stash_github_signals (
         id UUID PRIMARY KEY,
         delivery_id TEXT NOT NULL UNIQUE,
+        installation_id BIGINT NOT NULL CHECK (installation_id > 0),
         repository_id TEXT NOT NULL,
         kind TEXT NOT NULL CHECK (kind IN ('branch','commit','pull_request')),
         provider_id TEXT NOT NULL,
@@ -4057,16 +4068,16 @@ export class PostgresDatabase implements
   }
 
   async #recordTaskActivity(client: PoolClient, memberId: string, workspaceId: string, taskId: string,
-    action: string, before: TaskPlanningReadModel, after: TaskPlanningReadModel): Promise<ActivityRecord> {
+    action: string, before: TaskPlanningReadModel, after: TaskPlanningReadModel, cause: ActivityCause = { kind: "member" }): Promise<ActivityRecord> {
     const actor = await client.query<{ name: string }>("SELECT name FROM stash_accounts WHERE id=$1", [memberId]);
     if (!actor.rows[0]) throw new Error("member_identity_unavailable");
     const activity: ActivityRecord = { schema: "stash.activity.v1", id: randomUUID(), workspaceId,
       object: { kind: "Task", id: taskId }, action, actor: { localAccountId: memberId, displayName: actor.rows[0].name },
-      cause: { kind: "member" }, occurredAt: new Date().toISOString(), before: { ...before }, after: { ...after } };
+      cause, occurredAt: new Date().toISOString(), before: { ...before }, after: { ...after } };
     await client.query(`INSERT INTO stash_workspace_activity
       (id,workspace_id,object_kind,object_id,action,actor_account_id,cause,occurred_at,before_state,after_state)
-      VALUES ($1,$2,'Task',$3,$4,$5,'member',$6,$7::jsonb,$8::jsonb)`, [activity.id, workspaceId, taskId, action,
-      memberId, activity.occurredAt, JSON.stringify(before), JSON.stringify(after)]);
+      VALUES ($1,$2,'Task',$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb)`, [activity.id, workspaceId, taskId, action,
+      memberId, JSON.stringify(cause), activity.occurredAt, JSON.stringify(before), JSON.stringify(after)]);
     await this.#recordPortableProjection(client, "Activity", activity.id, activity.schema, activity);
     return activity;
   }
@@ -4219,7 +4230,7 @@ interface MemberLocalizationRow {
 }
 interface RepositoryConnectionRow { id: string; organization_id: string; provider: "github"; installation_id: string | number; repository_id: string; repository_url: string; created_by_account_id: string; created_by_attribution: "recorded" | "inferred-during-upgrade"; project_ids: string[] }
 function githubSignalFromRow(row: any): GitHubSignal {
-  return { id: row.id, deliveryId: row.delivery_id, repositoryId: row.repository_id, kind: row.kind,
+  return { id: row.id, deliveryId: row.delivery_id, installationId: Number(row.installation_id), repositoryId: row.repository_id, kind: row.kind,
     providerId: row.provider_id, url: row.url, label: row.label, occurredAt: new Date(row.occurred_at).toISOString() };
 }
 interface AttachmentRow { id: string; workspace_id: string; filename: string; content_type: string; byte_size: string | number; relative_path: string; storage_key: string; source: "upload" | "paste"; created_by_account_id: string; created_at: Date | string }

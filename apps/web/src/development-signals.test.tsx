@@ -36,6 +36,7 @@ describe("development Signals", () => {
       .mockResolvedValueOnce(Response.json({ signals: [] }));
     renderPage(fetcher);
     expect(await screen.findByRole("alert")).toHaveTextContent("Signals are temporarily unavailable.");
+    expect(screen.getByRole("alert")).toHaveFocus();
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(await screen.findByText("No development activity yet")).toBeVisible();
   });
