@@ -9,6 +9,7 @@ import {
   type SignalCandidate,
 } from "../src/github-signals.js";
 import { startInstance, type RunningInstance } from "../src/instance.js";
+import { AutomationService, type AutomationRepository, type AutomationState } from "../src/automations.js";
 
 const projectId = "11111111-1111-4111-8111-111111111111";
 const organizationId = "33333333-3333-4333-8333-333333333333";
@@ -54,6 +55,26 @@ class RepositoryFake implements GitHubSignalRepository {
   }
 }
 
+class AutomationFake implements AutomationRepository {
+  state: AutomationState = { recipes: [], transitions: [], availableStatuses: [{ id: "22222222-2222-4222-8222-222222222222", name: "In progress" }] };
+  async listAutomationState() { return structuredClone(this.state); }
+  async enableAutomation(_memberId: string, _projectId: string, trigger: "branch_created" | "pull_request_completed", targetStatusId: string) {
+    const recipe = this.state.recipes.find((value) => value.trigger === trigger) ?? { id: "33333333-3333-4333-8333-333333333333", trigger, targetStatus: { id: targetStatusId, name: "In progress" }, enabled: true };
+    if (!this.state.recipes.includes(recipe)) this.state.recipes.push(recipe);
+    return { status: "enabled" as const, recipe };
+  }
+  async reverseAutomation(_memberId: string, _projectId: string, _taskKey: string, transitionId: string) {
+    const transition = this.state.transitions.find((value) => value.id === transitionId); if (!transition) return "not_found" as const;
+    transition.reversedAt ??= new Date().toISOString(); return { status: "reversed" as const, transition };
+  }
+  async applySignalAutomations(signal: { id: string; trigger?: "branch_created" | "pull_request_completed" }, candidates: ReadonlyArray<{ status: "confirmed" | "pending_confirmation" }>) {
+    const recipe = this.state.recipes.find((value) => value.trigger === signal.trigger);
+    if (!recipe || !candidates.some(({ status }) => status === "confirmed") || this.state.transitions.some((value) => value.signalId === signal.id)) return;
+    this.state.transitions.push({ id: "44444444-4444-4444-8444-444444444444", automationId: recipe.id, signalId: signal.id,
+      before: { id: "66666666-6666-4666-8666-666666666666", name: "Ready" }, after: recipe.targetStatus, occurredAt: new Date().toISOString() });
+  }
+}
+
 function signature(body: string) {
   return `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`;
 }
@@ -64,16 +85,18 @@ describe("GitHub development Signals", () => {
 
   async function run() {
     const repository = new RepositoryFake();
+    const automationRepository = new AutomationFake(); const automations = new AutomationService(automationRepository);
     instance = await startInstance({
       database: { async verifyConnection() {}, async close() {} }, host: "127.0.0.1", port: 0, instanceAdminToken: "admin",
       memberAccess: { async authenticateBearer(value) { return value === "Bearer member" ? { accountId: "member", sessionId: "session" } : undefined; } },
-      githubSignals: new GitHubSignalService(repository, secret),
+      githubSignals: new GitHubSignalService(repository, secret, automations), automations,
     });
-    return { repository, baseUrl: instance.url };
+    return { repository, automationRepository, baseUrl: instance.url };
   }
 
   it("receives verified duplicate-safe activity and exposes a unique Task-key relation", async () => {
-    const { repository, baseUrl } = await run();
+    const { repository, automationRepository, baseUrl } = await run();
+    await fetch(`${baseUrl}/api/projects/${projectId}/automations`, { method: "POST", headers: { authorization: "Bearer member", "content-type": "application/json" }, body: JSON.stringify({ trigger: "branch_created", targetStatusId: "22222222-2222-4222-8222-222222222222" }) });
     const body = JSON.stringify({ ref: "refs/heads/STASH-36-signals", installation: { id: 42 }, repository: { id: 987, html_url: "https://github.com/acme/stash" }, after: "a".repeat(40), head_commit: { message: "Ship STASH-36" } });
     for (const _ of [1, 2]) {
       const response = await fetch(`${baseUrl}/api/github/webhooks`, { method: "POST", headers: { "content-type": "application/json", "x-github-event": "push", "x-github-delivery": "delivery-1", "x-hub-signature-256": signature(body) }, body });
@@ -88,13 +111,21 @@ describe("GitHub development Signals", () => {
 
     const branchBody = JSON.stringify({ ref_type: "branch", ref: "STASH-36-signals", installation: { id: 42 }, repository: { id: 987, html_url: "https://github.com/acme/stash" } });
     assert.equal((await fetch(`${baseUrl}/api/github/webhooks`, { method: "POST", headers: { "x-github-event": "create", "x-github-delivery": "delivery-branch", "x-hub-signature-256": signature(branchBody) }, body: branchBody })).status, 202);
+    assert.equal((await fetch(`${baseUrl}/api/github/webhooks`, { method: "POST", headers: { "x-github-event": "create", "x-github-delivery": "delivery-branch", "x-hub-signature-256": signature(branchBody) }, body: branchBody })).status, 202);
     const refreshed = await (await fetch(`${baseUrl}/api/projects/${projectId}/tasks/STASH-36/development-signals`, { headers: { authorization: "Bearer member" } })).json() as { signals: Array<{ signal: GitHubSignal }> };
     assert.deepEqual(refreshed.signals.map(({ signal }) => signal.kind).sort(), ["branch", "commit"]);
+    assert.equal(automationRepository.state.transitions.length, 1);
+    const automation = await (await fetch(`${baseUrl}/api/projects/${projectId}/tasks/STASH-36/automations`, { headers: { authorization: "Bearer member" } })).json() as { automation: AutomationState };
+    assert.equal(automation.automation.transitions[0]?.signalId, refreshed.signals.find(({ signal }) => signal.kind === "branch")?.signal.id);
+    const transitionId = automation.automation.transitions[0]!.id;
+    assert.equal((await fetch(`${baseUrl}/api/projects/${projectId}/tasks/STASH-36/automations/${transitionId}/reverse`, { method: "POST", headers: { authorization: "Bearer member" } })).status, 200);
+    assert.ok(automationRepository.state.transitions[0]?.reversedAt);
   });
 
   it("requires explicit confirmation when one textual key can identify multiple Tasks", async () => {
-    const { baseUrl } = await run();
-    const body = JSON.stringify({ action: "opened", installation: { id: 42 }, repository: { id: 987, html_url: "https://github.com/acme/stash" }, pull_request: { id: 42, number: 42, html_url: "https://github.com/acme/stash/pull/42", title: "OLD-1 shared work", body: "Touches both surfaces", merged: false } });
+    const { baseUrl, automationRepository } = await run();
+    await fetch(`${baseUrl}/api/projects/${projectId}/automations`, { method: "POST", headers: { authorization: "Bearer member", "content-type": "application/json" }, body: JSON.stringify({ trigger: "pull_request_completed", targetStatusId: "22222222-2222-4222-8222-222222222222" }) });
+    const body = JSON.stringify({ action: "closed", installation: { id: 42 }, repository: { id: 987, html_url: "https://github.com/acme/stash" }, pull_request: { id: 42, number: 42, html_url: "https://github.com/acme/stash/pull/42", title: "OLD-1 shared work", body: "Touches both surfaces", merged: true } });
     assert.equal((await fetch(`${baseUrl}/api/github/webhooks`, { method: "POST", headers: { "content-type": "application/json", "x-github-event": "pull_request", "x-github-delivery": "delivery-2", "x-hub-signature-256": signature(body) }, body })).status, 202);
     const list = await fetch(`${baseUrl}/api/projects/${projectId}/tasks/STASH-36/development-signals`, { headers: { authorization: "Bearer member" } });
     const result = await list.json() as { signals: Array<{ suggestions: SignalCandidate[] }> };
@@ -103,6 +134,7 @@ describe("GitHub development Signals", () => {
     const confirm = await fetch(`${baseUrl}/api/projects/${projectId}/tasks/STASH-36/development-signals/suggestions/${suggestion.id}/confirm`, { method: "POST", headers: { authorization: "Bearer member" } });
     assert.equal(confirm.status, 200);
     assert.equal(((await confirm.json()) as { suggestion: SignalCandidate }).suggestion.status, "confirmed");
+    assert.equal(automationRepository.state.transitions.length, 1);
   });
 
   it("rejects forged or invalid payloads and makes permissions and recoverable storage failures visible", async () => {

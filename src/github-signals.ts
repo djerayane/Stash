@@ -90,8 +90,10 @@ export class GitHubSignalService {
     if (result === "forbidden") throw new GitHubSignalWriteForbidden();
     if (result === "not_found") throw new GitHubSignalNotFound();
     const signals = await this.list(memberId, projectId, key);
-    const suggestion = signals.flatMap(({ suggestions }) => suggestions).find(({ id }) => id === suggestionId);
-    if (!suggestion) throw new GitHubSignalNotFound();
+    const entry = signals.find(({ suggestions }) => suggestions.some(({ id }) => id === suggestionId));
+    const suggestion = entry?.suggestions.find(({ id }) => id === suggestionId);
+    if (!entry || !suggestion) throw new GitHubSignalNotFound();
+    await this.automations?.applySignal(entry.signal, [suggestion]);
     return suggestion;
   }
 }
