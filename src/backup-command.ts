@@ -6,8 +6,11 @@ import { PostgresLocalInstanceBackupSource, PostgresLocalInstanceRestoreTarget }
 function required(name: string): string { const value = process.env[name]?.trim(); if (!value) throw new Error(`${name} must be configured`); return value; }
 
 async function main() {
-  const [operation, backupPath, flag] = process.argv.slice(2);
-  if (!operation || !backupPath || !["create", "verify", "restore"].includes(operation)) {
+  const arguments_ = process.argv.slice(2);
+  const [operation, backupPath, flag] = arguments_;
+  const valid = (operation === "create" || operation === "verify") && arguments_.length === 2
+    || operation === "restore" && (arguments_.length === 2 || arguments_.length === 3 && flag === "--dry-run");
+  if (!valid || !backupPath) {
     throw new Error("usage: stash-backup <create|verify|restore> <absolute-path> [--dry-run]");
   }
   const destination = resolve(backupPath);

@@ -111,6 +111,7 @@ export class InstanceBackupService {
       const attachmentRoot = childPath(temporary, "attachments");
       await mkdir(attachmentRoot, { recursive: true, mode: 0o700 });
       const attachments = await this.source.captureAttachments(attachmentRoot);
+      if (attachments.length === 0) await rm(attachmentRoot, { recursive: true });
       const seen = new Set<string>();
       for (const attachment of [...attachments].sort((left, right) => left.localeCompare(right))) {
         const path = `attachments/${safeRelativePath(attachment)}`;

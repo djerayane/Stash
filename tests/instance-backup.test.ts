@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
+import { spawnSync } from "node:child_process";
 
 import { InstanceBackupService, type InstanceBackupRestoreTarget, type InstanceBackupSource } from "../src/instance-backup.js";
 import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
@@ -12,6 +13,7 @@ const masterKey = Buffer.alloc(32, 7).toString("base64");
 
 class FakeSource implements InstanceBackupSource {
   fail: Error | undefined;
+  emptyAttachments = false;
   readonly calls: string[] = [];
   async captureDatabase(destination: string) {
     this.calls.push("database");
@@ -20,6 +22,7 @@ class FakeSource implements InstanceBackupSource {
   }
   async captureAttachments(destination: string) {
     this.calls.push("attachments");
+    if (this.emptyAttachments) return [];
     await mkdir(join(destination, "workspace"), { recursive: true });
     await writeFile(join(destination, "workspace", "attachment"), Buffer.from([0, 1, 2, 255]));
     return ["workspace/attachment"];
@@ -64,6 +67,34 @@ describe("coordinated Instance Backup", () => {
       const bytes = await readFile(join(root, "backup", file.path));
       assert.equal(file.bytes, bytes.length);
       assert.equal(file.sha256, createHash("sha256").update(bytes).digest("hex"));
+    }
+  });
+
+  it("creates, verifies, and restores an Instance with no Attachments", async () => {
+    const root = await mkdtemp(join(tmpdir(), "stash-backup-empty-"));
+    const source = new FakeSource(); source.emptyAttachments = true;
+    const path = join(root, "backup"); const service = new InstanceBackupService(source, { masterKey });
+    await service.create(path);
+    assert.deepEqual(await service.verify(path), { status: "verified", schema: "stash.instance-backup.v1", files: 2 });
+    const target = new FakeRestoreTarget();
+    target.prepareAttachments = async (sourcePath, paths) => { assert.match(sourcePath, /attachments$/); assert.deepEqual(paths, []); target.calls.push("prepare"); return "prepared"; };
+    assert.deepEqual(await service.restore(path, target, { dryRun: false }), { status: "restored" });
+    assert.deepEqual(target.calls, ["configuration", "prepare", "snapshot", "database", "commit", "discard"]);
+  });
+
+  it("rejects misspelled restore flags and surplus CLI arguments before reading configuration or restoring", () => {
+    const command = (arguments_: string[]) => spawnSync(process.execPath, ["--import", "tsx", "src/backup-command.ts", ...arguments_], {
+      cwd: process.cwd(), env: { PATH: process.env.PATH ?? "" }, encoding: "utf8",
+    });
+    for (const arguments_ of [
+      ["restore", "/tmp/backup", "--dry-rnu"],
+      ["restore", "/tmp/backup", "--dry-run", "extra"],
+      ["verify", "/tmp/backup", "extra"],
+    ]) {
+      const result = command(arguments_);
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /usage: stash-backup/);
+      assert.doesNotMatch(result.stderr, /DATABASE_URL|pg_restore/);
     }
   });
 
