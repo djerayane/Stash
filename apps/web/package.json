@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@gsap/react": "^2.1.2",
+    "@radix-ui/react-dialog": "^1.1.23",
     "@radix-ui/react-navigation-menu": "^1.2.14",
     "@stash/api-client": "workspace:*",
     "@stash/domain-types": "workspace:*",

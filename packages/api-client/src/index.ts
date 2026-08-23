@@ -1,6 +1,7 @@
 export interface StashApiClientOptions {
   readonly baseUrl: string;
   readonly fetch?: typeof globalThis.fetch;
+  readonly memberToken?: string;
 }
 
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -33,11 +34,23 @@ export function createStashApiClient(options: StashApiClientOptions) {
   const baseUrl = options.baseUrl.replace(/\/$/, "");
   return {
     async get<T>(path: string): Promise<T> {
-      const response = await request(`${baseUrl}${path}`, { credentials: "include" });
-      if (!response.ok) throw new StashApiError(response.status, `Stash request failed with ${response.status}`);
+      const response = await request(`${baseUrl}${path}`, { credentials: "include", ...(options.memberToken ? { headers: { authorization: `Bearer ${options.memberToken}` } } : {}) });
+      if (!response.ok) throw await apiError(response);
+      return response.json() as Promise<T>;
+    },
+    async post<T>(path: string, body?: unknown): Promise<T> {
+      const response = await request(`${baseUrl}${path}`, { method: "POST", credentials: "include",
+        headers: { ...(options.memberToken ? { authorization: `Bearer ${options.memberToken}` } : {}), ...(body === undefined ? {} : { "content-type": "application/json" }) },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+      if (!response.ok) throw await apiError(response);
       return response.json() as Promise<T>;
     },
   };
+}
+
+async function apiError(response: Response) {
+  const value = await response.json().catch(() => undefined) as { message?: unknown } | undefined;
+  return new StashApiError(response.status, typeof value?.message === "string" ? value.message : `Stash request failed with ${response.status}`);
 }
 
 export function createMobileProtocolClient(options: MobileProtocolClientOptions): MobileProtocolClient {

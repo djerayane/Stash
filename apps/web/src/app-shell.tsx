@@ -4,6 +4,7 @@ import gsap from "gsap";
 import { useEffect, useRef, type ReactNode } from "react";
 import { Link, Navigate, NavLink, Route, Routes, useLocation } from "react-router";
 import styles from "./app-shell.module.css";
+import { DevelopmentSignalsRoute } from "./development-signals";
 
 export type SessionState =
   | { readonly status: "loading" }
@@ -138,6 +139,7 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
           <Route path="/app/notes" element={<PlaceholderPage workspaceName={workspaceName} title="Notes" description="Ideas, decisions, and durable project knowledge." action="New note" actionTo="/app/notes/new" />} />
           <Route path="/app/notes/new" element={<PlaceholderPage workspaceName={workspaceName} title="New note" description="A focused editor will arrive in the rich-text migration slice." action="Save draft" />} />
           <Route path="/app/tasks" element={<PlaceholderPage workspaceName={workspaceName} title="Tasks" description="Actionable work connected to the thinking that shaped it." action="New task" />} />
+          <Route path="/app/projects/:projectId/tasks/:taskKey/development" element={<DevelopmentSignalsRoute />} />
           <Route path="/app/activity" element={<PlaceholderPage workspaceName={workspaceName} title="Activity" description="Meaningful changes, explained without unnecessary noise." action="Filter" />} />
           <Route path="*" element={<PlaceholderPage workspaceName={workspaceName} title="Not found" description="This Workspace route does not exist." action="Go home" actionTo="/app" />} />
         </Routes>

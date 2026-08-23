@@ -13,3 +13,14 @@ test("the primary shell has no automatically detectable accessibility violations
   const results = await new AxeBuilder({ page }).analyze();
   expect(results.violations).toEqual([]);
 });
+
+test("the development Signal confirmation flow has no detectable accessibility violations @a11y", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("stash.member-session", JSON.stringify({ token: "browser-acceptance-member-token" })));
+  const projectId = "11111111-1111-4111-8111-111111111111";
+  await page.route("**/development-signals", (route) => route.fulfill({ json: { signals: [{ signal: { id: "signal-1", kind: "pull_request", url: "https://github.com/acme/stash/pull/42", label: "#42 Shared work", occurredAt: "2026-08-23T08:00:00.000Z" }, suggestions: [{ id: "22222222-2222-4222-8222-222222222222", taskKey: "STASH-36", taskTitle: "Receive GitHub development Signals", matchedKey: "OLD-1", status: "pending_confirmation" }] }] } }));
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto(`/app/projects/${projectId}/tasks/STASH-36/development`);
+  await page.getByRole("button", { name: "Review match" }).click();
+  await expect(page.getByRole("dialog", { name: "Confirm Task relationship" })).toBeVisible();
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+});

@@ -1,0 +1,36 @@
+.page { width: min(100%, 76rem); margin: 0 auto; padding: clamp(2.5rem, 7vw, 6rem) clamp(1.25rem, 4vw, 4rem); }
+.header { display: flex; align-items: end; justify-content: space-between; gap: var(--stash-space-8); padding-bottom: clamp(3rem, 8vw, 6rem); border-bottom: 1px solid var(--stash-border-subtle); }
+.header h1 { max-width: 72rem; margin: 0; font: 480 clamp(2.4rem, 5vw, 5.2rem)/.98 var(--stash-font-display); letter-spacing: -.055em; text-wrap: balance; }
+.header p:not(.eyebrow) { max-width: 46rem; margin: var(--stash-space-4) 0 0; color: var(--stash-color-muted); line-height: 1.6; }
+.eyebrow, .kind { margin: 0 0 var(--stash-space-3); color: var(--stash-color-accent); font-size: .72rem; font-weight: 750; letter-spacing: .1em; text-transform: uppercase; }
+.backLink { flex: none; color: var(--stash-color-ink); font-size: .82rem; font-weight: 700; text-underline-offset: .35em; }
+.grid { display: grid; grid-auto-flow: dense; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 0; margin-top: clamp(3rem, 8vw, 7rem); border: 1px solid var(--stash-border-subtle); }
+.signal { grid-column: span 12; padding: clamp(1.5rem, 4vw, 3rem); background: var(--stash-color-surface); border-bottom: 1px solid var(--stash-border-subtle); }
+.signal:last-child { border-bottom: 0; }
+.signalHeading { display: flex; justify-content: space-between; gap: 1rem; }
+.signalHeading time { color: var(--stash-color-faint); font-size: .75rem; }
+.signal h2 { margin: var(--stash-space-3) 0 var(--stash-space-8); font: 500 clamp(1.5rem, 3vw, 2.6rem)/1.08 var(--stash-font-display); letter-spacing: -.035em; }
+.signal h2 a { color: inherit; text-decoration-thickness: 1px; text-underline-offset: .22em; }
+.relations { display: grid; gap: 1px; background: var(--stash-border-subtle); }
+.relation { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--stash-space-6); padding: var(--stash-space-4); background: var(--stash-color-canvas); }
+.relation div { display: grid; gap: .2rem; }
+.relation span, .relation small { color: var(--stash-color-muted); }
+.relation small { font-size: .72rem; }
+.confirmed { color: var(--stash-color-accent) !important; font-size: .75rem; font-weight: 750; }
+.relation button, .actions button, .error button { min-height: 2.6rem; padding: .65rem 1rem; color: var(--stash-color-accent-contrast); background: var(--stash-color-accent); border: 1px solid var(--stash-color-accent); border-radius: var(--stash-radius-sm); font: 700 .8rem var(--stash-font-sans); cursor: pointer; }
+.loading, .error, .empty { margin-top: clamp(3rem, 8vw, 7rem); padding: clamp(2rem, 5vw, 4rem); background: var(--stash-color-surface); border: 1px solid var(--stash-border-subtle); }
+.error { border-left: 3px solid var(--stash-color-error); }
+.error p, .empty p { max-width: 38rem; color: var(--stash-color-muted); line-height: 1.6; }
+.empty span { display: block; width: 4rem; height: 2px; margin-bottom: var(--stash-space-8); background: var(--stash-color-accent); }
+.empty h2 { margin: 0; font: 500 clamp(1.8rem, 3vw, 3rem)/1.05 var(--stash-font-display); letter-spacing: -.04em; }
+.backdrop { position: fixed; z-index: 40; inset: 0; background: color-mix(in srgb, var(--stash-color-sidebar) 58%, transparent); }
+.dialog { position: fixed; z-index: 41; inset: 0 0 0 auto; width: min(100%, 34rem); padding: clamp(2rem, 5vw, 3.5rem); color: var(--stash-color-ink); background: var(--stash-color-canvas); box-shadow: -1rem 0 4rem rgb(0 0 0 / .18); outline: none; }
+.dialog h2 { margin: 0; font: 500 clamp(2rem, 4vw, 3.5rem)/1 var(--stash-font-display); letter-spacing: -.045em; }
+.dialog > p:not(.eyebrow) { margin: var(--stash-space-6) 0; color: var(--stash-color-muted); line-height: 1.65; }
+.actions { display: flex; justify-content: end; gap: var(--stash-space-3); margin-top: var(--stash-space-8); }
+.actions .secondary { color: var(--stash-color-ink); background: transparent; border-color: var(--stash-border-strong); }
+.inlineError { padding: var(--stash-space-3); color: var(--stash-color-error) !important; background: var(--stash-color-error-soft); }
+button:focus-visible, a:focus-visible, .dialog:focus-visible { outline: 3px solid var(--stash-color-focus); outline-offset: 3px; }
+button:disabled { opacity: .6; cursor: wait; }
+@media (max-width: 760px) { .header { align-items: start; flex-direction: column; } .relation { grid-template-columns: 1fr; } .relation button { justify-self: start; } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition-duration: .01ms !important; } }

@@ -37,6 +37,7 @@ services:
       EMAIL_RECOVERY_FROM: ${EMAIL_RECOVERY_FROM:-}
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
       GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
       ATTACHMENT_STORAGE_PATH: /var/lib/stash/attachments
       INSTANCE_BACKUP_PATH: /var/lib/stash/backups
       HOST: 0.0.0.0

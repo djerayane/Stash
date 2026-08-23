@@ -53,6 +53,7 @@ The application fails at startup with a clear error when required configuration 
 | `EMAIL_RECOVERY_FROM` | no | Sender address for recovery messages; must be configured with `SMTP_URL` |
 | `GITHUB_APP_ID` | no | Numeric ID of the Instance-owned GitHub App; must be configured with `GITHUB_APP_PRIVATE_KEY` |
 | `GITHUB_APP_PRIVATE_KEY` | no | PEM private key for the Instance-owned GitHub App; keep it outside PostgreSQL and configure it with `GITHUB_APP_ID` |
+| `GITHUB_WEBHOOK_SECRET` | no | Shared secret used to verify GitHub webhook deliveries before development Signals are accepted |
 | `INSTANCE_BACKUP_PATH` | no | Operator-owned directory for backups created through the protected Instance administration API |
 
 Never commit production secrets or include them in a Portable Workspace Export.

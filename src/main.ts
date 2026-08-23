@@ -28,6 +28,7 @@ import { BoardService } from "./boards.js";
 import { NoteLinkService } from "./note-links.js";
 import { ActivityService } from "./activity.js";
 import { GitHubArtifactService } from "./github-artifacts.js";
+import { GitHubSignalService } from "./github-signals.js";
 import { fileURLToPath } from "node:url";
 import { InstanceBackupService } from "./instance-backup.js";
 import { PostgresLocalInstanceBackupSource } from "./instance-backup-system.js";
@@ -62,6 +63,7 @@ async function main(): Promise<void> {
   const githubAppPrivateKey = process.env.GITHUB_APP_PRIVATE_KEY?.replace(/\\n/g, "\n").trim();
   if (Boolean(githubAppId) !== Boolean(githubAppPrivateKey)) throw new Error("GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY must be configured together");
   const githubApp = githubAppId && githubAppPrivateKey ? new GitHubAppClient(githubAppId, githubAppPrivateKey) : undefined;
+  const githubWebhookSecret = process.env.GITHUB_WEBHOOK_SECRET?.trim();
   const publicOrigin = requiredEnvironment("PUBLIC_ORIGIN");
   const instanceBackups = new InstanceBackupService(new PostgresLocalInstanceBackupSource({
     databaseUrl: requiredEnvironment("DATABASE_URL"), attachmentRoot: attachmentStoragePath, publicOrigin,
@@ -86,6 +88,7 @@ async function main(): Promise<void> {
     invitations: new InvitationService(database),
     ...(githubApp ? { repositoryConnections: new RepositoryConnectionService(database, githubApp) } : {}),
     ...(githubApp ? { githubArtifacts: new GitHubArtifactService(database, githubApp) } : {}),
+    ...(githubWebhookSecret ? { githubSignals: new GitHubSignalService(database, githubWebhookSecret) } : {}),
     notes: new NoteService(database),
     noteLinks: new NoteLinkService(database),
     tasks: new TaskService(database, database),
