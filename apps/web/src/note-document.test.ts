@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { markdownToRichText, proseMirrorToRichText } from "@stash/rich-text";
 import { markdownFromTiptap, toTiptap } from "./note-document";
 
 describe("Note Markdown round trips", () => {
@@ -24,5 +25,25 @@ describe("Note Markdown round trips", () => {
       { type: "callout", attrs: { kind: "note" }, content: [{ type: "paragraph", content: [{ type: "text", text: "Keep this context" }] }] },
       { type: "workspaceAttachment", attrs: { href: "./attachments/attachment-id/design.pdf", label: "design.pdf" } },
     ] })).toBe("> [!NOTE]\n> Keep this context\n\n[design.pdf](<./attachments/attachment-id/design.pdf>)");
+  });
+
+  it("round-trips nested lists and grouped callout paragraphs without losing linked identities", () => {
+    const source = { type: "doc" as const, content: [
+      { type: "taskList", content: [{ type: "taskItem", attrs: { checked: true, blockId: "11111111-1111-4111-8111-111111111111" }, content: [
+        { type: "paragraph", content: [{ type: "text", text: "Parent" }] },
+        { type: "bulletList", content: [{ type: "listItem", attrs: { blockId: "22222222-2222-4222-8222-222222222222" }, content: [
+          { type: "paragraph", content: [{ type: "text", text: "Nested" }] },
+        ] }] },
+      ] }] },
+      { type: "callout", attrs: { kind: "warning", blockId: "33333333-3333-4333-8333-333333333333" }, content: [
+        { type: "paragraph", attrs: { blockId: "44444444-4444-4444-8444-444444444444" }, content: [{ type: "text", text: "First paragraph" }] },
+        { type: "paragraph", attrs: { blockId: "55555555-5555-4555-8555-555555555555" }, content: [{ type: "text", text: "Second paragraph" }] },
+      ] },
+    ] };
+    const canonical = proseMirrorToRichText(source);
+    const markdown = markdownFromTiptap(source);
+    expect(markdown).toContain("  - Nested");
+    expect(markdown).toContain(">\n> Second paragraph");
+    expect(markdownToRichText(markdown)).toEqual(canonical);
   });
 });

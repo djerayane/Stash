@@ -1,6 +1,6 @@
-import type { RichTextBlock, RichTextSpan, RichTextTableCell } from "@stash/domain-types";
+import type { RichTextBlock, RichTextList, RichTextSpan, RichTextTableCell } from "@stash/domain-types";
 
-export type { RichTextBlock, RichTextMark, RichTextSpan, RichTextTableCell } from "@stash/domain-types";
+export type { RichTextBlock, RichTextCalloutParagraph, RichTextList, RichTextListItem, RichTextMark, RichTextSpan, RichTextTableCell } from "@stash/domain-types";
 
 export interface RichTextDocument { type: "doc"; blocks: RichTextBlock[] }
 
@@ -30,23 +30,32 @@ export function isRichTextDocument(value: unknown): value is RichTextDocument {
     || !Object.keys(value).every((key) => ["type", "blocks"].includes(key))) return false;
   const identifiers = new Set<string>();
   const blockKeys = new Set<string>();
+  const validIdentity = (value: Record<string, unknown>): boolean => {
+    if (value.blockKey !== undefined && (typeof value.blockKey !== "string" || !uuid.test(value.blockKey) || blockKeys.has(value.blockKey))) return false;
+    if (typeof value.blockKey === "string") blockKeys.add(value.blockKey);
+    if (value.id !== undefined && (typeof value.id !== "string" || !uuid.test(value.id) || identifiers.has(value.id))) return false;
+    if (typeof value.id === "string") identifiers.add(value.id);
+    return true;
+  };
+  const validList = (list: unknown): list is RichTextList => plainObject(list) && ["bullet", "check"].includes(String(list.type))
+    && Array.isArray(list.items) && list.items.length > 0 && list.items.every((item) => plainObject(item) && validIdentity(item)
+      && validContent(item.content) && (list.type !== "check" || typeof item.checked === "boolean")
+      && (item.children === undefined || Array.isArray(item.children) && item.children.every(validList))
+      && Object.keys(item).every((key) => ["blockKey", "id", "content", "checked", "children"].includes(key)))
+    && Object.keys(list).every((key) => ["type", "items"].includes(key));
   return value.blocks.every((block) => {
     if (!plainObject(block) || typeof block.type !== "string") return false;
-    if (block.blockKey !== undefined && (typeof block.blockKey !== "string" || !uuid.test(block.blockKey)
-      || blockKeys.has(block.blockKey))) return false;
-    if (typeof block.blockKey === "string") blockKeys.add(block.blockKey);
-    if (block.id !== undefined && (typeof block.id !== "string" || !uuid.test(block.id)
-      || identifiers.has(block.id))) return false;
-    if (typeof block.id === "string") identifiers.add(block.id);
+    if (!validIdentity(block)) return false;
     if (block.type === "code") {
       return typeof block.text === "string"
         && (block.language === undefined || (typeof block.language === "string" && safeCodeLanguage.test(block.language)))
         && (block.blockKey === undefined || typeof block.blockKey === "string" && uuid.test(block.blockKey))
         && Object.keys(block).every((key) => ["type", "blockKey", "id", "text", "language"].includes(key));
     }
-    if (block.type === "callout") return ["note", "tip", "warning"].includes(String(block.kind)) && validContent(block.content)
-      && (block.blockKey === undefined || typeof block.blockKey === "string" && uuid.test(block.blockKey))
-      && Object.keys(block).every((key) => ["type", "kind", "blockKey", "id", "content"].includes(key));
+    if (block.type === "callout") return ["note", "tip", "warning"].includes(String(block.kind)) && Array.isArray(block.paragraphs)
+      && block.paragraphs.length > 0 && block.paragraphs.every((paragraph) => plainObject(paragraph) && validIdentity(paragraph)
+        && validContent(paragraph.content) && Object.keys(paragraph).every((key) => ["blockKey", "id", "content"].includes(key)))
+      && Object.keys(block).every((key) => ["type", "kind", "blockKey", "id", "paragraphs"].includes(key));
     if (block.type === "attachment") return typeof block.href === "string" && /^\.\/attachments\/[^\s<>]+$/.test(block.href)
       && typeof block.label === "string" && block.label.length > 0
       && (block.blockKey === undefined || typeof block.blockKey === "string" && uuid.test(block.blockKey))
@@ -65,9 +74,12 @@ export function isRichTextDocument(value: unknown): value is RichTextDocument {
       || !validContent(block.content)) return false;
     if (block.type === "heading" && ![1, 2, 3].includes(Number(block.level))) return false;
     if (block.type === "check" && typeof block.checked !== "boolean") return false;
+    if ((block.type === "bullet" || block.type === "check") && block.children !== undefined
+      && (!Array.isArray(block.children) || !block.children.every(validList))) return false;
     if (block.blockKey !== undefined && (typeof block.blockKey !== "string" || !uuid.test(block.blockKey))) return false;
     const allowed = block.type === "heading" ? ["type", "blockKey", "id", "level", "content"]
-      : block.type === "check" ? ["type", "blockKey", "id", "checked", "content"] : ["type", "blockKey", "id", "content"];
+      : block.type === "check" ? ["type", "blockKey", "id", "checked", "content", "children"]
+      : block.type === "bullet" ? ["type", "blockKey", "id", "content", "children"] : ["type", "blockKey", "id", "content"];
     return Object.keys(block).every((key) => allowed.includes(key));
   });
 }
@@ -92,6 +104,13 @@ function renderSpan(span: RichTextSpan): string {
 }
 
 export function richTextToMarkdown(document: RichTextDocument): string {
+  const renderList = (type: "bullet" | "check", items: Array<{ content: RichTextSpan[]; checked?: boolean; id?: string; children?: RichTextList[] }>, depth = 0): string =>
+    items.flatMap((item) => {
+      const prefix = type === "check" ? `- [${item.checked ? "x" : " "}] ` : "- ";
+      const line = `${"  ".repeat(depth)}${prefix}${item.content.map(renderSpan).join("")}`;
+      const identity = item.id ? `${"  ".repeat(depth + 1)}<!-- stash-block:${item.id} -->` : undefined;
+      return [line, ...(identity ? [identity] : []), ...(item.children ?? []).flatMap((child) => renderList(child.type, child.items, depth + 1).split("\n"))];
+    }).join("\n");
   return document.blocks.map((block) => {
     const identity = block.id ? `\n<!-- stash-block:${block.id} -->` : "";
     if (block.type === "code") {
@@ -99,7 +118,8 @@ export function richTextToMarkdown(document: RichTextDocument): string {
       const fence = "`".repeat(Math.max(3, longestRun + 1));
       return `${fence}${block.language ?? ""}\n${block.text}\n${fence}${identity}`;
     }
-    if (block.type === "callout") return `> [!${block.kind.toUpperCase()}]\n${block.content.map(renderSpan).join("").split("\n").map((line) => `> ${line}`).join("\n")}${identity}`;
+    if (block.type === "callout") return `> [!${block.kind.toUpperCase()}]\n${block.paragraphs.map((paragraph) =>
+      `> ${paragraph.content.map(renderSpan).join("")}${paragraph.id ? `\n> <!-- stash-block:${paragraph.id} -->` : ""}`).join("\n>\n")}${identity}`;
     if (block.type === "attachment") return `[${escapeMarkdownText(block.label)}](<${block.href}>)${identity}`;
     if (block.type === "image") return `![${escapeMarkdownText(block.alt)}](<${block.src}>${block.title ? ` \"${block.title.replaceAll('"', '\\"')}\"` : ""})${identity}`;
     if (block.type === "table") {
@@ -108,11 +128,12 @@ export function richTextToMarkdown(document: RichTextDocument): string {
       rows.splice(1, 0, `| ${block.rows[0]!.map(() => "---").join(" | ")} |`);
       return `${rows.join("\n")}${identity}`;
     }
+    if (block.type === "bullet") return renderList(block.type, [block]);
+    if (block.type === "check") return renderList(block.type, [block]);
     const content = block.content.map(renderSpan).join("");
     const markdown = block.type === "heading" ? `${"#".repeat(block.level)} ${content}`
       : block.type === "quote" ? `> ${content}`
-      : block.type === "bullet" ? `- ${content}`
-      : block.type === "check" ? `- [${block.checked ? "x" : " "}] ${content}` : content;
+      : content;
     return markdown + identity;
   }).join("\n\n");
 }
@@ -161,9 +182,12 @@ export function markdownToRichText(markdown: string): RichTextDocument {
     const id = identity?.[1];
     const code = chunk.match(/^(`{3,})([a-z0-9_+.-]*)\n([\s\S]*)\n\1$/i);
     if (code) { blocks.push({ type: "code", text: code[3]!, ...(code[2] ? { language: code[2] } : {}), ...(id ? { id } : {}) }); continue; }
-    const callout = chunk.match(/^> \[!(NOTE|TIP|WARNING)\]\n((?:> ?.*(?:\n|$))+)/i);
-    if (callout) { blocks.push({ type: "callout", kind: callout[1]!.toLowerCase() as "note" | "tip" | "warning",
-      content: parseInline(callout[2]!.replace(/^> ?/gm, "").trimEnd()), ...(id ? { id } : {}) }); continue; }
+    const callout = chunk.match(/^> \[!(NOTE|TIP|WARNING)\]\n([\s\S]+)$/i);
+    if (callout) { const paragraphs = callout[2]!.split(/\n>\s*\n/).map((source) => {
+      const lines = source.split("\n").map((line) => line.replace(/^> ?/, ""));
+      const marker = lines.at(-1)?.match(/^<!-- stash-block:([0-9a-f-]+) -->$/i); if (marker) lines.pop();
+      return { content: parseInline(lines.join("\n").trimEnd()), ...(marker ? { id: marker[1] } : {}) };
+    }); blocks.push({ type: "callout", kind: callout[1]!.toLowerCase() as "note" | "tip" | "warning", paragraphs, ...(id ? { id } : {}) }); continue; }
     const attachment = chunk.match(/^\[([^\]]+)\]\(<(\.\/attachments\/[^\s<>]+)>\)$/);
     if (attachment) { blocks.push({ type: "attachment", label: attachment[1]!, href: attachment[2]!, ...(id ? { id } : {}) }); continue; }
     const image = chunk.match(/^!\[([^\]]*)\]\(<([^>]+)>(?: "((?:\\"|[^"])*)")?\)$/);
@@ -175,6 +199,29 @@ export function markdownToRichText(markdown: string): RichTextDocument {
       const rows = [tableLines[0]!, ...tableLines.slice(2)].map((line, row) => cells(line).map((content) => ({ header: row === 0, content })));
       if (!rows.length || rows.some((row) => row.length !== rows[0]!.length)) throw new UnsupportedMarkdown("Malformed table");
       blocks.push({ type: "table", rows, ...(id ? { id } : {}) }); continue;
+    }
+    if (/^- (?:\[[ x]\] )?/.test(chunk)) {
+      const lines = chunk.split("\n");
+      const parseList = (start: number, depth: number, type: "bullet" | "check"): { list: RichTextList; next: number } => {
+        const items: RichTextList["items"] = []; let cursor = start;
+        while (cursor < lines.length) {
+          const match = lines[cursor]!.match(/^( *)(- )(?:\[([ x])\] )?(.*)$/); if (!match) { cursor += 1; continue; }
+          const lineDepth = match[1]!.length / 2; if (lineDepth < depth) break; if (lineDepth > depth) { cursor += 1; continue; }
+          const lineType = match[3] === undefined ? "bullet" : "check"; if (lineType !== type) break;
+          const item: RichTextList["items"][number] = { content: parseInline(match[4]!), ...(type === "check" ? { checked: match[3] === "x" } : {}) };
+          cursor += 1;
+          const identity = lines[cursor]?.match(new RegExp(`^ {${(depth + 1) * 2}}<!-- stash-block:([0-9a-f-]+) -->$`, "i"));
+          if (identity?.[1]) { item.id = identity[1]; cursor += 1; }
+          const children: RichTextList[] = [];
+          while (cursor < lines.length) { const child = lines[cursor]!.match(/^( *)(- )(?:\[([ x])\] )?/); if (!child || child[1]!.length / 2 !== depth + 1) break;
+            const childType = child[3] === undefined ? "bullet" : "check"; const parsed = parseList(cursor, depth + 1, childType); children.push(parsed.list); cursor = parsed.next; }
+          if (children.length) item.children = children; items.push(item);
+        }
+        return { list: { type, items }, next: cursor };
+      };
+      const type = /^- \[[ x]\] /.test(lines[0]!) ? "check" : "bullet"; const parsed = parseList(0, 0, type);
+      for (const [itemIndex, item] of parsed.list.items.entries()) blocks.push({ type, ...item, ...(itemIndex === 0 && id ? { id } : {}) } as RichTextBlock);
+      continue;
     }
     let type: "paragraph" | "quote" | "bullet" | "heading" | "check" = "paragraph";
     let level: 1 | 2 | 3 | undefined; let checked = false;

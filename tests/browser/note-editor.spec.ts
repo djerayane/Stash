@@ -57,20 +57,36 @@ test("preserves every checklist item and callout paragraph with stable identitie
   await page.keyboard.type("First acceptance item"); await page.keyboard.press("Enter"); await page.keyboard.type("Second acceptance item");
   await page.keyboard.press("Enter"); await page.keyboard.type("Nested acceptance item"); await page.keyboard.press("Tab");
   await expect(editor.locator("li li").filter({ hasText: "Nested acceptance item" })).toBeVisible();
-  await page.keyboard.press("ControlOrMeta+End"); await page.keyboard.press("Enter");
+  await persisted; await expect(page.getByRole("status")).toHaveText("All changes saved");
+  await page.keyboard.press("ControlOrMeta+End"); await page.keyboard.press("Enter"); await page.keyboard.press("Enter"); await page.keyboard.press("Enter");
+  const calloutPersisted = page.waitForResponse((response) => response.request().method() === "POST" && response.url().includes(`/api/notes/${richNoteId}/collaboration`));
   await page.getByRole("button", { name: "Insert callout" }).click();
   await page.keyboard.press("End"); await page.keyboard.press("Enter"); await page.keyboard.type("Second callout paragraph");
-  await persisted; await expect(page.getByRole("status")).toHaveText("All changes saved");
+  await calloutPersisted; await expect(page.getByRole("status")).toHaveText("All changes saved");
+  const finalPersisted = page.waitForResponse((response) => response.request().method() === "POST" && response.url().includes(`/api/notes/${richNoteId}/collaboration`));
+  await page.keyboard.type("."); await finalPersisted; await expect(page.getByRole("status")).toHaveText("All changes saved");
   const authoredItems = editor.locator("li[data-block-key]").filter({ hasText: /First acceptance item|Second acceptance item|Nested acceptance item/ });
   const itemKeys = await authoredItems.evaluateAll((items) => items.map((item) => item.getAttribute("data-block-key")));
   expect(itemKeys).toHaveLength(3); expect(new Set(itemKeys).size).toBe(3);
   const calloutParagraphKeys = await editor.locator("[data-callout] p[data-block-key]").evaluateAll((items) => items.map((item) => item.getAttribute("data-block-key")));
   expect(calloutParagraphKeys).toHaveLength(2); expect(new Set(calloutParagraphKeys).size).toBe(2);
+  await expect.poll(() => page.evaluate(async (id) => (await fetch(`/api/notes/${id}`, { headers: { authorization: "Bearer browser-acceptance-member-token" } })).json()
+    .then((note: { content: string }) => note.content), richNoteId)).toContain("Second callout paragraph.");
+  const canonical = await page.evaluate(async (id) => (await fetch(`/api/notes/${id}`, { headers: { authorization: "Bearer browser-acceptance-member-token" } })).json(), richNoteId) as {
+    content: string; document: { blocks: Array<{ type: string; children?: unknown[]; paragraphs?: unknown[] }> };
+  };
   await page.reload();
   await expect(page.getByRole("textbox", { name: "Note content" })).toContainText("First acceptance item");
   await expect(page.getByRole("textbox", { name: "Note content" })).toContainText("Second acceptance item");
   await expect(page.getByRole("textbox", { name: "Note content" }).locator("li li").filter({ hasText: "Nested acceptance item" })).toBeVisible();
   await expect(page.getByRole("textbox", { name: "Note content" })).toContainText("Second callout paragraph");
+  const restoredCallout = page.getByRole("textbox", { name: "Note content" }).locator("[data-callout]");
+  await expect(restoredCallout.locator("p")).toHaveCount(2);
+  expect(await restoredCallout.locator("p").evaluateAll((items) => items.map((item) => item.getAttribute("data-block-key")))).toEqual(calloutParagraphKeys);
+  expect(canonical.content).toContain("  - [ ] Nested acceptance item");
+  expect(canonical.content).toContain(">\n> Second callout paragraph");
+  expect(canonical.document.blocks.find((block) => block.type === "check" && block.children?.length)?.children).toHaveLength(1);
+  expect(canonical.document.blocks.find((block) => block.type === "callout")?.paragraphs).toHaveLength(2);
 });
 
 test("persists an empty code block as a normal editing state", async ({ page }) => {

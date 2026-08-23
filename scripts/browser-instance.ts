@@ -3,7 +3,8 @@ import { fileURLToPath } from "node:url";
 import { startInstance } from "../src/instance.js";
 import { NoteCollaborationService, type CollaborationSnapshot } from "../src/note-collaboration.js";
 import * as Y from "yjs";
-import { collaborativeDocumentFromRichText } from "../src/postgres-database.js";
+import { collaborativeDocumentFromRichText, richTextFromCollaborativeDocument } from "../src/postgres-database.js";
+import { richTextToMarkdown } from "../src/rich-text.js";
 
 const noteId = "99999999-9999-4999-8999-999999999999";
 const secondNoteId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -65,6 +66,11 @@ const instance = await startInstance({
     },
   },
   notes: { async get(memberId: string, requestedNoteId: string) { if (!["browser-member", "browser-second-member", "browser-guest"].includes(memberId) || !collaborations.has(requestedNoteId)) return undefined;
+    if (requestedNoteId === richNoteId) { const current = new Y.Doc(); Y.applyUpdate(current, collaborations.get(requestedNoteId)!.update);
+      const document = richTextFromCollaborativeDocument(current); current.destroy(); return {
+        id: requestedNoteId, workspaceId: "88888888-8888-4888-8888-888888888888", content: richTextToMarkdown(document), revision: collaborations.get(requestedNoteId)!.sequence + 1,
+        document, tags: [], createdByMemberId: memberId, createdAt: new Date(0).toISOString(),
+      }; }
     const second = requestedNoteId === secondNoteId; const emptyCode = requestedNoteId === emptyCodeNoteId; return {
     id: requestedNoteId, workspaceId: "88888888-8888-4888-8888-888888888888", content: second ? "Stale canonical second Note" : emptyCode ? "Clear this content" : "Release collaboration plan", revision: 1,
     document: { type: "doc", blocks: [{ type: "paragraph", blockKey: second ? "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" : emptyCode ? "ffffffff-ffff-4fff-8fff-ffffffffffff" : "77777777-7777-4777-8777-777777777777",

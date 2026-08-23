@@ -14,12 +14,16 @@ export interface ProjectSummary {
 export type RichTextMark = "bold" | "italic" | "code";
 export interface RichTextSpan { text: string; marks?: RichTextMark[]; href?: string }
 export interface RichTextTableCell { header: boolean; content: RichTextSpan[] }
+export interface RichTextListItem { blockKey?: string; id?: string; content: RichTextSpan[]; checked?: boolean; children?: RichTextList[] }
+export interface RichTextList { type: "bullet" | "check"; items: RichTextListItem[] }
+export interface RichTextCalloutParagraph { blockKey?: string; id?: string; content: RichTextSpan[] }
 export type RichTextBlock =
-  | { type: "paragraph" | "quote" | "bullet"; blockKey?: string; id?: string; content: RichTextSpan[] }
+  | { type: "paragraph" | "quote"; blockKey?: string; id?: string; content: RichTextSpan[] }
+  | { type: "bullet"; blockKey?: string; id?: string; content: RichTextSpan[]; children?: RichTextList[] }
+  | { type: "check"; blockKey?: string; id?: string; content: RichTextSpan[]; checked: boolean; children?: RichTextList[] }
   | { type: "heading"; level: 1 | 2 | 3; blockKey?: string; id?: string; content: RichTextSpan[] }
-  | { type: "check"; checked: boolean; blockKey?: string; id?: string; content: RichTextSpan[] }
   | { type: "code"; language?: string; blockKey?: string; id?: string; text: string }
-  | { type: "callout"; kind: "note" | "tip" | "warning"; blockKey?: string; id?: string; content: RichTextSpan[] }
+  | { type: "callout"; kind: "note" | "tip" | "warning"; blockKey?: string; id?: string; paragraphs: RichTextCalloutParagraph[] }
   | { type: "attachment"; href: string; label: string; blockKey?: string; id?: string }
   | { type: "image"; src: string; alt: string; title?: string; blockKey?: string; id?: string }
   | { type: "table"; rows: RichTextTableCell[][]; blockKey?: string; id?: string };

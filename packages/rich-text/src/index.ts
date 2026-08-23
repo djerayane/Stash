@@ -1,4 +1,4 @@
-import type { RichTextBlock, RichTextSpan } from "@stash/domain-types";
+import type { RichTextBlock, RichTextList, RichTextListItem, RichTextSpan } from "@stash/domain-types";
 import { richTextToMarkdown } from "./domain.js";
 
 export * from "./domain.js";
@@ -18,14 +18,19 @@ const inline = (spans: RichTextSpan[]): ProseMirrorNode[] => spans.map((span) =>
     ...(span.href ? [{ type: "link", attrs: { href: span.href } }] : [])] } : {}) }));
 
 export function richTextToProseMirror(document: RichTextDocument, createBlockKey?: () => string): ProseMirrorNode {
+  const list = (source: RichTextList): ProseMirrorNode => ({ type: source.type === "check" ? "taskList" : "bulletList",
+    content: source.items.map((item) => ({ type: source.type === "check" ? "taskItem" : "listItem",
+      attrs: { blockKey: item.blockKey ?? createBlockKey?.() ?? null, blockId: item.id ?? null, ...(source.type === "check" ? { checked: item.checked ?? false } : {}) },
+      content: [{ type: "paragraph", content: inline(item.content) }, ...(item.children ?? []).map(list)] })) });
   return { type: "doc", content: document.blocks.map((block) => {
     const attrs = { blockKey: block.blockKey ?? createBlockKey?.() ?? null, blockId: block.id ?? null };
     if (block.type === "heading") return { type: "heading", attrs: { ...attrs, level: block.level }, content: inline(block.content) };
     if (block.type === "code") return { type: "codeBlock", attrs: { ...attrs, language: block.language ?? null }, content: text(block.text) };
     if (block.type === "quote") return { type: "blockquote", attrs, content: [{ type: "paragraph", attrs, content: inline(block.content) }] };
-    if (block.type === "bullet") return { type: "bulletList", content: [{ type: "listItem", attrs, content: [{ type: "paragraph", content: inline(block.content) }] }] };
-    if (block.type === "check") return { type: "taskList", content: [{ type: "taskItem", attrs: { ...attrs, checked: block.checked }, content: [{ type: "paragraph", content: inline(block.content) }] }] };
-    if (block.type === "callout") return { type: "callout", attrs: { ...attrs, kind: block.kind }, content: [{ type: "paragraph", content: inline(block.content) }] };
+    if (block.type === "bullet" || block.type === "check") return list({ type: block.type, items: [{ ...attrsToIdentity(attrs), content: block.content,
+      ...(block.type === "check" ? { checked: block.checked ?? false } : {}), ...(block.children ? { children: block.children } : {}) }] });
+    if (block.type === "callout") return { type: "callout", attrs: { ...attrs, kind: block.kind }, content: block.paragraphs.map((paragraph) => ({
+      type: "paragraph", attrs: { blockKey: paragraph.blockKey ?? createBlockKey?.() ?? null, blockId: paragraph.id ?? null }, content: inline(paragraph.content) })) };
     if (block.type === "attachment") return { type: "workspaceAttachment", attrs: { ...attrs, href: block.href, label: block.label } };
     if (block.type === "image") return { type: "image", attrs: { ...attrs, src: block.src, alt: block.alt, title: block.title ?? null } };
     if (block.type === "table") return { type: "table", attrs, content: block.rows.map((row) => ({ type: "tableRow", content: row.map((cell) => ({
@@ -33,6 +38,10 @@ export function richTextToProseMirror(document: RichTextDocument, createBlockKey
     })) })) };
     return { type: "paragraph", attrs, content: inline(block.content) };
   }) };
+}
+
+function attrsToIdentity(attrs: { blockKey: string | null; blockId: string | null }) {
+  return { ...(attrs.blockKey ? { blockKey: attrs.blockKey } : {}), ...(attrs.blockId ? { id: attrs.blockId } : {}) };
 }
 
 export function proseMirrorToRichText(source: ProseMirrorNode): RichTextDocument {
@@ -47,21 +56,24 @@ export function proseMirrorToRichText(source: ProseMirrorNode): RichTextDocument
   };
   const identity = (node: ProseMirrorNode) => ({ ...(typeof node.attrs?.blockKey === "string" && node.attrs.blockKey ? { blockKey: node.attrs.blockKey } : {}),
     ...(typeof node.attrs?.blockId === "string" && node.attrs.blockId ? { id: node.attrs.blockId } : {}) });
-  const listItems = (node: ProseMirrorNode, type: "bullet" | "check"): RichTextBlock[] => (node.content ?? []).flatMap((item) => {
+  const readList = (node: ProseMirrorNode, type: "bullet" | "check"): RichTextList => ({ type, items: (node.content ?? []).map((item) => {
     const [paragraph, ...descendants] = item.content ?? [];
-    const current: RichTextBlock = type === "check"
-      ? { type, checked: Boolean(item.attrs?.checked), ...identity(item), content: readInline(paragraph?.content) }
-      : { type, ...identity(item), content: readInline(paragraph?.content) };
-    return [current, ...descendants.flatMap(convertNode)];
-  });
+    return { ...identity(item), content: readInline(paragraph?.content), ...(type === "check" ? { checked: Boolean(item.attrs?.checked) } : {}),
+      ...(descendants.length ? { children: descendants.filter((child) => child.type === "bulletList" || child.type === "taskList")
+        .map((child) => readList(child, child.type === "taskList" ? "check" : "bullet")) } : {}) } as RichTextListItem;
+  }) });
+  const listBlock = (node: ProseMirrorNode, type: "bullet" | "check"): RichTextBlock[] => {
+    const source = readList(node, type);
+    return source.items.map((item) => ({ type, ...item } as RichTextBlock));
+  };
   function convertNode(node: ProseMirrorNode): RichTextBlock[] {
     if (node.type === "heading") return [{ type: "heading", level: [1, 2, 3].includes(Number(node.attrs?.level)) ? Number(node.attrs?.level) as 1 | 2 | 3 : 1, ...identity(node), content: readInline(node.content) }];
     if (node.type === "codeBlock") return [{ type: "code", ...identity(node), ...(typeof node.attrs?.language === "string" && node.attrs.language ? { language: node.attrs.language } : {}), text: (node.content ?? []).map((child) => child.text ?? "").join("") }];
     if (node.type === "blockquote") return (node.content ?? []).map((child) => ({ type: "quote" as const, ...identity(child), content: readInline(child.content) }));
-    if (node.type === "bulletList") return listItems(node, "bullet");
-    if (node.type === "taskList") return listItems(node, "check");
+    if (node.type === "bulletList") return listBlock(node, "bullet");
+    if (node.type === "taskList") return listBlock(node, "check");
     if (node.type === "callout") { const kind = ["note", "tip", "warning"].includes(String(node.attrs?.kind)) ? node.attrs?.kind as "note" | "tip" | "warning" : "note";
-      return (node.content ?? []).map((child, index) => ({ type: "callout" as const, kind, ...identity(index === 0 ? node : child), content: readInline(child.content) })); }
+      return [{ type: "callout" as const, kind, ...identity(node), paragraphs: (node.content ?? []).map((child) => ({ ...identity(child), content: readInline(child.content) })) }]; }
     if (node.type === "workspaceAttachment") return [{ type: "attachment", ...identity(node), href: String(node.attrs?.href ?? ""), label: String(node.attrs?.label ?? "Attachment") }];
     if (node.type === "image") return [{ type: "image", ...identity(node), src: String(node.attrs?.src ?? ""), alt: String(node.attrs?.alt ?? ""), ...(typeof node.attrs?.title === "string" && node.attrs.title ? { title: node.attrs.title } : {}) }];
     if (node.type === "table") return [{ type: "table", ...identity(node), rows: (node.content ?? []).map((row) => (row.content ?? []).map((cell) => ({ header: cell.type === "tableHeader", content: readInline(cell.content?.[0]?.content) }))) }];

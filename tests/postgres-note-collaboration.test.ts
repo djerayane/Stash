@@ -8,7 +8,7 @@ import { createAuthenticationSecretCodec } from "../src/authentication-secrets.j
 import { NoteCollaborationService } from "../src/note-collaboration.js";
 import { NoteService } from "../src/notes.js";
 import { OwnerBootstrapService } from "../src/owner-bootstrap.js";
-import { PostgresDatabase } from "../src/postgres-database.js";
+import { collaborativeDocumentFromRichText, PostgresDatabase } from "../src/postgres-database.js";
 import { WorkspaceProjectService } from "../src/workspaces-projects.js";
 
 const databaseUrl = process.env.STASH_TEST_DATABASE_URL;
@@ -49,15 +49,28 @@ describe("PostgreSQL Note collaboration", { skip: databaseUrl ? false : "STASH_T
     const applied = await collaboration.apply(editorId, captured.note.id, editUpdate);
     assert.equal(applied?.sequence, 1); document.destroy();
     const retry = await collaboration.apply(editorId, captured.note.id, editUpdate); assert.equal(retry?.sequence, 1);
+    const structured = collaborativeDocumentFromRichText({ type: "doc", blocks: [
+      { type: "check", checked: true, id: "11111111-1111-4111-8111-111111111111", content: [{ text: "Parent" }], children: [{ type: "bullet", items: [
+        { id: "22222222-2222-4222-8222-222222222222", content: [{ text: "Nested" }] },
+      ] }] },
+      { type: "callout", kind: "warning", id: "33333333-3333-4333-8333-333333333333", paragraphs: [
+        { id: "44444444-4444-4444-8444-444444444444", content: [{ text: "First paragraph" }] },
+        { id: "55555555-5555-4555-8555-555555555555", content: [{ text: "Second paragraph" }] },
+      ] },
+    ] });
+    const structuredResult = await collaboration.apply(editorId, captured.note.id, Y.encodeStateAsUpdate(structured));
+    assert.equal(structuredResult?.sequence, 2); structured.destroy();
     const canonical = (await probe.query<any>("SELECT content,document,revision,created_by_account_id FROM stash_notes WHERE id=$1", [captured.note.id])).rows[0];
-    assert.equal(canonical.content, "Edited together"); assert.equal(canonical.document.blocks[0].content[0].text, "Edited together");
-    assert.equal(canonical.revision, 2); assert.equal(canonical.created_by_account_id, owner.ownerId);
+    assert.match(canonical.content, /  - Nested/); assert.match(canonical.content, />\n> Second paragraph/);
+    assert.equal(canonical.document.blocks.find((block: any) => block.type === "check").children[0].items[0].id, "22222222-2222-4222-8222-222222222222");
+    assert.equal(canonical.document.blocks.find((block: any) => block.type === "callout").paragraphs.length, 2);
+    assert.equal(canonical.revision, 3); assert.equal(canonical.created_by_account_id, owner.ownerId);
     const projection = (await probe.query<any>(`SELECT payload FROM stash_portable_projection_outbox
       WHERE object_kind='Note' AND object_id=$1 ORDER BY revision DESC LIMIT 1`, [captured.note.id])).rows[0].payload;
-    assert.equal(projection.content, "Edited together"); assert.equal(projection.createdBy.localAccountId, owner.ownerId);
+    assert.equal(projection.content, canonical.content); assert.equal(projection.createdBy.localAccountId, owner.ownerId);
     const history = (await probe.query<any>("SELECT revision,actor_account_id,content FROM stash_note_history WHERE note_id=$1 ORDER BY revision", [captured.note.id])).rows;
     assert.deepEqual(history.map(({ revision, actor_account_id, content }) => [revision, actor_account_id, content]),
-      [[1, owner.ownerId, "Original"], [2, editorId, "Edited together"]]);
+      [[1, owner.ownerId, "Original"], [2, editorId, "Edited together"], [3, editorId, canonical.content]]);
     const activity = (await probe.query<any>(`SELECT action,actor_account_id,after_state FROM stash_workspace_activity
       WHERE object_kind='Note' AND object_id=$1 ORDER BY occurred_at DESC LIMIT 1`, [captured.note.id])).rows[0];
     assert.equal(activity.action, "note_edited"); assert.equal(activity.actor_account_id, editorId); assert.equal(activity.after_state.revision, 2);

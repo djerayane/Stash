@@ -5,7 +5,14 @@ import { NoteCollaborationService, type CollaborationSnapshot, type NoteCollabor
 import { yDocToProsemirrorJSON } from "y-prosemirror";
 import { collaborativeDocumentFromRichText, richTextFromCollaborativeDocument, validatedRichTextFromCollaborativeDocument } from "../src/postgres-database.js";
 import { InvalidCollaborationUpdate } from "../src/note-collaboration.js";
-import { proseMirrorToMarkdown, proseMirrorToRichText, richTextToMarkdown, type RichTextDocument } from "../src/rich-text.js";
+import { markdownToRichText, proseMirrorToMarkdown, proseMirrorToRichText, richTextToMarkdown, type RichTextDocument } from "../src/rich-text.js";
+
+function portable(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(portable);
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).filter(([key]) => key !== "blockKey")
+    .map(([key, child]) => [key, portable(child)]));
+  return value;
+}
 
 class MemoryRepository implements NoteCollaborationRepository {
   snapshot?: CollaborationSnapshot;
@@ -71,7 +78,9 @@ describe("self-hosted Note collaboration", () => {
       ] },
     ] };
     const materialized = proseMirrorToRichText(source);
-    assert.deepEqual(materialized.blocks.map((block) => [block.type, block.blockKey, "content" in block ? block.content[0]?.text : undefined]), [
+    assert.deepEqual(materialized.blocks.flatMap((block) => block.type === "callout"
+      ? block.paragraphs.map((paragraph) => [block.type, paragraph.blockKey ?? block.blockKey, paragraph.content[0]?.text])
+      : [[block.type, block.blockKey, "content" in block ? block.content[0]?.text : undefined]]), [
       ["bullet", "11111111-1111-4111-8111-111111111111", "First item"],
       ["bullet", "22222222-2222-4222-8222-222222222222", "Second item"],
       ["check", "33333333-3333-4333-8333-333333333333", "First task"],
@@ -97,16 +106,18 @@ describe("self-hosted Note collaboration", () => {
       ] },
     ] }] };
     const materialized = proseMirrorToRichText(source);
-    assert.deepEqual(materialized.blocks.map((block) => [block.type, block.blockKey, block.id]), [
-      ["bullet", "11111111-1111-4111-8111-111111111111", "21111111-1111-4111-8111-111111111111"],
-      ["check", "22222222-2222-4222-8222-222222222222", "32222222-2222-4222-8222-222222222222"],
-      ["bullet", "33333333-3333-4333-8333-333333333333", "43333333-3333-4333-8333-333333333333"],
-    ]);
+    assert.deepEqual(materialized.blocks, [{ type: "bullet", blockKey: "11111111-1111-4111-8111-111111111111",
+      id: "21111111-1111-4111-8111-111111111111", content: [{ text: "Parent contribution" }], children: [{ type: "check", items: [{
+        blockKey: "22222222-2222-4222-8222-222222222222", id: "32222222-2222-4222-8222-222222222222", checked: true,
+        content: [{ text: "Nested contribution" }], children: [{ type: "bullet", items: [{ blockKey: "33333333-3333-4333-8333-333333333333",
+          id: "43333333-3333-4333-8333-333333333333", content: [{ text: "Deep contribution" }] }] }],
+      }] }] }]);
     const markdown = proseMirrorToMarkdown(source);
     for (const contribution of ["Parent contribution", "Nested contribution", "Deep contribution"])
       assert.match(markdown, new RegExp(contribution));
     for (const identifier of ["21111111-1111-4111-8111-111111111111", "32222222-2222-4222-8222-222222222222", "43333333-3333-4333-8333-333333333333"])
       assert.match(markdown, new RegExp(`stash-block:${identifier}`));
+    assert.deepEqual(markdownToRichText(markdown), portable(materialized));
   });
 
   it("accepts an empty code block as a normal collaborative editing state", () => {
@@ -119,7 +130,10 @@ describe("self-hosted Note collaboration", () => {
 
   it("round-trips expressive blocks into portable Markdown without losing stable identity", () => {
     const source: RichTextDocument = { type: "doc", blocks: [
-      { type: "callout", kind: "note", blockKey: "11111111-1111-4111-8111-111111111111", content: [{ text: "Remember this" }] },
+      { type: "callout", kind: "note", blockKey: "11111111-1111-4111-8111-111111111111", paragraphs: [
+        { id: "66666666-6666-4666-8666-666666666666", content: [{ text: "Remember this" }] },
+        { id: "77777777-7777-4777-8777-777777777777", content: [{ text: "And preserve this paragraph" }] },
+      ] },
       { type: "attachment", href: "./attachments/asset-id/spec%20sheet.pdf", label: "Spec sheet",
         blockKey: "22222222-2222-4222-8222-222222222222", id: "33333333-3333-4333-8333-333333333333" },
       { type: "image", src: "./attachments/image-id/diagram.png", alt: "System diagram", title: "Architecture",
@@ -133,6 +147,7 @@ describe("self-hosted Note collaboration", () => {
     assert.deepEqual(richTextFromCollaborativeDocument(document), source); document.destroy();
     const markdown = richTextToMarkdown(source);
     assert.match(markdown, /> \[!NOTE\]\n> Remember this/);
+    assert.deepEqual(markdownToRichText(markdown), portable(source));
     assert.match(markdown, /\[Spec sheet\]\(<\.\/attachments\/asset-id\/spec%20sheet\.pdf>\)/);
     assert.match(markdown, /!\[System diagram\]\(<\.\/attachments\/image-id\/diagram\.png> "Architecture"\)/);
     assert.match(markdown, /\| Owner \| State \|\n\| --- \| --- \|\n\| Ada \| Ready \|/);

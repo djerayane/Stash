@@ -27,7 +27,7 @@ describe("portable rich-text Markdown", () => {
 
   it("round-trips portable callouts, attachments, images, and tables", () => {
     const document: RichTextDocument = { type: "doc", blocks: [
-      { type: "callout", kind: "note", content: [{ text: "Remember this" }] },
+      { type: "callout", kind: "note", paragraphs: [{ content: [{ text: "Remember this" }] }] },
       { type: "attachment", href: "./attachments/asset/spec%20sheet.pdf", label: "Spec sheet" },
       { type: "image", src: "./attachments/image/diagram.png", alt: "Diagram", title: "Architecture" },
       { type: "table", rows: [[{ header: true, content: [{ text: "Owner" }] }, { header: true, content: [{ text: "State" }] }],
