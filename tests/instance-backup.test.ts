@@ -179,6 +179,59 @@ describe("coordinated Instance Backup", () => {
     assert.equal(created.status, 201); assert.equal((await created.json() as { status: string }).status, "created");
   });
 
+  it("lets only an Instance Administrator list, dry-run, and explicitly confirm a restore", async () => {
+    const root = await mkdtemp(join(tmpdir(), "stash-backup-administration-"));
+    const backupRoot = join(root, "scheduled");
+    const service = new InstanceBackupService(new FakeSource(), { masterKey, now: () => new Date("2026-08-23T10:00:00.000Z") });
+    await service.create(join(backupRoot, "release-ready"));
+    const target = new FakeRestoreTarget();
+    const instance = await startInstance({ database: new Probe(), host: "127.0.0.1", port: 0,
+      instanceAdminToken: "admin", instanceBackups: service, instanceBackupRoot: backupRoot, instanceBackupRestoreTarget: target });
+    instances.push(instance);
+
+    assert.equal((await fetch(`${instance.url}/api/instance/backups`)).status, 401);
+    const headers = { authorization: "Bearer admin", "content-type": "application/json" };
+    const listing = await fetch(`${instance.url}/api/instance/backups`, { headers });
+    assert.equal(listing.status, 200);
+    assert.deepEqual(await listing.json(), { backups: [{ name: "release-ready", createdAt: "2026-08-23T10:00:00.000Z",
+      schema: "stash.instance-backup.v1", status: "readable", verifiedAt: "2026-08-23T10:00:00.000Z" }] });
+
+    const dryRun = await fetch(`${instance.url}/api/instance/backups/release-ready/restore`, { method: "POST", headers,
+      body: JSON.stringify({ dryRun: true }) });
+    assert.equal(dryRun.status, 200); assert.deepEqual(await dryRun.json(), { status: "verified", backup: "release-ready" });
+    assert.deepEqual(target.calls, ["configuration"]);
+
+    const unconfirmed = await fetch(`${instance.url}/api/instance/backups/release-ready/restore`, { method: "POST", headers,
+      body: JSON.stringify({ dryRun: false, confirmation: "wrong" }) });
+    assert.equal(unconfirmed.status, 400); assert.deepEqual(target.calls, ["configuration"]);
+
+    const restored = await fetch(`${instance.url}/api/instance/backups/release-ready/restore`, { method: "POST", headers,
+      body: JSON.stringify({ dryRun: false, confirmation: "release-ready" }) });
+    assert.equal(restored.status, 200); assert.deepEqual(await restored.json(), { status: "restored", backup: "release-ready" });
+    assert.deepEqual(target.calls, ["configuration", "configuration", "prepare", "snapshot", "database", "commit", "discard"]);
+    const restartGate = await fetch(`${instance.url}/api/instance/backups/health`, { headers });
+    assert.equal(restartGate.status, 503); assert.equal((await restartGate.json() as { error: string }).error, "restore_restart_required");
+  });
+
+  it("returns actionable restore diagnostics without accepting path traversal", async () => {
+    const root = await mkdtemp(join(tmpdir(), "stash-backup-diagnostics-")); const backupRoot = join(root, "scheduled");
+    const service = new InstanceBackupService(new FakeSource(), { masterKey }); await service.create(join(backupRoot, "corrupt"));
+    await mkdir(join(backupRoot, "missing-manifest"));
+    await writeFile(join(backupRoot, "corrupt", "database.dump"), "tampered");
+    const instance = await startInstance({ database: new Probe(), host: "127.0.0.1", port: 0,
+      instanceAdminToken: "admin", instanceBackups: service, instanceBackupRoot: backupRoot, instanceBackupRestoreTarget: new FakeRestoreTarget() });
+    instances.push(instance); const headers = { authorization: "Bearer admin", "content-type": "application/json" };
+
+    const listing = await fetch(`${instance.url}/api/instance/backups`, { headers });
+    assert.equal((await listing.json() as { backups: Array<{ name: string; status: string }> }).backups.find(({ name }) => name === "missing-manifest")?.status, "invalid");
+
+    const corrupt = await fetch(`${instance.url}/api/instance/backups/corrupt/restore`, { method: "POST", headers, body: JSON.stringify({ dryRun: true }) });
+    assert.equal(corrupt.status, 422); assert.deepEqual(await corrupt.json(), { error: "integrity_failed",
+      message: "The backup payload does not match its signed manifest. No Instance data was changed." });
+    const traversal = await fetch(`${instance.url}/api/instance/backups/%2e%2e/restore`, { method: "POST", headers, body: JSON.stringify({ dryRun: true }) });
+    assert.equal(traversal.status, 404);
+  });
+
   it("does not publish a partial backup when capture fails", async () => {
     const root = await mkdtemp(join(tmpdir(), "stash-backup-failure-"));
     const source = new FakeSource(); source.fail = new Error("database snapshot unavailable");

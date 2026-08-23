@@ -76,6 +76,7 @@ function childPath(root: string, relative: string): string {
 export class InstanceBackupService {
   #health: BackupHealth = { status: "never_created" };
   #running = false;
+  #restartRequired = false;
   readonly #key: Buffer;
   readonly #now: () => Date;
   readonly #instanceVersion: string;
@@ -88,6 +89,7 @@ export class InstanceBackupService {
 
   health(): BackupHealth { return this.#health; }
   isRunning(): boolean { return this.#running; }
+  requiresRestart(): boolean { return this.#restartRequired; }
 
   async create(destination: string): Promise<{ status: "created"; manifest: BackupManifest }> {
     if (this.#running) throw new Error("an Instance Backup is already running");
@@ -177,6 +179,9 @@ export class InstanceBackupService {
   }
 
   async restore(source: string, target: InstanceBackupRestoreTarget, options: { dryRun: boolean }): Promise<{ status: "verified" | "restored" }> {
+    if (this.#running) throw new Error("an Instance Backup operation is already running");
+    this.#running = true;
+    try {
     await this.verify(source);
     let configuration: Record<string, unknown>;
     try {
@@ -200,11 +205,13 @@ export class InstanceBackupService {
         catch (rollbackError) { throw new AggregateError([error, rollbackError], "Attachment restore failed and database rollback also failed"); }
         throw error;
       }
+      this.#restartRequired = true;
       return { status: "restored" };
     } finally {
       await target.discardPreparedAttachments(prepared).catch(() => undefined);
       await rm(rollbackDatabase, { force: true }).catch(() => undefined);
     }
+    } finally { this.#running = false; }
   }
 
   async refreshHealth(backupRoot: string): Promise<BackupHealth> {

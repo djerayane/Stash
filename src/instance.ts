@@ -59,7 +59,7 @@ import { githubSignalRoutes, githubWebhookRoute } from "./github-signal-routes.j
 import type { GitHubSignalService } from "./github-signals.js";
 import { publicDomainApiRoute } from "./public-domain-api.js";
 import { instanceBackupRoute } from "./instance-backup-routes.js";
-import type { InstanceBackupService } from "./instance-backup.js";
+import type { InstanceBackupRestoreTarget, InstanceBackupService } from "./instance-backup.js";
 import { notificationRoutes } from "./notification-routes.js";
 import type { NotificationService } from "./notifications.js";
 import { automationRoutes } from "./automation-routes.js";
@@ -128,6 +128,7 @@ export interface InstanceOptions {
   webClientRoot?: string;
   instanceBackups?: InstanceBackupService;
   instanceBackupRoot?: string;
+  instanceBackupRestoreTarget?: InstanceBackupRestoreTarget;
   notifications?: NotificationService;
   automations?: AutomationService;
   importedIdentityAdministration?: ImportedIdentityAdministration;
@@ -247,7 +248,7 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
     diagnosticsSchemaRoute(diagnostics),
     requireInstanceAdministrator(options.instanceAdminToken, diagnosticsAdminRoute(diagnostics)),
     requireInstanceAdministrator(options.instanceAdminToken, instanceAdminRoute(acceleration)),
-    ...(options.instanceBackups ? [requireInstanceAdministrator(options.instanceAdminToken, instanceBackupRoute(options.instanceBackups, options.instanceBackupRoot))] : []),
+    ...(options.instanceBackups ? [requireInstanceAdministrator(options.instanceAdminToken, instanceBackupRoute(options.instanceBackups, options.instanceBackupRoot, options.instanceBackupRestoreTarget))] : []),
     requireInstanceAdministrator(
       options.instanceAdminToken,
       ownerBootstrapRoute(options.ownerBootstrap),
@@ -279,12 +280,21 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
     }
 
     if (request.method === "GET" && url.pathname === "/health/ready") {
+      if (options.instanceBackups?.requiresRestart()) {
+        json(response, 503, { status: "unavailable", error: "restore_restart_required" });
+        return;
+      }
       try {
         await options.database.verifyConnection();
         json(response, 200, { status: "ready" });
       } catch {
         json(response, 503, { status: "unavailable", error: "database_unavailable" });
       }
+      return;
+    }
+
+    if (options.instanceBackups?.requiresRestart() && url.pathname.startsWith("/api/")) {
+      json(response, 503, { error: "restore_restart_required", message: "The Instance was restored and must be restarted before serving application data." });
       return;
     }
 
