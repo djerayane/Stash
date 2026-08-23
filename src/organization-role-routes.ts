@@ -70,9 +70,13 @@ export function organizationRoleRoutes(
           }
         } else if (request.method === "DELETE" && !url.pathname.endsWith("/role")) {
           result = await service.remove(organizationId, access.accountId, memberId!);
-          if (result === "removed") {
-            response.writeHead(204, { "cache-control": "no-store" });
-            response.end();
+          if (typeof result === "object" && result.status === "removed") {
+            json(response, 200, {
+              memberId: result.departure.memberId,
+              affectedTaskIds: result.departure.affectedTaskIds,
+              degradedRepositoryConnectionIds: result.departure.degradedRepositoryConnectionIds,
+              authorityRevoked: true,
+            });
             return true;
           }
         } else {

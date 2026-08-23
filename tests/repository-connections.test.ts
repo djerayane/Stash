@@ -62,6 +62,14 @@ class DatabaseFake implements DatabaseProbe, RepositoryConnectionRepository {
     this.portable.push(projection(record));
     return "attached" as const;
   }
+  async repairRepositoryConnection(actorId: string, organizationId: string, connectionId: string) {
+    if (await this.organizationRole(organizationId, actorId) !== "Admin") return "forbidden" as const;
+    const record = this.records.find((candidate) => candidate.id === connectionId && candidate.organizationId === organizationId && candidate.state === "degraded");
+    if (!record) return "not_found" as const;
+    record.ownership = "organization"; record.state = "active";
+    this.portable.push(projection(record));
+    return "repaired" as const;
+  }
 }
 function projection(record: RepositoryConnectionRecord): PortableRepositoryConnectionProjection { return { schema: "stash.repository-connection.v1", id: record.id, provider: "github", repositoryUrl: record.repositoryUrl, organization: { localOrganizationId: record.organizationId, displayName: "Acme" }, createdBy: { localAccountId: record.createdByMemberId, displayName: "Ada", attribution: record.createdByAttribution }, projectIds: [...record.projectIds] }; }
 
@@ -160,6 +168,26 @@ describe("Organization Repository Connections", () => {
     assert.equal(crossOrganizationProject.status, 404);
     assert.deepEqual(database.portable.at(-1)!.projectIds, [projectOne, projectTwo]);
     assert.doesNotMatch(JSON.stringify(database.portable), /installationId|repositoryId|token|private/i);
+  });
+
+  it("creates a personal connection, exposes degradation, and lets an Admin repair it as Organization-owned", async () => {
+    const { baseUrl, database } = await run();
+    const created = await fetch(`${baseUrl}/api/organizations/${acme}/repository-connections`, {
+      method: "POST", headers: { authorization: "Bearer admin-session", "content-type": "application/json" },
+      body: JSON.stringify({ installationId: 42, owner: "acme", name: "personal-repo", ownership: "personal" }),
+    });
+    assert.equal(created.status, 201);
+    const connection = await created.json() as { id: string; ownership: string; state: string };
+    assert.equal(connection.ownership, "personal"); assert.equal(connection.state, "active");
+
+    database.records[0]!.state = "degraded";
+    const listed = await fetch(`${baseUrl}/api/organizations/${acme}/repository-connections`, { headers: { authorization: "Bearer admin-session" } });
+    assert.deepEqual((await listed.json() as any).repositoryConnections[0].state, "degraded");
+    const repaired = await fetch(`${baseUrl}/api/organizations/${acme}/repository-connections/${connection.id}/repair`, {
+      method: "PUT", headers: { authorization: "Bearer admin-session" },
+    });
+    assert.equal(repaired.status, 204);
+    assert.equal(database.records[0]!.ownership, "organization"); assert.equal(database.records[0]!.state, "active");
   });
 
   it("rechecks authority atomically after provider calls and before Project attachment", async () => {

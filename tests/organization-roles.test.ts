@@ -23,6 +23,17 @@ class ProtocolCompatibleDatabase implements DatabaseProbe, OrganizationRoleRepos
     [otherOrganizationId, new Map([[margaretId, "Owner"]])],
   ]);
   failure: Error | undefined;
+  readonly revokedMembers = new Set<string>();
+  readonly activeSessions = new Set([linusId]);
+  readonly personalCredentials = new Set([linusId]);
+  readonly activeAgentGrants = new Set([linusId]);
+  readonly authoredNotes = new Map([[linusId, ["note-by-linus"]]]);
+  readonly taskAssignments = new Map([["task-assigned-to-linus", { assigneeIds: [linusId], formerAssigneeIds: [] as string[] }]]);
+  readonly repositoryConnections = new Map([
+    ["organization-github-connection", { owner: "organization", state: "active" }],
+    ["personal-github-connection", { owner: linusId, state: "active" }],
+  ]);
+  readonly operatorAudit: Array<{ actorId: string; memberId: string; action: string }> = [];
 
   async verifyConnection() {}
   async close() {}
@@ -59,7 +70,32 @@ class ProtocolCompatibleDatabase implements DatabaseProbe, OrganizationRoleRepos
       return "final_owner" as const;
     }
     members.delete(accountId);
-    return "removed" as const;
+    const belongsElsewhere = [...this.memberships.entries()].some(([candidateOrganizationId, candidateMembers]) =>
+      candidateOrganizationId !== orgId && candidateMembers.has(accountId));
+    if (!belongsElsewhere) {
+      this.revokedMembers.add(accountId);
+      this.activeSessions.delete(accountId);
+      this.personalCredentials.delete(accountId);
+    }
+    const revokedAgentGrants = this.activeAgentGrants.delete(accountId) ? 1 : 0;
+    const affectedTaskIds: string[] = [];
+    for (const [taskId, assignment] of this.taskAssignments) {
+      if (!assignment.assigneeIds.includes(accountId)) continue;
+      assignment.formerAssigneeIds.push(accountId);
+      affectedTaskIds.push(taskId);
+    }
+    const degradedRepositoryConnectionIds: string[] = [];
+    for (const [connectionId, connection] of this.repositoryConnections) {
+      if (connection.owner !== accountId) continue;
+      connection.state = "degraded";
+      degradedRepositoryConnectionIds.push(connectionId);
+    }
+    this.operatorAudit.push({ actorId, memberId: accountId, action: "organization_member_departed" });
+    return {
+      status: "removed" as const,
+      departure: { memberId: accountId, affectedTaskIds, revokedSessions: 1, revokedCredentials: 1, revokedAgentGrants,
+        degradedRepositoryConnectionIds },
+    };
   }
 }
 
@@ -85,7 +121,12 @@ describe("managing built-in Organization Roles", () => {
       host: "127.0.0.1",
       port: 0,
       instanceAdminToken: "instance-admin",
-      memberAccess: access,
+      memberAccess: {
+        async authenticateBearer(authorization) {
+          const authenticated = await access.authenticateBearer(authorization);
+          return authenticated && !database.revokedMembers.has(authenticated.accountId) ? authenticated : undefined;
+        },
+      },
       organizationRoles: new OrganizationRoleService(database),
     });
     return { database, baseUrl: instance.url };
@@ -154,8 +195,53 @@ describe("managing built-in Organization Roles", () => {
     })).status, 200);
     assert.equal((await request(baseUrl, `/api/organizations/${organizationId}/members/${adaId}`, `member-${adaId}`, {
       method: "DELETE",
-    })).status, 204);
+    })).status, 200);
     assert.equal(database.memberships.get(organizationId)?.has(adaId), false);
+  });
+
+  it("revokes a departed Member immediately while preserving attribution and marking former assignments", async () => {
+    const { baseUrl, database } = await run();
+
+    const removed = await request(baseUrl, `/api/organizations/${organizationId}/members/${linusId}`, `member-${adaId}`, {
+      method: "DELETE",
+    });
+
+    assert.equal(removed.status, 200);
+    assert.deepEqual(await removed.json(), {
+      memberId: linusId,
+      affectedTaskIds: ["task-assigned-to-linus"],
+      degradedRepositoryConnectionIds: ["personal-github-connection"],
+      authorityRevoked: true,
+    });
+    assert.deepEqual(database.authoredNotes.get(linusId), ["note-by-linus"]);
+    assert.deepEqual(database.taskAssignments.get("task-assigned-to-linus"), {
+      assigneeIds: [linusId],
+      formerAssigneeIds: [linusId],
+    });
+    assert.deepEqual(database.repositoryConnections.get("organization-github-connection"), { owner: "organization", state: "active" });
+    assert.deepEqual(database.repositoryConnections.get("personal-github-connection"), { owner: linusId, state: "degraded" });
+    assert.equal(database.activeSessions.has(linusId), false);
+    assert.equal(database.personalCredentials.has(linusId), false);
+    assert.equal(database.activeAgentGrants.has(linusId), false);
+    assert.deepEqual(database.operatorAudit, [{ actorId: adaId, memberId: linusId, action: "organization_member_departed" }]);
+
+    const departedSession = await request(baseUrl, `/api/organizations/${organizationId}/roles`, `member-${linusId}`);
+    assert.equal(departedSession.status, 401);
+  });
+
+  it("preserves account-global authentication for a Member who still belongs to another Organization", async () => {
+    const { baseUrl, database } = await run();
+    database.memberships.get(otherOrganizationId)!.set(linusId, "Member");
+
+    const removed = await request(baseUrl, `/api/organizations/${organizationId}/members/${linusId}`, `member-${adaId}`, {
+      method: "DELETE",
+    });
+
+    assert.equal(removed.status, 200);
+    assert.equal(database.activeSessions.has(linusId), true);
+    assert.equal(database.personalCredentials.has(linusId), true);
+    const oldOrganization = await request(baseUrl, `/api/organizations/${organizationId}/roles`, `member-${linusId}`);
+    assert.equal(oldOrganization.status, 403);
   });
 
   it("rejects non-Owners, invalid Roles, and attempts to mutate built-in definitions", async () => {
@@ -207,6 +293,14 @@ describe("managing built-in Organization Roles", () => {
     assert.equal(unavailable.status, 503);
     assert.doesNotMatch(await unavailable.text(), /postgres|secret/i);
     assert.equal(database.memberships.get(organizationId)?.get(linusId), "Member");
+    const removalUnavailable = await request(baseUrl, `/api/organizations/${organizationId}/members/${linusId}`, `member-${adaId}`, {
+      method: "DELETE",
+    });
+    assert.equal(removalUnavailable.status, 503);
+    assert.doesNotMatch(await removalUnavailable.text(), /postgres|secret/i);
+    assert.equal(database.memberships.get(organizationId)?.get(linusId), "Member");
+    assert.equal(database.activeSessions.has(linusId), true);
+    assert.equal(database.repositoryConnections.get("personal-github-connection")?.state, "active");
   });
 
   it("rejects malformed Organization and Member identifiers before repository access", async () => {
