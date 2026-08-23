@@ -38,6 +38,7 @@ services:
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
       GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
       ATTACHMENT_STORAGE_PATH: /var/lib/stash/attachments
+      INSTANCE_BACKUP_PATH: /var/lib/stash/backups
       HOST: 0.0.0.0
       PORT: 3000
     depends_on:
@@ -58,8 +59,10 @@ services:
       - "${STASH_PORT:-3000}:3000"
     volumes:
       - stash-attachments:/var/lib/stash/attachments
+      - stash-backups:/var/lib/stash/backups
     restart: unless-stopped
 
 volumes:
   stash-postgres:
   stash-attachments:
+  stash-backups:

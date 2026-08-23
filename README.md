@@ -53,6 +53,7 @@ The application fails at startup with a clear error when required configuration 
 | `EMAIL_RECOVERY_FROM` | no | Sender address for recovery messages; must be configured with `SMTP_URL` |
 | `GITHUB_APP_ID` | no | Numeric ID of the Instance-owned GitHub App; must be configured with `GITHUB_APP_PRIVATE_KEY` |
 | `GITHUB_APP_PRIVATE_KEY` | no | PEM private key for the Instance-owned GitHub App; keep it outside PostgreSQL and configure it with `GITHUB_APP_ID` |
+| `INSTANCE_BACKUP_PATH` | no | Operator-owned directory for backups created through the protected Instance administration API |
 
 Never commit production secrets or include them in a Portable Workspace Export.
 
@@ -82,6 +83,52 @@ resupply the same key when restoring the Instance. If the key is missing or wron
 authentication state is unreadable; restore preflight must fail visibly rather than starting with
 partially usable or silently discarded authentication data. Portable Workspace Exports must never
 contain the key or other Instance authentication secrets.
+
+### Coordinated Instance Backups
+
+Instance Backups are distinct from Portable Workspace Exports. They contain a transactionally
+consistent PostgreSQL dump (including accounts, identity links, Activity, and application-encrypted
+integration state), the local Attachment store, and non-secret runtime requirements. A versioned
+manifest records SHA-256 checksums for every payload and a keyed verification value, but never
+contains `INSTANCE_MASTER_KEY`. Preserve that exact key in a separate secret manager.
+
+With `INSTANCE_BACKUP_PATH` configured, an Instance Administrator can create a backup and inspect
+its health without supplying a filesystem path over HTTP:
+
+```sh
+curl -X POST https://stash.example.com/api/instance/backups \
+  -H "Authorization: Bearer $INSTANCE_ADMIN_TOKEN"
+curl https://stash.example.com/api/instance/backups/health \
+  -H "Authorization: Bearer $INSTANCE_ADMIN_TOKEN"
+```
+
+The Instance remains readable but rejects writes while the coordinated database and Attachment
+snapshot is made. Verification rejects missing, changed, symbolic, unsupported, and unlisted files.
+Its signed verification timestamp is stored in the published manifest, so backup age and the latest
+verification remain visible after an Instance restart or a separate CLI verification process.
+Scheduling and off-site copying remain operator responsibilities. Redis is an acceleration layer
+and is never included.
+
+The operator command supports explicit creation and disaster-recovery preflight. Paths must be
+absolute. Use the protected HTTP command for a live coordinated backup; stop the application before
+using the CLI `create` command or a real restore. `--dry-run` verifies the version, manifest,
+every checksum, local Attachment adapter requirement, and supplied master key without changing
+PostgreSQL or files.
+
+```sh
+pnpm run backup -- create /srv/stash-backups/2026-08-23
+pnpm run backup -- verify /srv/stash-backups/2026-08-23
+pnpm run backup -- restore /srv/stash-backups/2026-08-23 --dry-run
+# after stopping the Stash application:
+pnpm run backup -- restore /srv/stash-backups/2026-08-23
+```
+
+Restore copies only the verified Attachment inventory into staging before touching PostgreSQL. It
+then snapshots the current database, uses `pg_restore --single-transaction --exit-on-error`, and
+atomically swaps the staged Attachment tree. A failed Attachment swap restores the pre-restore
+database snapshot. Missing files, corruption, unsupported versions, a wrong master key, or an
+incompatible Attachment adapter fail visibly. A failed backup is never published under its
+destination name.
 
 ### Optional Redis acceleration
 

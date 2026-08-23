@@ -19,7 +19,8 @@
     "test:browser": "pnpm run build:web && playwright test --grep-invert @a11y",
     "test:a11y": "pnpm run build:web && playwright test --grep @a11y",
     "test:server": "node --import tsx --test tests/**/*.test.ts",
-    "smoke": "node --import tsx scripts/smoke.ts"
+    "smoke": "node --import tsx scripts/smoke.ts",
+    "backup": "node --import tsx src/backup-command.ts"
   },
   "dependencies": {
     "@simplewebauthn/server": "^13.3.2",
