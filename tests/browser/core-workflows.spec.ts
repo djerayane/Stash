@@ -77,7 +77,7 @@ test("presents every relevant canonical notification without collapsing its attr
   const triggers = [
     ["direct_mention", "Grace mentioned you", "discussion message mentioned members", "Grace Hopper · member"],
     ["assignment", "You were assigned STASH-33", "task assigned", "Grace Hopper · member"],
-    ["requested_review", "Planning assistant requested review", "proposal review requested", "Grace Hopper · agent"],
+    ["requested_review", "Planning assistant requested review", "proposal review requested", "Ada Lovelace · Agent Planning assistant"],
     ["automation_failure", "Automation failed for STASH-37", "automation execution failed", "Grace Hopper · automation"],
     ["followed_change", "Release plan updated", "note updated", "Grace Hopper · member"],
   ] as const;
@@ -87,7 +87,8 @@ test("presents every relevant canonical notification without collapsing its attr
     trigger, summary, createdAt: "2026-08-23T12:00:00.000Z", delivery: "immediate",
     activity: { schema: "stash.activity.v1", id: `10000000-0000-4000-8000-00000000000${index}`,
       workspaceId: "11111111-1111-4111-8111-111111111111", object: { kind: trigger === "requested_review" ? "Proposal" : "Task", id: `20000000-0000-4000-8000-00000000000${index}` },
-      action, actor: { localAccountId: "grace", displayName: "Grace Hopper" },
+      action, actor: trigger === "requested_review" ? { localAccountId: "browser-member", displayName: "Ada Lovelace" }
+        : { localAccountId: "grace", displayName: "Grace Hopper" },
       cause: trigger === "requested_review" ? { kind: "agent", agentGrantId: "grant", sponsoringMemberId: "browser-member", agentName: "Planning assistant" }
         : trigger === "automation_failure" ? { kind: "automation", automationId: "automation" } : { kind: "member" },
       occurredAt: "2026-08-23T12:00:00.000Z", before: {}, after: {} },
