@@ -124,6 +124,18 @@ pnpm run backup -- restore /srv/stash-backups/2026-08-23 --dry-run
 pnpm run backup -- restore /srv/stash-backups/2026-08-23
 ```
 
+Instance Administrators can instead open `/instance-admin/backups` in the React web client, enter
+the separately configured `INSTANCE_ADMIN_TOKEN`, inspect the backups under `INSTANCE_BACKUP_PATH`,
+and run the same restore preflight. A passing dry-run unlocks restore only for that backup; the
+operator must then type its exact directory name. The protected boundary accepts backup names from
+the configured root rather than arbitrary filesystem paths and returns stable diagnostics for
+invalid manifests, checksum failures, unsupported versions, master-key mismatches, and incompatible
+runtime configuration.
+
+After a live administrative restore succeeds, Stash marks readiness unavailable and rejects API
+traffic until the process is restarted. This prevents process-local state from being served across
+the restored database boundary; restart the Instance, then validate readiness before reopening it.
+
 Restore copies only the verified Attachment inventory into staging before touching PostgreSQL. It
 then snapshots the current database, uses `pg_restore --single-transaction --exit-on-error`, and
 atomically swaps the staged Attachment tree. A failed Attachment swap restores the pre-restore

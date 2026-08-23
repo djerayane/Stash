@@ -33,6 +33,39 @@ test("rejects the Instance Administrator credential from the Member shell", asyn
   await expect(page.getByRole("navigation", { name: "Workspace" })).toHaveCount(0);
 });
 
+test("verifies and confirms an Instance restore through the operator console", async ({ page }) => {
+  const operations: Array<{ dryRun: boolean; confirmation?: string }> = [];
+  await page.route("**/api/instance/backups", (route) => route.fulfill({ json: { backups: [{ name: "release-ready", schema: "stash.instance-backup.v1",
+    createdAt: "2026-08-23T10:00:00.000Z", verifiedAt: "2026-08-23T10:05:00.000Z" }] } }));
+  await page.route("**/api/instance/backups/release-ready/restore", async (route) => {
+    const body = await route.request().postDataJSON() as { dryRun: boolean; confirmation?: string }; operations.push(body);
+    await route.fulfill({ json: { status: body.dryRun ? "verified" : "restored", backup: "release-ready" } });
+  });
+  await page.emulateMedia({ reducedMotion: "reduce" }); await page.goto("/instance-admin/backups");
+  await expect(page.getByRole("heading", { name: "Administrator access" })).toBeVisible();
+  await page.getByLabel("Instance Administrator token").fill("browser-acceptance-admin-token");
+  await page.getByRole("button", { name: "Continue" }).press("Enter");
+  const verify = page.getByRole("button", { name: "Verify release-ready" }); await expect(verify).toBeVisible(); await verify.press("Enter");
+  await expect(page.getByRole("status")).toBeFocused();
+  const restore = page.getByRole("button", { name: "Restore release-ready" }); await expect(restore).toBeEnabled(); await restore.press("Enter");
+  const destructive = page.getByRole("button", { name: "Restore Instance" }); await expect(destructive).toBeDisabled();
+  await page.getByRole("textbox", { name: /Type release-ready/ }).fill("release-ready"); await expect(destructive).toBeEnabled(); await destructive.press("Enter");
+  await expect(page.getByRole("status")).toContainText("restored successfully");
+  expect(operations).toEqual([{ dryRun: true }, { dryRun: false, confirmation: "release-ready" }]);
+});
+
+test("keeps a malformed backup visible and announces its verification diagnosis", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("stash.instance-admin-session", JSON.stringify({ token: "browser-acceptance-admin-token" })));
+  await page.route("**/api/instance/backups", (route) => route.fulfill({ json: { backups: [{ name: "metadata-missing", status: "invalid" }] } }));
+  await page.route("**/api/instance/backups/metadata-missing/restore", (route) => route.fulfill({ status: 422, json: { error: "invalid_manifest",
+    message: "The backup manifest is missing or invalid. No Instance data was changed." } }));
+  await page.emulateMedia({ reducedMotion: "reduce" }); await page.goto("/instance-admin/backups");
+  await expect(page.getByText("Manifest details unavailable")).toBeVisible();
+  await page.getByRole("button", { name: "Verify metadata-missing" }).press("Enter");
+  const diagnosis = page.getByRole("alert"); await expect(diagnosis).toBeFocused(); await expect(diagnosis).toContainText("manifest is missing or invalid");
+  await expect(page.getByRole("button", { name: "Restore metadata-missing" })).toBeDisabled();
+});
+
 test("supports keyboard navigation and focuses changed route content", async ({ page }) => {
   await installMemberSession(page);
   await page.goto("/app");

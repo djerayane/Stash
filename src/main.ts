@@ -31,7 +31,7 @@ import { GitHubArtifactService } from "./github-artifacts.js";
 import { GitHubSignalService } from "./github-signals.js";
 import { fileURLToPath } from "node:url";
 import { InstanceBackupService } from "./instance-backup.js";
-import { PostgresLocalInstanceBackupSource } from "./instance-backup-system.js";
+import { PostgresLocalInstanceBackupSource, PostgresLocalInstanceRestoreTarget } from "./instance-backup-system.js";
 import { NotificationService } from "./notifications.js";
 import { AutomationService } from "./automations.js";
 import { NoteCollaborationService } from "./note-collaboration.js";
@@ -108,6 +108,7 @@ async function main(): Promise<void> {
     discussions: new DiscussionService(database),
     activities: new ActivityService(database),
     instanceBackups,
+    instanceBackupRestoreTarget: new PostgresLocalInstanceRestoreTarget({ databaseUrl: requiredEnvironment("DATABASE_URL"), attachmentRoot: attachmentStoragePath, publicOrigin }),
     ...(process.env.INSTANCE_BACKUP_PATH?.trim() ? { instanceBackupRoot: process.env.INSTANCE_BACKUP_PATH.trim() } : {}),
     notifications,
     memberLocalization: new MemberLocalizationService(database),

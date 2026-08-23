@@ -14,6 +14,27 @@ test("the primary shell has no automatically detectable accessibility violations
   expect(results.violations).toEqual([]);
 });
 
+test("the Instance Backup restore confirmation has no detectable accessibility violations @a11y", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("stash.instance-admin-session", JSON.stringify({ token: "browser-acceptance-admin-token" })));
+  await page.route("**/api/instance/backups", (route) => route.fulfill({ json: { backups: [{ name: "release-ready", schema: "stash.instance-backup.v1",
+    createdAt: "2026-08-23T10:00:00.000Z", verifiedAt: "2026-08-23T10:05:00.000Z" }] } }));
+  await page.route("**/api/instance/backups/release-ready/restore", (route) => route.fulfill({ json: { status: "verified", backup: "release-ready" } }));
+  await page.emulateMedia({ reducedMotion: "reduce" }); await page.goto("/instance-admin/backups");
+  await page.getByRole("button", { name: "Verify release-ready" }).click(); await page.getByRole("button", { name: "Restore release-ready" }).click();
+  await expect(page.getByRole("dialog", { name: "Replace the current Instance state?" })).toBeVisible();
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+});
+
+test("an invalid Instance Backup diagnosis has no detectable accessibility violations @a11y", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("stash.instance-admin-session", JSON.stringify({ token: "browser-acceptance-admin-token" })));
+  await page.route("**/api/instance/backups", (route) => route.fulfill({ json: { backups: [{ name: "metadata-missing", status: "invalid" }] } }));
+  await page.route("**/api/instance/backups/metadata-missing/restore", (route) => route.fulfill({ status: 422, json: { error: "invalid_manifest",
+    message: "The backup manifest is missing or invalid. No Instance data was changed." } }));
+  await page.emulateMedia({ reducedMotion: "reduce" }); await page.goto("/instance-admin/backups");
+  await page.getByRole("button", { name: "Verify metadata-missing" }).click(); await expect(page.getByRole("alert")).toBeFocused();
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+});
+
 test("the development Signal confirmation flow has no detectable accessibility violations @a11y", async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem("stash.member-session", JSON.stringify({ token: "browser-acceptance-member-token" })));
   const projectId = "11111111-1111-4111-8111-111111111111";

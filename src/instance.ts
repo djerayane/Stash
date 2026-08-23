@@ -1,4 +1,4 @@
-import { createServer } from "node:http";
+import { createServer, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
 import { extname, resolve, sep } from "node:path";
 
@@ -59,7 +59,7 @@ import { githubSignalRoutes, githubWebhookRoute } from "./github-signal-routes.j
 import type { GitHubSignalService } from "./github-signals.js";
 import { publicDomainApiRoute } from "./public-domain-api.js";
 import { instanceBackupRoute } from "./instance-backup-routes.js";
-import type { InstanceBackupService } from "./instance-backup.js";
+import type { InstanceBackupRestoreTarget, InstanceBackupService } from "./instance-backup.js";
 import { notificationRoutes } from "./notification-routes.js";
 import type { NotificationService } from "./notifications.js";
 import { automationRoutes } from "./automation-routes.js";
@@ -128,6 +128,7 @@ export interface InstanceOptions {
   webClientRoot?: string;
   instanceBackups?: InstanceBackupService;
   instanceBackupRoot?: string;
+  instanceBackupRestoreTarget?: InstanceBackupRestoreTarget;
   notifications?: NotificationService;
   automations?: AutomationService;
   importedIdentityAdministration?: ImportedIdentityAdministration;
@@ -247,7 +248,7 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
     diagnosticsSchemaRoute(diagnostics),
     requireInstanceAdministrator(options.instanceAdminToken, diagnosticsAdminRoute(diagnostics)),
     requireInstanceAdministrator(options.instanceAdminToken, instanceAdminRoute(acceleration)),
-    ...(options.instanceBackups ? [requireInstanceAdministrator(options.instanceAdminToken, instanceBackupRoute(options.instanceBackups, options.instanceBackupRoot))] : []),
+    ...(options.instanceBackups ? [requireInstanceAdministrator(options.instanceAdminToken, instanceBackupRoute(options.instanceBackups, options.instanceBackupRoot, options.instanceBackupRestoreTarget))] : []),
     requireInstanceAdministrator(
       options.instanceAdminToken,
       ownerBootstrapRoute(options.ownerBootstrap),
@@ -264,6 +265,19 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
     publicDomainApiRoute(publicDomainRoutes), ...applicationRoutes,
   ];
 
+  let activeApplicationRequests = 0;
+  const restoreDrainWaiters = new Set<() => void>();
+  options.instanceBackups?.setRestoreUnavailableBarrier(async () => {
+    if (activeApplicationRequests === 0) return;
+    await new Promise<void>((resolve) => restoreDrainWaiters.add(resolve));
+  });
+  const trackApplicationRequest = (response: ServerResponse) => {
+    activeApplicationRequests += 1; let finished = false;
+    const finish = () => { if (finished) return; finished = true; activeApplicationRequests -= 1;
+      if (activeApplicationRequests === 0) { for (const resolve of restoreDrainWaiters) resolve(); restoreDrainWaiters.clear(); } };
+    response.once("finish", finish); response.once("close", finish);
+  };
+
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://stash.invalid");
 
@@ -279,6 +293,11 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
     }
 
     if (request.method === "GET" && url.pathname === "/health/ready") {
+      const backupAvailability = options.instanceBackups?.availability();
+      if (backupAvailability === "restore_in_progress" || backupAvailability === "restore_restart_required") {
+        json(response, 503, { status: "unavailable", error: backupAvailability });
+        return;
+      }
       try {
         await options.database.verifyConnection();
         json(response, 200, { status: "ready" });
@@ -287,6 +306,19 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
       }
       return;
     }
+
+    const backupAvailability = options.instanceBackups?.availability();
+    const operationalRestoreRequest = url.pathname === "/api/instance/backups/health" && (request.method === "GET" || request.method === "HEAD")
+      || /^\/api\/instance\/backups\/[^/]+\/restore$/.test(url.pathname) && request.method === "POST";
+    if ((backupAvailability === "restore_in_progress" || backupAvailability === "restore_restart_required") && url.pathname.startsWith("/api/")) {
+      if (!operationalRestoreRequest) {
+        json(response, 503, { error: backupAvailability, message: backupAvailability === "restore_in_progress"
+          ? "The Instance is unavailable while its database and Attachments are restored."
+          : "The Instance was restored and must be restarted before serving application data." });
+        return;
+      }
+    }
+    if (url.pathname.startsWith("/api/") && !operationalRestoreRequest) trackApplicationRequest(response);
 
     if (request.method === "GET" && url.pathname === "/api/client-session") {
       if (request.headers.authorization === `Bearer ${options.instanceAdminToken}`) {
