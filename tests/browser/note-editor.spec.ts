@@ -60,9 +60,13 @@ test("preserves every checklist item and callout paragraph with stable identitie
   await expect.poll(() => page.evaluate(async (id) => (await fetch(`/api/notes/${id}`, { headers: { authorization: "Bearer browser-acceptance-member-token" } })).json()
     .then((note: { content: string }) => note.content), richNoteId)).toContain("Nested acceptance item");
   await page.keyboard.press("ControlOrMeta+End"); await page.keyboard.press("Enter"); await page.keyboard.press("Enter"); await page.keyboard.press("Enter");
+  const calloutPersisted = page.waitForResponse((response) => response.request().method() === "POST"
+    && response.url().includes(`/api/notes/${richNoteId}/collaboration`));
   await page.getByRole("button", { name: "Insert callout" }).click();
   await page.keyboard.press("End"); await page.keyboard.press("Enter"); await page.keyboard.type("Second callout paragraph");
   await page.keyboard.type(".");
+  await calloutPersisted;
+  await expect(page.getByRole("status")).toHaveText("All changes saved");
   const authoredItems = ["First acceptance item", "Second acceptance item", "Nested acceptance item"].map((content) =>
     editor.getByText(content, { exact: true }).locator("xpath=ancestor::li[@data-block-key][1]"));
   await Promise.all(authoredItems.map((item) => expect(item).toHaveCount(1)));
