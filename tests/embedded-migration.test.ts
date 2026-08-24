@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, test } from "node:test";
 import { spawnSync } from "node:child_process";
 import { Pool } from "pg";
@@ -62,6 +62,8 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
       const separator = postgresUrl!.includes("?") ? "&" : "?"; const scoped = `${postgresUrl}${separator}options=-csearch_path%3D${schema}`;
       await assert.rejects(migrateEmbeddedInstance({ source, destinationDatabaseUrl: scoped,
         destinationAttachmentRoot: join(await mkdtemp(join(tmpdir(), "stash-unconfigured-attachments-")), "attachments"),
+        destinationConfigurationRoot: join(await mkdtemp(join(tmpdir(), "stash-unconfigured-config-")), "config"),
+        destinationDatabaseAvailableBytes: BigInt(Number.MAX_SAFE_INTEGER),
         keys: { source: sourceKey, destination: sourceKey, mode: "preserve" } }), /prepared with its configured master key/i);
     } finally { await source.close(); await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined); await admin.end(); }
   });
@@ -80,6 +82,8 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
       await configured.verifyConnection(); await configured.prepareInstanceStore(); await configured.createFirstOrganizationOwner({ organizationId: randomUUID(), organizationName: "Destination",
         ownerId: randomUUID(), ownerName: "Destination Owner", ownerEmail: "destination@example.test", passwordHash: "hash", role: "Owner" }); await configured.close();
       await assert.rejects(migrateEmbeddedInstance({ source, destinationDatabaseUrl: scoped, destinationAttachmentRoot: attachments,
+        destinationConfigurationRoot: join(dirname(attachments), "config"),
+        destinationDatabaseAvailableBytes: BigInt(Number.MAX_SAFE_INTEGER),
         keys: { source: sourceKey, destination: suppliedDestinationKey, mode: "rotate" } }), /destination Instance master key/i);
     } finally { await source.close(); await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined); await admin.end(); }
   });
@@ -89,6 +93,7 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
     const source = await EmbeddedInstanceStore.open(sourceRoot, createAuthenticationSecretCodec(sourceKey));
     const admin = new Pool({ connectionString: postgresUrl! }); const schema = `embedded_migration_${randomUUID().replaceAll("-", "")}`;
     const attachmentRoot = await mkdtemp(join(tmpdir(), "stash-migration-attachments-parent-")); const destinationAttachments = join(attachmentRoot, "attachments");
+    const destinationConfiguration = join(attachmentRoot, "config");
     try {
       await source.database.verifyConnection(); await source.database.prepareInstanceStore();
       const organizationId = randomUUID(); const ownerId = randomUUID(); const adminId = randomUUID(); const memberId = randomUUID();
@@ -117,6 +122,7 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
       const attachment = await new AttachmentService(source.database, new LocalAttachmentStorage(source.paths.attachments)).create(ownerId, workspaceId,
         { filename: "migration.bin", contentType: "application/octet-stream", source: "upload", content: attachmentBytes });
       assert.equal(attachment.status, "created");
+      await writeFile(join(source.paths.configuration, "runtime.json"), `${JSON.stringify({ publicOrigin: "https://stash.example.test", registration: false })}\n`, { mode: 0o600 });
       const recoveryToken = "migration-recovery-token-with-enough-entropy"; const recoveryCode = "01234567-89abcdef"; const jobId = randomUUID(); const claimOwner = randomUUID();
       await source.database.replaceRecoveryCodes(ownerId, [{ accountId: ownerId, lookup: recoveryCodeLookup(recoveryCode),
         protectedSecret: createAuthenticationSecretCodec(sourceKey).encrypt(recoveryCode) }]);
@@ -130,6 +136,8 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
       const configured = new (await import("../src/postgres-database.js")).PostgresDatabase(scoped, createAuthenticationSecretCodec(destinationKey));
       await configured.verifyConnection(); await configured.prepareInstanceStore(); await configured.close();
       const result = await migrateEmbeddedInstance({ source, destinationDatabaseUrl: scoped, destinationAttachmentRoot: destinationAttachments,
+        destinationConfigurationRoot: destinationConfiguration,
+        destinationDatabaseAvailableBytes: BigInt(Number.MAX_SAFE_INTEGER),
         keys: { source: sourceKey, destination: destinationKey, mode: "rotate" } });
       assert.ok(result.tables > 20); assert.ok(result.rows > 2);
       const migrated = new (await import("../src/postgres-database.js")).PostgresDatabase(scoped, createAuthenticationSecretCodec(destinationKey));
@@ -143,6 +151,7 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
         assert.equal((await migrated.listNoteHistory(ownerId, noteId)).status, "found"); assert.equal((await migrated.listWorkspaceActivity(ownerId, workspaceId)).status, "found");
         if (attachment.status === "created") assert.deepEqual((await new AttachmentService(migrated, new LocalAttachmentStorage(destinationAttachments))
           .get(ownerId, attachment.record.id))?.content, attachmentBytes);
+        assert.deepEqual(JSON.parse(await readFile(join(destinationConfiguration, "runtime.json"), "utf8")), { publicOrigin: "https://stash.example.test", registration: false });
         assert.equal(await migrated.findEmailRecoveryAccount(deriveEmailRecoveryLookup(recoveryToken), "2026-08-24T10:00:00.000Z"), ownerId);
         const lookupRows = await admin.query(`SELECT code_lookup FROM ${schema}.stash_recovery_codes WHERE account_id=$1`, [ownerId]);
         assert.equal(lookupRows.rows[0]?.code_lookup, createAuthenticationSecretCodec(destinationKey).blindIndex(recoveryCodeLookup(recoveryCode))); }
@@ -153,7 +162,8 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
   test("preserve mode keeps authentication usable with the source key", async () => {
     const sourceRoot = await mkdtemp(join(tmpdir(), "stash-migration-preserve-")); const sourceKey = key();
     const source = await EmbeddedInstanceStore.open(sourceRoot, createAuthenticationSecretCodec(sourceKey)); const admin = new Pool({ connectionString: postgresUrl! });
-    const schema = `embedded_preserve_${randomUUID().replaceAll("-", "")}`; const destinationAttachments = join(await mkdtemp(join(tmpdir(), "stash-preserve-attachments-")), "attachments");
+    const schema = `embedded_preserve_${randomUUID().replaceAll("-", "")}`; const destinationRoot = await mkdtemp(join(tmpdir(), "stash-preserve-attachments-"));
+    const destinationAttachments = join(destinationRoot, "attachments"); const destinationConfiguration = join(destinationRoot, "config");
     try {
       await source.database.verifyConnection(); await source.database.prepareInstanceStore(); const organizationId = randomUUID(); const ownerId = randomUUID();
       await source.database.createFirstOrganizationOwner({ organizationId, organizationName: "Preserved", ownerId, ownerName: "Grace", ownerEmail: "grace@example.test", passwordHash: "preserved-hash", role: "Owner" });
@@ -161,7 +171,12 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
       await admin.query(`CREATE SCHEMA ${schema}`); const separator = postgresUrl!.includes("?") ? "&" : "?"; const scoped = `${postgresUrl}${separator}options=-csearch_path%3D${schema}`;
       const configured = new (await import("../src/postgres-database.js")).PostgresDatabase(scoped, createAuthenticationSecretCodec(sourceKey));
       await configured.verifyConnection(); await configured.prepareInstanceStore(); await configured.close();
+      await assert.rejects(migrateEmbeddedInstance({ source, destinationDatabaseUrl: scoped, destinationAttachmentRoot: destinationAttachments,
+        destinationConfigurationRoot: destinationConfiguration,
+        destinationDatabaseAvailableBytes: 0n, keys: { source: sourceKey, destination: sourceKey, mode: "preserve" } }), /PostgreSQL capacity is insufficient/i);
       await migrateEmbeddedInstance({ source, destinationDatabaseUrl: scoped, destinationAttachmentRoot: destinationAttachments,
+        destinationConfigurationRoot: destinationConfiguration,
+        destinationDatabaseAvailableBytes: BigInt(Number.MAX_SAFE_INTEGER),
         keys: { source: sourceKey, destination: sourceKey, mode: "preserve" } });
       const migrated = new (await import("../src/postgres-database.js")).PostgresDatabase(scoped, createAuthenticationSecretCodec(sourceKey));
       try { await migrated.verifyConnection(); assert.equal((await migrated.findAccountByEmail("grace@example.test"))?.passwordHash, "preserved-hash"); }

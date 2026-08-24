@@ -18,14 +18,17 @@ Startup runs the same idempotent schema preparation used by external PostgreSQL.
 
 ## Migration to external PostgreSQL
 
-The migration destination must be an empty compatible PostgreSQL Instance and an empty Attachment directory. Stop the standalone Instance first; the migration command obtains its exclusive data-directory lock and copies a serializable semantic snapshot through one destination transaction. Attachments are checksum-verified in a staging directory and cut over only with the database transaction. Failure removes staged destination state and leaves the source authoritative.
+The migration destination must be an empty compatible PostgreSQL Instance already prepared with its independently configured master key, plus empty Attachment and configuration directories. Stop the standalone Instance first; the migration command obtains its exclusive data-directory lock and copies a serializable semantic snapshot through one destination transaction. Attachments and non-secret durable configuration are checksum-verified in staging directories and recoverably cut over after per-table semantic validation. Failure before commit removes staged destination state and leaves the source authoritative; a retry validates the journal's database and file digests before completing an interrupted cutover.
+
+Set `DESTINATION_DATABASE_AVAILABLE_BYTES` to the destination operator's measured free database capacity in bytes. Migration rejects insufficient database, Attachment-filesystem, or configuration-filesystem capacity before staging data.
 
 Store each key in an owner-private (`0600` on POSIX) file. Preserve mode configures the destination with the same key:
 
 ```sh
-DESTINATION_DATABASE_URL='postgresql://…' pnpm migrate:embedded -- \
+DESTINATION_DATABASE_URL='postgresql://…' DESTINATION_DATABASE_AVAILABLE_BYTES='10737418240' pnpm migrate:embedded -- \
   --data-dir /srv/stash-standalone \
   --attachment-root /srv/stash/attachments \
+  --configuration-root /srv/stash/config \
   --mode preserve \
   --source-key-file /run/secrets/stash-master-key
 ```
@@ -33,12 +36,13 @@ DESTINATION_DATABASE_URL='postgresql://…' pnpm migrate:embedded -- \
 Rotate mode requires distinct source and destination key files and re-encrypts protected authentication, recovery, invitation, OIDC, and key-check records while recomputing keyed lookups:
 
 ```sh
-DESTINATION_DATABASE_URL='postgresql://…' pnpm migrate:embedded -- \
+DESTINATION_DATABASE_URL='postgresql://…' DESTINATION_DATABASE_AVAILABLE_BYTES='10737418240' pnpm migrate:embedded -- \
   --data-dir /srv/stash-standalone \
   --attachment-root /srv/stash/attachments \
+  --configuration-root /srv/stash/config \
   --mode rotate \
   --source-key-file /run/secrets/stash-old-key \
   --destination-key-file /run/secrets/stash-new-key
 ```
 
-Master-key values are rejected on the command line. Configure the destination Instance to read the selected destination key file before cutover.
+Master-key values are rejected on the command line. Preserve mode also rejects a destination key-file argument: configure the destination Instance to use the source key before preparing it. Rotate mode requires the destination Instance to be prepared with the distinct destination key before migration starts.

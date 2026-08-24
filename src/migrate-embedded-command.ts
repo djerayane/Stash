@@ -5,7 +5,9 @@ import { EmbeddedInstanceStore } from "./embedded-instance-store.js";
 import { migrateEmbeddedInstance, readMigrationKeys, type MigrationKeyInput } from "./embedded-instance-migration.js";
 
 function requiredEnvironment(name: string): string { const value = process.env[name]?.trim(); if (!value) throw new Error(`${name} must be configured`); return value; }
-function usage(): never { throw new Error("usage: stash-migrate-embedded --data-dir <path> --attachment-root <path> --mode <preserve|rotate> --source-key-file <path> [--destination-key-file <path>]"); }
+function requiredCapacity(): bigint { const value = requiredEnvironment("DESTINATION_DATABASE_AVAILABLE_BYTES");
+  if (!/^[1-9][0-9]*$/.test(value)) throw new Error("DESTINATION_DATABASE_AVAILABLE_BYTES must be a positive integer"); return BigInt(value); }
+function usage(): never { throw new Error("usage: stash-migrate-embedded --data-dir <path> --attachment-root <path> --configuration-root <path> --mode <preserve|rotate> --source-key-file <path> [--destination-key-file <path>]"); }
 
 async function main() {
   const values = new Map<string, string>(); const arguments_ = process.argv.slice(2);
@@ -14,8 +16,9 @@ async function main() {
     const name = arguments_[index]; const value = arguments_[index + 1];
     if (!name?.startsWith("--") || !value || value.startsWith("--") || values.has(name)) usage(); values.set(name, value);
   }
-  const dataDirectory = values.get("--data-dir"); const attachmentRoot = values.get("--attachment-root"); const mode = values.get("--mode"); const sourceKeyFile = values.get("--source-key-file");
-  if (!dataDirectory || !attachmentRoot || !sourceKeyFile || mode !== "preserve" && mode !== "rotate") usage();
+  const dataDirectory = values.get("--data-dir"); const attachmentRoot = values.get("--attachment-root"); const configurationRoot = values.get("--configuration-root");
+  const mode = values.get("--mode"); const sourceKeyFile = values.get("--source-key-file");
+  if (!dataDirectory || !attachmentRoot || !configurationRoot || !sourceKeyFile || mode !== "preserve" && mode !== "rotate") usage();
   if (mode === "preserve" && values.has("--destination-key-file")) throw new Error("Preserve migration does not accept a destination key file");
   const input: MigrationKeyInput = mode === "preserve" ? { mode, sourceKeyFile: resolve(sourceKeyFile) }
     : { mode, sourceKeyFile: resolve(sourceKeyFile), ...(values.get("--destination-key-file") ? { destinationKeyFile: resolve(values.get("--destination-key-file")!) } : {}) };
@@ -23,7 +26,7 @@ async function main() {
   try {
     await store.database.verifyConnection();
     const result = await migrateEmbeddedInstance({ source: store, destinationDatabaseUrl: requiredEnvironment("DESTINATION_DATABASE_URL"),
-      destinationAttachmentRoot: resolve(attachmentRoot), keys });
+      destinationAttachmentRoot: resolve(attachmentRoot), destinationConfigurationRoot: resolve(configurationRoot), destinationDatabaseAvailableBytes: requiredCapacity(), keys });
     process.stdout.write(`${JSON.stringify({ status: "migrated", ...result })}\n`);
   } finally { await store.close(); }
 }
