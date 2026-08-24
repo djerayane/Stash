@@ -76,3 +76,41 @@ jobs:
         run: |
           echo "digest=${{ steps.publish.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
           echo "source-commit=${{ steps.metadata.outputs['source-commit'] }}" >> "$GITHUB_STEP_SUMMARY"
+
+  publish-server-bundles:
+    needs: release-quality
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Refuse a publication collision immediately before upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "GitHub Release already exists" >&2
+            exit 1
+          fi
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: server-bundle-*
+          path: artifacts
+          merge-multiple: true
+      - name: Verify tested archives and assemble the checksum index
+        shell: bash
+        run: |
+          shopt -s nullglob
+          checksums=(artifacts/*.sha256)
+          test "${#checksums[@]}" -eq 5
+          for checksum in "${checksums[@]}"; do (cd artifacts && sha256sum --check "$(basename "$checksum")"); done
+          cat "${checksums[@]}" | LC_ALL=C sort -k2 > artifacts/SHA256SUMS
+          printf 'source-commit=%s\nversion=%s\n' "$GITHUB_SHA" "${GITHUB_REF_NAME#v}" >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish archives without overwriting
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" artifacts/*.tar.gz artifacts/*.zip artifacts/*.sha256 artifacts/SHA256SUMS \
+            --verify-tag --title "Stash ${GITHUB_REF_NAME#v}" --generate-notes

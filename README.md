@@ -41,6 +41,30 @@ STASH_IMAGE=ghcr.io/djerayane/stash@sha256:<manifest-digest> docker compose up -
 
 Published images support `linux/amd64` and `linux/arm64`. They contain no Instance credentials; all configuration continues to come from the Compose environment or the operator's deployment system.
 
+### Self-contained Instance bundle
+
+GitHub Releases also provide `stash-instance-<version>-<platform>-<architecture>` archives and matching `.sha256` files. Each archive contains the server, React client, PGlite embedded PostgreSQL engine, Node runtime, license, launcher, and source metadata; the machine needs no Docker, Node, pnpm, or separately installed database. Extract the archive, verify its checksum, and select one durable data directory:
+
+```sh
+sha256sum --check stash-instance-1.2.3-linux-x64.tar.gz.sha256
+tar -xzf stash-instance-1.2.3-linux-x64.tar.gz
+./stash-instance-1.2.3-linux-x64/stash --data-dir /srv/stash-standalone
+```
+
+On Windows, extract the ZIP and run `stash.cmd --data-dir C:\Stash\data`. The launcher binds to `127.0.0.1:3000`, enables local account creation, and refuses a public bind while its evaluation configuration remains. Database files, Attachments, backups, and generated non-secret configuration stay beneath the selected directory. The generated master-key file is deliberately adjacent to, not inside, that directory; protect and back it up separately because neither the bundle nor an Instance Backup contains it.
+
+Stop the Instance before using the offline backup commands:
+
+```sh
+./stash backup create --data-dir /srv/stash-standalone --backup /srv/stash-standalone/backups/pre-upgrade
+./stash backup verify --data-dir /srv/stash-standalone --backup /srv/stash-standalone/backups/pre-upgrade
+./stash backup restore --data-dir /srv/stash-standalone --backup /srv/stash-standalone/backups/pre-upgrade --dry-run
+```
+
+To upgrade, verify and extract the newer archive, take a backup with the old launcher, stop it, then start the new launcher with the same data directory. Stash runs its normal format preflight and keeps a rollback backup before changing durable state.
+
+The bundled `stash migrate` command exposes the same tested standalone-to-PostgreSQL migration described in [Embedded Instance storage](docs/embedded-instance-storage.md). Configure `DESTINATION_DATABASE_URL` and measured `DESTINATION_DATABASE_AVAILABLE_BYTES`, then use protected source/destination key files and explicit preserve or rotate mode; the migration keeps the source authoritative unless its database, Attachment, configuration, authentication, authorization, and checksum validation all succeed.
+
 ### Local evaluation defaults are not production secrets
 
 The zero-configuration path is deliberately bound to `127.0.0.1` and supplies conspicuous, deterministic development-only values for the administrator token, Instance master key, PostgreSQL password, and `http://localhost:3000` public origin. Anyone with local machine access can discover these values. Do not expose this configuration to a network, reuse its data as a production Instance, or treat its credentials as private.

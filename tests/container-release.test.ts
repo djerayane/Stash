@@ -45,7 +45,7 @@ describe("container release contract", () => {
     assert.match(release, /release: true/);
     assert.match(release, /publish-container:\s*\n\s*needs: release-quality/);
     assert.match(release, /packages: write/);
-    assert.doesNotMatch(release, /contents: write/);
+    assert.doesNotMatch(release.match(/publish-container:[\s\S]*?(?=\n  publish-server-bundles:)/)?.[0] ?? "", /contents: write/);
     assert.match(release, /linux\/amd64,linux\/arm64/);
     assert.match(release, /concurrency:\s*\n\s*group: release-/);
     assert.match(release, /docker\/setup-qemu-action@v3[\s\S]*docker\/setup-buildx-action@v3/);
