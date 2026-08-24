@@ -17,9 +17,10 @@
 - Production deployments must retain explicit strong secrets and an HTTPS public origin.
 - Standalone startup must require no Docker, Node, pnpm, or separately installed database.
 - Standalone durable state must live beneath one explicit data directory and migrate losslessly to the standard external-PostgreSQL deployment.
+- `INSTANCE_MASTER_KEY` remains operator-managed outside storage and must never appear in a bundle, migration artifact, backup payload, process argument, diagnostic, or log.
 - Pull requests must never publish release artifacts.
 - Only canonical SemVer 2.0.0 tags prefixed with `v` may publish artifacts from the tested revision; prereleases are allowed and build metadata is rejected so the version maps losslessly to an OCI tag.
-- Every publish job must directly `needs: release-quality`; common quality and artifact-smoke checks run for pull requests, while ref, collision, credential, and signing preflight runs only when the workflow's explicit `release` input is `true`.
+- Every publish job must directly `needs: release-quality`; common quality and artifact-smoke checks run for pull requests without secrets, while ref, collision, credential, and signing preflight runs only when the workflow's explicit `release` input is `true` and may receive explicitly mapped `EXPO_TOKEN`.
 - Release preflight must reject a tag/ref mismatch or any existing GitHub Release, asset, GHCR version tag, or EAS version association; publishers never overwrite an existing artifact.
 - OCI manifest and SHA-256 digests are immutable artifact identities. A moved or recreated Git tag fails collision/ref checks and cannot replace a prior release.
 
@@ -81,13 +82,16 @@
 - Test: shared storage contract, backup/restore, upgrade, and migration acceptance suites.
 
 **Interfaces:**
-- Produces: one Instance-store contract implemented by external PostgreSQL and a filesystem-persistent embedded PostgreSQL-compatible engine; `migrateStandaloneInstance(sourceDataDir, destinationDatabaseUrl)` transfers one quiesced Instance without semantic loss.
+- Produces: one Instance-store contract implemented by external PostgreSQL and a filesystem-persistent embedded PostgreSQL-compatible engine; `migrateStandaloneInstance({ sourceDataDir, destinationDatabaseUrl, mode, sourceMasterKeyFile, destinationMasterKeyFile? })` transfers one quiesced Instance without semantic loss. `mode: "preserve"` requires the destination configuration to use the source key and forbids `destinationMasterKeyFile`; `mode: "rotate"` requires both protected key files and re-encrypts protected state for the destination key.
 
 - [ ] Inventory every SQL feature, extension, transaction boundary, search query, migration, and durable-job behavior used by the running Instance; encode unsupported embedded capabilities as failing contract tests before selecting or integrating the engine.
 - [ ] Write shared red tests that run the same repository, authorization, synchronization, search, backup/restore, and upgrade behavior against external PostgreSQL and a temporary embedded data directory.
 - [ ] Introduce the narrow Instance-store composition boundary without duplicating domain rules or weakening PostgreSQL behavior.
 - [ ] Implement the embedded adapter with filesystem persistence, transactions, migrations, exclusive-process locking, clean shutdown, and crash-safe restart.
-- [ ] Implement and test a quiesced migration into an empty external-PostgreSQL Instance, comparing identities, configuration, audit history, Workspaces, Attachments, and checksums independent of storage identifiers.
+- [ ] Write red migration tests for both key modes: preserve mode rejects a destination not configured with the supplied source key; rotate mode rejects a missing or identical destination-key input; both modes prove authentication, recovery, and integration records remain decryptable after cutover.
+- [ ] Implement migration preflight that quiesces and exclusively locks the source, requires an empty compatible destination, reads keys only from permission-checked files, validates source decryption and destination key configuration, checks capacity and Attachment destinations, and rejects secret-bearing command-line arguments.
+- [ ] Implement the copy through a destination database transaction and staging Attachment directory. In preserve mode leave encrypted values unchanged after proving the destination key boundary; in rotate mode decrypt and re-encrypt every protected record. Atomically cut over only after semantic/checksum and protected-state validation; otherwise roll back destination writes, remove staging output, and leave the source authoritative and restartable.
+- [ ] Test that failed validation, copy, checksum, and re-encryption each roll back cleanly, and scan archives, migration artifacts, backups, diagnostics, process arguments, and captured logs to prove neither master key is present.
 - [ ] Run both storage contract suites, full server tests, backup/restore acceptance, check, build, and diff hygiene.
 - [ ] Commit with `feat(server): add embedded standalone instance storage`.
 
@@ -109,10 +113,10 @@
 - [ ] Add a packaging test that rejects missing server output, web assets, license, or version metadata.
 - [ ] Run the packaging test and confirm it fails before the packager exists.
 - [ ] Implement deterministic archive staging with the server, web client, embedded engine, runtime, license, version metadata, and one launcher per platform.
-- [ ] Make the launcher accept a data directory, default to loopback, generate local-only first-run configuration, acquire the exclusive Instance lock, and keep all database, Attachment, backup, and configuration files beneath that directory.
+- [ ] Make the launcher accept a data directory, default to loopback, generate local-only first-run configuration including a protected external master-key file reference, acquire the exclusive Instance lock, and keep all database, Attachment, backup, and configuration files beneath that directory without packaging or logging the key.
 - [ ] Extend the reusable quality workflow with matrix jobs for Linux, macOS, and Windows that extract and smoke-check each archive; its successful reusable-workflow result remains the single `release-quality` dependency required by publishers.
 - [ ] Expose verified archives, source metadata, and SHA-256 checksums for Task 6; do not publish a GitHub Release or release asset in this task.
-- [ ] Smoke-test first start, web access, durable restart, second-process refusal, backup/restore, and migration to external PostgreSQL without any preinstalled database or Node runtime.
+- [ ] Smoke-test first start, web access, durable restart, second-process refusal, backup/restore, and both preserve-key and rotate-key migration to external PostgreSQL without any preinstalled database or Node runtime; verify migrated encrypted state and secret-free artifacts/logs.
 - [ ] Document the one-command start, data directory, backup, upgrade, and migration contract.
 - [ ] Commit with `ci: package self-contained Stash instances`.
 
@@ -152,11 +156,11 @@
 - Consumes: commands and artifact names produced by Tasks 1 through 5.
 - Produces: the complete gated release graph and one operator guide comparing source Compose, prebuilt image, and standalone bundle installation.
 
-- [ ] Complete the reusable workflow's `release: true` conditional preflight: validate canonical SemVer with a SemVer parser, reject build metadata, verify the tag resolves to `GITHUB_SHA`, check GitHub Release/assets, GHCR, and EAS version collisions, and probe mobile capabilities without running these checks for pull requests.
+- [ ] Complete the reusable workflow's `release: true` conditional preflight: validate canonical SemVer with a SemVer parser, reject build metadata, verify the tag resolves to `GITHUB_SHA`, check GitHub Release/assets and GHCR collisions, and use an explicitly mapped, masked, least-privilege `EXPO_TOKEN` only in the conditional preflight job for authenticated EAS version-collision and signing-capability probes. The `release: false` call must neither receive nor reference the secret.
 - [ ] In the central tag workflow, invoke the completed reusable workflow as `release-quality` with `release: true`. Make the container, GitHub Release/server-bundle, Android, and conditional iOS publish jobs each declare `needs: release-quality`; publish without overwrite and record the source commit plus OCI/SHA-256 identities.
-- [ ] Scope `EXPO_TOKEN` only to Android and iOS publish jobs. Fail a missing token with `Mobile release unavailable: configure the EXPO_TOKEN GitHub Actions secret`; fail missing Android signing with `Android release unavailable: configure the EAS Android keystore for app.stash.capture`; when iOS signing is missing, report `iOS release unavailable: configure the Apple distribution certificate and provisioning profile for app.stash.capture`, skip only iOS publication, allow valid Android artifacts, and never claim an IPA.
+- [ ] Scope `EXPO_TOKEN` only to the `release: true` preflight and Android/iOS publish jobs. Fail a missing token with `Mobile release unavailable: configure the EXPO_TOKEN GitHub Actions secret`; fail missing Android signing with `Android release unavailable: configure the EAS Android keystore for app.stash.capture`; when iOS signing is missing, report `iOS release unavailable: configure the Apple distribution certificate and provisioning profile for app.stash.capture`, skip only iOS publication, allow valid Android artifacts, and never claim an IPA.
 - [ ] Write executable documentation checks for every shell command and artifact name that can be validated without release credentials.
-- [ ] Document prerequisites, first startup, URL, persistence, production hardening, upgrades, checksums, architectures, standalone data-directory backup, and standalone-to-PostgreSQL migration.
+- [ ] Document prerequisites, first startup, URL, persistence, production hardening, upgrades, checksums, architectures, standalone data-directory backup, and standalone-to-PostgreSQL preserve-key and rotate-key migration, including destination configuration, preflight, rollback, and secret-handling guarantees.
 - [ ] Link the guide from the README before detailed configuration material.
 - [ ] Run documentation checks, `pnpm run check`, `pnpm test`, and `git diff --check`.
 - [ ] Commit with `docs: document supported Stash installation paths`.
