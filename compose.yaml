@@ -32,15 +32,21 @@ services:
         if [ "$$INSTANCE_ADMIN_TOKEN" = "stash-development-only-admin-token" ] ||
            [ "$$INSTANCE_MASTER_KEY" = "c3Rhc2gtbG9jYWwtZGV2ZWxvcG1lbnQta2V5LTAwMDA=" ] ||
            [ "$$PUBLIC_ORIGIN" = "http://localhost:3000" ] ||
-           case "$$DATABASE_URL" in *stash-development-only*) true;; *) false;; esac; then
+           [ "$$POSTGRES_PASSWORD" = "stash-development-only" ]; then
           echo "WARNING: Stash is using localhost-only development credentials. Read README.md before exposing this Instance." >&2
         fi
         exec node dist/main.js
     environment:
-      DATABASE_URL: postgres://stash:${POSTGRES_PASSWORD:-stash-development-only}@postgres:5432/stash
+      DATABASE_URL: ${DATABASE_URL:-}
+      POSTGRES_USER: stash
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stash-development-only}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: stash
       INSTANCE_ADMIN_TOKEN: ${INSTANCE_ADMIN_TOKEN:-stash-development-only-admin-token}
       INSTANCE_MASTER_KEY: ${INSTANCE_MASTER_KEY:-c3Rhc2gtbG9jYWwtZGV2ZWxvcG1lbnQta2V5LTAwMDA=}
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost:3000}
+      STASH_BIND_ADDRESS: ${STASH_BIND_ADDRESS:-127.0.0.1}
       REDIS_URL: ${REDIS_URL:-}
       WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-}
       WEBAUTHN_RP_NAME: ${WEBAUTHN_RP_NAME:-Stash}

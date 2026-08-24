@@ -35,7 +35,7 @@ Before any external exposure, supply unique secrets and the canonical HTTPS orig
 ```sh
 export INSTANCE_ADMIN_TOKEN="$(openssl rand -base64 48)"
 export INSTANCE_MASTER_KEY="$(openssl rand -base64 32)"
-export POSTGRES_PASSWORD="$(openssl rand -base64 32)"
+export POSTGRES_PASSWORD="$(openssl rand -hex 32)"
 export PUBLIC_ORIGIN="https://stash.example.com"
 export STASH_BIND_ADDRESS="0.0.0.0"
 docker compose up -d
@@ -49,7 +49,7 @@ The application fails at startup with a clear error when required configuration 
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `DATABASE_URL` | yes | PostgreSQL connection URL |
+| `DATABASE_URL` | yes outside Compose | PostgreSQL connection URL; Compose instead URL-encodes its separate PostgreSQL fields so reserved password characters remain safe |
 | `INSTANCE_ADMIN_TOKEN` | yes | Bearer token for Instance Administrator surfaces; keep it outside Workspace content |
 | `INSTANCE_MASTER_KEY` | yes | Base64-encoded 32-byte key used to protect authentication material; store it outside PostgreSQL and Workspace exports |
 | `PUBLIC_ORIGIN` | yes | Canonical HTTPS origin used for OIDC callbacks, such as `https://stash.example.com`; plain HTTP is accepted only for `localhost` evaluation |

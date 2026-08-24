@@ -41,6 +41,7 @@ import { AgentGrantService } from "./agent-grants.js";
 import { InstanceUpgradeService } from "./instance-upgrade.js";
 import { PostgresInstanceUpgradeTarget } from "./postgres-instance-upgrade.js";
 import { readStashReleaseVersion } from "./release-version.js";
+import { databaseUrlFromEnvironment, validateComposeExposure } from "./deployment-configuration.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -49,8 +50,10 @@ function requiredEnvironment(name: string): string {
 }
 
 async function main(): Promise<void> {
+  validateComposeExposure(process.env);
+  const databaseUrl = databaseUrlFromEnvironment(process.env);
   const authenticationSecrets = createAuthenticationSecretCodec(requiredEnvironment("INSTANCE_MASTER_KEY"));
-  const database = new PostgresDatabase(requiredEnvironment("DATABASE_URL"), authenticationSecrets);
+  const database = new PostgresDatabase(databaseUrl, authenticationSecrets);
   await database.verifyConnection();
   const redisUrl = process.env.REDIS_URL?.trim();
   let redis: RunningRedisAcceleration | undefined;
@@ -78,14 +81,14 @@ async function main(): Promise<void> {
   const githubWebhookSecret = process.env.GITHUB_WEBHOOK_SECRET?.trim();
   const publicOrigin = requiredEnvironment("PUBLIC_ORIGIN");
   const instanceBackups = new InstanceBackupService(new PostgresLocalInstanceBackupSource({
-    databaseUrl: requiredEnvironment("DATABASE_URL"), attachmentRoot: attachmentStoragePath, ...(s3AttachmentStorage ? { attachmentStorage: s3AttachmentStorage } : {}),
+    databaseUrl, attachmentRoot: attachmentStoragePath, ...(s3AttachmentStorage ? { attachmentStorage: s3AttachmentStorage } : {}),
     attachmentStorageKind, publicOrigin,
   }), { masterKey: requiredEnvironment("INSTANCE_MASTER_KEY") });
   const instanceBackupRoot = process.env.INSTANCE_BACKUP_PATH?.trim();
-  const instanceBackupRestoreTarget = new PostgresLocalInstanceRestoreTarget({ databaseUrl: requiredEnvironment("DATABASE_URL"), attachmentRoot: attachmentStoragePath,
+  const instanceBackupRestoreTarget = new PostgresLocalInstanceRestoreTarget({ databaseUrl, attachmentRoot: attachmentStoragePath,
     ...(s3AttachmentStorage ? { attachmentStorage: s3AttachmentStorage } : {}), attachmentStorageKind, publicOrigin });
   const instanceUpgrades = instanceBackupRoot ? new InstanceUpgradeService({ backups: instanceBackups, backupRoot: instanceBackupRoot, targetVersion: await readStashReleaseVersion(),
-    target: new PostgresInstanceUpgradeTarget(requiredEnvironment("DATABASE_URL"), async (backupPath) => { await instanceBackups.restore(backupPath, instanceBackupRestoreTarget, { dryRun: false }); }) }) : undefined;
+    target: new PostgresInstanceUpgradeTarget(databaseUrl, async (backupPath) => { await instanceBackups.restore(backupPath, instanceBackupRestoreTarget, { dryRun: false }); }) }) : undefined;
   const smtpUrl = process.env.SMTP_URL?.trim();
   const emailRecoveryFrom = process.env.EMAIL_RECOVERY_FROM?.trim();
   const recoveryEmail = createRecoveryEmailSender({

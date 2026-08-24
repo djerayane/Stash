@@ -30,6 +30,7 @@ describe("Docker Compose quick start", () => {
 
     assert.deepEqual(config.services.stash.ports, [{ mode: "ingress", host_ip: "127.0.0.1", target: 3000, published: "3000", protocol: "tcp" }]);
     assert.equal(config.services.stash.environment.PUBLIC_ORIGIN, "http://localhost:3000");
+    assert.equal(config.services.stash.environment.STASH_BIND_ADDRESS, "127.0.0.1");
     assert.match(config.services.stash.environment.INSTANCE_ADMIN_TOKEN ?? "", /development-only/);
     assert.equal(config.services.stash.environment.INSTANCE_MASTER_KEY, "c3Rhc2gtbG9jYWwtZGV2ZWxvcG1lbnQta2V5LTAwMDA=");
     assert.equal(config.services.postgres.environment.POSTGRES_PASSWORD, "stash-development-only");
@@ -60,7 +61,15 @@ describe("Docker Compose quick start", () => {
     assert.equal(config.services.stash.environment.INSTANCE_ADMIN_TOKEN, "production-admin-token");
     assert.equal(config.services.stash.environment.INSTANCE_MASTER_KEY, "production-master-key");
     assert.equal(config.services.stash.environment.PUBLIC_ORIGIN, "https://stash.example.com");
-    assert.match(config.services.stash.environment.DATABASE_URL ?? "", /production-postgres-password/);
+    assert.equal(config.services.stash.environment.DATABASE_URL, "");
+    assert.equal(config.services.stash.environment.POSTGRES_PASSWORD, "production-postgres-password");
     assert.deepEqual(config.services.stash.ports, [{ mode: "ingress", host_ip: "0.0.0.0", target: 3000, published: "8443", protocol: "tcp" }]);
+  });
+
+  it("passes reserved characters in an existing PostgreSQL password without interpolating a URL", () => {
+    const config = composeConfig({ POSTGRES_PASSWORD: "slash/value:@safe" });
+    assert.equal(config.services.postgres.environment.POSTGRES_PASSWORD, "slash/value:@safe");
+    assert.equal(config.services.stash.environment.POSTGRES_PASSWORD, "slash/value:@safe");
+    assert.equal(config.services.stash.environment.DATABASE_URL, "");
   });
 });
