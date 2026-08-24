@@ -62,7 +62,7 @@ async function assertDockerSocketDenied(bundle) {
   const result = spawnSync(runtime, ["-e", probe], { encoding: "utf8", timeout: 2_000, env: { SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR, DOCKER_HOST: "npipe:////./pipe/stash_docker_forbidden" } });
   if (result.status !== 0) throw new Error(`Bundled Windows child could access the Docker named pipe/API (${result.status})`);
 }
-function configureWindowsFirewall(bundle, remove = false, name = "") { if (process.platform !== "win32") return; const runtime = join(bundle, "runtime", "node.exe"); const arguments_ = remove ? ["advfirewall", "firewall", "delete", "rule", `name=${name}`] : ["advfirewall", "firewall", "add", "rule", `name=${name}`, "dir=out", "action=block", `program="${runtime}"`, "enable=yes"];
+function configureWindowsFirewall(bundle, remove = false, name = "") { if (process.platform !== "win32") return; const runtime = join(bundle, "runtime", "node.exe"); const quotedName = `name="${name}"`; const arguments_ = remove ? ["advfirewall", "firewall", "delete", "rule", quotedName] : ["advfirewall", "firewall", "add", "rule", quotedName, "dir=out", "action=block", `program="${runtime}"`, "enable=yes"];
   const result = spawnSync("netsh", arguments_, { encoding: "utf8" }); if (result.status !== 0) throw new Error(`Windows outbound isolation rule ${remove ? "removal" : "creation"} failed: ${result.stderr || result.stdout}`); }
 function traceDescendants(rootPid) {
   let failure; const sample = () => { try { const output = process.platform === "win32"
