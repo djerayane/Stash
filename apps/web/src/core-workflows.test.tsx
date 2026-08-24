@@ -18,13 +18,16 @@ describe("core React workflows", () => {
     const fetcher = vi.fn(async (input: RequestInfo | URL) => Response.json({ results: [
       { id: "note-1", kind: "note", title: "Release plan", excerpt: "Rollback context", author: "Ada", occurredAt: "2026-08-20T12:00:00.000Z", href: "/app/notes/note-1" },
       { id: "task-1", kind: "task", title: "STASH-42 · Ship release", status: "In Review", assignee: "Grace", href: "/app/projects/project-1/tasks/STASH-42" },
-    ] }));
+    ], total: 2, facets: { kinds: [{ value: "note", count: 1 }, { value: "task", count: 1 }], projects: [], statuses: [{ value: "In Review", count: 1 }] } }));
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<QueryClientProvider client={client}><MemoryRouter initialEntries={["/app/search?q=release&object=task"]}><SearchPage workspaceId="workspace-1" token="member" fetcher={fetcher as typeof fetch} /></MemoryRouter></QueryClientProvider>);
     expect(await screen.findByRole("link", { name: /Release plan/ })).toHaveAttribute("href", "/app/notes/note-1");
     expect(screen.getByRole("link", { name: /STASH-42/ })).toHaveAttribute("href", "/app/projects/project-1/tasks/STASH-42");
     await waitFor(() => expect(screen.getByText(/Ada/)).toBeVisible());
     expect(screen.getByText(/In Review/)).toBeVisible();
+    expect(screen.getByText("2 permitted matches")).toBeVisible();
+    expect(screen.getByText("note 1")).toBeVisible();
+    expect(screen.getByText("task 1")).toBeVisible();
     expect(String(fetcher.mock.calls[0]?.[0])).toContain("q=release&object=task");
     fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Object type" })).toHaveValue(""));
@@ -35,7 +38,7 @@ describe("core React workflows", () => {
     vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true, addEventListener() {}, removeEventListener() {} })));
     const fetcher = vi.fn(async () => Response.json({ results: [
       { id: "note-1", kind: "note", title: "Release plan", href: "/app/notes/note-1" },
-    ] }));
+    ], total: 1, facets: { kinds: [{ value: "note", count: 1 }], projects: [], statuses: [] } }));
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<QueryClientProvider client={client}><MemoryRouter initialEntries={["/app/search?q=release"]}><SearchPage workspaceId="workspace-1" token="member" fetcher={fetcher as typeof fetch} /></MemoryRouter></QueryClientProvider>);
     expect(await screen.findByRole("link", { name: /Release plan/ })).toBeVisible();
@@ -46,7 +49,7 @@ describe("core React workflows", () => {
     let attempts = 0;
     const fetcher = vi.fn(async () => ++attempts === 1
       ? new Response(JSON.stringify({ message: "Search is temporarily unavailable." }), { status: 503 })
-      : Response.json({ results: [] }));
+      : Response.json({ results: [], total: 0, facets: { kinds: [], projects: [], statuses: [] } }));
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<QueryClientProvider client={client}><MemoryRouter initialEntries={["/app/search?q=release&status=Ready"]}><SearchPage workspaceId="workspace-1" token="member" fetcher={fetcher as typeof fetch} /></MemoryRouter></QueryClientProvider>);
     const alert = await screen.findByRole("alert"); await waitFor(() => expect(alert).toHaveFocus());

@@ -13,6 +13,21 @@ export interface WorkspaceSearchResult {
   occurredAt?: string;
 }
 
+export interface WorkspaceSearchFacet<T extends string = string> {
+  value: T;
+  count: number;
+}
+
+export interface WorkspaceSearchResponse {
+  results: WorkspaceSearchResult[];
+  total: number;
+  facets: {
+    kinds: WorkspaceSearchFacet<WorkspaceSearchKind>[];
+    projects: WorkspaceSearchFacet[];
+    statuses: WorkspaceSearchFacet[];
+  };
+}
+
 export interface WorkspaceSearchQuery {
   q: string;
   projectId?: string;
@@ -26,7 +41,7 @@ export interface WorkspaceSearchQuery {
 
 export interface WorkspaceSearchRepository {
   searchWorkspace(memberId: string, workspaceId: string, query: WorkspaceSearchQuery): Promise<
-    { status: "found"; results: WorkspaceSearchResult[] } | { status: "forbidden" }
+    ({ status: "found" } & WorkspaceSearchResponse) | { status: "forbidden" }
   >;
 }
 
