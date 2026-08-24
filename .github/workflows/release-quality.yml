@@ -41,6 +41,21 @@ jobs:
         run: |
           curl --fail --show-error --retry 5 --retry-connrefused http://127.0.0.1:3000/health/ready
           curl --fail --show-error http://127.0.0.1:3000/ | grep -q Stash
+      - name: Verify signup and password authentication
+        run: node scripts/compose-auth-outage.mjs register
+      - name: Verify database loss stays recoverable and safely diagnosed
+        run: |
+          docker compose stop postgres
+          node scripts/compose-auth-outage.mjs unavailable
+          test "$(docker compose ps --status running --services stash)" = "stash"
+          logs="$(docker compose logs stash)"
+          echo "$logs" | grep -Eq 'Authentication operation unavailable \(operation=password_sign_in, cause=[A-Za-z][A-Za-z0-9]*, code=(unclassified|[A-Z0-9_]{5,32})\)\.'
+          if echo "$logs" | grep -Eqi 'secretKey|compose-authentication-smoke-password|postgres://'; then
+            echo "Authentication outage logs exposed forbidden protocol or credential material." >&2
+            exit 1
+          fi
+          docker compose start postgres
+          node scripts/compose-auth-outage.mjs recovered
       - name: Show container logs after a failure
         if: failure()
         run: docker compose logs

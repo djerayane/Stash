@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 
-import { AccountRegistrationService, type RegistrationRecord } from "../src/account-registration.js";
+import { AccountRegistrationService, RegistrationAdmissionController, RegistrationThrottled, type RegistrationRecord } from "../src/account-registration.js";
+import type { PasswordHashCodec } from "../src/password-hash.js";
 import { startInstance, type RunningInstance } from "../src/instance.js";
 
 class RegistrationRepository {
@@ -54,5 +55,28 @@ describe("built-in account registration through a running Instance", () => {
     repository.failure = new Error("postgres://member:secret@database/stash"); const unavailable = await register(baseUrl, "other@stash.test");
     assert.equal(unavailable.status, 503); assert.deepEqual(failures.map(({ operation }) => operation), ["registration"]);
     assert.doesNotMatch(await unavailable.text(), /postgres|secret|password/i);
+  });
+
+  it("rejects excess concurrent work before invoking the password hash codec", async () => {
+    const repository = new RegistrationRepository(); let hashCalls = 0; let releaseHash!: () => void; let markHashEntered!: () => void;
+    const hashEntered = new Promise<void>((resolve) => { markHashEntered = resolve; });
+    const passwordHashReleased = new Promise<void>((resolve) => { releaseHash = resolve; });
+    const passwords: PasswordHashCodec = { async hash() { hashCalls += 1; markHashEntered(); await passwordHashReleased; return "hash"; }, async matches() { return false; } };
+    const registration = new AccountRegistrationService(repository, passwords,
+      new RegistrationAdmissionController({ maximumConcurrent: 1, maximumAttempts: 10, windowMs: 60_000 }));
+    const first = registration.register({ name: "First", email: "first@stash.test", password: "password long enough" }, undefined, "127.0.0.1");
+    await hashEntered;
+    await assert.rejects(registration.register({ name: "Second", email: "second@stash.test", password: "password long enough" }, undefined, "127.0.0.2"), RegistrationThrottled);
+    assert.equal(hashCalls, 1); releaseHash(); await first;
+  });
+
+  it("rate-limits repeated registration attempts before hashing", async () => {
+    const repository = new RegistrationRepository(); let hashCalls = 0;
+    const passwords: PasswordHashCodec = { async hash() { hashCalls += 1; return "hash"; }, async matches() { return false; } };
+    const registration = new AccountRegistrationService(repository, passwords,
+      new RegistrationAdmissionController({ maximumConcurrent: 2, maximumAttempts: 1, windowMs: 60_000 }));
+    await registration.register({ name: "First", email: "first@stash.test", password: "password long enough" }, undefined, "127.0.0.1");
+    await assert.rejects(registration.register({ name: "Second", email: "second@stash.test", password: "password long enough" }, undefined, "127.0.0.1"), RegistrationThrottled);
+    assert.equal(hashCalls, 1);
   });
 });

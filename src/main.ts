@@ -41,7 +41,7 @@ import { AgentGrantService } from "./agent-grants.js";
 import { InstanceUpgradeService } from "./instance-upgrade.js";
 import { PostgresInstanceUpgradeTarget } from "./postgres-instance-upgrade.js";
 import { readStashReleaseVersion } from "./release-version.js";
-import { databaseUrlFromEnvironment, validateComposeExposure } from "./deployment-configuration.js";
+import { databaseUrlFromEnvironment, openRegistrationFromEnvironment, validateComposeExposure } from "./deployment-configuration.js";
 import { AccountRegistrationService } from "./account-registration.js";
 
 function requiredEnvironment(name: string): string {
@@ -69,9 +69,7 @@ async function main(): Promise<void> {
   }
 
   const publicOrigin = requiredEnvironment("PUBLIC_ORIGIN");
-  const registrationSetting = process.env.OPEN_REGISTRATION?.trim().toLowerCase();
-  const localEvaluationRegistration = new URL(publicOrigin).hostname === "localhost";
-  const openRegistration = registrationSetting === "true" || (registrationSetting !== "false" && localEvaluationRegistration);
+  const openRegistration = openRegistrationFromEnvironment(process.env);
   const passwordAuth = new PasswordAuthService(database);
   const notifications = new NotificationService(database);
   const automations = new AutomationService(database, notifications);
@@ -112,7 +110,7 @@ async function main(): Promise<void> {
     reportAuthenticationFailure: ({ operation, cause }) => {
       const causeType = cause instanceof Error ? cause.name : "UnknownFailure";
       const candidateCode = cause && typeof cause === "object" && "code" in cause ? String(cause.code) : "";
-      const causeCode = /^[A-Z0-9]{5}$/.test(candidateCode) ? candidateCode : "unclassified";
+      const causeCode = /^(?:[A-Z0-9]{5}|E[A-Z_]{2,31})$/.test(candidateCode) ? candidateCode : "unclassified";
       console.warn(`Authentication operation unavailable (operation=${operation}, cause=${causeType}, code=${causeCode}).`);
     },
     workspaceProjects: new WorkspaceProjectService(database),

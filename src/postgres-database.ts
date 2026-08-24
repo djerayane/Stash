@@ -233,6 +233,11 @@ export class PostgresDatabase implements
 
   constructor(connectionString: string, authenticationSecrets: AuthenticationSecretCodec) {
     this.#pool = new Pool({ connectionString, connectionTimeoutMillis: 2_000 });
+    // pg emits idle-client failures on Pool rather than through the request that
+    // originally created the client. Installing a listener keeps a database
+    // restart from becoming an uncaught process-level exception; the next
+    // operation reports its sanitized boundary-specific failure to the caller.
+    this.#pool.on("error", () => undefined);
     this.#authenticationSecrets = authenticationSecrets;
   }
 

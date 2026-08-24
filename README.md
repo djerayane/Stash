@@ -27,7 +27,6 @@ docker compose up -d
 Wait for the `stash` service to become healthy, then open <http://localhost:3000>. Use `docker compose ps` to inspect readiness and `docker compose logs stash` to inspect startup. Stop the Instance with `docker compose down`. PostgreSQL, local Attachments, and Instance Backups remain in the `stash-postgres`, `stash-attachments`, and `stash-backups` named volumes; removing those volumes deletes local Instance data and is intentionally not part of the normal stop command.
 
 The signed-out page offers **Create an account** in the localhost Compose evaluation configuration. Registration creates a built-in password account and a personal Workspace, then signs the new Member in. Set `OPEN_REGISTRATION=false` to close registration. The application default is closed, so non-Compose deployments must explicitly set `OPEN_REGISTRATION=true` to enable it. Existing built-in accounts always use the Password sign-in method.
-
 To use a published multi-architecture image instead of building from the checkout, set `STASH_IMAGE`. Compose retains the same PostgreSQL, persistence, health, and localhost-only defaults:
 
 ```sh
@@ -71,7 +70,7 @@ The application fails at startup with a clear error when required configuration 
 | `PUBLIC_ORIGIN` | yes | Canonical HTTPS origin used for OIDC callbacks, such as `https://stash.example.com`; plain HTTP is accepted only for `localhost` evaluation |
 | `HOST` | no | Bind address, defaults to `0.0.0.0` |
 | `PORT` | no | TCP port, defaults to `3000` |
-| `OPEN_REGISTRATION` | no | `true` opens built-in account registration and `false` closes it; when unset, only the localhost evaluation origin enables it |
+| `OPEN_REGISTRATION` | no | `true` opens built-in account registration and `false` closes it; the application default is `false`, while the localhost Compose evaluation configuration explicitly defaults to `true` |
 | `REDIS_URL` | no | Redis connection URL for best-effort acceleration; PostgreSQL remains authoritative |
 | `WEBAUTHN_RP_ID` | no | WebAuthn relying-party domain; defaults to the `PUBLIC_ORIGIN` hostname |
 | `WEBAUTHN_RP_NAME` | no | Name displayed by authenticators; defaults to `Stash` |

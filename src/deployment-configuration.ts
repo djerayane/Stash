@@ -3,6 +3,15 @@ export const developmentMasterKey = "c3Rhc2gtbG9jYWwtZGV2ZWxvcG1lbnQta2V5LTAwMDA
 export const developmentPostgresPassword = "stash-development-only";
 export const developmentPublicOrigin = "http://localhost:3000";
 
+export function openRegistrationFromEnvironment(values: NodeJS.ProcessEnv): boolean {
+  const value = values.OPEN_REGISTRATION;
+  if (value === undefined) return false;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "true") return true;
+  if (normalized === "false") return false;
+  throw new Error("OPEN_REGISTRATION must be true or false");
+}
+
 function isCanonicalExternalHttpsOrigin(value: string | undefined): boolean {
   if (!value?.trim()) return false;
   const raw = value.trim();

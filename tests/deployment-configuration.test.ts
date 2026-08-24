@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { databaseUrlFromEnvironment, developmentAdminToken, developmentMasterKey, validateComposeExposure } from "../src/deployment-configuration.js";
+import { databaseUrlFromEnvironment, developmentAdminToken, developmentMasterKey, openRegistrationFromEnvironment, validateComposeExposure } from "../src/deployment-configuration.js";
 
 describe("deployment configuration", () => {
   it("rejects every evaluation default on a non-loopback Compose bind address", () => {
@@ -97,5 +97,14 @@ describe("deployment configuration", () => {
 
   it("preserves an explicitly supplied DATABASE_URL", () => {
     assert.equal(databaseUrlFromEnvironment({ DATABASE_URL: "postgres://external.example/stash" }), "postgres://external.example/stash");
+  });
+
+  it("keeps registration closed by default and rejects ambiguous boolean values", () => {
+    assert.equal(openRegistrationFromEnvironment({}), false);
+    assert.equal(openRegistrationFromEnvironment({ OPEN_REGISTRATION: " true " }), true);
+    assert.equal(openRegistrationFromEnvironment({ OPEN_REGISTRATION: "FALSE" }), false);
+    for (const value of ["", "1", "yes", "enabled", "tru"]) {
+      assert.throws(() => openRegistrationFromEnvironment({ OPEN_REGISTRATION: value }), /OPEN_REGISTRATION must be true or false/);
+    }
   });
 });

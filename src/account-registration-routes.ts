@@ -2,6 +2,7 @@ import { json, readJson, type HttpRoute } from "./http-routing.js";
 import {
   InvalidRegistrationInput,
   RegistrationConflict,
+  RegistrationThrottled,
   type AccountRegistrationService,
 } from "./account-registration.js";
 
@@ -30,7 +31,7 @@ export function accountRegistrationRoute(
         return true;
       }
       try {
-        json(response, 201, await service.register(await readJson(request), request.headers["user-agent"]));
+        json(response, 201, await service.register(await readJson(request), request.headers["user-agent"], request.socket.remoteAddress ?? "unknown"));
       } catch (error) {
         if (error instanceof Error && error.message === "body_too_large") {
           json(response, 413, { error: "body_too_large", message: "Request body exceeds the 64 KiB limit." });
@@ -38,6 +39,9 @@ export function accountRegistrationRoute(
           json(response, 422, { error: "invalid_input", message: "Name, email, and password must be valid." });
         } else if (error instanceof RegistrationConflict) {
           json(response, 409, { error: "account_exists", message: "An account with this email already exists." });
+        } else if (error instanceof RegistrationThrottled) {
+          response.setHeader("retry-after", String(error.retryAfterSeconds));
+          json(response, 429, { error: "registration_throttled", message: "Too many account registration attempts. Try again later." });
         } else if (error instanceof SyntaxError) {
           json(response, 400, { error: "invalid_json", message: "Request body must be valid JSON." });
         } else {
