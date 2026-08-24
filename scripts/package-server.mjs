@@ -67,8 +67,8 @@ async function main() {
   await mkdir(paths.output, { recursive: true });
   const extension = platform === "win32" ? ".zip" : ".tar.gz"; const archive = join(paths.output, `${archiveRoot}${extension}`); await rm(archive, { force: true }); await rm(`${archive}.sha256`, { force: true });
   if (platform === "win32") {
-    const result = spawnSync("powershell", ["-NoProfile", "-Command", `Compress-Archive -Path '${stage}' -DestinationPath '${archive}' -CompressionLevel Optimal`], { encoding: "utf8" });
-    if (result.status !== 0) throw new Error(`Archive creation failed: ${result.stderr}`);
+    const result = spawnSync("tar", ["-a", "-cf", archive, "-C", paths.output, basename(stage)], { encoding: "utf8" });
+    if (result.status !== 0) throw new Error(`Archive creation failed: ${result.stderr || result.stdout}`);
   } else {
     const tarVersion = spawnSync("tar", ["--version"], { encoding: "utf8" });
     const tarFlags = tarVersion.status === 0 && tarVersion.stdout.includes("GNU tar")

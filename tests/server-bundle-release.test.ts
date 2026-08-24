@@ -97,6 +97,7 @@ describe("self-contained Instance bundle packaging", () => {
 
   test("uses deterministic owner and ordering flags supported by GNU and BSD tar", async () => {
     const packager = await readFile(new URL("../scripts/package-server.mjs", import.meta.url), "utf8");
+    assert.match(packager, /spawnSync\("tar", \["-a", "-cf", archive/);
     assert.match(packager, /spawnSync\("tar", \["--version"\]/);
     assert.match(packager, /--owner/);
     assert.match(packager, /--uid/);
