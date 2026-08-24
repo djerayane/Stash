@@ -89,21 +89,29 @@ describe("embedded Instance store", () => {
     const store = await EmbeddedInstanceStore.open(root, createAuthenticationSecretCodec(key)); stores.push(store); await store.database.verifyConnection();
     const backup = join(store.paths.backups, "manual"); const service = new InstanceBackupService(
       new EmbeddedLocalInstanceBackupSource({ store, publicOrigin: "http://127.0.0.1:3000" }), { masterKey: key });
+    await writeFile(join(store.paths.configuration, "runtime.json"), `${JSON.stringify({ accidentalKey: key })}\n`, { mode: 0o600 });
+    await assert.rejects(() => service.create(backup), /master-key material/);
+    await writeFile(join(store.paths.configuration, "runtime.json"), `${JSON.stringify({ locale: "fr-FR" })}\n`, { mode: 0o600 });
     await service.create(backup); assert.equal((await service.verify(backup)).status, "verified");
     const manifest = await readFile(join(backup, "manifest.json"), "utf8");
     assert.match(manifest, /pglite-data-directory-v1/); assert.doesNotMatch(manifest, new RegExp(key.replace(/[+/=]/g, "\\$&")));
+    assert.doesNotMatch(await readFile(join(backup, "configuration.json"), "utf8"), new RegExp(key.replace(/[+/=]/g, "\\$&")));
   });
 
   test("restores an embedded backup and requires restart before the restored state is used", async () => {
     const root = await mkdtemp(join(tmpdir(), "stash-embedded-restore-")); const key = masterKey();
     const store = await EmbeddedInstanceStore.open(root, createAuthenticationSecretCodec(key)); stores.push(store); await store.database.verifyConnection();
+    const configurationPath = join(store.paths.configuration, "runtime.json");
+    await writeFile(configurationPath, `${JSON.stringify({ locale: "fr-FR", registration: "closed" })}\n`, { mode: 0o600 });
     const backup = join(store.paths.backups, "restore-point"); const service = new InstanceBackupService(
       new EmbeddedLocalInstanceBackupSource({ store, publicOrigin: "http://127.0.0.1:3000" }), { masterKey: key });
     await service.create(backup);
+    await writeFile(configurationPath, `${JSON.stringify({ locale: "en-US", registration: "open" })}\n`, { mode: 0o600 });
     const target = new EmbeddedLocalInstanceRestoreTarget({ store, publicOrigin: "http://127.0.0.1:3000" });
     assert.deepEqual(await service.restore(backup, target, { dryRun: false }), { status: "restored" }); assert.equal(service.requiresRestart(), true);
     await store.database.verifyConnection();
     await store.close(); stores.splice(stores.indexOf(store), 1);
     const reopened = await EmbeddedInstanceStore.open(root, createAuthenticationSecretCodec(key)); stores.push(reopened); await reopened.database.verifyConnection();
+    assert.deepEqual(JSON.parse(await readFile(configurationPath, "utf8")), { locale: "fr-FR", registration: "closed" });
   });
 });

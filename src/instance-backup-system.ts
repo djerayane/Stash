@@ -51,6 +51,13 @@ async function regularFiles(root: string): Promise<string[]> {
   return result;
 }
 
+function safeConfigurationPath(path: string): string {
+  if (!path || path.startsWith("/") || path.includes("\\") || path.split("/").some((part) => !part || part === "." || part === "..")) {
+    throw new Error("Instance Backup durable configuration is invalid");
+  }
+  return path;
+}
+
 export class PostgresLocalInstanceBackupSource implements InstanceBackupSource {
   constructor(private readonly options: {
     databaseUrl: string;
@@ -103,39 +110,81 @@ export class EmbeddedLocalInstanceBackupSource implements InstanceBackupSource {
     return files;
   }
   async captureConfiguration() {
-    return { publicOrigin: this.options.publicOrigin, attachmentStorage: "local", storageMode: "embedded", masterKeyRequired: true, redisIncluded: false };
+    const files = await regularFiles(this.options.store.paths.configuration);
+    const result: Record<string, string | boolean> = { publicOrigin: this.options.publicOrigin, attachmentStorage: "local", storageMode: "embedded",
+      masterKeyRequired: true, redisIncluded: false, durableConfigurationManifest: JSON.stringify(files) };
+    for (const [index, path] of files.entries()) {
+      result[`durableConfigurationFile${index}`] = (await readFile(join(this.options.store.paths.configuration, ...path.split("/")))).toString("base64");
+    }
+    return result;
   }
 }
 
 export class EmbeddedLocalInstanceRestoreTarget implements InstanceBackupRestoreTarget {
   readonly databaseFormat = "pglite-data-directory-v1" as const;
+  private configurationFiles: ReadonlyArray<{ path: string; content: Buffer }> = [];
   constructor(private readonly options: { store: EmbeddedInstanceStore; publicOrigin: string }) {}
   async validateConfiguration(configuration: Record<string, unknown>): Promise<void> {
     if (configuration.storageMode !== "embedded" || configuration.attachmentStorage !== "local") throw new Error("Instance Backup is not an embedded local-storage backup");
     if (configuration.publicOrigin !== this.options.publicOrigin) throw new Error("Instance Backup PUBLIC_ORIGIN does not match this restore environment");
     if (configuration.masterKeyRequired !== true) throw new Error("Instance Backup does not declare its master-key requirement");
+    let decoded: unknown;
+    try { decoded = JSON.parse(String(configuration.durableConfigurationManifest)); } catch { throw new Error("Instance Backup durable configuration is invalid"); }
+    if (!Array.isArray(decoded)) throw new Error("Instance Backup durable configuration is invalid");
+    const seen = new Set<string>();
+    this.configurationFiles = decoded.map((entry: unknown, index) => {
+      const encoded = configuration[`durableConfigurationFile${index}`];
+      if (typeof entry !== "string" || typeof encoded !== "string" || seen.has(entry)) throw new Error("Instance Backup durable configuration is invalid");
+      const path = safeConfigurationPath(entry); seen.add(path);
+      const content = Buffer.from(encoded, "base64");
+      if (content.toString("base64") !== encoded) throw new Error("Instance Backup durable configuration is invalid");
+      return { path, content };
+    });
   }
   async prepareAttachments(source: string, paths: ReadonlyArray<string>): Promise<unknown> {
     const staged = `${this.options.store.paths.attachments}.restore-staged-${process.pid}`; await rm(staged, { recursive: true, force: true });
+    const stagedConfiguration = `${this.options.store.paths.configuration}.restore-staged-${process.pid}`;
+    await rm(stagedConfiguration, { recursive: true, force: true });
     await mkdir(staged, { recursive: false, mode: 0o700 });
+    await mkdir(stagedConfiguration, { recursive: false, mode: 0o700 });
     try {
       for (const path of paths) { const from = join(source, ...path.split("/")); const metadata = await lstat(from);
         if (!metadata.isFile() || metadata.isSymbolicLink()) throw new Error(`Invalid verified Attachment: ${path}`);
         const target = join(staged, ...path.split("/")); await mkdir(dirname(target), { recursive: true, mode: 0o700 }); await cp(from, target, { errorOnExist: true, preserveTimestamps: true }); }
-      return staged;
-    } catch (error) { await rm(staged, { recursive: true, force: true }); throw error; }
+      for (const file of this.configurationFiles) {
+        const target = join(stagedConfiguration, ...file.path.split("/"));
+        await mkdir(dirname(target), { recursive: true, mode: 0o700 }); await writeFile(target, file.content, { mode: 0o600, flag: "wx" });
+      }
+      return { attachments: staged, configuration: stagedConfiguration };
+    } catch (error) { await Promise.all([rm(staged, { recursive: true, force: true }), rm(stagedConfiguration, { recursive: true, force: true })]); throw error; }
   }
   snapshotDatabase(destination: string): Promise<void> { return this.options.store.captureDatabase(destination); }
   restoreDatabase(source: string): Promise<void> { return this.options.store.restoreDatabase(source); }
   async commitAttachments(prepared: unknown): Promise<void> {
-    if (typeof prepared !== "string") throw new Error("invalid prepared Attachment restore");
-    const destination = this.options.store.paths.attachments; const previous = `${destination}.restore-previous-${process.pid}`;
-    await rm(previous, { recursive: true, force: true }); let movedPrevious = false;
-    try { await rename(destination, previous); movedPrevious = true; await rename(prepared, destination); }
-    catch (error) { if (movedPrevious) await rename(previous, destination).catch(() => undefined); throw error; }
-    await rm(previous, { recursive: true, force: true });
+    if (!prepared || typeof prepared !== "object" || !("attachments" in prepared) || !("configuration" in prepared)) throw new Error("invalid prepared Attachment restore");
+    const staged = prepared as { attachments: string; configuration: string };
+    const destinations = [this.options.store.paths.attachments, this.options.store.paths.configuration];
+    const stagedPaths = [staged.attachments, staged.configuration];
+    const previous = destinations.map((destination) => `${destination}.restore-previous-${process.pid}`);
+    await Promise.all(previous.map((path) => rm(path, { recursive: true, force: true })));
+    let previousCount = 0; let committedCount = 0;
+    try {
+      for (let index = 0; index < destinations.length; index += 1) { await rename(destinations[index]!, previous[index]!); previousCount += 1; }
+      for (let index = 0; index < destinations.length; index += 1) { await rename(stagedPaths[index]!, destinations[index]!); committedCount += 1; }
+    } catch (error) {
+      for (let index = 0; index < committedCount; index += 1) await rm(destinations[index]!, { recursive: true, force: true }).catch(() => undefined);
+      for (let index = 0; index < previousCount; index += 1) await rename(previous[index]!, destinations[index]!).catch(() => undefined);
+      throw error;
+    }
+    await Promise.all(previous.map((path) => rm(path, { recursive: true, force: true })));
   }
-  async discardPreparedAttachments(prepared: unknown): Promise<void> { if (typeof prepared === "string") await rm(prepared, { recursive: true, force: true }); }
+  async discardPreparedAttachments(prepared: unknown): Promise<void> {
+    if (prepared && typeof prepared === "object") {
+      const value = prepared as { attachments?: unknown; configuration?: unknown };
+      await Promise.all([value.attachments, value.configuration].filter((path): path is string => typeof path === "string")
+        .map((path) => rm(path, { recursive: true, force: true })));
+    }
+  }
 }
 
 export class PostgresLocalInstanceRestoreTarget implements InstanceBackupRestoreTarget {

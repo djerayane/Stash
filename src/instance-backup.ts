@@ -65,6 +65,15 @@ function parseMasterKey(encoded: string): Buffer {
   if (key.length !== 32 || key.toString("base64") !== encoded) throw new Error("INSTANCE_MASTER_KEY must be a base64-encoded 32-byte key");
   return key;
 }
+function containsEncodedSecret(value: unknown, secret: string): boolean {
+  if (typeof value === "string") {
+    if (value.includes(secret)) return true;
+    const decoded = Buffer.from(value, "base64");
+    return decoded.length > 0 && decoded.toString("base64") === value && decoded.toString("utf8").includes(secret);
+  }
+  if (Array.isArray(value)) return value.some((item) => containsEncodedSecret(item, secret));
+  return Boolean(value && typeof value === "object" && Object.values(value).some((item) => containsEncodedSecret(item, secret)));
+}
 function safeRelativePath(path: string): string {
   if (!path || path.startsWith("/") || path.includes("\\") || path.split("/").some((part) => !part || part === "." || part === "..")) {
     throw new Error("invalid backup file path");
@@ -135,7 +144,12 @@ export class InstanceBackupService {
         if (seen.has(path)) throw new Error("duplicate Attachment path in Instance Backup");
         seen.add(path); await record(path, "attachment");
       }
-      const configuration = Buffer.from(stableJson(await this.source.captureConfiguration()));
+      const capturedConfiguration = await this.source.captureConfiguration();
+      const encodedKey = this.#key.toString("base64");
+      if (containsEncodedSecret(capturedConfiguration, encodedKey)) {
+        throw new Error("Instance Backup configuration contains master-key material");
+      }
+      const configuration = Buffer.from(stableJson(capturedConfiguration));
       await writeFile(childPath(temporary, "configuration.json"), configuration, { mode: 0o600, flag: "wx" });
       await record("configuration.json", "configuration");
       const createdAt = this.#now().toISOString();
