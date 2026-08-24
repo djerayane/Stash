@@ -114,5 +114,6 @@ describe("self-contained Instance bundle packaging", () => {
     assert.match(release, /publish-server-bundles:\s*\n\s*needs: release-quality/);
     assert.match(release, /SHA256SUMS/);
     assert.doesNotMatch(await readFile(new URL("../.github/workflows/compose-quick-start.yml", import.meta.url), "utf8"), /upload-release-asset|gh release/);
+    assert.match(await readFile(new URL("../.github/workflows/compose-quick-start.yml", import.meta.url), "utf8"), /permissions:\s*\n\s*contents: read\s*\n\s*packages: read/);
   });
 });
