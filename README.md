@@ -18,21 +18,30 @@ The Vite build is the sole browser application. The server hosts its static asse
 
 ## Run an Instance
 
-Docker Compose starts the supported baseline: one Stash application container and PostgreSQL.
+Docker Compose starts the supported baseline: one Stash application container and PostgreSQL. From a fresh checkout, the complete local evaluation path is:
 
 ```sh
-export INSTANCE_ADMIN_TOKEN="replace-with-a-long-random-secret"
-export INSTANCE_MASTER_KEY="$(openssl rand -base64 32)"
-export PUBLIC_ORIGIN="https://stash.example.com"
-docker compose up --build -d
-corepack enable
-pnpm install --frozen-lockfile
-pnpm run smoke
+docker compose up -d
 ```
 
-Open <http://localhost:3000>. Stop the Instance with `docker compose down`. PostgreSQL data remains in the `stash-postgres` volume; removing that volume deletes the local database and is intentionally not part of the normal stop command.
+Wait for the `stash` service to become healthy, then open <http://localhost:3000>. Use `docker compose ps` to inspect readiness and `docker compose logs stash` to inspect startup. Stop the Instance with `docker compose down`. PostgreSQL, local Attachments, and Instance Backups remain in the `stash-postgres`, `stash-attachments`, and `stash-backups` named volumes; removing those volumes deletes local Instance data and is intentionally not part of the normal stop command.
 
-For a non-development installation, also set a strong `POSTGRES_PASSWORD`. `STASH_PORT` changes the published host port, and `STASH_URL` tells the smoke test where to find an Instance.
+### Local evaluation defaults are not production secrets
+
+The zero-configuration path is deliberately bound to `127.0.0.1` and supplies conspicuous, deterministic development-only values for the administrator token, Instance master key, PostgreSQL password, and `http://localhost:3000` public origin. Anyone with local machine access can discover these values. Do not expose this configuration to a network, reuse its data as a production Instance, or treat its credentials as private.
+
+Before any external exposure, supply unique secrets and the canonical HTTPS origin. Set the bind address explicitly only after the Instance is behind the intended firewall or reverse proxy:
+
+```sh
+export INSTANCE_ADMIN_TOKEN="$(openssl rand -base64 48)"
+export INSTANCE_MASTER_KEY="$(openssl rand -base64 32)"
+export POSTGRES_PASSWORD="$(openssl rand -base64 32)"
+export PUBLIC_ORIGIN="https://stash.example.com"
+export STASH_BIND_ADDRESS="0.0.0.0"
+docker compose up -d
+```
+
+Store `INSTANCE_MASTER_KEY` separately from PostgreSQL and backups; restoring encrypted Instance state requires the exact same key. `STASH_PORT` changes the published host port, `STASH_BIND_ADDRESS` defaults to localhost, and `STASH_URL` tells the smoke test where to find an Instance. Application-level validation remains active for Compose overrides: malformed keys and non-local HTTP origins fail startup clearly.
 
 ## Configuration
 
@@ -43,7 +52,7 @@ The application fails at startup with a clear error when required configuration 
 | `DATABASE_URL` | yes | PostgreSQL connection URL |
 | `INSTANCE_ADMIN_TOKEN` | yes | Bearer token for Instance Administrator surfaces; keep it outside Workspace content |
 | `INSTANCE_MASTER_KEY` | yes | Base64-encoded 32-byte key used to protect authentication material; store it outside PostgreSQL and Workspace exports |
-| `PUBLIC_ORIGIN` | yes | Canonical HTTPS origin used for OIDC callbacks, such as `https://stash.example.com` |
+| `PUBLIC_ORIGIN` | yes | Canonical HTTPS origin used for OIDC callbacks, such as `https://stash.example.com`; plain HTTP is accepted only for `localhost` evaluation |
 | `HOST` | no | Bind address, defaults to `0.0.0.0` |
 | `PORT` | no | TCP port, defaults to `3000` |
 | `REDIS_URL` | no | Redis connection URL for best-effort acceleration; PostgreSQL remains authoritative |

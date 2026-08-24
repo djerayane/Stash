@@ -207,6 +207,20 @@ describe("optional OpenID Connect authentication on a running Stash Instance", (
     );
   });
 
+  it("accepts an HTTP localhost callback origin for the Compose evaluation Instance", async () => {
+    const database = new ProtocolCompatibleOidcDatabase();
+    const oidc = new OidcAuthService(database, createOidcHttpClient({ allowUnsafeForTest: () => true }));
+    const instance = await startInstance({
+      database,
+      host: "127.0.0.1",
+      port: 0,
+      instanceAdminToken: "admin",
+      oidcAuth: oidc,
+      oidcCallbackOrigin: "http://localhost:3000",
+    });
+    await instance.close();
+  });
+
   it("signs a mapped Organization Member in through OIDC while built-in auth remains independently available", async () => {
     const { baseUrl, database, provider } = await run();
     const start = await fetch(`${baseUrl}/api/auth/oidc/${organizationId}`, {

@@ -188,9 +188,10 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
     if (!options.oidcCallbackOrigin) throw new Error("PUBLIC_ORIGIN must be configured when OpenID Connect is enabled");
     let origin: URL;
     try { origin = new URL(options.oidcCallbackOrigin); } catch { throw new Error("PUBLIC_ORIGIN must be a valid absolute URL"); }
+    const localhostHttp = origin.protocol === "http:" && origin.hostname === "localhost";
     if (origin.origin !== origin.href.replace(/\/$/, "") || origin.username || origin.password
-      || (origin.protocol !== "https:" && !(options.allowInsecureOidcCallbackOriginForTest && origin.protocol === "http:"))) {
-      throw new Error("PUBLIC_ORIGIN must be an HTTPS origin without credentials, path, query, or fragment");
+      || (origin.protocol !== "https:" && !localhostHttp && !(options.allowInsecureOidcCallbackOriginForTest && origin.protocol === "http:"))) {
+      throw new Error("PUBLIC_ORIGIN must be an HTTPS origin, or HTTP on localhost, without credentials, path, query, or fragment");
     }
     oidcCallbackOrigin = origin.origin;
   }
