@@ -18,7 +18,7 @@ async function message(response: Response, fallback: string) {
 export function InstanceBackupAdministration({ fetcher = fetch }: { readonly fetcher?: typeof fetch }) {
   const session = useInstanceAdminSession("instance-backups"); const { token } = session;
   const [verified, setVerified] = useState<string>(); const [selected, setSelected] = useState<BackupSummary>(); const [confirmation, setConfirmation] = useState("");
-  const pageRef = useRef<HTMLElement>(null); const feedbackRef = useRef<HTMLDivElement>(null);
+  const pageRef = useRef<HTMLElement>(null); const feedbackRef = useRef<HTMLDivElement>(null); const restoreTriggerRef = useRef<HTMLButtonElement>(null);
   const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
   const backups = useQuery({ queryKey: ["instance-backups", token], enabled: Boolean(token), retry: false, queryFn: async () => {
     const response = await fetcher("/api/instance/backups", { headers });
@@ -55,9 +55,9 @@ export function InstanceBackupAdministration({ fetcher = fetch }: { readonly fet
     {backups.data?.length ? <section className={styles.inventory} aria-labelledby="inventory-title"><div className={styles.inventoryHeading}><h2 id="inventory-title">Available restore points</h2><p>Select deliberately. Newer is not always the correct recovery point.</p></div><ul>{backups.data.map((backup) => <li className={styles.backup} key={backup.name}>
       <div><h3>{backup.name}</h3><p>{backup.createdAt ? `Created ${dateTime(backup.createdAt)}` : "Manifest details unavailable"}</p><small>{backup.verifiedAt ? `Last verified ${dateTime(backup.verifiedAt)}` : "Not yet verified"}{backup.schema ? ` · ${backup.schema}` : " · Select Verify for a precise diagnosis"}</small></div>
       <div className={styles.actions}><button type="button" disabled={operation.isPending} onClick={() => { operation.reset(); setVerified(undefined); operation.mutate({ backup, dryRun: true }); }}>Verify {backup.name}</button>
-        <button className={styles.danger} type="button" disabled={verified !== backup.name || operation.isPending} onClick={() => { setSelected(backup); setConfirmation(""); operation.reset(); }}>Restore {backup.name}</button></div>
+        <button className={styles.danger} type="button" disabled={verified !== backup.name || operation.isPending} onClick={(event) => { restoreTriggerRef.current = event.currentTarget; setSelected(backup); setConfirmation(""); operation.reset(); }}>Restore {backup.name}</button></div>
     </li>)}</ul></section> : null}
-    <Dialog.Root open={Boolean(selected)} onOpenChange={(open) => { if (!open) { setSelected(undefined); setConfirmation(""); } }}><Dialog.Portal><Dialog.Overlay className={styles.overlay} /><Dialog.Content className={styles.dialog}>
+    <Dialog.Root open={Boolean(selected)} onOpenChange={(open) => { if (!open) { setSelected(undefined); setConfirmation(""); } }}><Dialog.Portal><Dialog.Overlay className={styles.overlay} /><Dialog.Content className={styles.dialog} onCloseAutoFocus={(event) => { event.preventDefault(); if (!operation.isError && !operation.isSuccess) restoreTriggerRef.current?.focus(); }}>
       <Dialog.Title>Replace the current Instance state?</Dialog.Title><Dialog.Description>This changes accounts, identity links, permissions, configuration, audit history, credentials, Workspaces, and Attachments. Active sessions may stop working.</Dialog.Description>
       <label htmlFor="restore-confirmation">Type {selected?.name} to confirm</label><input id="restore-confirmation" autoComplete="off" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} />
       <div className={styles.dialogActions}><Dialog.Close asChild><button type="button">Cancel</button></Dialog.Close><button className={styles.danger} type="button" disabled={!selected || confirmation !== selected.name || operation.isPending} onClick={() => selected && operation.mutate({ backup: selected, dryRun: false })}>Restore Instance</button></div>
