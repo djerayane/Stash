@@ -25,11 +25,28 @@ services:
 
   stash:
     build: .
+    command:
+      - sh
+      - -c
+      - |
+        if [ "$$INSTANCE_ADMIN_TOKEN" = "stash-development-only-admin-token" ] ||
+           [ "$$INSTANCE_MASTER_KEY" = "c3Rhc2gtbG9jYWwtZGV2ZWxvcG1lbnQta2V5LTAwMDA=" ] ||
+           [ "$$PUBLIC_ORIGIN" = "http://localhost:3000" ] ||
+           [ "$$POSTGRES_PASSWORD" = "stash-development-only" ]; then
+          echo "WARNING: Stash is using localhost-only development credentials. Read README.md before exposing this Instance." >&2
+        fi
+        exec node dist/main.js
     environment:
-      DATABASE_URL: postgres://stash:${POSTGRES_PASSWORD:-stash-development-only}@postgres:5432/stash
-      INSTANCE_ADMIN_TOKEN: ${INSTANCE_ADMIN_TOKEN:?Set INSTANCE_ADMIN_TOKEN to a strong secret}
-      INSTANCE_MASTER_KEY: ${INSTANCE_MASTER_KEY:?Set INSTANCE_MASTER_KEY to a base64-encoded 32-byte key}
-      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?Set PUBLIC_ORIGIN to the canonical HTTPS origin}
+      DATABASE_URL: ${DATABASE_URL:-}
+      POSTGRES_USER: stash
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stash-development-only}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: stash
+      INSTANCE_ADMIN_TOKEN: ${INSTANCE_ADMIN_TOKEN:-stash-development-only-admin-token}
+      INSTANCE_MASTER_KEY: ${INSTANCE_MASTER_KEY:-c3Rhc2gtbG9jYWwtZGV2ZWxvcG1lbnQta2V5LTAwMDA=}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost:3000}
+      STASH_BIND_ADDRESS: ${STASH_BIND_ADDRESS:-127.0.0.1}
       REDIS_URL: ${REDIS_URL:-}
       WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-}
       WEBAUTHN_RP_NAME: ${WEBAUTHN_RP_NAME:-Stash}
@@ -65,7 +82,7 @@ services:
       timeout: 3s
       retries: 10
     ports:
-      - "${STASH_PORT:-3000}:3000"
+      - "${STASH_BIND_ADDRESS:-127.0.0.1}:${STASH_PORT:-3000}:3000"
     volumes:
       - stash-attachments:/var/lib/stash/attachments
       - stash-backups:/var/lib/stash/backups

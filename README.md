@@ -18,21 +18,30 @@ The Vite build is the sole browser application. The server hosts its static asse
 
 ## Run an Instance
 
-Docker Compose starts the supported baseline: one Stash application container and PostgreSQL.
+Docker Compose starts the supported baseline: one Stash application container and PostgreSQL. From a fresh checkout, the complete local evaluation path is:
 
 ```sh
-export INSTANCE_ADMIN_TOKEN="replace-with-a-long-random-secret"
-export INSTANCE_MASTER_KEY="$(openssl rand -base64 32)"
-export PUBLIC_ORIGIN="https://stash.example.com"
-docker compose up --build -d
-corepack enable
-pnpm install --frozen-lockfile
-pnpm run smoke
+docker compose up -d
 ```
 
-Open <http://localhost:3000>. Stop the Instance with `docker compose down`. PostgreSQL data remains in the `stash-postgres` volume; removing that volume deletes the local database and is intentionally not part of the normal stop command.
+Wait for the `stash` service to become healthy, then open <http://localhost:3000>. Use `docker compose ps` to inspect readiness and `docker compose logs stash` to inspect startup. Stop the Instance with `docker compose down`. PostgreSQL, local Attachments, and Instance Backups remain in the `stash-postgres`, `stash-attachments`, and `stash-backups` named volumes; removing those volumes deletes local Instance data and is intentionally not part of the normal stop command.
 
-For a non-development installation, also set a strong `POSTGRES_PASSWORD`. `STASH_PORT` changes the published host port, and `STASH_URL` tells the smoke test where to find an Instance.
+### Local evaluation defaults are not production secrets
+
+The zero-configuration path is deliberately bound to `127.0.0.1` and supplies conspicuous, deterministic development-only values for the administrator token, Instance master key, PostgreSQL password, and `http://localhost:3000` public origin. Anyone with local machine access can discover these values. Do not expose this configuration to a network, reuse its data as a production Instance, or treat its credentials as private.
+
+Before any external exposure, supply unique secrets and the canonical HTTPS origin. Set the bind address explicitly only after the Instance is behind the intended firewall or reverse proxy:
+
+```sh
+export INSTANCE_ADMIN_TOKEN="$(openssl rand -base64 48)"
+export INSTANCE_MASTER_KEY="$(openssl rand -base64 32)"
+export POSTGRES_PASSWORD="Aa1-$(openssl rand -hex 24)"
+export PUBLIC_ORIGIN="https://stash.example.com"
+export STASH_BIND_ADDRESS="0.0.0.0"
+docker compose up -d
+```
+
+Store `INSTANCE_MASTER_KEY` separately from PostgreSQL and backups; restoring encrypted Instance state requires the exact same key. External binds require a PostgreSQL password of at least 16 characters containing at least three of lowercase, uppercase, digits, and symbols. Their `PUBLIC_ORIGIN` must be canonical HTTPS with a DNS hostname; IP literals and localhost names are rejected. `STASH_PORT` changes the published host port, `STASH_BIND_ADDRESS` defaults to localhost, and `STASH_URL` tells the smoke test where to find an Instance. Application-level validation remains active for Compose overrides and fails unsafe production configuration clearly.
 
 ## Configuration
 
@@ -40,10 +49,10 @@ The application fails at startup with a clear error when required configuration 
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `DATABASE_URL` | yes | PostgreSQL connection URL |
+| `DATABASE_URL` | yes outside Compose | PostgreSQL connection URL; Compose instead URL-encodes its separate PostgreSQL fields so reserved password characters remain safe |
 | `INSTANCE_ADMIN_TOKEN` | yes | Bearer token for Instance Administrator surfaces; keep it outside Workspace content |
 | `INSTANCE_MASTER_KEY` | yes | Base64-encoded 32-byte key used to protect authentication material; store it outside PostgreSQL and Workspace exports |
-| `PUBLIC_ORIGIN` | yes | Canonical HTTPS origin used for OIDC callbacks, such as `https://stash.example.com` |
+| `PUBLIC_ORIGIN` | yes | Canonical HTTPS origin used for OIDC callbacks, such as `https://stash.example.com`; plain HTTP is accepted only for `localhost` evaluation |
 | `HOST` | no | Bind address, defaults to `0.0.0.0` |
 | `PORT` | no | TCP port, defaults to `3000` |
 | `REDIS_URL` | no | Redis connection URL for best-effort acceleration; PostgreSQL remains authoritative |
@@ -87,7 +96,7 @@ Provider identities are explicitly linked to an existing Organization Member wit
 
 OIDC issuer, discovery, token, and JWKS endpoints must use HTTPS and resolve only to public addresses. Stash pins each validated DNS result to the outbound connection, revalidates controlled discovery/JWKS redirects, rejects token-endpoint redirects, and bounds response time and size. The plain-HTTP/private-address exception exists only as an explicitly injected test adapter and is not available through Instance configuration.
 
-OIDC callback URLs always use `PUBLIC_ORIGIN`; request `Host` and forwarding headers never influence them. Deployments behind a proxy must preserve the configured public URL when forwarding the callback. Production callback origins require HTTPS. The insecure-origin exception is injectable only by acceptance tests and is not available from environment configuration.
+OIDC callback URLs always use `PUBLIC_ORIGIN`; request `Host` and forwarding headers never influence them. The zero-configuration, loopback-bound evaluation Instance may configure `http://localhost:3000` through the environment because browsers treat localhost as a secure development context. Every production or otherwise non-local callback origin must be canonical HTTPS, and changing Compose to a non-loopback bind fails startup while the localhost origin remains. The separately injected acceptance-test adapter does not enable any broader environment-configured insecure origin. Deployments behind a proxy must preserve the configured public URL when forwarding the callback.
 
 When the Instance GitHub App is configured, an authenticated Organization Owner or Admin creates a Repository Connection with `POST /api/organizations/<organizationId>/repository-connections` and a JSON body containing the numeric `installationId`, repository `owner`, and repository `name`. `GET` on the same path lists only that Organization's connections. A connection is reused for the same GitHub repository inside one Organization and is never shared across Organizations. The installation and repository IDs remain operational Instance data. Stash never persists short-lived GitHub installation tokens: the Instance-owned App mints a fresh token for each provider operation, and the App private key remains in Instance configuration. Tokens, private keys, and provider operational IDs are never returned in portable metadata.
 
