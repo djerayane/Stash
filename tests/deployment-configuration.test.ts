@@ -7,7 +7,7 @@ describe("deployment configuration", () => {
     const secure = {
       INSTANCE_ADMIN_TOKEN: "production-token",
       INSTANCE_MASTER_KEY: "production-key",
-      POSTGRES_PASSWORD: "production-password",
+      POSTGRES_PASSWORD: "Prod-db-2026!safe",
       PUBLIC_ORIGIN: "https://stash.example.com",
       STASH_BIND_ADDRESS: "0.0.0.0",
     };
@@ -18,9 +18,15 @@ describe("deployment configuration", () => {
       { POSTGRES_PASSWORD: "stash-development-only" },
       { POSTGRES_PASSWORD: "   " },
       { POSTGRES_PASSWORD: "too-short" },
+      { POSTGRES_PASSWORD: "aaaaaaaaaaaaaaaa" },
+      { POSTGRES_PASSWORD: "AAAAAAAAAAAAAAAA" },
+      { POSTGRES_PASSWORD: "1111111111111111" },
+      { POSTGRES_PASSWORD: "!!!!!!!!!!!!!!!!" },
+      { POSTGRES_PASSWORD: "lowercase1234567" },
       { PUBLIC_ORIGIN: "http://localhost:3000" },
       { PUBLIC_ORIGIN: "http://stash.example.com" },
       { PUBLIC_ORIGIN: "https://localhost" },
+      { PUBLIC_ORIGIN: "https://localhost." },
       { PUBLIC_ORIGIN: "https://0.0.0.0" },
       { PUBLIC_ORIGIN: "https://10.0.0.1" },
       { PUBLIC_ORIGIN: "https://100.64.0.1" },
@@ -43,10 +49,12 @@ describe("deployment configuration", () => {
       { PUBLIC_ORIGIN: "https://[2001:db8::1]" },
       { PUBLIC_ORIGIN: "https://[2002::1]" },
       { PUBLIC_ORIGIN: "https://[::ffff:192.168.1.1]" },
+      { PUBLIC_ORIGIN: "https://8.8.8.8" },
+      { PUBLIC_ORIGIN: "https://[2606:4700:4700::1111]" },
     ]) {
       assert.throws(
         () => validateComposeExposure({ ...secure, ...override }),
-        /non-loopback STASH_BIND_ADDRESS requires unique secrets, a PostgreSQL password of at least 16 characters, and a canonical HTTPS PUBLIC_ORIGIN/,
+        /non-loopback STASH_BIND_ADDRESS requires unique secrets, a PostgreSQL password of at least 16 characters using three character classes, and a canonical HTTPS DNS PUBLIC_ORIGIN/,
       );
     }
   });
@@ -62,15 +70,15 @@ describe("deployment configuration", () => {
     assert.doesNotThrow(() => validateComposeExposure({
       INSTANCE_ADMIN_TOKEN: "production-token",
       INSTANCE_MASTER_KEY: "production-key",
-      POSTGRES_PASSWORD: "production-password",
+      POSTGRES_PASSWORD: "ProductionReady2026",
       PUBLIC_ORIGIN: "https://stash.example.com",
       STASH_BIND_ADDRESS: "0.0.0.0",
     }));
-    for (const publicOrigin of ["https://8.8.8.8", "https://[2606:4700:4700::1111]"]) {
+    for (const publicOrigin of ["https://stash.example.com", "https://stash.example.co.uk"]) {
       assert.doesNotThrow(() => validateComposeExposure({
         INSTANCE_ADMIN_TOKEN: "production-token",
         INSTANCE_MASTER_KEY: "production-key",
-        POSTGRES_PASSWORD: "production-password",
+        POSTGRES_PASSWORD: "Prod-db-2026!safe",
         PUBLIC_ORIGIN: publicOrigin,
         STASH_BIND_ADDRESS: "0.0.0.0",
       }));

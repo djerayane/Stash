@@ -35,13 +35,13 @@ Before any external exposure, supply unique secrets and the canonical HTTPS orig
 ```sh
 export INSTANCE_ADMIN_TOKEN="$(openssl rand -base64 48)"
 export INSTANCE_MASTER_KEY="$(openssl rand -base64 32)"
-export POSTGRES_PASSWORD="$(openssl rand -hex 32)"
+export POSTGRES_PASSWORD="Aa1-$(openssl rand -hex 24)"
 export PUBLIC_ORIGIN="https://stash.example.com"
 export STASH_BIND_ADDRESS="0.0.0.0"
 docker compose up -d
 ```
 
-Store `INSTANCE_MASTER_KEY` separately from PostgreSQL and backups; restoring encrypted Instance state requires the exact same key. `STASH_PORT` changes the published host port, `STASH_BIND_ADDRESS` defaults to localhost, and `STASH_URL` tells the smoke test where to find an Instance. Application-level validation remains active for Compose overrides: malformed keys and non-local HTTP origins fail startup clearly.
+Store `INSTANCE_MASTER_KEY` separately from PostgreSQL and backups; restoring encrypted Instance state requires the exact same key. External binds require a PostgreSQL password of at least 16 characters containing at least three of lowercase, uppercase, digits, and symbols. Their `PUBLIC_ORIGIN` must be canonical HTTPS with a DNS hostname; IP literals and localhost names are rejected. `STASH_PORT` changes the published host port, `STASH_BIND_ADDRESS` defaults to localhost, and `STASH_URL` tells the smoke test where to find an Instance. Application-level validation remains active for Compose overrides and fails unsafe production configuration clearly.
 
 ## Configuration
 
