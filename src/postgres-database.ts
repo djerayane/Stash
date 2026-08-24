@@ -43,7 +43,7 @@ import * as Y from "yjs";
 import { prosemirrorJSONToYDoc, yDocToProsemirrorJSON } from "y-prosemirror";
 import { Schema } from "prosemirror-model";
 import { InvalidCollaborationUpdate, type CollaborationSnapshot, type NoteCollaborationRepository } from "./note-collaboration.js";
-import type { WorkspaceSearchQuery, WorkspaceSearchRepository, WorkspaceSearchResult } from "./workspace-search.js";
+import type { WorkspaceSearchFacet, WorkspaceSearchKind, WorkspaceSearchQuery, WorkspaceSearchRepository, WorkspaceSearchResult } from "./workspace-search.js";
 import { proseMirrorToRichText, richTextToProseMirror } from "@stash/rich-text";
 import type { AgentGrant, AgentGrantOption, AgentProposal, StoredAgentGrant } from "./agent-grants.js";
 
@@ -2206,16 +2206,24 @@ export class PostgresDatabase implements
     try {
       await this.#ensureDiscussionSchema(client);
       await this.#ensureAttachmentSchema(client);
-      const access = await client.query<{ full_member: boolean }>(`SELECT
+      await this.#ensureInvitationSchema(client);
+      const access = await client.query<{ full_member: boolean; requested_project_visible: boolean }>(`SELECT
         ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
          (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
-           WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2))) AS full_member
+           WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2))) AS full_member,
+        ($3::uuid IS NULL OR EXISTS (SELECT 1 FROM stash_projects requested_project
+          WHERE requested_project.id=$3 AND requested_project.workspace_id=workspace.id AND
+            (((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
+              (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+                WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2)))
+             OR EXISTS (SELECT 1 FROM stash_project_guests guest
+                WHERE guest.project_id=requested_project.id AND guest.account_id=$2)))) AS requested_project_visible
         FROM stash_workspaces workspace WHERE workspace.id=$1 AND (((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
          (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
            WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2))) OR EXISTS (
              SELECT 1 FROM stash_projects project JOIN stash_project_guests guest ON guest.project_id=project.id
-             WHERE project.workspace_id=workspace.id AND guest.account_id=$2))`, [workspaceId, memberId]);
-      if (!access.rowCount) return { status: "forbidden" as const };
+             WHERE project.workspace_id=workspace.id AND guest.account_id=$2))`, [workspaceId, memberId, query.projectId ?? null]);
+      if (!access.rowCount || !access.rows[0]!.requested_project_visible) return { status: "forbidden" as const };
       const values = [workspaceId, memberId, query.q, query.projectId ?? null, query.object ?? null, query.author ?? null,
         query.assignee ?? null, query.status ?? null, query.from ?? null, query.to ?? null, access.rows[0]!.full_member];
       const rows = await client.query<any>(`WITH visible_projects AS (
@@ -2266,17 +2274,31 @@ export class PostgresDatabase implements
           FROM stash_tasks task CROSS JOIN LATERAL jsonb_array_elements(task.development_links) WITH ORDINALITY development(value,ordinality)
           JOIN stash_accounts author ON author.id=task.created_by_account_id JOIN stash_workflow_statuses status ON status.id=task.workflow_status_id
           WHERE task.workspace_id=$1 AND task.project_id IN (SELECT id FROM visible_projects)
-        ) SELECT id,kind,title,excerpt,href,project_id,author,assignee,status,occurred_at FROM candidates
+        ), filtered AS (
+          SELECT id,kind,title,excerpt,href,project_id,author,assignee,status,occurred_at FROM candidates
           WHERE searchable ILIKE '%'||$3||'%' AND ($4::uuid IS NULL OR project_id=$4) AND ($5::text IS NULL OR kind=$5)
             AND ($6::text IS NULL OR author ILIKE '%'||$6||'%') AND ($7::text IS NULL OR assignee ILIKE '%'||$7||'%')
             AND ($8::text IS NULL OR status ILIKE $8) AND ($9::timestamptz IS NULL OR occurred_at >= $9)
             AND ($10::timestamptz IS NULL OR occurred_at <= $10)
-          ORDER BY occurred_at DESC NULLS LAST, kind, title LIMIT 100`, values);
-      return { status: "found" as const, results: rows.rows.map((row): WorkspaceSearchResult => ({ id: row.id, kind: row.kind,
+        ), page AS (
+          SELECT * FROM filtered ORDER BY occurred_at DESC NULLS LAST, kind, title LIMIT 100
+        ) SELECT
+          COALESCE((SELECT jsonb_agg(to_jsonb(page) ORDER BY occurred_at DESC NULLS LAST,kind,title) FROM page),'[]'::jsonb) AS results,
+          (SELECT count(*)::integer FROM filtered) AS total,
+          COALESCE((SELECT jsonb_agg(jsonb_build_object('value',kind,'count',count) ORDER BY kind)
+            FROM (SELECT kind,count(*)::integer AS count FROM filtered GROUP BY kind) facet),'[]'::jsonb) AS kind_facets,
+          COALESCE((SELECT jsonb_agg(jsonb_build_object('value',project_id,'count',count) ORDER BY project_id)
+            FROM (SELECT project_id,count(*)::integer AS count FROM filtered WHERE project_id IS NOT NULL GROUP BY project_id) facet),'[]'::jsonb) AS project_facets,
+          COALESCE((SELECT jsonb_agg(jsonb_build_object('value',status,'count',count) ORDER BY status)
+            FROM (SELECT status,count(*)::integer AS count FROM filtered WHERE status IS NOT NULL GROUP BY status) facet),'[]'::jsonb) AS status_facets`, values);
+      const envelope = rows.rows[0]!;
+      return { status: "found" as const, results: envelope.results.map((row: any): WorkspaceSearchResult => ({ id: row.id, kind: row.kind,
         title: row.title, ...(row.excerpt ? { excerpt: row.excerpt } : {}), ...(row.href ? { href: row.href } : {}),
         ...(row.project_id ? { projectId: row.project_id } : {}), ...(row.author ? { author: row.author } : {}),
         ...(row.assignee ? { assignee: row.assignee } : {}), ...(row.status ? { status: row.status } : {}),
-        ...(row.occurred_at ? { occurredAt: new Date(row.occurred_at).toISOString() } : {}) })) };
+        ...(row.occurred_at ? { occurredAt: new Date(row.occurred_at).toISOString() } : {}) })), total: envelope.total,
+        facets: { kinds: envelope.kind_facets as WorkspaceSearchFacet<WorkspaceSearchKind>[],
+          projects: envelope.project_facets as WorkspaceSearchFacet[], statuses: envelope.status_facets as WorkspaceSearchFacet[] } };
     } finally { client.release(); }
   }
 
