@@ -21,6 +21,8 @@ describe("container release contract", () => {
     assert.match(quality, /docker compose up -d --wait/);
     assert.match(quality, /linux\/amd64,linux\/arm64/);
     assert.match(quality, /docker\/setup-qemu-action@v3[\s\S]*docker\/setup-buildx-action@v3/);
+    assert.match(quality, /postgres:\s*\n\s*image: postgres:17-alpine[\s\S]*ports:\s*\n\s*- 5432:5432/);
+    assert.match(quality, /--network host[\s\S]*DATABASE_URL=postgresql:\/\/stash:stash-ci-only@127\.0\.0\.1:5432\/stash/);
     assert.match(pullRequest, /pull_request:/);
     assert.match(pullRequest, /uses: \.\/.github\/workflows\/release-quality\.yml/);
     assert.match(pullRequest, /release: false/);
