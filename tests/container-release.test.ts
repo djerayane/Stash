@@ -20,6 +20,7 @@ describe("container release contract", () => {
     assert.match(quality, /pnpm run test/);
     assert.match(quality, /docker compose up -d --wait/);
     assert.match(quality, /linux\/amd64,linux\/arm64/);
+    assert.match(quality, /docker\/setup-qemu-action@v3[\s\S]*docker\/setup-buildx-action@v3/);
     assert.match(pullRequest, /pull_request:/);
     assert.match(pullRequest, /uses: \.\/.github\/workflows\/release-quality\.yml/);
     assert.match(pullRequest, /release: false/);
@@ -44,6 +45,11 @@ describe("container release contract", () => {
     assert.match(release, /packages: write/);
     assert.doesNotMatch(release, /contents: write/);
     assert.match(release, /linux\/amd64,linux\/arm64/);
+    assert.match(release, /concurrency:\s*\n\s*group: release-/);
+    assert.match(release, /docker\/setup-qemu-action@v3[\s\S]*docker\/setup-buildx-action@v3/);
+    assert.match(release, /publish-container:[\s\S]*gh api --paginate \/users\/djerayane\/packages\/container\/stash\/versions/);
+    assert.match(release, /publish-container:[\s\S]*ghcr\.io\/djerayane\/stash:\$version already exists/);
+    assert.match(release, /publish-container:[\s\S]*ghcr-error/);
     assert.match(release, /provenance: true/);
     assert.match(release, /ghcr\.io\/djerayane\/stash/);
     assert.match(release, /digest=/);
