@@ -18,4 +18,15 @@ describe("standalone first-run secret boundary", () => {
     const root = await mkdtemp(join(tmpdir(), "stash-existing-no-config-")); await mkdir(join(root, "database")); await writeFile(join(root, "database", "state"), "durable");
     await assert.rejects(loadStandaloneConfiguration(root), /existing data directory.*configuration/i);
   });
+
+  test("rejects falsy, partial, and wrong-type saved configuration before mutation", async () => {
+    const invalid = [null, false, 0, "", {}, { schema: "stash.standalone-config.v1" },
+      { schema: "stash.standalone-config.v1", publicOrigin: 1, host: "127.0.0.1", port: 3000, masterKeyFile: "/tmp/key" },
+      { schema: "stash.standalone-config.v1", publicOrigin: "http://localhost:3000", host: "", port: "3000", masterKeyFile: "/tmp/key" }];
+    for (const value of invalid) {
+      const root = await mkdtemp(join(tmpdir(), "stash-invalid-config-")); await mkdir(join(root, "config"));
+      await writeFile(join(root, "config", "runtime.json"), JSON.stringify(value));
+      await assert.rejects(loadStandaloneConfiguration(root), /configuration is unreadable or invalid/i);
+    }
+  });
 });
