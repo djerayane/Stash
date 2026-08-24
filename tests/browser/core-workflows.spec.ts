@@ -72,6 +72,21 @@ test("navigates Notes, Boards, Discussions, notifications, and Activity through 
   await search.fill("discussion"); await search.press("Enter"); const discussionResult = page.getByRole("link", { name: /Keep this release context/ }); await expect(discussionResult).toHaveAttribute("href", `/app/notes/99999999-9999-4999-8999-999999999999/discussions`);
 });
 
+test("searches Notes and Tasks with URL-backed filters and canonical deep links", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" }); await authenticate(page);
+  await page.goto("/app/search?q=task&object=task&status=Ready");
+  await expect(page.getByRole("combobox", { name: "Object type" })).toHaveValue("task");
+  await expect(page.getByRole("textbox", { name: "Status" })).toHaveValue("Ready");
+  const task = page.getByRole("link", { name: /STASH-32/ });
+  await expect(task).toHaveAttribute("href", "/app/projects/22222222-2222-4222-8222-222222222222/tasks/STASH-32");
+  await expect(task.getByText("Browser Member", { exact: true }).first()).toBeVisible();
+  await expect(task.getByText("Ready", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Clear filters" }).focus(); await page.keyboard.press("Enter");
+  await expect(page).toHaveURL(/\/app\/search\?q=task$/);
+  await expect(page.getByRole("combobox", { name: "Object type" })).toHaveValue("");
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+});
+
 test("presents every relevant canonical notification without collapsing its attribution", async ({ page }) => {
   await authenticate(page);
   const triggers = [
