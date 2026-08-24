@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
@@ -28,11 +29,12 @@ async function stop(child, port) {
   throw new Error(`Standalone descendant retained port ${port} after wrapper stop`);
 }
 async function filesBelow(root) { const files = []; for (const entry of await readdir(root, { withFileTypes: true })) { const path = join(root, entry.name); if (entry.isDirectory()) files.push(...await filesBelow(path)); else if (entry.isFile()) files.push(path); } return files; }
-function macSandboxPolicy() { const sockets = ["/var/run/docker.sock", "/private/var/run/docker.sock", join(process.env.HOME ?? "/nonexistent", ".docker/run/docker.sock"), join(process.env.HOME ?? "/nonexistent", "Library/Containers/com.docker.docker/Data/docker.raw.sock")];
-  return `(version 1)(allow default)${sockets.map((socket) => `(deny file-read* file-write* (literal ${JSON.stringify(socket)}))(deny network-outbound (remote unix-socket (path-literal ${JSON.stringify(socket)})))`).join("")}`; }
+function macSandboxPolicy(allowedPorts = []) { const sockets = ["/var/run/docker.sock", "/private/var/run/docker.sock", join(process.env.HOME ?? "/nonexistent", ".docker/run/docker.sock"), join(process.env.HOME ?? "/nonexistent", "Library/Containers/com.docker.docker/Data/docker.raw.sock")];
+  return `(version 1)(allow default)(deny network-outbound)${allowedPorts.map((port) => `(allow network-outbound (remote tcp \"localhost:${port}\"))`).join("")}${sockets.map((socket) => `(deny file-read* file-write* (literal ${JSON.stringify(socket)}))(deny network-outbound (remote unix-socket (path-literal ${JSON.stringify(socket)})))`).join("")}`; }
 function isolatedInvocation(launcher, arguments_, traceRoot) {
-  if (process.platform === "darwin") return { command: "/usr/bin/sandbox-exec", arguments: ["-p", macSandboxPolicy(), launcher, ...arguments_] };
-  if (process.platform === "linux") return { command: "/usr/bin/strace", arguments: ["-ff", "-o", join(traceRoot, `syscalls-${randomUUID()}`), "-e", "trace=process,network,file", launcher, ...arguments_] };
+  const portIndex = arguments_.indexOf("--port"); const ports = [...(portIndex >= 0 ? [arguments_[portIndex + 1]] : []), ...(value("--postgres-url") ? [new URL(value("--postgres-url")).port || "5432"] : [])];
+  if (process.platform === "darwin") return { command: "/usr/bin/sandbox-exec", arguments: ["-p", macSandboxPolicy(ports), launcher, ...arguments_] };
+  if (process.platform === "linux") { const hidden = ["/usr/bin/docker", "/usr/local/bin/docker", "/usr/bin/podman", "/usr/local/bin/podman"].filter(existsSync); return { command: "/usr/bin/bwrap", arguments: ["--die-with-parent", "--new-session", "--ro-bind", "/", "/", "--dev-bind", "/dev", "/dev", "--proc", "/proc", "--tmpfs", "/run", "--bind", traceRoot, traceRoot, ...hidden.flatMap((path) => ["--bind", "/dev/null", path]), "/usr/bin/strace", "-ff", "-o", join(traceRoot, `syscalls-${randomUUID()}`), "-e", "trace=process,network,file", launcher, ...arguments_] }; }
   return { command: launcher, arguments: arguments_ };
 }
 function assertNoContainerDescendants(processList, rootPid) {
@@ -51,13 +53,17 @@ async function assertDockerSocketDenied(bundle) {
   if (process.platform === "darwin") {
     const runtime = join(bundle, "runtime", "bin", "node"); for (const candidate of [socket, join(process.env.HOME ?? "/nonexistent", ".docker/run/docker.sock"), join(process.env.HOME ?? "/nonexistent", "Library/Containers/com.docker.docker/Data/docker.raw.sock")]) {
       const probe = `require('net').createConnection(${JSON.stringify(candidate)}).once('connect',()=>process.exit(9)).once('error',()=>process.exit(0));setTimeout(()=>process.exit(0),500)`;
-      const result = spawnSync("sandbox-exec", ["-p", macSandboxPolicy(), runtime, "-e", probe], { encoding: "utf8", timeout: 2_000 }); if (result.status !== 0) throw new Error(`Docker API socket was not denied by the standalone test context (${candidate}, ${result.status})`); } return;
+      const result = spawnSync("sandbox-exec", ["-p", macSandboxPolicy(), runtime, "-e", probe], { encoding: "utf8", timeout: 2_000 }); if (result.status !== 0) throw new Error(`Docker API socket was not denied by the standalone test context (${candidate}, ${result.status})`); }
+    const tcpProbe = `require('net').createConnection({host:'127.0.0.1',port:2375}).once('connect',()=>process.exit(9)).once('error',()=>process.exit(0));setTimeout(()=>process.exit(0),500)`; const tcp = spawnSync("sandbox-exec", ["-p", macSandboxPolicy(), runtime, "-e", tcpProbe], { encoding: "utf8", timeout: 2_000 }); if (tcp.status !== 0) throw new Error("Docker TCP API was not denied by macOS sandbox policy"); return;
   }
+  if (process.platform === "linux") { const runtime = join(bundle, "runtime", "bin", "node"); const probe = `const n=require('net');let pending=2,failed=false;for(const target of [{path:'/var/run/docker.sock'},{host:'127.0.0.1',port:2375}])n.createConnection(target).once('connect',()=>{failed=true;process.exit(9)}).once('error',()=>{if(!--pending)process.exit(failed?9:0)});setTimeout(()=>process.exit(failed?9:0),700)`; const call = isolatedInvocation(runtime, ["-e", probe], dirname(bundle)); const result = spawnSync(call.command, call.arguments, { encoding: "utf8", timeout: 3_000 }); if (result.status !== 0) throw new Error("Linux bundle boundary did not deny Docker socket/TCP API"); return; }
   if (process.platform !== "win32") return;
   const runtime = join(bundle, "runtime", "node.exe"); const probe = `require('net').createConnection(${JSON.stringify(socket)}).once('connect',()=>process.exit(9)).once('error',()=>process.exit(0));setTimeout(()=>process.exit(0),500)`;
   const result = spawnSync(runtime, ["-e", probe], { encoding: "utf8", timeout: 2_000, env: { SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR, DOCKER_HOST: "npipe:////./pipe/stash_docker_forbidden" } });
   if (result.status !== 0) throw new Error(`Bundled Windows child could access the Docker named pipe/API (${result.status})`);
 }
+function configureWindowsFirewall(bundle, remove = false, name = "") { if (process.platform !== "win32") return; const runtime = join(bundle, "runtime", "node.exe"); const arguments_ = remove ? ["advfirewall", "firewall", "delete", "rule", `name=${name}`] : ["advfirewall", "firewall", "add", "rule", `name=${name}`, "dir=out", "action=block", `program=${runtime}`, "enable=yes"];
+  const result = spawnSync("netsh", arguments_, { encoding: "utf8" }); if (result.status !== 0) throw new Error(`Windows outbound isolation rule ${remove ? "removal" : "creation"} failed: ${result.stderr || result.stdout}`); }
 function traceDescendants(rootPid) {
   let failure; const sample = () => { try { const output = process.platform === "win32"
     ? run("powershell", ["-NoProfile", "-Command", "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,ExecutablePath | ConvertTo-Json"], { env: process.env }).stdout
@@ -160,7 +166,7 @@ async function main() {
   const port = 31_000 + Math.floor(Math.random() * 1_000); const url = `http://127.0.0.1:${port}`;
   const cleanEnvironment = { PATH: dirname(launcher), SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR,
     DOCKER_HOST: `unix://${join(extraction, "docker-access-is-forbidden.sock")}` };
-  const invoke = (arguments_) => isolatedInvocation(launcher, arguments_, extraction);
+  const invoke = (arguments_) => isolatedInvocation(launcher, arguments_, extraction); const windowsFirewallRule = `Stash bundle isolation ${randomUUID()}`; configureWindowsFirewall(bundle, false, windowsFirewallRule);
   const launch = () => { const call = invoke(["serve", "--data-dir", dataDirectory, "--port", String(port)]); return spawn(call.command, call.arguments, { env: cleanEnvironment, stdio: ["ignore", "pipe", "pipe"], shell: process.platform === "win32", detached: process.platform !== "win32" }); };
   await assertDockerSocketDenied(bundle); let allForbidden = ["INSTANCE_MASTER_KEY", "standalone-acceptance-password"]; const operatorLogs = []; let server = launch(); let stopTracing = traceDescendants(server.pid); let stderr = "", stdout = ""; server.stderr.on("data", (chunk) => { stderr += chunk; }); server.stdout.on("data", (chunk) => { stdout += chunk; });
   try {
@@ -197,7 +203,7 @@ async function main() {
     }
     for (const file of await filesBelow(backup)) { const content = await readFile(file); for (const secret of forbidden) if (content.includes(Buffer.from(secret))) throw new Error(`Secret leaked into backup artifact ${file}`); }
     if (richFixture) { await stop(server, port); stopTracing(); await verifyRestoredRichFixture(bundle, dataDirectory, richFixture); }
-  } finally { if (server.exitCode === null) await stop(server, port); stopTracing(); }
+  } finally { if (server.exitCode === null) await stop(server, port); stopTracing(); configureWindowsFirewall(bundle, true, windowsFirewallRule); }
   if (process.platform === "linux") { const traces = (await filesBelow(extraction)).filter((path) => basename(path).startsWith("syscalls-")); if (traces.length < 9) throw new Error(`Not every launcher invocation was syscall-traced (${traces.length})`);
     for (const trace of traces) { const content = await readFile(trace, "utf8"); if (/docker\.sock|\/var\/run\/docker|execve\([^\n]*(?:docker|podman)|connect\([^\n]*(?:docker|2375|2376)/i.test(content)) throw new Error(`Forbidden Docker execution or API access in ${trace}`); for (const secret of allForbidden) if (content.includes(secret)) throw new Error(`Secret leaked into syscall trace ${trace}`); } }
   for (const secret of ["standalone-acceptance-password", ...(value("--postgres-url") ? [] : [])]) if (stderr.includes(secret) || stdout.includes(secret)) throw new Error("Standalone logs contain forbidden secret material");

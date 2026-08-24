@@ -102,10 +102,13 @@ describe("self-contained Instance bundle packaging", () => {
     assert.doesNotMatch(quality, /macos-13/);
     assert.match(quality, /package:server[\s\S]*smoke:server-bundle/);
     assert.match(quality, /server-bundle-postgres-migration:[\s\S]*postgres:17-alpine[\s\S]*--postgres-url/);
-    assert.match(quality, /runner\.os == 'Linux'[\s\S]*install --yes strace/);
+    assert.match(quality, /runner\.os == 'Linux'[\s\S]*install --yes bubblewrap iptables strace[\s\S]*--dport 2375:2376 -j REJECT/);
     const smoke = await readFile(new URL("../scripts/smoke-server-bundle.mjs", import.meta.url), "utf8");
     assert.match(smoke, /process\.kill\(-child\.pid/); assert.match(smoke, /taskkill[\s\S]*"\/T"/);
     assert.match(smoke, /sandbox-exec/); assert.match(smoke, /\.docker\/run\/docker\.sock/); assert.match(smoke, /strace[\s\S]*trace=process,network,file/);
+    assert.match(smoke, /bwrap[\s\S]*--tmpfs[\s\S]*\/run[\s\S]*\/dev\/null/); assert.match(smoke, /netsh/); assert.match(smoke, /dir=out[\s\S]*action=block/);
+    assert.match(smoke, /deny network-outbound[\s\S]*localhost:/);
+    const windowsIsolation = await readFile(new URL("../scripts/windows-bundle-isolation.ps1", import.meta.url), "utf8"); assert.match(windowsIsolation, /Get-Command docker\.exe,podman\.exe -All[\s\S]*Move-Item[\s\S]*remains executable/);
     assert.match(smoke, /Standalone descendant retained port/);
     assert.match(JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")).scripts["package:server"], /prepare-server-deploy/);
     assert.match(release, /publish-server-bundles:\s*\n\s*needs: release-quality/);
