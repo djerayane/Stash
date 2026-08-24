@@ -102,6 +102,7 @@ describe("self-contained Instance bundle packaging", () => {
     assert.doesNotMatch(quality, /macos-13/);
     assert.match(quality, /package:server[\s\S]*smoke:server-bundle/);
     assert.match(quality, /server-bundle-postgres-migration:[\s\S]*postgres:17-alpine[\s\S]*--postgres-url/);
+    assert.match(quality, /runner\.os == 'Linux'[\s\S]*install --yes strace/);
     assert.match(JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")).scripts["package:server"], /prepare-server-deploy/);
     assert.match(release, /publish-server-bundles:\s*\n\s*needs: release-quality/);
     assert.match(release, /SHA256SUMS/);
