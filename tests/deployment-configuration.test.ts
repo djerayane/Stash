@@ -3,15 +3,26 @@ import { describe, it } from "node:test";
 import { databaseUrlFromEnvironment, developmentAdminToken, developmentMasterKey, validateComposeExposure } from "../src/deployment-configuration.js";
 
 describe("deployment configuration", () => {
-  it("rejects known development credentials on a non-loopback Compose bind address", () => {
-    for (const credentials of [
-      { INSTANCE_ADMIN_TOKEN: developmentAdminToken, INSTANCE_MASTER_KEY: "production-key" },
-      { INSTANCE_ADMIN_TOKEN: "production-token", INSTANCE_MASTER_KEY: developmentMasterKey },
-      { INSTANCE_ADMIN_TOKEN: ` ${developmentAdminToken} `, INSTANCE_MASTER_KEY: "production-key" },
+  it("rejects every evaluation default on a non-loopback Compose bind address", () => {
+    const secure = {
+      INSTANCE_ADMIN_TOKEN: "production-token",
+      INSTANCE_MASTER_KEY: "production-key",
+      POSTGRES_PASSWORD: "production-password",
+      PUBLIC_ORIGIN: "https://stash.example.com",
+      STASH_BIND_ADDRESS: "0.0.0.0",
+    };
+    for (const override of [
+      { INSTANCE_ADMIN_TOKEN: developmentAdminToken },
+      { INSTANCE_MASTER_KEY: developmentMasterKey },
+      { INSTANCE_ADMIN_TOKEN: ` ${developmentAdminToken} ` },
+      { POSTGRES_PASSWORD: "stash-development-only" },
+      { PUBLIC_ORIGIN: "http://localhost:3000" },
+      { PUBLIC_ORIGIN: "http://stash.example.com" },
+      { PUBLIC_ORIGIN: "https://localhost" },
     ]) {
       assert.throws(
-        () => validateComposeExposure({ ...credentials, STASH_BIND_ADDRESS: "0.0.0.0" }),
-        /development-only credentials cannot be used with non-loopback STASH_BIND_ADDRESS/,
+        () => validateComposeExposure({ ...secure, ...override }),
+        /non-loopback STASH_BIND_ADDRESS requires unique secrets, a non-default PostgreSQL password, and a canonical HTTPS PUBLIC_ORIGIN/,
       );
     }
   });
@@ -20,11 +31,15 @@ describe("deployment configuration", () => {
     assert.doesNotThrow(() => validateComposeExposure({
       INSTANCE_ADMIN_TOKEN: developmentAdminToken,
       INSTANCE_MASTER_KEY: developmentMasterKey,
+      POSTGRES_PASSWORD: "stash-development-only",
+      PUBLIC_ORIGIN: "http://localhost:3000",
       STASH_BIND_ADDRESS: "127.0.0.1",
     }));
     assert.doesNotThrow(() => validateComposeExposure({
       INSTANCE_ADMIN_TOKEN: "production-token",
       INSTANCE_MASTER_KEY: "production-key",
+      POSTGRES_PASSWORD: "production-password",
+      PUBLIC_ORIGIN: "https://stash.example.com",
       STASH_BIND_ADDRESS: "0.0.0.0",
     }));
   });
