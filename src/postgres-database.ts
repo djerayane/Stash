@@ -48,6 +48,26 @@ import type { WorkspaceSearchFacet, WorkspaceSearchKind, WorkspaceSearchQuery, W
 import { proseMirrorToRichText, richTextToProseMirror } from "@stash/rich-text";
 import type { AgentGrant, AgentGrantOption, AgentProposal, StoredAgentGrant } from "./agent-grants.js";
 
+export interface IdlePostgresClientFailure {
+  operation: "idle_client";
+  cause: string;
+  code: string;
+}
+
+export interface PostgresDatabaseOptions {
+  pool?: Pool;
+  reportIdleClientFailure?: (diagnostic: IdlePostgresClientFailure) => void;
+  registrationCheckpoint?: (stage: "session_inserted") => void | Promise<void>;
+}
+
+function safeIdleClientFailure(cause: unknown): IdlePostgresClientFailure {
+  const candidateCause = cause instanceof Error ? cause.name : "UnknownFailure";
+  const safeCause = /^[A-Za-z][A-Za-z0-9]{0,31}$/.test(candidateCause) ? candidateCause : "UnknownFailure";
+  const candidateCode = cause && typeof cause === "object" && "code" in cause ? String(cause.code) : "";
+  const code = /^(?:[A-Z0-9]{5}|E[A-Z_]{2,31})$/.test(candidateCode) ? candidateCode : "unclassified";
+  return { operation: "idle_client", cause: safeCause, code };
+}
+
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
 const authenticationKeyCheckLockId = 795_541_992;
@@ -230,15 +250,19 @@ export class PostgresDatabase implements
 {
   readonly #pool: Pool;
   readonly #authenticationSecrets: AuthenticationSecretCodec;
+  readonly #registrationCheckpoint?: PostgresDatabaseOptions["registrationCheckpoint"];
 
-  constructor(connectionString: string, authenticationSecrets: AuthenticationSecretCodec) {
-    this.#pool = new Pool({ connectionString, connectionTimeoutMillis: 2_000 });
+  constructor(connectionString: string, authenticationSecrets: AuthenticationSecretCodec, options: PostgresDatabaseOptions = {}) {
+    this.#pool = options.pool ?? new Pool({ connectionString, connectionTimeoutMillis: 2_000 });
     // pg emits idle-client failures on Pool rather than through the request that
-    // originally created the client. Installing a listener keeps a database
-    // restart from becoming an uncaught process-level exception; the next
-    // operation reports its sanitized boundary-specific failure to the caller.
-    this.#pool.on("error", () => undefined);
+    // originally created the client. Handle that lifecycle event without
+    // forwarding pg's error or Client objects, which can contain protocol data.
+    const report = options.reportIdleClientFailure ?? ((diagnostic: IdlePostgresClientFailure) => {
+      console.warn(`PostgreSQL idle client unavailable (operation=${diagnostic.operation}, cause=${diagnostic.cause}, code=${diagnostic.code}).`);
+    });
+    this.#pool.on("error", (cause) => report(safeIdleClientFailure(cause)));
     this.#authenticationSecrets = authenticationSecrets;
+    this.#registrationCheckpoint = options.registrationCheckpoint;
   }
 
   async verifyConnection(): Promise<void> {
@@ -318,6 +342,7 @@ export class PostgresDatabase implements
         createdBy: { localAccountId: record.account.id, displayName: record.account.name },
       });
       await this.#insertSession(client, record.session);
+      await this.#registrationCheckpoint?.("session_inserted");
       return true;
     });
   }
