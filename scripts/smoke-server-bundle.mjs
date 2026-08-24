@@ -20,13 +20,18 @@ async function waitFor(url, diagnostics = () => "") {
   throw new Error(`Standalone Instance did not become ready: ${diagnostics()}`);
 }
 async function json(url, path, init) { const response = await fetch(`${url}${path}`, init); return { response, body: await response.json() }; }
-async function stop(child) {
-  child.kill("SIGTERM");
+async function stop(child, port) {
+  if (process.platform === "win32") spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { encoding: "utf8" });
+  else { try { process.kill(-child.pid, "SIGTERM"); } catch { child.kill("SIGTERM"); } }
   await new Promise((resolve_) => child.once("exit", resolve_));
+  for (let attempt = 0; attempt < 20; attempt += 1) { try { await fetch(`http://127.0.0.1:${port}/health/live`); } catch { return; } await new Promise((resolve_) => setTimeout(resolve_, 50)); }
+  throw new Error(`Standalone descendant retained port ${port} after wrapper stop`);
 }
 async function filesBelow(root) { const files = []; for (const entry of await readdir(root, { withFileTypes: true })) { const path = join(root, entry.name); if (entry.isDirectory()) files.push(...await filesBelow(path)); else if (entry.isFile()) files.push(path); } return files; }
+function macSandboxPolicy() { const sockets = ["/var/run/docker.sock", "/private/var/run/docker.sock", join(process.env.HOME ?? "/nonexistent", ".docker/run/docker.sock"), join(process.env.HOME ?? "/nonexistent", "Library/Containers/com.docker.docker/Data/docker.raw.sock")];
+  return `(version 1)(allow default)${sockets.map((socket) => `(deny file-read* file-write* (literal ${JSON.stringify(socket)}))(deny network-outbound (remote unix-socket (path-literal ${JSON.stringify(socket)})))`).join("")}`; }
 function isolatedInvocation(launcher, arguments_, traceRoot) {
-  if (process.platform === "darwin") return { command: "/usr/bin/sandbox-exec", arguments: ["-p", "(version 1)(allow default)(deny file-read* file-write* (literal \"/var/run/docker.sock\"))", launcher, ...arguments_] };
+  if (process.platform === "darwin") return { command: "/usr/bin/sandbox-exec", arguments: ["-p", macSandboxPolicy(), launcher, ...arguments_] };
   if (process.platform === "linux") return { command: "/usr/bin/strace", arguments: ["-ff", "-o", join(traceRoot, `syscalls-${randomUUID()}`), "-e", "trace=process,network,file", launcher, ...arguments_] };
   return { command: launcher, arguments: arguments_ };
 }
@@ -44,9 +49,9 @@ function assertNoContainerDescendants(processList, rootPid) {
 async function assertDockerSocketDenied(bundle) {
   const socket = process.platform === "win32" ? "\\\\.\\pipe\\docker_engine" : "/var/run/docker.sock";
   if (process.platform === "darwin") {
-    const runtime = join(bundle, "runtime", "bin", "node"); const probe = `require('net').createConnection(${JSON.stringify(socket)}).once('connect',()=>process.exit(9)).once('error',()=>process.exit(0));setTimeout(()=>process.exit(0),500)`;
-    const result = spawnSync("sandbox-exec", ["-p", "(version 1)(allow default)(deny network*)", runtime, "-e", probe], { encoding: "utf8", timeout: 2_000 });
-    if (result.status !== 0) throw new Error(`Docker API socket was not denied by the standalone test context (${result.status})`); return;
+    const runtime = join(bundle, "runtime", "bin", "node"); for (const candidate of [socket, join(process.env.HOME ?? "/nonexistent", ".docker/run/docker.sock"), join(process.env.HOME ?? "/nonexistent", "Library/Containers/com.docker.docker/Data/docker.raw.sock")]) {
+      const probe = `require('net').createConnection(${JSON.stringify(candidate)}).once('connect',()=>process.exit(9)).once('error',()=>process.exit(0));setTimeout(()=>process.exit(0),500)`;
+      const result = spawnSync("sandbox-exec", ["-p", macSandboxPolicy(), runtime, "-e", probe], { encoding: "utf8", timeout: 2_000 }); if (result.status !== 0) throw new Error(`Docker API socket was not denied by the standalone test context (${candidate}, ${result.status})`); } return;
   }
   if (process.platform !== "win32") return;
   const runtime = join(bundle, "runtime", "node.exe"); const probe = `require('net').createConnection(${JSON.stringify(socket)}).once('connect',()=>process.exit(9)).once('error',()=>process.exit(0));setTimeout(()=>process.exit(0),500)`;
@@ -72,7 +77,7 @@ async function migrateFixture({ bundle, launcher, environment, postgresUrl, data
   const { PortableWorkspaceExportService } = await import(pathToFileURL(join(bundle, "app", "dist", "portable-workspace-export.js")));
   const { PortableWorkspaceImportService } = await import(pathToFileURL(join(bundle, "app", "dist", "portable-workspace-import.js")));
   const { LocalAttachmentStorage } = await import(pathToFileURL(join(bundle, "app", "dist", "attachments.js")));
-  const configuration = JSON.parse(await readFile(join(dataDirectory, "config", "runtime.json"), "utf8"));
+  const configurationBytes = await readFile(join(dataDirectory, "config", "runtime.json")); const configuration = JSON.parse(configurationBytes.toString("utf8"));
   const sourceKey = (await readFile(configuration.masterKeyFile, "utf8")).trim(); const codec = createAuthenticationSecretCodec(sourceKey);
   const expected = { organizationId: randomUUID(), ownerId: randomUUID(), adminId: randomUUID(), memberId: randomUUID(), noteId: randomUUID(), workspaceId: randomUUID(),
     recoveryToken: `bundle-recovery-${randomUUID()}`, oidcSecret: `bundle-oidc-${randomUUID()}`, importedAccountId: randomUUID(), importId: randomUUID() };
@@ -110,29 +115,31 @@ async function migrateFixture({ bundle, launcher, environment, postgresUrl, data
       if ((await new PasswordAuthService(verified).signIn({ email: address, password: richPassword })).member.id !== id || await verified.organizationRole(expected.organizationId, id) !== role) throw new Error(`${mode} migration lost authentication or immutable authorization roles`); }
     const authorization = new RepositoryConnectionService(verified, {}); if (!await authorization.authorize(expected.organizationId, expected.ownerId) || !await authorization.authorize(expected.organizationId, expected.adminId) || await authorization.authorize(expected.organizationId, expected.memberId)) throw new Error(`${mode} migration changed Owner/Admin/Member capability decisions`);
     const oidc = await verified.findOidcConfiguration(expected.organizationId); if (oidc?.clientSecret !== expected.oidcSecret) throw new Error(`${mode} migration lost encrypted integration state`);
+    if ((await verified.findOidcIdentity({ organizationId: expected.organizationId, issuer: "https://identity.bundle.test", subject: "bundle-owner" }))?.accountId !== expected.ownerId) throw new Error(`${mode} migration lost linked OIDC identity`);
     const identities = await verified.listPendingImportedIdentities(expected.ownerId); if (!identities.some((identity) => identity.importId === expected.importId && identity.sourceAccountId === expected.importedAccountId)) throw new Error(`${mode} migration lost imported Identity Stub`);
     if ((await verified.listNoteHistory(expected.ownerId, expected.noteId)).status !== "found" || (await verified.listWorkspaceActivity(expected.ownerId, expected.workspaceId)).status !== "found") throw new Error(`${mode} migration lost Note history or audit Activity`);
     if (await verified.findEmailRecoveryAccount(deriveEmailRecoveryLookup(expected.recoveryToken), "2026-08-24T10:00:00.000Z") !== expected.ownerId) throw new Error(`${mode} migration lost recovery state`);
     const counts = await admin.query(`SELECT (SELECT count(*) FROM ${schema}.stash_workspaces) AS workspaces, (SELECT count(*) FROM ${schema}.stash_attachments) AS attachments`);
     if (+counts.rows[0].workspaces < 1 || +counts.rows[0].attachments < 1) throw new Error(`${mode} migration lost domain or Attachment records`);
-    await verified.close(); if (!(await stat(join(root, "config", "runtime.json"))).isFile()) throw new Error(`${mode} migration lost configuration`);
+    await verified.close(); if (!(await stat(join(root, "config", "runtime.json"))).isFile() || !configurationBytes.equals(await readFile(join(root, "config", "runtime.json")))) throw new Error(`${mode} migration changed durable configuration bytes/schema`);
     const attachmentFiles = await filesBelow(join(root, "attachments")); const expectedChecksum = createHash("sha256").update("durable bundle Attachment").digest("hex");
     const checksums = await Promise.all(attachmentFiles.map(async (path) => createHash("sha256").update(await readFile(path)).digest("hex"))); if (!checksums.includes(expectedChecksum)) throw new Error(`${mode} migration changed Attachment bytes or checksums`);
     for (const path of [...attachmentFiles, ...await filesBelow(join(root, "config"))]) { const bytes = await readFile(path); for (const secret of [sourceKey, destinationKey]) if (bytes.includes(Buffer.from(secret))) throw new Error(`${mode} migration leaked a key into destination artifacts`); }
     await admin.query(`DROP SCHEMA ${schema} CASCADE`);
-  } } finally { await admin.end(); } return { email: "bundle-owner@stash.test", password: richPassword, workspaceId: expected.workspaceId, sourceKey, generatedKeys, expected };
+  } } finally { await admin.end(); } return { email: "bundle-owner@stash.test", password: richPassword, workspaceId: expected.workspaceId, sourceKey, generatedKeys, expected, configurationBytes };
 }
 async function verifyRestoredRichFixture(bundle, dataDirectory, fixture) {
   const { EmbeddedInstanceStore } = await import(pathToFileURL(join(bundle, "app", "dist", "embedded-instance-store.js"))); const { createAuthenticationSecretCodec } = await import(pathToFileURL(join(bundle, "app", "dist", "authentication-secrets.js")));
   const { RepositoryConnectionService } = await import(pathToFileURL(join(bundle, "app", "dist", "repository-connections.js"))); const { deriveEmailRecoveryLookup } = await import(pathToFileURL(join(bundle, "app", "dist", "account-recovery.js")));
+  const { PasswordAuthService } = await import(pathToFileURL(join(bundle, "app", "dist", "password-auth.js")));
   const store = await EmbeddedInstanceStore.open(dataDirectory, createAuthenticationSecretCodec(fixture.sourceKey)); const e = fixture.expected;
-  try { for (const [id, role] of [[e.ownerId, "Owner"], [e.adminId, "Admin"], [e.memberId, "Member"]]) if (await store.database.organizationRole(e.organizationId, id) !== role) throw new Error("Backup/restore changed memberships");
+  try { for (const [id, role, email] of [[e.ownerId, "Owner", "bundle-owner@stash.test"], [e.adminId, "Admin", "bundle-admin@stash.test"], [e.memberId, "Member", "bundle-member@stash.test"]]) if (await store.database.organizationRole(e.organizationId, id) !== role || (await new PasswordAuthService(store.database).signIn({ email, password: fixture.password })).member.id !== id) throw new Error("Backup/restore changed authentication or memberships");
     const authz = new RepositoryConnectionService(store.database, {}); if (!await authz.authorize(e.organizationId, e.ownerId) || !await authz.authorize(e.organizationId, e.adminId) || await authz.authorize(e.organizationId, e.memberId)) throw new Error("Backup/restore changed capability decisions");
     if (!(await store.database.listPendingImportedIdentities(e.ownerId)).some((identity) => identity.importId === e.importId && identity.sourceAccountId === e.importedAccountId)) throw new Error("Backup/restore lost imported Identity Stub");
-    if ((await store.database.listNoteHistory(e.ownerId, e.noteId)).status !== "found" || (await store.database.listWorkspaceActivity(e.ownerId, e.workspaceId)).status !== "found") throw new Error("Backup/restore lost history or audit");
-    if ((await store.database.findOidcConfiguration(e.organizationId))?.clientSecret !== e.oidcSecret || await store.database.findEmailRecoveryAccount(deriveEmailRecoveryLookup(e.recoveryToken), "2026-08-24T10:00:00.000Z") !== e.ownerId) throw new Error("Backup/restore lost integration or recovery state");
+    const history = await store.database.listNoteHistory(e.ownerId, e.noteId); const activity = await store.database.listWorkspaceActivity(e.ownerId, e.workspaceId); if (history.status !== "found" || !JSON.stringify(history).includes("Rich migration history") || activity.status !== "found" || !JSON.stringify(activity).includes(e.noteId)) throw new Error("Backup/restore changed exact history or audit content");
+    if ((await store.database.findOidcConfiguration(e.organizationId))?.clientSecret !== e.oidcSecret || (await store.database.findOidcIdentity({ organizationId: e.organizationId, issuer: "https://identity.bundle.test", subject: "bundle-owner" }))?.accountId !== e.ownerId || await store.database.findEmailRecoveryAccount(deriveEmailRecoveryLookup(e.recoveryToken), "2026-08-24T10:00:00.000Z") !== e.ownerId) throw new Error("Backup/restore lost integration identity or recovery state");
     const attachmentChecksums = await Promise.all((await filesBelow(store.paths.attachments)).map(async (path) => createHash("sha256").update(await readFile(path)).digest("hex"))); if (!attachmentChecksums.includes(createHash("sha256").update("durable bundle Attachment").digest("hex"))) throw new Error("Backup/restore changed Attachment bytes");
-    if (!(await readFile(join(store.paths.configuration, "runtime.json"), "utf8")).includes("stash.standalone-config.v1")) throw new Error("Backup/restore lost durable configuration");
+    if (!fixture.configurationBytes.equals(await readFile(join(store.paths.configuration, "runtime.json")))) throw new Error("Backup/restore changed exact durable configuration bytes/schema");
   } finally { await store.close(); }
 }
 
@@ -154,8 +161,8 @@ async function main() {
   const cleanEnvironment = { PATH: dirname(launcher), SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR,
     DOCKER_HOST: `unix://${join(extraction, "docker-access-is-forbidden.sock")}` };
   const invoke = (arguments_) => isolatedInvocation(launcher, arguments_, extraction);
-  const launch = () => { const call = invoke(["serve", "--data-dir", dataDirectory, "--port", String(port)]); return spawn(call.command, call.arguments, { env: cleanEnvironment, stdio: ["ignore", "pipe", "pipe"], shell: process.platform === "win32" }); };
-  await assertDockerSocketDenied(bundle); let allForbidden = ["INSTANCE_MASTER_KEY", "standalone-acceptance-password"]; let server = launch(); let stopTracing = traceDescendants(server.pid); let stderr = "", stdout = ""; server.stderr.on("data", (chunk) => { stderr += chunk; }); server.stdout.on("data", (chunk) => { stdout += chunk; });
+  const launch = () => { const call = invoke(["serve", "--data-dir", dataDirectory, "--port", String(port)]); return spawn(call.command, call.arguments, { env: cleanEnvironment, stdio: ["ignore", "pipe", "pipe"], shell: process.platform === "win32", detached: process.platform !== "win32" }); };
+  await assertDockerSocketDenied(bundle); let allForbidden = ["INSTANCE_MASTER_KEY", "standalone-acceptance-password"]; const operatorLogs = []; let server = launch(); let stopTracing = traceDescendants(server.pid); let stderr = "", stdout = ""; server.stderr.on("data", (chunk) => { stderr += chunk; }); server.stdout.on("data", (chunk) => { stdout += chunk; });
   try {
     await waitFor(url, () => stderr);
     const page = await fetch(`${url}/`); if (!page.ok || !await page.text().then((text) => text.includes("Stash"))) throw new Error("Built web client was not served");
@@ -169,12 +176,12 @@ async function main() {
     if (attachment.status !== 201) throw new Error(`Attachment upload failed (${attachment.status})`);
     const secondCall = invoke(["serve", "--data-dir", dataDirectory, "--port", String(port + 1)]); const second = spawnSync(secondCall.command, secondCall.arguments, { env: cleanEnvironment, encoding: "utf8", timeout: 15_000, shell: process.platform === "win32" });
     if (second.status === 0 || !/already (?:open|in use)|locked|another process/i.test(second.stderr)) throw new Error(`Concurrent second process was not rejected safely (status=${second.status}, signal=${second.signal}): ${second.stderr || second.stdout}`);
-    await stop(server); stopTracing();
+    await stop(server, port); stopTracing();
     const postgresUrl = value("--postgres-url"); const richFixture = postgresUrl ? await migrateFixture({ bundle, launcher, environment: cleanEnvironment, postgresUrl, dataDirectory, extraction, email, password }) : undefined;
     const unsafeCall = invoke(["serve", "--data-dir", join(extraction, "unsafe-data"), "--host", "0.0.0.0", "--port", String(port + 1)]); const unsafe = spawnSync(unsafeCall.command, unsafeCall.arguments,
       { env: cleanEnvironment, encoding: "utf8", timeout: 15_000, shell: process.platform === "win32" });
     if (unsafe.status === 0 || !/non-loopback.*requires unique secrets/i.test(unsafe.stderr)) throw new Error(`Evaluation defaults accepted an unsafe public bind: ${unsafe.stderr || unsafe.stdout}`);
-    for (const operation of [["backup", "create"], ["backup", "verify"], ["backup", "restore"]]) { const call = invoke([...operation, "--data-dir", dataDirectory, "--backup", backup]); run(call.command, call.arguments, { env: cleanEnvironment, shell: process.platform === "win32" }); }
+    for (const operation of [["backup", "create"], ["backup", "verify"], ["backup", "restore"]]) { const call = invoke([...operation, "--data-dir", dataDirectory, "--backup", backup]); const output = run(call.command, call.arguments, { env: cleanEnvironment, shell: process.platform === "win32" }); operatorLogs.push(output.stdout, output.stderr); }
     server = launch(); stopTracing = traceDescendants(server.pid); server.stderr.on("data", (chunk) => { stderr += chunk; }); await waitFor(url, () => stderr);
     const signIn = await json(url, "/api/auth/sessions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email, password }) });
     if (signIn.response.status !== 201 || !signIn.body.token) throw new Error(`Restart sign-in failed (${signIn.response.status})`);
@@ -184,13 +191,13 @@ async function main() {
     for (const relative of ["database", "attachments", "backups", "config"]) if (!(await stat(join(dataDirectory, relative))).isDirectory()) throw new Error(`Missing data-directory surface ${relative}`);
     const forbidden = ["INSTANCE_MASTER_KEY", "standalone-acceptance-password", ...(richFixture?.generatedKeys ?? [])];
     allForbidden = forbidden;
-    for (const secret of forbidden) if (stderr.includes(secret) || stdout.includes(secret)) throw new Error("Standalone server logs exposed forbidden secret material");
+    for (const secret of forbidden) if (stderr.includes(secret) || stdout.includes(secret) || operatorLogs.some((output) => output.includes(secret))) throw new Error("Standalone server/operator logs exposed forbidden secret material");
     for (const file of [join(bundle, "SOURCE.json"), `${archive}.sha256`].filter((path) => path && path !== "undefined.sha256")) {
       const content = await readFile(file, "utf8").catch(() => ""); for (const secret of forbidden) if (content.includes(secret)) throw new Error(`Secret leaked into ${file}`);
     }
     for (const file of await filesBelow(backup)) { const content = await readFile(file); for (const secret of forbidden) if (content.includes(Buffer.from(secret))) throw new Error(`Secret leaked into backup artifact ${file}`); }
-    if (richFixture) { await stop(server); stopTracing(); await verifyRestoredRichFixture(bundle, dataDirectory, richFixture); }
-  } finally { if (server.exitCode === null) await stop(server); stopTracing(); }
+    if (richFixture) { await stop(server, port); stopTracing(); await verifyRestoredRichFixture(bundle, dataDirectory, richFixture); }
+  } finally { if (server.exitCode === null) await stop(server, port); stopTracing(); }
   if (process.platform === "linux") { const traces = (await filesBelow(extraction)).filter((path) => basename(path).startsWith("syscalls-")); if (traces.length < 9) throw new Error(`Not every launcher invocation was syscall-traced (${traces.length})`);
     for (const trace of traces) { const content = await readFile(trace, "utf8"); if (/docker\.sock|\/var\/run\/docker|execve\([^\n]*(?:docker|podman)|connect\([^\n]*(?:docker|2375|2376)/i.test(content)) throw new Error(`Forbidden Docker execution or API access in ${trace}`); for (const secret of allForbidden) if (content.includes(secret)) throw new Error(`Secret leaked into syscall trace ${trace}`); } }
   for (const secret of ["standalone-acceptance-password", ...(value("--postgres-url") ? [] : [])]) if (stderr.includes(secret) || stdout.includes(secret)) throw new Error("Standalone logs contain forbidden secret material");

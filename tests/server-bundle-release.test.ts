@@ -103,6 +103,10 @@ describe("self-contained Instance bundle packaging", () => {
     assert.match(quality, /package:server[\s\S]*smoke:server-bundle/);
     assert.match(quality, /server-bundle-postgres-migration:[\s\S]*postgres:17-alpine[\s\S]*--postgres-url/);
     assert.match(quality, /runner\.os == 'Linux'[\s\S]*install --yes strace/);
+    const smoke = await readFile(new URL("../scripts/smoke-server-bundle.mjs", import.meta.url), "utf8");
+    assert.match(smoke, /process\.kill\(-child\.pid/); assert.match(smoke, /taskkill[\s\S]*"\/T"/);
+    assert.match(smoke, /sandbox-exec/); assert.match(smoke, /\.docker\/run\/docker\.sock/); assert.match(smoke, /strace[\s\S]*trace=process,network,file/);
+    assert.match(smoke, /Standalone descendant retained port/);
     assert.match(JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")).scripts["package:server"], /prepare-server-deploy/);
     assert.match(release, /publish-server-bundles:\s*\n\s*needs: release-quality/);
     assert.match(release, /SHA256SUMS/);
