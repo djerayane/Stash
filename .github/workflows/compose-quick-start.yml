@@ -1,4 +1,4 @@
-name: Compose quick start
+name: Distribution quality
 
 on:
   pull_request:
@@ -9,22 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  smoke:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - name: Resolve empty-environment configuration
-        run: env -i PATH="$PATH" HOME="$HOME" docker compose config
-      - name: Start the supported Instance baseline
-        run: env -i PATH="$PATH" HOME="$HOME" docker compose up -d --wait
-      - name: Verify readiness and the built React application
-        run: |
-          curl --fail --show-error --retry 5 --retry-connrefused http://127.0.0.1:3000/health/ready
-          curl --fail --show-error http://127.0.0.1:3000/ | grep -q Stash
-      - name: Show container logs after a failure
-        if: failure()
-        run: docker compose logs
-      - name: Stop containers without deleting Instance volumes
-        if: always()
-        run: docker compose down
+  release-quality:
+    uses: ./.github/workflows/release-quality.yml
+    with:
+      release: false

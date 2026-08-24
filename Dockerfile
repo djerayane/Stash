@@ -32,4 +32,5 @@ USER root
 RUN mkdir -p /var/lib/stash/attachments /var/lib/stash/backups && chown -R node:node /var/lib/stash
 USER node
 EXPOSE 3000
+HEALTHCHECK --interval=5s --timeout=3s --retries=10 CMD node -e "fetch('http://127.0.0.1:3000/health/ready').then(response=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))"
 CMD ["node", "dist/main.js"]
