@@ -170,6 +170,8 @@ export class EmbeddedLocalInstanceRestoreTarget implements InstanceBackupRestore
   async discardPreparedAttachments(prepared: unknown): Promise<void> {
     if (prepared && typeof prepared === "object") {
       const value = prepared as { attachments?: unknown; configuration?: unknown };
+      if (typeof value.attachments === "string" && typeof value.configuration === "string")
+        await this.options.store.abortPreparedRestore(value.attachments, value.configuration);
       await Promise.all([value.attachments, value.configuration].filter((path): path is string => typeof path === "string")
         .map((path) => rm(path, { recursive: true, force: true })));
     }

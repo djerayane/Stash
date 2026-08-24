@@ -116,6 +116,21 @@ describe("embedded Instance store", () => {
     assert.deepEqual(JSON.parse(await readFile(configurationPath, "utf8")), { locale: "fr-FR", registration: "closed" });
   });
 
+  test("clears only a prepared restore journal after rollback snapshot failure and retries without restart", async () => {
+    const root = await mkdtemp(join(tmpdir(), "stash-embedded-restore-retry-")); const key = masterKey();
+    const store = await EmbeddedInstanceStore.open(root, createAuthenticationSecretCodec(key)); stores.push(store); await store.database.verifyConnection();
+    const backup = join(store.paths.backups, "retry"); const service = new InstanceBackupService(
+      new EmbeddedLocalInstanceBackupSource({ store, publicOrigin: "http://127.0.0.1:3000" }), { masterKey: key });
+    await service.create(backup);
+    const target = new EmbeddedLocalInstanceRestoreTarget({ store, publicOrigin: "http://127.0.0.1:3000" });
+    const capture = store.captureDatabase.bind(store); let failSnapshot = true;
+    store.captureDatabase = async (destination: string) => { if (failSnapshot) throw new Error("injected rollback snapshot failure"); await capture(destination); };
+    await assert.rejects(service.restore(backup, target, { dryRun: false }), /injected rollback snapshot failure/);
+    assert.equal(await readFile(join(root, ".restore-journal.json"), "utf8").then(() => true).catch(() => false), false);
+    failSnapshot = false;
+    assert.deepEqual(await service.restore(backup, target, { dryRun: false }), { status: "restored" });
+  });
+
   test("recovers one coordinated database, Attachment, and configuration snapshot after every restore rename crash point", async () => {
     const key = masterKey();
     for (let renameCount = 0; renameCount <= 6; renameCount += 1) {

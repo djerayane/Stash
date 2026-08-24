@@ -238,6 +238,18 @@ export class EmbeddedInstanceStore {
     await writeJournal(journalPath, journal);
   }
 
+  async abortPreparedRestore(attachments: string, configuration: string): Promise<void> {
+    const journalPath = join(this.paths.root, ".restore-journal.json");
+    let journal: EmbeddedRestoreJournal;
+    try { journal = JSON.parse(await readFile(journalPath, "utf8")) as EmbeddedRestoreJournal; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+    if (journal.state !== "prepared") return;
+    if (journal.staged.attachments !== attachments || journal.staged.configuration !== configuration)
+      throw new Error("embedded restore preparation does not own the pending journal");
+    await rm(journal.staged.database, { recursive: true, force: true });
+    await rm(journalPath);
+  }
+
   async semanticSnapshot(): Promise<EmbeddedTableSnapshot[]> {
     if (this.#closed) throw new Error("Embedded Instance store is closed");
     const engine = this.pool.engine;

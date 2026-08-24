@@ -359,4 +359,32 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
       await source.close(); source = await EmbeddedInstanceStore.open(sourceRoot, createAuthenticationSecretCodec(sourceKey)); await source.database.verifyConnection();
     } finally { await source.close(); await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined); await admin.end(); }
   });
+
+  test("successful preserve and rotate CLI migrations keep keys out of process output, logs, diagnostics, and artifacts", async () => {
+    const admin = new Pool({ connectionString: postgresUrl! });
+    try {
+      for (const mode of ["preserve", "rotate"] as const) {
+        const sourceKey = key(); const destinationKey = mode === "preserve" ? sourceKey : key();
+        const root = await mkdtemp(join(tmpdir(), `stash-migration-cli-${mode}-`)); const sourceRoot = join(root, "source");
+        const source = await EmbeddedInstanceStore.open(sourceRoot, createAuthenticationSecretCodec(sourceKey));
+        await source.database.verifyConnection(); await source.database.prepareInstanceStore(); await source.database.createFirstOrganizationOwner({ organizationId: randomUUID(),
+          organizationName: "CLI", ownerId: randomUUID(), ownerName: "CLI Owner", ownerEmail: `${mode}@example.test`, passwordHash: "cli-password", role: "Owner" }); await source.close();
+        const keyRoot = await mkdtemp(join(tmpdir(), "stash-migration-cli-keys-")); const sourceKeyFile = join(keyRoot, "source.key"); const destinationKeyFile = join(keyRoot, "destination.key");
+        await writeFile(sourceKeyFile, sourceKey, { mode: 0o600 }); if (mode === "rotate") await writeFile(destinationKeyFile, destinationKey, { mode: 0o600 });
+        const schema = `embedded_cli_${mode}_${randomUUID().replaceAll("-", "")}`; await admin.query(`CREATE SCHEMA ${schema}`);
+        const scoped = new URL(postgresUrl!); scoped.searchParams.set("options", `-csearch_path=${schema}`);
+        const destination = new (await import("../src/postgres-database.js")).PostgresDatabase(scoped.toString(), createAuthenticationSecretCodec(destinationKey));
+        await destination.verifyConnection(); await destination.prepareInstanceStore(); await destination.close();
+        const arguments_ = ["--import", "tsx", "src/migrate-embedded-command.ts", "--data-dir", sourceRoot, "--attachment-root", join(root, "destination-attachments"),
+          "--configuration-root", join(root, "destination-configuration"), "--mode", mode, "--source-key-file", sourceKeyFile,
+          ...(mode === "rotate" ? ["--destination-key-file", destinationKeyFile] : [])];
+        const processResult = spawnSync(process.execPath, arguments_, { cwd: process.cwd(), encoding: "utf8", env: { ...process.env,
+          DESTINATION_DATABASE_URL: scoped.toString(), DESTINATION_DATABASE_AVAILABLE_BYTES: String(Number.MAX_SAFE_INTEGER) } });
+        assert.equal(processResult.status, 0, processResult.stderr); assert.match(processResult.stdout, /"status":"migrated"/);
+        for (const secret of [sourceKey, destinationKey]) { assert.equal(processResult.stdout.includes(secret), false); assert.equal(processResult.stderr.includes(secret), false); }
+        await assertDirectoryExcludesSecrets(sourceRoot, [sourceKey, destinationKey]); await assertDirectoryExcludesSecrets(root, [sourceKey, destinationKey]);
+        await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+      }
+    } finally { await admin.end(); }
+  });
 });
