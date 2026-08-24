@@ -3,7 +3,7 @@ import type { InstanceUpgradeTarget, UpgradeCheck } from "./instance-upgrade.js"
 
 export const legacyUnversionedFormat = "0.0.0";
 interface MigrationConnection { query<T extends Record<string, unknown> = Record<string, unknown>>(sql: string, values?: unknown[]): Promise<QueryResult<T>> }
-interface UpgradeDatabase extends MigrationConnection { connect(): Promise<PoolClient>; end(): Promise<void> }
+export interface UpgradeDatabase extends MigrationConnection { connect(): Promise<PoolClient>; end(): Promise<void> }
 interface PostgresMigration { from: string; to: string; apply(connection: MigrationConnection): Promise<void> }
 
 export const postgresInstanceMigrations: readonly PostgresMigration[] = [{

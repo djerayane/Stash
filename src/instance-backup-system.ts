@@ -108,6 +108,7 @@ export class EmbeddedLocalInstanceBackupSource implements InstanceBackupSource {
 }
 
 export class EmbeddedLocalInstanceRestoreTarget implements InstanceBackupRestoreTarget {
+  readonly databaseFormat = "pglite-data-directory-v1" as const;
   constructor(private readonly options: { store: EmbeddedInstanceStore; publicOrigin: string }) {}
   async validateConfiguration(configuration: Record<string, unknown>): Promise<void> {
     if (configuration.storageMode !== "embedded" || configuration.attachmentStorage !== "local") throw new Error("Instance Backup is not an embedded local-storage backup");
@@ -138,6 +139,7 @@ export class EmbeddedLocalInstanceRestoreTarget implements InstanceBackupRestore
 }
 
 export class PostgresLocalInstanceRestoreTarget implements InstanceBackupRestoreTarget {
+  readonly databaseFormat = "postgresql-custom" as const;
   constructor(private readonly options: {
     databaseUrl: string;
     attachmentRoot: string;

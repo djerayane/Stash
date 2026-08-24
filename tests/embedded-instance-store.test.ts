@@ -11,6 +11,7 @@ import { paragraphDocument } from "../src/rich-text.js";
 import { InstanceBackupService } from "../src/instance-backup.js";
 import { EmbeddedLocalInstanceBackupSource, EmbeddedLocalInstanceRestoreTarget } from "../src/instance-backup-system.js";
 import type { WorkspaceSearchResult } from "../src/workspace-search.js";
+import { PostgresInstanceUpgradeTarget } from "../src/postgres-instance-upgrade.js";
 
 const stores: EmbeddedInstanceStore[] = [];
 afterEach(async () => Promise.all(stores.splice(0).map((store) => store.close().catch(() => undefined))));
@@ -18,6 +19,12 @@ afterEach(async () => Promise.all(stores.splice(0).map((store) => store.close().
 function masterKey(): string { return randomBytes(32).toString("base64"); }
 
 describe("embedded Instance store", () => {
+  test("uses the shared Instance upgrade contract without an external PostgreSQL process", async () => {
+    const store = await EmbeddedInstanceStore.open(await mkdtemp(join(tmpdir(), "stash-embedded-upgrade-")), createAuthenticationSecretCodec(masterKey())); stores.push(store);
+    const target = new PostgresInstanceUpgradeTarget("embedded://local", async () => undefined, store.upgradeDatabase);
+    const before = await target.inspect("0.1.0"); assert.equal(before.currentVersion, "0.0.0"); assert.equal(before.checks.every(({ status }) => status === "pass"), true);
+    await target.apply("0.0.0", "0.1.0"); assert.equal((await target.inspect("0.1.0")).currentVersion, "0.1.0");
+  });
   test("persists PostgreSQL state beneath the selected data directory across a clean restart", async () => {
     const root = await mkdtemp(join(tmpdir(), "stash-embedded-restart-"));
     const key = masterKey();

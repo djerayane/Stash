@@ -35,6 +35,7 @@ class FakeSource implements InstanceBackupSource {
 
 class Probe implements DatabaseProbe { async verifyConnection() {} async close() {} }
 class FakeRestoreTarget implements InstanceBackupRestoreTarget {
+  readonly databaseFormat = "postgresql-custom" as const;
   readonly calls: string[] = [];
   commitFailure: Error | undefined;
   rollbackFailure: Error | undefined;
@@ -81,6 +82,15 @@ describe("coordinated Instance Backup", () => {
     target.prepareAttachments = async (sourcePath, paths) => { assert.match(sourcePath, /attachments$/); assert.deepEqual(paths, []); target.calls.push("prepare"); return "prepared"; };
     assert.deepEqual(await service.restore(path, target, { dryRun: false }), { status: "restored" });
     assert.deepEqual(target.calls, ["configuration", "prepare", "snapshot", "database", "commit", "discard"]);
+  });
+
+  it("rejects a database adapter mismatch during dry-run before restore preparation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "stash-backup-adapter-mismatch-"));
+    const path = join(root, "backup"); const service = new InstanceBackupService(new FakeSource(), { masterKey });
+    await service.create(path); const target = new FakeRestoreTarget();
+    Object.defineProperty(target, "databaseFormat", { value: "pglite-data-directory-v1" });
+    await assert.rejects(service.restore(path, target, { dryRun: true }), /database storage adapter/i);
+    assert.deepEqual(target.calls, []);
   });
 
   it("rejects misspelled restore flags and surplus CLI arguments before reading configuration or restoring", () => {

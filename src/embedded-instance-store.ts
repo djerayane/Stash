@@ -117,6 +117,7 @@ export class EmbeddedInstanceStore {
   private constructor(
     readonly paths: InstanceStorePaths,
     readonly database: PostgresDatabase,
+    readonly upgradeDatabase: import("./postgres-instance-upgrade.js").UpgradeDatabase,
     private readonly releaseLock: () => Promise<void>,
     private readonly engine: PGlite,
   ) {}
@@ -133,7 +134,7 @@ export class EmbeddedInstanceStore {
       const engine = await PGlite.create(paths.database, { relaxedDurability: false });
       const pool = new PGlitePoolAdapter(engine) as unknown as Pool;
       const database = new PostgresDatabase("embedded://local", authenticationSecrets, { pool });
-      return new EmbeddedInstanceStore(paths, database, releaseLock, engine);
+      return new EmbeddedInstanceStore(paths, database, pool as unknown as import("./postgres-instance-upgrade.js").UpgradeDatabase, releaseLock, engine);
     } catch (error) { await releaseLock().catch(() => undefined); throw error; }
   }
 
@@ -174,7 +175,7 @@ export class EmbeddedInstanceStore {
       const result: EmbeddedTableSnapshot[] = [];
       for (const { table_name: name } of tables.rows) {
         const columns = (await this.engine.query<{ column_name: string }>(`SELECT column_name FROM information_schema.columns
-          WHERE table_schema=current_schema() AND table_name=$1 ORDER BY ordinal_position`, [name])).rows.map((row) => row.column_name);
+          WHERE table_schema=current_schema() AND table_name=$1 AND is_generated='NEVER' ORDER BY ordinal_position`, [name])).rows.map((row) => row.column_name);
         const dependencies = (await this.engine.query<{ referenced_table: string }>(`SELECT DISTINCT referenced.relname AS referenced_table
           FROM pg_constraint constraint_record
           JOIN pg_class referenced ON referenced.oid=constraint_record.confrelid

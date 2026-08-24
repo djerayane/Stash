@@ -16,6 +16,7 @@ export interface InstanceBackupSource {
   captureConfiguration(): Promise<Record<string, string | number | boolean | null>>;
 }
 export interface InstanceBackupRestoreTarget {
+  readonly databaseFormat: "postgresql-custom" | "pglite-data-directory-v1";
   validateConfiguration(configuration: Record<string, unknown>): Promise<void>;
   prepareAttachments(source: string, paths: ReadonlyArray<string>): Promise<unknown>;
   snapshotDatabase(destination: string): Promise<void>;
@@ -196,6 +197,8 @@ export class InstanceBackupService {
     this.#operation = "restore_preflight";
     try {
     await this.verify(source);
+    const manifest = JSON.parse(await readFile(join(source, "manifest.json"), "utf8")) as BackupManifest;
+    if (manifest.database.format !== target.databaseFormat) throw new Error("Instance Backup database storage adapter does not match this restore environment");
     let configuration: Record<string, unknown>;
     try {
       const decoded: unknown = JSON.parse(await readFile(childPath(source, "configuration.json"), "utf8"));
@@ -204,7 +207,6 @@ export class InstanceBackupService {
     } catch { throw new Error("Instance Backup configuration is invalid"); }
     await target.validateConfiguration(configuration);
     if (options.dryRun) { this.#operation = "idle"; return { status: "verified" }; }
-    const manifest = JSON.parse(await readFile(join(source, "manifest.json"), "utf8")) as BackupManifest;
     const attachmentPaths = manifest.files.filter((file) => file.kind === "attachment")
       .map((file) => file.path.slice("attachments/".length));
     const prepared = await target.prepareAttachments(childPath(source, "attachments"), attachmentPaths);

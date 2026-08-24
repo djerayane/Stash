@@ -98,8 +98,8 @@ async function main(): Promise<void> {
   const instanceBackupRestoreTarget = embeddedStore ? new EmbeddedLocalInstanceRestoreTarget({ store: embeddedStore, publicOrigin })
     : new PostgresLocalInstanceRestoreTarget({ databaseUrl: databaseUrl!, attachmentRoot: attachmentStoragePath,
       ...(s3AttachmentStorage ? { attachmentStorage: s3AttachmentStorage } : {}), attachmentStorageKind, publicOrigin });
-  const instanceUpgrades = instanceBackupRoot && !embeddedStore ? new InstanceUpgradeService({ backups: instanceBackups, backupRoot: instanceBackupRoot, targetVersion: await readStashReleaseVersion(),
-    target: new PostgresInstanceUpgradeTarget(databaseUrl!, async (backupPath) => { await instanceBackups.restore(backupPath, instanceBackupRestoreTarget, { dryRun: false }); }) }) : undefined;
+  const instanceUpgrades = instanceBackupRoot ? new InstanceUpgradeService({ backups: instanceBackups, backupRoot: instanceBackupRoot, targetVersion: await readStashReleaseVersion(),
+    target: new PostgresInstanceUpgradeTarget(databaseUrl ?? "embedded://local", async (backupPath) => { await instanceBackups.restore(backupPath, instanceBackupRestoreTarget, { dryRun: false }); }, embeddedStore?.upgradeDatabase) }) : undefined;
   const smtpUrl = process.env.SMTP_URL?.trim();
   const emailRecoveryFrom = process.env.EMAIL_RECOVERY_FROM?.trim();
   const recoveryEmail = createRecoveryEmailSender({

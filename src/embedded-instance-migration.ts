@@ -30,6 +30,9 @@ export async function readMigrationKeys(input: MigrationKeyInput): Promise<{ sou
 }
 
 function quote(identifier: string): string { return `"${identifier.replaceAll('"', '""')}"`; }
+function recoveryLookup(purpose: "recovery-code" | "email-recovery", value: string): string {
+  return createHash("sha256").update(`stash:${purpose}:v1\0${value}`).digest("base64");
+}
 
 function orderedTables(tables: EmbeddedTableSnapshot[]): EmbeddedTableSnapshot[] {
   const remaining = new Map(tables.map((table) => [table.name, table])); const ordered: EmbeddedTableSnapshot[] = [];
@@ -60,7 +63,10 @@ function rotateRow(table: string, row: Record<string, unknown>, sourceKey: strin
     const subject = destination.decrypt(next.subject_secret); next.subject_lookup = destination.blindIndex(`oidc-identity-v1:${JSON.stringify([next.organization_id, next.issuer, subject])}`);
   }
   if (table === "stash_email_recoveries" && typeof next.protected_secret === "string") {
-    next.token_lookup = destination.blindIndex(destination.decrypt(next.protected_secret));
+    next.token_lookup = destination.blindIndex(recoveryLookup("email-recovery", destination.decrypt(next.protected_secret)));
+  }
+  if (table === "stash_recovery_codes" && typeof next.protected_secret === "string") {
+    next.code_lookup = destination.blindIndex(recoveryLookup("recovery-code", destination.decrypt(next.protected_secret)));
   }
   return next;
 }
@@ -103,13 +109,18 @@ export async function migrateEmbeddedInstance(options: {
   if (JSON.stringify(sourceAttachments) !== JSON.stringify(staged)) { await rm(stagedAttachments, { recursive: true, force: true }); throw new Error("Attachment checksum validation failed"); }
   const targetPreparation = new PostgresDatabase(options.destinationDatabaseUrl, createAuthenticationSecretCodec(options.keys.destination));
   try { await targetPreparation.verifyConnection(); await targetPreparation.prepareInstanceStore(); }
+  catch (error) { throw new Error("Migration destination Instance master key does not match the configured destination key", { cause: error }); }
   finally { await targetPreparation.close(); }
   const pool = new Pool({ connectionString: options.destinationDatabaseUrl, connectionTimeoutMillis: 2_000, max: 1 }); const client = await pool.connect();
   let attachmentsCommitted = false;
   try {
     await client.query("BEGIN");
+    const destinationCheck = await client.query<{ encrypted_check: string }>("SELECT encrypted_check FROM stash_authentication_key_check WHERE singleton=TRUE");
+    if (destinationCheck.rowCount !== 1) throw new Error("Migration destination authentication key boundary is invalid");
+    try { verifyAuthenticationKeyCheck(createAuthenticationSecretCodec(options.keys.destination), destinationCheck.rows[0]!.encrypted_check); }
+    catch { throw new Error("Migration destination Instance master key does not match the configured destination key"); }
     for (const table of tables) {
-      const targetColumns = (await client.query<{ column_name: string }>(`SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1 ORDER BY ordinal_position`, [table.name])).rows.map((row) => row.column_name);
+      const targetColumns = (await client.query<{ column_name: string }>(`SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1 AND is_generated='NEVER' ORDER BY ordinal_position`, [table.name])).rows.map((row) => row.column_name);
       if (JSON.stringify(targetColumns) !== JSON.stringify(table.columns)) throw new Error(`Migration destination schema is incompatible at ${table.name}`);
       const targetCount = Number((await client.query(`SELECT count(*) count FROM ${quote(table.name)}`)).rows[0]?.count);
       if (table.name === "stash_authentication_key_check") {
@@ -123,6 +134,9 @@ export async function migrateEmbeddedInstance(options: {
         await client.query(`INSERT INTO ${quote(table.name)} (${table.columns.map(quote).join(",")}) VALUES (${placeholders})`, table.columns.map((column) => row[column]));
       }
     }
+    const copiedRows = tables.reduce((count, table) => count + table.rows.length, 0);
+    const destinationRows = (await Promise.all(tables.map(async (table) => Number((await client.query(`SELECT count(*) count FROM ${quote(table.name)}`)).rows[0]?.count)))).reduce((sum, count) => sum + count, 0);
+    if (destinationRows !== copiedRows) throw new Error("Migration post-copy semantic row-count validation failed");
     await mkdir(dirname(destinationAttachments), { recursive: true, mode: 0o700 });
     await rm(destinationAttachments, { recursive: true, force: true }); await rename(stagedAttachments, destinationAttachments); attachmentsCommitted = true;
     await client.query("COMMIT");
