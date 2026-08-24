@@ -43,7 +43,7 @@ import { projectWorkflowRoutes } from "./project-workflow-routes.js";
 import type { ProjectWorkflowService } from "./project-workflows.js";
 import { portableWorkspaceExportRoute } from "./portable-workspace-export-route.js";
 import type { PortableWorkspaceExportService } from "./portable-workspace-export.js";
-import { portableWorkspaceImportRoute } from "./portable-workspace-import-route.js";
+import { markdownWorkspaceImportRoute, portableWorkspaceImportRoute } from "./portable-workspace-import-route.js";
 import type { PortableWorkspaceImportService } from "./portable-workspace-import.js";
 import { boardRoutes } from "./board-routes.js";
 import type { BoardService } from "./boards.js";
@@ -220,6 +220,7 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
     ...(options.attachments ? [attachmentRoutes(options.attachments, memberAccess)] : []),
     ...(options.discussions ? [discussionRoutes(options.discussions, memberAccess)] : []),
     ...(options.portableWorkspaceExports ? [portableWorkspaceExportRoute(options.portableWorkspaceExports, memberAccess)] : []),
+    ...(options.portableWorkspaceImports ? [markdownWorkspaceImportRoute(options.portableWorkspaceImports,memberAccess)] : []),
     ...(options.activities ? [activityRoutes(options.activities, memberAccess)] : []),
     ...(options.notifications ? [notificationRoutes(options.notifications, memberAccess)] : []),
     ...(options.repositoryConnections ? [repositoryConnectionRoutes(options.repositoryConnections, memberAccess)] : []),

@@ -1,5 +1,6 @@
 import type { IncomingMessage } from "node:http";
 
+import type { MemberAccessResolver } from "./workspaces-projects.js";
 import { json, readJson, type HttpRoute } from "./http-routing.js";
 import { InvalidPortableWorkspaceImport, PortableWorkspaceImportTooLarge, UnsupportedPortableWorkspaceImport, type PortableWorkspaceImportService } from "./portable-workspace-import.js";
 
@@ -10,7 +11,7 @@ async function body(request: IncomingMessage): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 export function portableWorkspaceImportRoute(service: PortableWorkspaceImportService): HttpRoute {
-  return { matches(request, url) { return request.method === "POST" && ["/api/workspace-imports","/api/workspace-imports/markdown","/api/workspace-import-identity-mappings"].includes(url.pathname); },
+  return { matches(request, url) { return request.method === "POST" && ["/api/workspace-imports","/api/workspace-import-identity-mappings"].includes(url.pathname); },
     async handle(request, response, url) {
       if(url.pathname==="/api/workspace-import-identity-mappings") { try { const value=await readJson(request);
         if(!value||typeof value!=="object"||Array.isArray(value)||Object.keys(value).some((key)=>!["importId","sourceAccountId","localAccountId"].includes(key))) throw new InvalidPortableWorkspaceImport();
@@ -26,8 +27,7 @@ export function portableWorkspaceImportRoute(service: PortableWorkspaceImportSer
       const ownerAccountId = request.headers["x-stash-import-owner-account-id"];
       if (typeof importId !== "string" || typeof ownerAccountId !== "string") { json(response, 422, { error: "invalid_import_request", message: "UUID Idempotency-Key and X-Stash-Import-Owner-Account-Id headers are required." }); return true; }
       try {
-        const archive=await body(request); const result = url.pathname==="/api/workspace-imports/markdown"
-          ? await service.importMarkdown(importId,ownerAccountId,archive) : await service.import(importId, ownerAccountId, archive);
+        const archive=await body(request); const result = await service.import(importId, ownerAccountId, archive);
         if (result.status === "forbidden") { json(response, 403, { error: "import_forbidden", message: "Workspace import permission is required." }); return true; }
         if (result.status === "workspace_conflict") { json(response, 409, { error: "workspace_conflict", message: "The Workspace identity already exists with different content." }); return true; }
         json(response, result.status === "imported" ? 201 : 200, { status: result.status, report: result.report });
@@ -38,4 +38,22 @@ export function portableWorkspaceImportRoute(service: PortableWorkspaceImportSer
         else json(response, 503, { error: "import_unavailable", message: "The Workspace import could not be completed. Nothing was imported." });
       } return true;
     } };
+}
+
+export function markdownWorkspaceImportRoute(service: PortableWorkspaceImportService, access: MemberAccessResolver): HttpRoute {
+  return { matches(request,url){return request.method==="POST"&&url.pathname==="/api/workspace-imports/markdown";},async handle(request,response){
+    const member=await access.authenticateBearer(request.headers.authorization);
+    if(!member){json(response,401,{error:"unauthorized",message:"A valid Member bearer token is required."});return true;}
+    const importId=request.headers["idempotency-key"];
+    if(typeof importId!=="string"){json(response,422,{error:"invalid_import_request",message:"A UUID Idempotency-Key header is required."});return true;}
+    try{const result=await service.importMarkdown(importId,member.accountId,await body(request));
+      if(result.status==="forbidden")json(response,403,{error:"import_forbidden",message:"Workspace import permission is required."});
+      else if(result.status==="workspace_conflict")json(response,409,{error:"workspace_conflict",message:"The Workspace identity already exists with different content."});
+      else json(response,result.status==="imported"?201:200,{status:result.status,report:result.report});
+    }catch(error){if(error instanceof PortableWorkspaceImportTooLarge)json(response,413,{error:"import_too_large",message:"The archive exceeds the safe import limit."});
+      else if(error instanceof UnsupportedPortableWorkspaceImport)json(response,422,{error:"unsupported_import",message:"The Markdown archive encoding is not supported."});
+      else if(error instanceof InvalidPortableWorkspaceImport)json(response,422,{error:"invalid_import",message:"The Markdown archive failed validation. Nothing was imported."});
+      else json(response,503,{error:"import_unavailable",message:"The Workspace import could not be completed. Nothing was imported."});}
+    return true;
+  }};
 }

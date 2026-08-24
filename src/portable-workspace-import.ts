@@ -105,7 +105,7 @@ function exactCause(value: unknown, kind: string): void {
     || value.kind === "migration" && value.source !== "existing_note") throw new InvalidPortableWorkspaceImport(`invalid_${kind}`);
 }
 
-function unzipStored(archive: Buffer, limits: { maxEntries: number; maxFileBytes: number }): Entry[] {
+function unzipStored(archive: Buffer, limits: { maxEntries: number; maxFileBytes: number; maxArchiveBytes?:number }): Entry[] {
   if (archive.length < 22) throw new InvalidPortableWorkspaceImport("missing_zip_directory");
   let end = -1;
   for (let offset = archive.length - 22; offset >= Math.max(0, archive.length - 65_557); offset -= 1) {
@@ -127,7 +127,7 @@ function unzipStored(archive: Buffer, limits: { maxEntries: number; maxFileBytes
   }
   if (entries > limits.maxEntries) throw new PortableWorkspaceImportTooLarge("too_many_entries");
   if (directoryOffset + directorySize !== directoryEnd) throw new InvalidPortableWorkspaceImport("invalid_zip_directory");
-  const found: Entry[] = []; const paths = new Set<string>(); let cursor = directoryOffset;
+  const found: Entry[] = []; const paths = new Set<string>(); let cursor = directoryOffset; let expandedBytes=0;
   for (let index = 0; index < entries; index += 1) {
     if (cursor + 46 > directoryEnd || archive.readUInt32LE(cursor) !== 0x02014b50) throw new InvalidPortableWorkspaceImport("invalid_zip_entry");
     const flags = archive.readUInt16LE(cursor + 8); const method = archive.readUInt16LE(cursor + 10);
@@ -135,7 +135,9 @@ function unzipStored(archive: Buffer, limits: { maxEntries: number; maxFileBytes
     const nameLength = archive.readUInt16LE(cursor + 28); const extraLength = archive.readUInt16LE(cursor + 30); const commentLength = archive.readUInt16LE(cursor + 32);
     const localOffset = archive.readUInt32LE(cursor + 42); const path = archive.subarray(cursor + 46, cursor + 46 + nameLength).toString("utf8");
     if ((flags & 1) || ![0,8].includes(method) || method === 0 && compressed !== size) throw new UnsupportedPortableWorkspaceImport("unsupported_zip_entry_encoding");
-    if (!safePath(path) || paths.has(path) || size > limits.maxFileBytes) throw new InvalidPortableWorkspaceImport("unsafe_zip_entry");
+    const directory=path.endsWith("/"); const checkedPath=directory?path.slice(0,-1):path;
+    if (!safePath(checkedPath) || paths.has(path) || size > limits.maxFileBytes || directory&&size!==0) throw new InvalidPortableWorkspaceImport("unsafe_zip_entry");
+    expandedBytes+=size; if(expandedBytes>(limits.maxArchiveBytes??limits.maxFileBytes)) throw new PortableWorkspaceImportTooLarge("expanded_archive_too_large");
     if (localOffset + 30 > directoryOffset || archive.readUInt32LE(localOffset) !== 0x04034b50) throw new InvalidPortableWorkspaceImport("invalid_local_entry");
     const localNameLength = archive.readUInt16LE(localOffset + 26); const localExtraLength = archive.readUInt16LE(localOffset + 28);
     const localPath = archive.subarray(localOffset + 30, localOffset + 30 + localNameLength).toString("utf8");
@@ -157,7 +159,7 @@ function contentType(path: string): string {
   const extension=posix.extname(path).toLowerCase();
   return new Map([[".png","image/png"],[".jpg","image/jpeg"],[".jpeg","image/jpeg"],[".gif","image/gif"],[".webp","image/webp"],[".svg","image/svg+xml"],[".pdf","application/pdf"],[".txt","text/plain"]]).get(extension) ?? "application/octet-stream";
 }
-function markdownBundle(archive: Buffer, destinationOwnerAccountId: string, limits: {maxEntries:number;maxFileBytes:number}): PortableWorkspaceImportBundle {
+function markdownBundle(archive: Buffer, destinationOwnerAccountId: string, limits: {maxEntries:number;maxFileBytes:number;maxArchiveBytes?:number}): PortableWorkspaceImportBundle {
   const entries=unzipStored(archive,limits).filter(({path})=>!path.endsWith("/"));
   const rootParts=entries.length ? entries[0]!.path.split("/") : [];
   const commonRoot=rootParts.length>1 && entries.every(({path})=>path.startsWith(`${rootParts[0]!}/`)) ? `${rootParts[0]!}/` : "";
@@ -189,6 +191,13 @@ function markdownBundle(archive: Buffer, destinationOwnerAccountId: string, limi
       else if(scalar) tags.push(...scalar[1]!.split(/[ ,]+/).map((tag)=>tag.trim().replace(/^#/,"")));
       const block=front[1]!.match(/^tags:\s*\r?\n((?:\s+-\s*[^\n]+\r?\n?)*)/m); if(block) tags.push(...block[1]!.split(/\r?\n/).map((line)=>line.replace(/^\s+-\s*/,"").trim()).filter(Boolean));
       text=text.slice(front[0].length); transformations.push({kind:"transformed",object:`Note:${entry.path}`,reason:"frontmatter_tags_extracted"}); }
+    text=text.replace(/(!?)\[([^\]]*)\]\((?:<([^>]+)>|([^\s)]+))(?:\s+"[^"]*")?\)/g,(whole,embed:string,label:string,angled?:string,plain?:string)=>{
+      const raw=angled??plain??""; if(/^(?:[a-z]+:|#|\/)/i.test(raw)) return whole; let decoded:string; try{decoded=decodeURIComponent(raw);}catch{return whole;}
+      const target=posix.normalize(posix.join(posix.dirname(entry.path),decoded)); const attachmentId=attachmentByPath.get(target);
+      if(attachmentId){transformations.push({kind:"transformed",object:`Link:${entry.path}->${decoded}`,reason:"relative_attachment_link"});return `${embed?"!":""}[${label}](<./attachments/${attachmentId}/${encodePortableFilename(posix.basename(target))}>)`;}
+      const candidate=noteByPath.get(target); if(!embed&&candidate){noteLinks.push({schema:"stash.note-link.v2",id:randomUUID(),workspaceId,sourceNoteId:current.id,targetNoteId:candidate.id,targetPath:candidate.path,candidateNoteIds:[],label:(label.trim()||posix.basename(target,".md")).slice(0,200),revision:1});transformations.push({kind:"transformed",object:`Link:${entry.path}->${decoded}`,reason:"relative_note_link"});}
+      return whole;
+    });
     text=text.replace(/(!?)\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]/g,(whole,embed:string,target:string,label?:string)=>{
       const decoded=target.trim(); const relative=posix.normalize(posix.join(posix.dirname(entry.path),decoded));
       const attachmentId=attachmentByPath.get(relative)??attachmentByPath.get(decoded);
