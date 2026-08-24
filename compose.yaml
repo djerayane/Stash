@@ -24,6 +24,7 @@ services:
       - stash-postgres:/var/lib/postgresql/data
 
   stash:
+    image: ${STASH_IMAGE:-stash-local}
     build: .
     command:
       - sh

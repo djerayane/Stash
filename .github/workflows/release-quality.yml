@@ -1,0 +1,156 @@
+name: Release quality
+
+on:
+  workflow_call:
+    inputs:
+      release:
+        description: Run tag and publication-collision preflight
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  repository-quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run check
+      - run: pnpm run test
+      - run: pnpm run build
+
+  compose-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve empty-environment configuration
+        run: env -i PATH="$PATH" HOME="$HOME" docker compose config
+      - name: Start the supported Instance baseline
+        run: env -i PATH="$PATH" HOME="$HOME" docker compose up -d --wait
+      - name: Verify readiness and the built React application
+        run: |
+          curl --fail --show-error --retry 5 --retry-connrefused http://127.0.0.1:3000/health/ready
+          curl --fail --show-error http://127.0.0.1:3000/ | grep -q Stash
+      - name: Show container logs after a failure
+        if: failure()
+        run: docker compose logs
+      - name: Stop containers without deleting Instance volumes
+        if: always()
+        run: docker compose down
+
+  oci-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_DB: stash
+          POSTGRES_USER: stash
+          POSTGRES_PASSWORD: stash-ci-only
+        options: >-
+          --health-cmd "pg_isready -U stash -d stash"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build both supported architectures without publishing
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          outputs: type=oci,dest=/tmp/stash-image.tar
+      - name: Load the runner architecture for runtime smoke testing
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: stash-ci:${{ github.sha }}
+      - name: Boot and verify the built image
+        run: |
+          docker run -d --name stash-ci --network host \
+            -e DATABASE_URL=postgresql://stash:stash-ci-only@127.0.0.1:5432/stash \
+            -e INSTANCE_ADMIN_TOKEN=stash-ci-admin-token \
+            -e INSTANCE_MASTER_KEY=c3Rhc2gtY2ktb25seS1tYXN0ZXIta2V5LTAwMDAwMDA= \
+            -e PUBLIC_ORIGIN=http://localhost:3000 \
+            -e HOST=127.0.0.1 -e PORT=3000 \
+            stash-ci:${{ github.sha }}
+          for _ in $(seq 1 30); do
+            [ "$(docker inspect --format '{{.State.Health.Status}}' stash-ci)" = healthy ] && break
+            sleep 2
+          done
+          test "$(docker inspect --format '{{.State.Health.Status}}' stash-ci)" = healthy
+          curl --fail --show-error http://127.0.0.1:3000/health/ready
+          curl --fail --show-error http://127.0.0.1:3000/ | grep -q Stash
+      - if: failure()
+        run: docker logs stash-ci
+      - if: always()
+        run: docker rm -f stash-ci || true
+
+  release-preflight:
+    if: inputs.release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Validate immutable release candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          case "$GITHUB_REF" in refs/tags/v*) ;; *) echo "release requires refs/tags/v*" >&2; exit 1;; esac
+          case "$GITHUB_REF_NAME" in *+*) echo "build metadata is not supported" >&2; exit 1;; esac
+          version="${GITHUB_REF_NAME#v}"
+          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-([0-9A-Za-z-]+)(\.[0-9A-Za-z-]+)*)?$'
+          [[ "$version" =~ $semver ]] || { echo "tag must be canonical SemVer" >&2; exit 1; }
+          prerelease="${version#*-}"
+          if [ "$prerelease" != "$version" ]; then
+            IFS=. read -ra identifiers <<< "$prerelease"
+            for identifier in "${identifiers[@]}"; do
+              if [[ "$identifier" =~ ^[0-9]+$ && "$identifier" != 0 && "$identifier" == 0* ]]; then
+                echo "tag must be canonical SemVer" >&2
+                exit 1
+              fi
+            done
+          fi
+          tag_commit="$(git rev-parse "$GITHUB_REF^{commit}")"
+          [ "$tag_commit" = "${{ github.sha }}" ] || { echo "tag does not resolve to github.sha" >&2; exit 1; }
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "GitHub Release already exists" >&2
+            exit 1
+          fi
+          if package_tags="$(gh api --paginate /users/djerayane/packages/container/stash/versions --jq '.[].metadata.container.tags[]' 2>ghcr-error)"; then
+            if grep -Fxq "$version" <<< "$package_tags"; then
+              echo "ghcr.io/djerayane/stash:$version already exists" >&2
+              exit 1
+            fi
+          elif ! grep -q 'HTTP 404' ghcr-error; then
+            cat ghcr-error >&2
+            exit 1
+          fi

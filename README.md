@@ -26,6 +26,20 @@ docker compose up -d
 
 Wait for the `stash` service to become healthy, then open <http://localhost:3000>. Use `docker compose ps` to inspect readiness and `docker compose logs stash` to inspect startup. Stop the Instance with `docker compose down`. PostgreSQL, local Attachments, and Instance Backups remain in the `stash-postgres`, `stash-attachments`, and `stash-backups` named volumes; removing those volumes deletes local Instance data and is intentionally not part of the normal stop command.
 
+To use a published multi-architecture image instead of building from the checkout, set `STASH_IMAGE`. Compose retains the same PostgreSQL, persistence, health, and localhost-only defaults:
+
+```sh
+STASH_IMAGE=ghcr.io/djerayane/stash:1.2.3 docker compose up -d --no-build
+```
+
+Version tags are convenient selectors, while the manifest digest reported by the release workflow is the immutable artifact identity. Production automation should pin that digest:
+
+```sh
+STASH_IMAGE=ghcr.io/djerayane/stash@sha256:<manifest-digest> docker compose up -d --no-build
+```
+
+Published images support `linux/amd64` and `linux/arm64`. They contain no Instance credentials; all configuration continues to come from the Compose environment or the operator's deployment system.
+
 ### Local evaluation defaults are not production secrets
 
 The zero-configuration path is deliberately bound to `127.0.0.1` and supplies conspicuous, deterministic development-only values for the administrator token, Instance master key, PostgreSQL password, and `http://localhost:3000` public origin. Anyone with local machine access can discover these values. Do not expose this configuration to a network, reuse its data as a production Instance, or treat its credentials as private.
