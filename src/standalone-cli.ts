@@ -1,6 +1,4 @@
-import { randomBytes } from "node:crypto";
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createAuthenticationSecretCodec } from "./authentication-secrets.js";
@@ -9,8 +7,7 @@ import { EmbeddedInstanceStore } from "./embedded-instance-store.js";
 import { EmbeddedLocalInstanceBackupSource, EmbeddedLocalInstanceRestoreTarget } from "./instance-backup-system.js";
 import { InstanceBackupService } from "./instance-backup.js";
 import { composeInstanceRuntime } from "./instance-runtime.js";
-
-interface RuntimeConfiguration { schema: "stash.standalone-config.v1"; publicOrigin: string; host: string; port: number; masterKeyFile: string }
+import { loadStandaloneConfiguration } from "./standalone-configuration.js";
 
 function usage(): never {
   throw new Error("usage: stash [serve] --data-dir <path> [--host <address>] [--port <port>] | stash backup <create|verify|restore> --data-dir <path> --backup <absolute-path> [--dry-run]");
@@ -31,28 +28,9 @@ function parse(values: string[]) {
   return { command, operation, options, dryRun, dataDirectory: resolve(dataDirectory) };
 }
 
-async function loadConfiguration(dataDirectory: string, hostArgument?: string, portArgument?: string) {
-  const configurationPath = join(dataDirectory, "config", "runtime.json");
-  let saved: RuntimeConfiguration | undefined;
-  try { saved = JSON.parse(await readFile(configurationPath, "utf8")) as RuntimeConfiguration; } catch { /* first start */ }
-  const host = hostArgument?.trim() || saved?.host || "127.0.0.1";
-  const port = Number.parseInt(portArgument ?? String(saved?.port ?? 3000), 10);
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error("--port must be an integer between 1 and 65535");
-  const masterKeyFile = saved?.masterKeyFile || join(dirname(dataDirectory), `.${basename(dataDirectory)}.master-key`);
-  if (saved && (saved.schema !== "stash.standalone-config.v1" || !isAbsolute(masterKeyFile))) throw new Error("Standalone generated configuration is invalid");
-  await mkdir(join(dataDirectory, "config"), { recursive: true });
-  try { await readFile(masterKeyFile, "utf8"); } catch {
-    await writeFile(masterKeyFile, `${randomBytes(32).toString("base64")}\n`, { mode: 0o600, flag: "wx" });
-  }
-  if (process.platform !== "win32") await chmod(masterKeyFile, 0o600);
-  const configuration: RuntimeConfiguration = { schema: "stash.standalone-config.v1", publicOrigin: `http://localhost:${port}`, host, port, masterKeyFile };
-  await writeFile(configurationPath, `${JSON.stringify(configuration, null, 2)}\n`, { mode: 0o600 });
-  return { configuration, masterKey: (await readFile(masterKeyFile, "utf8")).trim() };
-}
-
 async function main() {
   const parsed = parse(process.argv.slice(2));
-  const { configuration, masterKey } = await loadConfiguration(parsed.dataDirectory, parsed.options.get("--host"), parsed.options.get("--port"));
+  const { configuration, masterKey } = await loadStandaloneConfiguration(parsed.dataDirectory, parsed.options.get("--host"), parsed.options.get("--port"));
   if (parsed.command === "serve") {
     const runtime = await composeInstanceRuntime({ ...process.env, STASH_DATA_DIR: parsed.dataDirectory, DATABASE_URL: undefined,
       HOST: configuration.host, PORT: String(configuration.port), STASH_BIND_ADDRESS: configuration.host,

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
@@ -41,6 +41,11 @@ function packageFixture(paths: Awaited<ReturnType<typeof fixture>>, omitted?: ke
     "--runtime", values.runtime, "--license", values.license, "--output-dir", values.output, "--stage-only"],
   { cwd: repositoryRoot, encoding: "utf8" });
 }
+function archiveFixture(paths: Awaited<ReturnType<typeof fixture>>) {
+  return spawnSync(process.execPath, ["scripts/package-server.mjs", "--version", "1.2.3", "--source-commit", "a".repeat(40),
+    "--server-dir", paths.server, "--web-dir", paths.web, "--dependencies-dir", paths.dependencies,
+    "--runtime", paths.runtime, "--license", paths.license, "--output-dir", paths.output], { cwd: repositoryRoot, encoding: "utf8" });
+}
 
 describe("self-contained Instance bundle packaging", () => {
   test("fails closed when a required runtime surface is absent", async () => {
@@ -66,6 +71,10 @@ describe("self-contained Instance bundle packaging", () => {
       process.platform === "win32" ? "stash.cmd" : "stash", process.platform === "win32" ? "runtime/node.exe" : "runtime/node"])
       await readFile(join(paths.output, "stash-instance-1.2.3-test", relative));
     assert.match(await readFile(join(paths.output, "stash-instance-1.2.3-test", process.platform === "win32" ? "stash.cmd" : "stash"), "utf8"), /standalone-launcher\.js/);
+    await writeFile(join(paths.output, "stash-instance-1.2.3-test", "stale.txt"), "stale");
+    assert.equal(packageFixture(paths).status, 0);
+    await assert.rejects(access(join(paths.output, "stash-instance-1.2.3-test", "stale.txt")));
+    assert.match(await readFile(new URL("../scripts/package-server.mjs", import.meta.url), "utf8"), /set "ROOT=%~dp0"/);
   });
 
   test("rejects missing or noncanonical version and source metadata", async () => {
@@ -79,11 +88,20 @@ describe("self-contained Instance bundle packaging", () => {
     }
   });
 
+  test("rebuilds byte-identical archives and checksums from identical inputs", async () => {
+    const paths = await fixture(); assert.equal(archiveFixture(paths).status, 0);
+    const extension = process.platform === "win32" ? ".zip" : ".tar.gz"; const archive = join(paths.output, `stash-instance-1.2.3-${process.platform}-${process.arch}${extension}`);
+    const first = await readFile(archive); const firstChecksum = await readFile(`${archive}.sha256`);
+    assert.equal(archiveFixture(paths).status, 0); assert.deepEqual(await readFile(archive), first); assert.deepEqual(await readFile(`${archive}.sha256`), firstChecksum);
+  });
+
   test("keeps pull requests non-publishing and gates target bundles plus the release publisher", async () => {
     const quality = await readFile(new URL("../.github/workflows/release-quality.yml", import.meta.url), "utf8");
     const release = await readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
-    assert.match(quality, /server-bundle-smoke:[\s\S]*matrix:[\s\S]*ubuntu-latest[\s\S]*macos-14[\s\S]*windows-latest/);
+    assert.match(quality, /server-bundle-smoke:[\s\S]*matrix:[\s\S]*ubuntu-latest[\s\S]*macos-15-intel[\s\S]*macos-14[\s\S]*windows-latest/);
+    assert.doesNotMatch(quality, /macos-13/);
     assert.match(quality, /package:server[\s\S]*smoke:server-bundle/);
+    assert.match(quality, /server-bundle-postgres-migration:[\s\S]*postgres:17-alpine[\s\S]*--postgres-url/);
     assert.match(JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")).scripts["package:server"], /prepare-server-deploy/);
     assert.match(release, /publish-server-bundles:\s*\n\s*needs: release-quality/);
     assert.match(release, /SHA256SUMS/);

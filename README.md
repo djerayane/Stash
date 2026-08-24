@@ -51,6 +51,8 @@ tar -xzf stash-instance-1.2.3-linux-x64.tar.gz
 ./stash-instance-1.2.3-linux-x64/stash --data-dir /srv/stash-standalone
 ```
 
+On macOS, use `shasum -a 256 -c stash-instance-1.2.3-darwin-arm64.tar.gz.sha256`. On Windows PowerShell, compare `(Get-FileHash .\stash-instance-1.2.3-win32-x64.zip -Algorithm SHA256).Hash` with the first value in `Get-Content .\stash-instance-1.2.3-win32-x64.zip.sha256` before expanding the ZIP.
+
 On Windows, extract the ZIP and run `stash.cmd --data-dir C:\Stash\data`. The launcher binds to `127.0.0.1:3000`, enables local account creation, and refuses a public bind while its evaluation configuration remains. Database files, Attachments, backups, and generated non-secret configuration stay beneath the selected directory. The generated master-key file is deliberately adjacent to, not inside, that directory; protect and back it up separately because neither the bundle nor an Instance Backup contains it.
 
 Stop the Instance before using the offline backup commands:
@@ -64,6 +66,24 @@ Stop the Instance before using the offline backup commands:
 To upgrade, verify and extract the newer archive, take a backup with the old launcher, stop it, then start the new launcher with the same data directory. Stash runs its normal format preflight and keeps a rollback backup before changing durable state.
 
 The bundled `stash migrate` command exposes the same tested standalone-to-PostgreSQL migration described in [Embedded Instance storage](docs/embedded-instance-storage.md). Configure `DESTINATION_DATABASE_URL` and measured `DESTINATION_DATABASE_AVAILABLE_BYTES`, then use protected source/destination key files and explicit preserve or rotate mode; the migration keeps the source authoritative unless its database, Attachment, configuration, authentication, authorization, and checksum validation all succeed.
+
+Preserve the existing encryption key:
+
+```sh
+export DESTINATION_DATABASE_URL='postgresql://stash@db.example/stash'
+export DESTINATION_DATABASE_AVAILABLE_BYTES=107374182400
+./stash migrate --data-dir /srv/stash-standalone --attachment-root /srv/stash-postgres/attachments --configuration-root /srv/stash-postgres/config --mode preserve --source-key-file /srv/.stash-standalone.master-key
+```
+
+Or rotate it by creating a separately protected 32-byte base64 destination key file and passing it explicitly:
+
+```sh
+openssl rand -base64 32 > /run/secrets/stash-destination-key
+chmod 600 /run/secrets/stash-destination-key
+./stash migrate --data-dir /srv/stash-standalone --attachment-root /srv/stash-postgres/attachments --configuration-root /srv/stash-postgres/config --mode rotate --source-key-file /srv/.stash-standalone.master-key --destination-key-file /run/secrets/stash-destination-key
+```
+
+The same options work with `stash.cmd migrate` in PowerShell. Both destination directories must be empty, the destination PostgreSQL schema must already be initialized, and the source remains authoritative until the command reports `"status":"migrated"`. These commands use only the extracted bundle; Node and pnpm are not required.
 
 ### Local evaluation defaults are not production secrets
 

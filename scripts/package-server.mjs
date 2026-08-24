@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmod, cp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -20,6 +20,10 @@ async function requirePath(path, description, kind = "any") {
     if (kind === "file" && !metadata.isFile() || kind === "directory" && !metadata.isDirectory()) throw new Error();
   } catch { throw new Error(`Missing ${description}: ${path}`); }
 }
+async function normalizeTree(path) { for (const entry of (await readdir(path, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
+  const child = join(path, entry.name); if (entry.isDirectory()) await normalizeTree(child);
+  if (!entry.isSymbolicLink()) { const metadata = await stat(child); await chmod(child, entry.isDirectory() || metadata.mode & 0o111 ? 0o755 : 0o644); await utimes(child, 0, 0); }
+} await chmod(path, 0o755); await utimes(path, 0, 0); }
 
 async function main() {
   const { values, stageOnly } = parse(process.argv.slice(2));
@@ -42,7 +46,7 @@ async function main() {
   await requirePath(paths.runtime, "Node runtime", "file"); await requirePath(paths.license, "license", "file");
   const platform = process.platform; const architecture = process.arch;
   const target = stageOnly ? "test" : `${platform}-${architecture}`; const archiveRoot = `stash-instance-${version}-${target}`;
-  const stage = join(paths.output, archiveRoot); await mkdir(join(stage, "app"), { recursive: true }); await mkdir(join(stage, "runtime"), { recursive: true });
+  const stage = join(paths.output, archiveRoot); await rm(stage, { recursive: true, force: true }); await mkdir(join(stage, "app"), { recursive: true }); await mkdir(join(stage, "runtime"), { recursive: true });
   await cp(paths.server, join(stage, "app", "dist"), { recursive: true, dereference: true });
   await cp(paths.web, join(stage, "app", "web"), { recursive: true, dereference: true });
   await cp(paths.dependencies, join(stage, "app", "node_modules"), { recursive: true, dereference: true });
@@ -53,19 +57,24 @@ async function main() {
   const launcherRuntime = runtimeRelative.replaceAll("\\", "/");
   const unixLauncher = `#!/bin/sh\nset -eu\nROOT=$(CDPATH= cd -- "\${0%/*}" && pwd)\nexec "$ROOT/runtime/${launcherRuntime}" "$ROOT/app/dist/standalone-launcher.js" "$@"\n`;
   const windowsRuntime = runtimeRelative.replaceAll("/", "\\");
-  const windowsLauncher = `@echo off\r\nset ROOT=%~dp0\r\n"%ROOT%runtime\\${windowsRuntime}" "%ROOT%app\\dist\\standalone-launcher.js" %*\r\n`;
+  const windowsLauncher = `@echo off\r\nset "ROOT=%~dp0"\r\n"%ROOT%runtime\\${windowsRuntime}" "%ROOT%app\\dist\\standalone-launcher.js" %*\r\n`;
   await writeFile(join(stage, platform === "win32" ? "stash.cmd" : "stash"), platform === "win32" ? windowsLauncher : unixLauncher);
   if (platform !== "win32") { await chmod(join(stage, "stash"), 0o755); await chmod(join(stage, "runtime", runtimeRelative), 0o755); }
   const metadata = { schema: "stash.instance-bundle.v1", version, sourceCommit, platform, architecture };
   await writeFile(join(stage, "SOURCE.json"), `${JSON.stringify(metadata, null, 2)}\n`);
+  await normalizeTree(stage);
   if (stageOnly) return;
   await mkdir(paths.output, { recursive: true });
-  const extension = platform === "win32" ? ".zip" : ".tar.gz"; const archive = join(paths.output, `${archiveRoot}${extension}`);
-  const command = platform === "win32"
-    ? ["powershell", ["-NoProfile", "-Command", `Compress-Archive -Path '${stage}' -DestinationPath '${archive}' -CompressionLevel Optimal`]]
-    : ["tar", ["-czf", archive, "-C", paths.output, basename(stage)]];
-  const result = spawnSync(command[0], command[1], { encoding: "utf8" });
-  if (result.status !== 0) throw new Error(`Archive creation failed: ${result.stderr}`);
+  const extension = platform === "win32" ? ".zip" : ".tar.gz"; const archive = join(paths.output, `${archiveRoot}${extension}`); await rm(archive, { force: true }); await rm(`${archive}.sha256`, { force: true });
+  if (platform === "win32") {
+    const result = spawnSync("powershell", ["-NoProfile", "-Command", `Compress-Archive -Path '${stage}' -DestinationPath '${archive}' -CompressionLevel Optimal`], { encoding: "utf8" });
+    if (result.status !== 0) throw new Error(`Archive creation failed: ${result.stderr}`);
+  } else {
+    const tar = spawnSync("tar", ["--uid", "0", "--gid", "0", "--uname", "root", "--gname", "root", "-cf", "-", "-C", paths.output, basename(stage)], { maxBuffer: 1024 * 1024 * 1024 });
+    if (tar.status !== 0) throw new Error(`Archive creation failed: ${tar.stderr}`);
+    const gzip = spawnSync("gzip", ["-n", "-9"], { input: tar.stdout, maxBuffer: 1024 * 1024 * 1024 });
+    if (gzip.status !== 0) throw new Error(`Archive compression failed: ${gzip.stderr}`); await writeFile(archive, gzip.stdout);
+  }
   const digest = createHash("sha256").update(await readFile(archive)).digest("hex");
   await writeFile(`${archive}.sha256`, `${digest}  ${basename(archive)}\n`);
   process.stdout.write(`${JSON.stringify({ archive, checksum: `${archive}.sha256`, ...metadata })}\n`);
