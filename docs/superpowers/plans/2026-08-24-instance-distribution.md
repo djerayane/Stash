@@ -112,4 +112,3 @@
 - [ ] Link the guide from the README before detailed configuration material.
 - [ ] Run documentation checks, `pnpm run check`, `pnpm test`, and `git diff --check`.
 - [ ] Commit with `docs: document supported Stash installation paths`.
-

@@ -49,4 +49,3 @@ The README leads with the exact zero-input local command and URL. A separate ins
 3. Pull-request workflows build and smoke-test the Docker image and standalone bundle without publishing.
 4. A version tag publishes multi-architecture GHCR images, checksummed standalone bundles, and the configured mobile artifacts.
 5. Release documentation lets an operator select a path and reach the web interface without inspecting source code.
-
