@@ -42,6 +42,7 @@ import { InstanceUpgradeService } from "./instance-upgrade.js";
 import { PostgresInstanceUpgradeTarget } from "./postgres-instance-upgrade.js";
 import { readStashReleaseVersion } from "./release-version.js";
 import { databaseUrlFromEnvironment, validateComposeExposure } from "./deployment-configuration.js";
+import { AccountRegistrationService } from "./account-registration.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -67,6 +68,10 @@ async function main(): Promise<void> {
     throw new Error("PORT must be an integer between 1 and 65535");
   }
 
+  const publicOrigin = requiredEnvironment("PUBLIC_ORIGIN");
+  const registrationSetting = process.env.OPEN_REGISTRATION?.trim().toLowerCase();
+  const localEvaluationRegistration = new URL(publicOrigin).hostname === "localhost";
+  const openRegistration = registrationSetting === "true" || (registrationSetting !== "false" && localEvaluationRegistration);
   const passwordAuth = new PasswordAuthService(database);
   const notifications = new NotificationService(database);
   const automations = new AutomationService(database, notifications);
@@ -79,7 +84,6 @@ async function main(): Promise<void> {
   if (Boolean(githubAppId) !== Boolean(githubAppPrivateKey)) throw new Error("GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY must be configured together");
   const githubApp = githubAppId && githubAppPrivateKey ? new GitHubAppClient(githubAppId, githubAppPrivateKey) : undefined;
   const githubWebhookSecret = process.env.GITHUB_WEBHOOK_SECRET?.trim();
-  const publicOrigin = requiredEnvironment("PUBLIC_ORIGIN");
   const instanceBackups = new InstanceBackupService(new PostgresLocalInstanceBackupSource({
     databaseUrl, attachmentRoot: attachmentStoragePath, ...(s3AttachmentStorage ? { attachmentStorage: s3AttachmentStorage } : {}),
     attachmentStorageKind, publicOrigin,
@@ -104,6 +108,13 @@ async function main(): Promise<void> {
     webClientRoot: process.env.WEB_CLIENT_ROOT?.trim() || fileURLToPath(new URL("../apps/web/dist", import.meta.url)),
     ownerBootstrap: new OwnerBootstrapService(database),
     passwordAuth,
+    ...(openRegistration ? { accountRegistration: new AccountRegistrationService(database) } : {}),
+    reportAuthenticationFailure: ({ operation, cause }) => {
+      const causeType = cause instanceof Error ? cause.name : "UnknownFailure";
+      const candidateCode = cause && typeof cause === "object" && "code" in cause ? String(cause.code) : "";
+      const causeCode = /^[A-Z0-9]{5}$/.test(candidateCode) ? candidateCode : "unclassified";
+      console.warn(`Authentication operation unavailable (operation=${operation}, cause=${causeType}, code=${causeCode}).`);
+    },
     workspaceProjects: new WorkspaceProjectService(database),
     organizationRoles: new OrganizationRoleService(database),
     invitations: new InvitationService(database),

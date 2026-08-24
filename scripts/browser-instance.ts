@@ -14,6 +14,8 @@ import { InvalidOidcRequest } from "../src/oidc-auth.js";
 import { ActivityService, type ActivityRepository, type NoteHistoryRevision } from "../src/activity.js";
 import { NotificationService, type NotificationRepository } from "../src/notifications.js";
 import type { ActivityRecord, NotificationDelivery } from "@stash/domain-types";
+import { AccountRegistrationService, type RegistrationRecord } from "../src/account-registration.js";
+import { PasswordAuthService, hashPassword, type AccountAuthenticationRecord, type SessionRecord } from "../src/password-auth.js";
 
 const noteId = "99999999-9999-4999-8999-999999999999";
 const secondNoteId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -104,6 +106,30 @@ const otherOrganizationId = "33333333-3333-4333-8333-333333333333";
 const departedMemberId = "55555555-5555-4555-8555-555555555555";
 const activeTokens = new Map([["browser-acceptance-member-token", browserMemberId], ["browser-acceptance-second-member-token", "browser-second-member"],
   ["browser-acceptance-guest-token", "browser-guest"], ["departed-member-token", departedMemberId]]);
+const browserAccounts = new Map<string, AccountAuthenticationRecord>([[browserMemberId, {
+  id: browserMemberId, name: "Browser Member", email: "member@stash.test",
+  passwordHash: await hashPassword("correct horse battery staple"),
+}]]);
+const browserSessions = new Map<string, SessionRecord>();
+const browserPersonalWorkspaces = new Map<string, { id: string; name: string }>();
+const browserAuthRepository = {
+  async findAccountByEmail(email: string) { return [...browserAccounts.values()].find((account) => account.email === email); },
+  async findAccountById(id: string) { return browserAccounts.get(id); },
+  async createSession(session: SessionRecord) { browserSessions.set(session.id, session); },
+  async findSessionByTokenHash(tokenHash: string) { return [...browserSessions.values()].find((session) => session.tokenHash === tokenHash); },
+  async listSessions(accountId: string) { return [...browserSessions.values()].filter((session) => session.accountId === accountId); },
+  async deleteSession(accountId: string, sessionId: string) { return browserSessions.get(sessionId)?.accountId === accountId && browserSessions.delete(sessionId); },
+  async changePasswordAndDeleteOtherSessions(accountId: string, sessionId: string, passwordHash: string) {
+    const account = browserAccounts.get(accountId); if (account) browserAccounts.set(accountId, { ...account, passwordHash });
+    for (const session of browserSessions.values()) if (session.accountId === accountId && session.id !== sessionId) browserSessions.delete(session.id);
+  },
+  async createAccountWithPersonalWorkspaceAndSession(record: RegistrationRecord) {
+    if ([...browserAccounts.values()].some((account) => account.email === record.account.email)) return false;
+    browserAccounts.set(record.account.id, record.account); browserPersonalWorkspaces.set(record.account.id, record.workspace);
+    browserSessions.set(record.session.id, record.session); return true;
+  },
+};
+const browserPasswordAuth = new PasswordAuthService(browserAuthRepository);
 let task: TaskPlanningReadModel = {
   schema: "stash.task.v1", id: "32323232-3232-4232-8232-323232323232", workspaceId: "browser-workspace", projectId,
   key: "STASH-32", title: "Restore release ownership", status: { id: "ready", name: "Ready", category: "unstarted" },
@@ -158,6 +184,8 @@ const taskRepository = {
 
 const instance = await startInstance({
   database: { async verifyConnection() {}, async close() {}, async resolveClientSessionPrincipal(accountId: string) {
+    const registered = browserAccounts.get(accountId); const personalWorkspace = browserPersonalWorkspaces.get(accountId);
+    if (registered && personalWorkspace) return { member: { id: registered.id, name: registered.name, email: registered.email }, workspace: personalWorkspace, capabilities: [] };
     if (![browserMemberId, "browser-second-member", "browser-guest"].includes(accountId)) return undefined;
     return { member: { id: accountId,
       name: accountId === browserMemberId ? "Browser Member" : accountId === "browser-second-member" ? "Second Browser Member" : "Browser Guest",
@@ -176,7 +204,8 @@ const instance = await startInstance({
   host: "127.0.0.1",
   port: Number.parseInt(process.env.STASH_BROWSER_PORT ?? "4173", 10),
   instanceAdminToken: "browser-acceptance-admin-token",
-  passwordAuth: { authenticateBearer: async (authorization: string | undefined) => { const accountId = activeTokens.get(authorization?.replace(/^Bearer /, "") || ""); return accountId ? { accountId, sessionId: `session-${accountId}` } : undefined; }, signIn: async () => { throw new Error("invalid_credentials"); } } as any,
+  passwordAuth: browserPasswordAuth,
+  accountRegistration: new AccountRegistrationService(browserAuthRepository),
   accountRecovery: { async authenticationOptions() { return { challenge: "cHJvb2Y", rpId: "127.0.0.1", userVerification: "required", allowCredentials: [] }; }, async signInWithPasskey() { return { token: "browser-acceptance-member-token" }; }, async signInWithRecoveryCode() { return { token: "browser-acceptance-member-token" }; }, async requestEmailRecovery() { throw new EmailRecoveryUnavailable(); }, async signInWithEmailRecovery() { return { token: "browser-acceptance-member-token" }; } } as any,
   oidcAuth: {
     async begin() { throw new InvalidOidcRequest(); },
@@ -191,7 +220,7 @@ const instance = await startInstance({
     async authenticateBearer(authorization) {
       const token = authorization?.replace(/^Bearer /, "");
       const accountId = token ? activeTokens.get(token) : undefined;
-      return accountId ? { accountId, sessionId: `session-${accountId}` } : undefined;
+      return accountId ? { accountId, sessionId: `session-${accountId}` } : browserPasswordAuth.authenticateBearer(authorization);
     },
   },
   workspaceProjects: new WorkspaceProjectService({ async findPortableMemberIdentity() { return { localAccountId: browserMemberId, displayName: "Browser Member" }; }, async createWorkspace() { return { status: "organization_forbidden" }; }, async createProject() { return "workspace_forbidden"; }, async listAccessibleWorkspaces() { return [{ id: browserWorkspaceId, name: "Acceptance Workspace", projects: [{ id: projectId, name: "Stash", key: "STASH" }] }, { id: "77777777-7777-4777-8777-777777777777", name: "Shared Workspace", projects: [{ id: "66666666-6666-4666-8666-666666666665", name: "Shared roadmap", key: "SHARED" }] }]; } }),

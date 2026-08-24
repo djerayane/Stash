@@ -6,6 +6,7 @@ import { noteOperationDigest, type NoteConflictResolution, type NoteEditBatch, t
 import { isRichTextDocument, markdownToRichText, paragraphDocument, richTextToMarkdown } from "./rich-text.js";
 import type { BootstrapRecord, OwnerBootstrapRepository } from "./owner-bootstrap.js";
 import type { AccountAuthenticationRecord, PasswordAuthRepository, SessionRecord } from "./password-auth.js";
+import type { AccountRegistrationRepository, RegistrationRecord } from "./account-registration.js";
 import type { OidcAuthRepository, OidcIdentityKey, OidcIdentityRecord, OidcOrganizationConfiguration } from "./oidc-auth.js";
 import type { AccountRecoveryRepository, ClaimedEmailRecoveryDelivery, EmailRecoveryDeliveryClaim, EmailRecoveryDeliveryJob, EmailRecoveryRecord, PasskeyRecord, RecoveryCodeRecord } from "./account-recovery.js";
 import type { BuiltInOrganizationRole, OrganizationRoleRepository } from "./organization-roles.js";
@@ -199,6 +200,7 @@ export class PostgresDatabase implements
   DatabaseProbe,
   OwnerBootstrapRepository,
   PasswordAuthRepository,
+  AccountRegistrationRepository,
   WorkspaceProjectRepository,
   NoteRepository,
   OidcAuthRepository,
@@ -242,7 +244,10 @@ export class PostgresDatabase implements
   async createFirstOrganizationOwner(record: BootstrapRecord): Promise<boolean> {
     const client = await this.#pool.connect();
     try {
-      await this.#ensureBootstrapSchema(client);
+      const workspaceId = record.workspaceId ?? randomUUID();
+      const workspaceName = record.workspaceName ?? `${record.organizationName} Workspace`;
+      const createdAt = record.createdAt ?? new Date().toISOString();
+      await this.#ensureWorkspaceProjectSchema(client);
       await client.query("BEGIN");
       await client.query("SELECT pg_advisory_xact_lock(2080289093)");
       const existing = await client.query("SELECT 1 FROM stash_instance_bootstrap WHERE singleton = TRUE");
@@ -263,6 +268,17 @@ export class PostgresDatabase implements
         "INSERT INTO stash_organization_memberships (organization_id, account_id, role) VALUES ($1, $2, $3)",
         [record.organizationId, record.ownerId, record.role],
       );
+      await client.query(
+        `INSERT INTO stash_workspaces
+          (id, name, owner_type, personal_owner_id, organization_owner_id, created_by_account_id, created_at)
+         VALUES ($1, $2, 'organization', NULL, $3, $4, $5)`,
+        [workspaceId, workspaceName, record.organizationId, record.ownerId, createdAt],
+      );
+      await this.#recordPortableProjection(client, "Workspace", workspaceId, "stash.workspace.v1", {
+        schema: "stash.workspace.v1", id: workspaceId, name: workspaceName,
+        owner: { type: "organization", identity: { localOrganizationId: record.organizationId, displayName: record.organizationName } },
+        createdBy: { localAccountId: record.ownerId, displayName: record.ownerName },
+      });
       await client.query("INSERT INTO stash_instance_bootstrap (singleton) VALUES (TRUE)");
       await client.query("COMMIT");
       return true;
@@ -272,6 +288,33 @@ export class PostgresDatabase implements
     } finally {
       client.release();
     }
+  }
+
+  async createAccountWithPersonalWorkspaceAndSession(record: RegistrationRecord): Promise<boolean> {
+    return this.#withTransaction(async (client) => {
+      await this.#ensureWorkspaceProjectSchema(client);
+      await this.#ensureAuthSchema(client);
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`registration:${record.account.email}`]);
+      if ((await client.query("SELECT 1 FROM stash_accounts WHERE email=$1", [record.account.email])).rowCount) return false;
+      await client.query("INSERT INTO stash_accounts(id,name,email,password_hash) VALUES($1,$2,$3,$4)", [
+        record.account.id, record.account.name, record.account.email,
+        this.#authenticationSecrets.encrypt(record.account.passwordHash),
+      ]);
+      const createdAt = record.session.createdAt;
+      await client.query(
+        `INSERT INTO stash_workspaces
+          (id,name,owner_type,personal_owner_id,organization_owner_id,created_by_account_id,created_at)
+         VALUES($1,$2,'personal',$3,NULL,$3,$4)`,
+        [record.workspace.id, record.workspace.name, record.account.id, createdAt],
+      );
+      await this.#recordPortableProjection(client, "Workspace", record.workspace.id, "stash.workspace.v1", {
+        schema: "stash.workspace.v1", id: record.workspace.id, name: record.workspace.name,
+        owner: { type: "personal", identity: { localAccountId: record.account.id, displayName: record.account.name } },
+        createdBy: { localAccountId: record.account.id, displayName: record.account.name },
+      });
+      await this.#insertSession(client, record.session);
+      return true;
+    });
   }
 
   async findPortableMemberIdentity(memberId: string): Promise<PortableIdentity | undefined> {
@@ -2398,7 +2441,7 @@ export class PostgresDatabase implements
   async resolveClientSessionPrincipal(accountId: string) {
     const client = await this.#pool.connect();
     try {
-      await this.#ensureWorkspaceProjectSchema(client);
+      await this.#ensureInvitationSchema(client);
       const result = await client.query<{ account_id: string; account_name: string; account_email: string; workspace_id: string; workspace_name: string; organization_id: string | null }>(`
         SELECT account.id account_id, account.name account_name, account.email account_email,
           workspace.id workspace_id, workspace.name workspace_name, workspace.organization_owner_id organization_id
@@ -3319,8 +3362,8 @@ export class PostgresDatabase implements
     }
   }
 
-  async #ensureAuthSchema(): Promise<void> {
-    await this.#pool.query(`
+  async #ensureAuthSchema(client: PoolClient | Pool = this.#pool): Promise<void> {
+    await client.query(`
       CREATE TABLE IF NOT EXISTS stash_sessions (
         id UUID PRIMARY KEY,
         account_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
@@ -3634,12 +3677,14 @@ export class PostgresDatabase implements
         personal_owner_id UUID REFERENCES stash_accounts(id),
         organization_owner_id UUID REFERENCES stash_organizations(id),
         created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         CHECK (
           (owner_type = 'personal' AND personal_owner_id IS NOT NULL AND organization_owner_id IS NULL)
           OR
           (owner_type = 'organization' AND personal_owner_id IS NULL AND organization_owner_id IS NOT NULL)
         )
       );
+      ALTER TABLE stash_workspaces ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
       CREATE TABLE IF NOT EXISTS stash_projects (
         id UUID PRIMARY KEY,
         workspace_id UUID NOT NULL REFERENCES stash_workspaces(id),
