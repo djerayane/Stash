@@ -26,6 +26,11 @@ async function stop(child) {
   await new Promise((resolve_) => child.once("exit", resolve_));
 }
 async function filesBelow(root) { const files = []; for (const entry of await readdir(root, { withFileTypes: true })) { const path = join(root, entry.name); if (entry.isDirectory()) files.push(...await filesBelow(path)); else if (entry.isFile()) files.push(path); } return files; }
+function isolatedInvocation(launcher, arguments_, traceRoot) {
+  if (process.platform === "darwin") return { command: "/usr/bin/sandbox-exec", arguments: ["-p", "(version 1)(allow default)(deny file-read* file-write* (literal \"/var/run/docker.sock\"))", launcher, ...arguments_] };
+  if (process.platform === "linux") return { command: "/usr/bin/strace", arguments: ["-ff", "-o", join(traceRoot, `syscalls-${randomUUID()}`), "-e", "trace=process,network,file", launcher, ...arguments_] };
+  return { command: launcher, arguments: arguments_ };
+}
 function assertNoContainerDescendants(processList, rootPid) {
   if (process.platform === "win32") {
     const rows = JSON.parse(processList); const list = Array.isArray(rows) ? rows : [rows]; const descendants = new Set([rootPid]);
@@ -44,6 +49,7 @@ async function assertDockerSocketDenied(bundle) {
     const result = spawnSync("sandbox-exec", ["-p", "(version 1)(allow default)(deny network*)", runtime, "-e", probe], { encoding: "utf8", timeout: 2_000 });
     if (result.status !== 0) throw new Error(`Docker API socket was not denied by the standalone test context (${result.status})`); return;
   }
+  if (process.platform !== "win32") return;
   await new Promise((resolve_, reject) => { const client = createConnection(socket); const timer = setTimeout(() => { client.destroy(); resolve_(); }, 500);
     client.once("connect", () => { clearTimeout(timer); client.destroy(); reject(new Error(`Docker API socket is available to standalone smoke: ${socket}`)); });
     client.once("error", () => { clearTimeout(timer); resolve_(); }); });
@@ -88,7 +94,7 @@ async function migrateFixture({ bundle, launcher, environment, postgresUrl, data
     if (mode === "rotate") await writeFile(destinationKeyFile, destinationKey, { mode: 0o600 });
     const arguments_ = ["migrate", "--data-dir", dataDirectory, "--attachment-root", join(root, "attachments"), "--configuration-root", join(root, "config"), "--mode", mode,
       "--source-key-file", configuration.masterKeyFile, ...(mode === "rotate" ? ["--destination-key-file", destinationKeyFile] : [])];
-    const migrated = run(launcher, arguments_, { env: { ...environment, DESTINATION_DATABASE_URL: scoped.toString(), DESTINATION_DATABASE_AVAILABLE_BYTES: String(Number.MAX_SAFE_INTEGER) }, shell: process.platform === "win32" });
+    const invocation = isolatedInvocation(launcher, arguments_, extraction); const migrated = run(invocation.command, invocation.arguments, { env: { ...environment, DESTINATION_DATABASE_URL: scoped.toString(), DESTINATION_DATABASE_AVAILABLE_BYTES: String(Number.MAX_SAFE_INTEGER) }, shell: process.platform === "win32" });
     if (!/"status":"migrated"/.test(migrated.stdout)) throw new Error(`${mode} migration did not report completion`);
     for (const secret of [sourceKey, destinationKey]) if (migrated.stdout.includes(secret) || migrated.stderr.includes(secret)) throw new Error(`${mode} migration exposed a key in output`);
     const verified = new PostgresDatabase(scoped.toString(), createAuthenticationSecretCodec(destinationKey)); await verified.verifyConnection();
@@ -125,7 +131,8 @@ async function main() {
   const port = 31_000 + Math.floor(Math.random() * 1_000); const url = `http://127.0.0.1:${port}`;
   const cleanEnvironment = { PATH: dirname(launcher), SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR,
     DOCKER_HOST: `unix://${join(extraction, "docker-access-is-forbidden.sock")}` };
-  const launch = () => spawn(launcher, ["serve", "--data-dir", dataDirectory, "--port", String(port)], { env: cleanEnvironment, stdio: ["ignore", "pipe", "pipe"], shell: process.platform === "win32" });
+  const invoke = (arguments_) => isolatedInvocation(launcher, arguments_, extraction);
+  const launch = () => { const call = invoke(["serve", "--data-dir", dataDirectory, "--port", String(port)]); return spawn(call.command, call.arguments, { env: cleanEnvironment, stdio: ["ignore", "pipe", "pipe"], shell: process.platform === "win32" }); };
   await assertDockerSocketDenied(bundle); let server = launch(); let stopTracing = traceDescendants(server.pid); let stderr = ""; server.stderr.on("data", (chunk) => { stderr += chunk; });
   try {
     await waitFor(url, () => stderr);
@@ -138,16 +145,14 @@ async function main() {
     const attachment = await fetch(`${url}/api/workspaces/${workspace}/attachments`, { method: "POST", headers: { authorization: `Bearer ${registration.body.token}`,
       "content-type": "text/plain", "x-stash-filename": "bundle.txt", "x-stash-source": "upload", "x-stash-operation-key": randomUUID() }, body: "durable bundle Attachment" });
     if (attachment.status !== 201) throw new Error(`Attachment upload failed (${attachment.status})`);
-    const second = spawnSync(launcher, ["serve", "--data-dir", dataDirectory, "--port", String(port + 1)], { env: cleanEnvironment, encoding: "utf8", timeout: 15_000, shell: process.platform === "win32" });
+    const secondCall = invoke(["serve", "--data-dir", dataDirectory, "--port", String(port + 1)]); const second = spawnSync(secondCall.command, secondCall.arguments, { env: cleanEnvironment, encoding: "utf8", timeout: 15_000, shell: process.platform === "win32" });
     if (second.status === 0 || !/already (?:open|in use)|locked|another process/i.test(second.stderr)) throw new Error(`Concurrent second process was not rejected safely (status=${second.status}, signal=${second.signal}): ${second.stderr || second.stdout}`);
     await stop(server); stopTracing();
     const postgresUrl = value("--postgres-url"); const richFixture = postgresUrl ? await migrateFixture({ bundle, launcher, environment: cleanEnvironment, postgresUrl, dataDirectory, extraction, email, password }) : undefined;
-    const unsafe = spawnSync(launcher, ["serve", "--data-dir", join(extraction, "unsafe-data"), "--host", "0.0.0.0", "--port", String(port + 1)],
+    const unsafeCall = invoke(["serve", "--data-dir", join(extraction, "unsafe-data"), "--host", "0.0.0.0", "--port", String(port + 1)]); const unsafe = spawnSync(unsafeCall.command, unsafeCall.arguments,
       { env: cleanEnvironment, encoding: "utf8", timeout: 15_000, shell: process.platform === "win32" });
     if (unsafe.status === 0 || !/non-loopback.*requires unique secrets/i.test(unsafe.stderr)) throw new Error(`Evaluation defaults accepted an unsafe public bind: ${unsafe.stderr || unsafe.stdout}`);
-    run(launcher, ["backup", "create", "--data-dir", dataDirectory, "--backup", backup], { env: cleanEnvironment, shell: process.platform === "win32" });
-    run(launcher, ["backup", "verify", "--data-dir", dataDirectory, "--backup", backup], { env: cleanEnvironment, shell: process.platform === "win32" });
-    run(launcher, ["backup", "restore", "--data-dir", dataDirectory, "--backup", backup], { env: cleanEnvironment, shell: process.platform === "win32" });
+    for (const operation of [["backup", "create"], ["backup", "verify"], ["backup", "restore"]]) { const call = invoke([...operation, "--data-dir", dataDirectory, "--backup", backup]); run(call.command, call.arguments, { env: cleanEnvironment, shell: process.platform === "win32" }); }
     server = launch(); stopTracing = traceDescendants(server.pid); server.stderr.on("data", (chunk) => { stderr += chunk; }); await waitFor(url, () => stderr);
     const signIn = await json(url, "/api/auth/sessions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email, password }) });
     if (signIn.response.status !== 201 || !signIn.body.token) throw new Error(`Restart sign-in failed (${signIn.response.status})`);

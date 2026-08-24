@@ -175,6 +175,8 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes strace
       - name: Package the target-native self-contained Instance
         run: pnpm run package:server
         env:
