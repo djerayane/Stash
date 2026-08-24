@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import gsap from "gsap";
 
 import { ActivityPage, DiscussionsPage, InboxPage, NoteHistoryPage, NotificationsPage, SearchPage } from "./core-workflows";
 
@@ -10,7 +11,7 @@ function renderWorkflow(node: React.ReactNode) {
   return render(<QueryClientProvider client={client}><MemoryRouter>{node}</MemoryRouter></QueryClientProvider>);
 }
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe("core React workflows", () => {
   it("searches canonical Note and Task results with URL-backed filters and deep links", async () => {
@@ -27,6 +28,18 @@ describe("core React workflows", () => {
     expect(String(fetcher.mock.calls[0]?.[0])).toContain("q=release&object=task");
     fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Object type" })).toHaveValue(""));
+  });
+
+  it("does not animate search results when reduced motion is requested", async () => {
+    const motion = vi.spyOn(gsap, "from");
+    vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true, addEventListener() {}, removeEventListener() {} })));
+    const fetcher = vi.fn(async () => Response.json({ results: [
+      { id: "note-1", kind: "note", title: "Release plan", href: "/app/notes/note-1" },
+    ] }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={client}><MemoryRouter initialEntries={["/app/search?q=release"]}><SearchPage workspaceId="workspace-1" token="member" fetcher={fetcher as typeof fetch} /></MemoryRouter></QueryClientProvider>);
+    expect(await screen.findByRole("link", { name: /Release plan/ })).toBeVisible();
+    expect(motion).not.toHaveBeenCalled();
   });
 
   it("keeps a failed Workspace search recoverable without losing its filters", async () => {
