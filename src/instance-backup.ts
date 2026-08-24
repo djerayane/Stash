@@ -81,6 +81,7 @@ function childPath(root: string, relative: string): string {
 export class InstanceBackupService {
   #health: BackupHealth = { status: "never_created" };
   #operation: "idle" | "backup" | "restore_preflight" | "restoring" | "restart_required" = "idle";
+  #backupUnavailableBarrier: () => Promise<void> = async () => undefined;
   #restoreUnavailableBarrier: () => Promise<void> = async () => undefined;
   readonly #key: Buffer;
   readonly #now: () => Date;
@@ -101,6 +102,7 @@ export class InstanceBackupService {
     return "available";
   }
   requiresRestart(): boolean { return this.#operation === "restart_required"; }
+  setBackupUnavailableBarrier(barrier: () => Promise<void>): void { this.#backupUnavailableBarrier = barrier; }
   setRestoreUnavailableBarrier(barrier: () => Promise<void>): void { this.#restoreUnavailableBarrier = barrier; }
 
   async create(destination: string): Promise<{ status: "created"; manifest: BackupManifest }> {
@@ -108,6 +110,7 @@ export class InstanceBackupService {
     this.#operation = "backup";
     const temporary = `${destination}.partial-${randomUUID()}`;
     try {
+      await this.#backupUnavailableBarrier();
       await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
       await mkdir(temporary, { recursive: false, mode: 0o700 });
       const files: BackupFile[] = [];

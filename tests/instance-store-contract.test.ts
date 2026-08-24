@@ -8,6 +8,7 @@ import { Pool } from "pg";
 import * as Y from "yjs";
 
 import { createAuthenticationSecretCodec } from "../src/authentication-secrets.js";
+import { AttachmentService, LocalAttachmentStorage } from "../src/attachments.js";
 import { EmbeddedInstanceStore } from "../src/embedded-instance-store.js";
 import { NoteCollaborationService } from "../src/note-collaboration.js";
 import { paragraphDocument } from "../src/rich-text.js";
@@ -23,6 +24,8 @@ interface ContractHarness {
   restoreTarget: EmbeddedLocalInstanceRestoreTarget | PostgresLocalInstanceRestoreTarget;
   upgrade: PostgresInstanceUpgradeTarget;
   backupRoot: string;
+  attachmentRoot: string;
+  reopen(): Promise<PostgresDatabase>;
   close(): Promise<void>;
 }
 
@@ -85,16 +88,43 @@ function contract(adapter: ContractAdapter): void {
     test("shares backup/restore and upgrade lifecycle behavior", async () => {
       const harness = await adapter.open();
       try {
-        await harness.database.prepareInstanceStore();
-        const backupPath = join(harness.backupRoot, "contract");
-        await harness.backup.create(backupPath);
-        assert.equal((await harness.backup.verify(backupPath)).status, "verified");
-        assert.deepEqual(await harness.backup.restore(backupPath, harness.restoreTarget, { dryRun: true }), { status: "verified" });
-        assert.deepEqual(await harness.backup.restore(backupPath, harness.restoreTarget, { dryRun: false }), { status: "restored" });
+        const ownerId = randomUUID(); const organizationId = randomUUID(); const workspaceId = randomUUID(); const noteId = randomUUID();
+        const createdAt = "2026-08-24T10:00:00.000Z"; await harness.database.prepareInstanceStore();
         const before = await harness.upgrade.inspect("0.1.0");
         assert.equal(before.currentVersion, "0.0.0"); assert.equal(before.checks.every(({ status }) => status === "pass"), true);
         await harness.upgrade.apply("0.0.0", "0.1.0");
         assert.equal((await harness.upgrade.inspect("0.1.0")).currentVersion, "0.1.0");
+        await harness.database.createFirstOrganizationOwner({ organizationId, organizationName: "Backup parity", ownerId,
+          ownerName: "Backup Owner", ownerEmail: `${ownerId}@example.test`, passwordHash: "backup-auth-hash", role: "Owner" });
+        await harness.database.createWorkspace({ id: workspaceId, name: "Backup Workspace", owner: { type: "organization", id: organizationId },
+          createdByMemberId: ownerId }, { localAccountId: ownerId, displayName: "Backup Owner" });
+        const document = paragraphDocument("Restored parity note", randomUUID());
+        await harness.database.createNote(ownerId, { id: noteId, workspaceId, content: "Restored parity note", document, revision: 1,
+          tags: ["restored"], createdByMemberId: ownerId, createdAt }, { schema: "stash.note.v1", id: noteId, workspaceId,
+          content: "Restored parity note", tags: ["restored"], createdAt, createdBy: { localAccountId: ownerId, displayName: "Backup Owner" } });
+        const collaboration = new Y.Doc(); collaboration.getText("parity").insert(0, "restored collaboration");
+        await harness.database.appendNoteCollaboration(ownerId, noteId, Y.encodeStateAsUpdate(collaboration)); collaboration.destroy();
+        const jobId = randomUUID(); await harness.database.enqueueEmailRecovery({ id: jobId, protectedDelivery: "restored-job", createdAt });
+        const attachmentBytes = Buffer.from("restored Attachment bytes");
+        const attachment = await new AttachmentService(harness.database, new LocalAttachmentStorage(harness.attachmentRoot))
+          .create(ownerId, workspaceId, { filename: "parity.txt", contentType: "text/plain", source: "upload", content: attachmentBytes });
+        assert.equal(attachment.status, "created"); if (attachment.status !== "created") return;
+        const backupPath = join(harness.backupRoot, "contract");
+        await harness.backup.create(backupPath);
+        const postBackupNoteId = randomUUID(); await harness.database.createNote(ownerId, { id: postBackupNoteId, workspaceId, content: "Post-backup mutation", document, revision: 1,
+          tags: [], createdByMemberId: ownerId, createdAt }, { schema: "stash.note.v1", id: postBackupNoteId, workspaceId,
+          content: "Post-backup mutation", tags: [], createdAt, createdBy: { localAccountId: ownerId, displayName: "Backup Owner" } });
+        assert.equal((await harness.backup.verify(backupPath)).status, "verified");
+        assert.deepEqual(await harness.backup.restore(backupPath, harness.restoreTarget, { dryRun: true }), { status: "verified" });
+        assert.deepEqual(await harness.backup.restore(backupPath, harness.restoreTarget, { dryRun: false }), { status: "restored" });
+        const restored = await harness.reopen();
+        assert.equal((await restored.findAccountByEmail(`${ownerId}@example.test`))?.passwordHash, "backup-auth-hash");
+        assert.equal((await restored.listAccessibleWorkspaces(ownerId)).some((workspace: { id: string }) => workspace.id === workspaceId), true);
+        assert.equal((await restored.listNoteHistory(ownerId, noteId)).status, "found");
+        assert.equal((await restored.loadNoteCollaboration(ownerId, noteId))?.sequence, 1);
+        assert.equal((await restored.searchWorkspace(ownerId, workspaceId, { q: "Restored" })).status, "found");
+        assert.equal((await restored.claimEmailRecoveryDelivery(randomUUID(), "2026-08-24T10:10:00.000Z"))?.job.id, jobId);
+        assert.deepEqual((await new AttachmentService(restored, new LocalAttachmentStorage(harness.attachmentRoot)).get(ownerId, attachment.record.id))?.content, attachmentBytes);
       } finally { await harness.close(); }
     });
 
@@ -109,11 +139,12 @@ function contract(adapter: ContractAdapter): void {
 contract({ name: "embedded PGlite", exclusions: ["external PostgreSQL process administration", "pg_dump custom-format interoperability"],
   async open() {
     const root = await mkdtemp(join(tmpdir(), "stash-contract-embedded-")); const masterKey = key();
-    const store = await EmbeddedInstanceStore.open(root, createAuthenticationSecretCodec(masterKey));
-    return { database: store.database, backupRoot: store.paths.backups,
+    let store = await EmbeddedInstanceStore.open(root, createAuthenticationSecretCodec(masterKey));
+    return { database: store.database, backupRoot: store.paths.backups, attachmentRoot: store.paths.attachments,
       backup: new InstanceBackupService(new EmbeddedLocalInstanceBackupSource({ store, publicOrigin: "http://127.0.0.1:3000" }), { masterKey }),
       restoreTarget: new EmbeddedLocalInstanceRestoreTarget({ store, publicOrigin: "http://127.0.0.1:3000" }),
       upgrade: new PostgresInstanceUpgradeTarget("embedded://local", async () => undefined, store.upgradeDatabase),
+      async reopen() { await store.close(); store = await EmbeddedInstanceStore.open(root, createAuthenticationSecretCodec(masterKey)); return store.database; },
       async close() { await store.close(); await rm(root, { recursive: true, force: true }); } };
   } });
 
@@ -123,11 +154,12 @@ contract({ name: "external PostgreSQL", skip: postgresUrl ? false : "STASH_TEST_
     const root = await mkdtemp(join(tmpdir(), "stash-contract-postgres-")); const schema = `contract_${randomUUID().replaceAll("-", "")}`;
     const administrator = new Pool({ connectionString: postgresUrl! }); await administrator.query(`CREATE SCHEMA ${schema}`);
     const scoped = new URL(postgresUrl!); scoped.searchParams.set("options", `-csearch_path=${schema}`); const databaseUrl = scoped.toString();
-    const masterKey = key(); const database = new PostgresDatabase(databaseUrl, createAuthenticationSecretCodec(masterKey));
+    const masterKey = key(); let database = new PostgresDatabase(databaseUrl, createAuthenticationSecretCodec(masterKey));
     const attachments = join(root, "attachments"); const backupRoot = join(root, "backups");
-    return { database, backupRoot,
+    return { database, backupRoot, attachmentRoot: attachments,
       backup: new InstanceBackupService(new PostgresLocalInstanceBackupSource({ databaseUrl, attachmentRoot: attachments, publicOrigin: "http://127.0.0.1:3000" }), { masterKey }),
       restoreTarget: new PostgresLocalInstanceRestoreTarget({ databaseUrl, attachmentRoot: attachments, publicOrigin: "http://127.0.0.1:3000" }),
       upgrade: new PostgresInstanceUpgradeTarget(databaseUrl, async () => undefined),
+      async reopen() { await database.close(); database = new PostgresDatabase(databaseUrl, createAuthenticationSecretCodec(masterKey)); return database; },
       async close() { await database.close(); await administrator.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); await administrator.end(); await rm(root, { recursive: true, force: true }); } };
   } });

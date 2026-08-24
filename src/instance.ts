@@ -270,6 +270,10 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
 
   let activeApplicationRequests = 0;
   const restoreDrainWaiters = new Set<() => void>();
+  options.instanceBackups?.setBackupUnavailableBarrier(async () => {
+    if (activeApplicationRequests === 0) return;
+    await new Promise<void>((resolve) => restoreDrainWaiters.add(resolve));
+  });
   options.instanceBackups?.setRestoreUnavailableBarrier(async () => {
     if (activeApplicationRequests === 0) return;
     await new Promise<void>((resolve) => restoreDrainWaiters.add(resolve));
@@ -317,6 +321,7 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
     if ((upgradeAvailability === "upgrade_in_progress" || upgradeAvailability === "upgrade_restart_required") && url.pathname.startsWith("/api/") && url.pathname !== "/api/instance/upgrade") {
       json(response, 503, { error: upgradeAvailability, message: upgradeAvailability === "upgrade_in_progress" ? "This Instance is unavailable while an upgrade is applied." : "Restart the Instance to complete the upgrade." }); return;
     }
+    const operationalBackupRequest = url.pathname === "/api/instance/backups" && request.method === "POST";
     const operationalRestoreRequest = url.pathname === "/api/instance/backups/health" && (request.method === "GET" || request.method === "HEAD")
       || /^\/api\/instance\/backups\/[^/]+\/restore$/.test(url.pathname) && request.method === "POST";
     const operationalUpgradeRequest = url.pathname === "/api/instance/upgrade";
@@ -328,7 +333,7 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
         return;
       }
     }
-    if (url.pathname.startsWith("/api/") && !operationalRestoreRequest && !operationalUpgradeRequest) trackApplicationRequest(response);
+    if (url.pathname.startsWith("/api/") && !operationalBackupRequest && !operationalRestoreRequest && !operationalUpgradeRequest) trackApplicationRequest(response);
 
     if (request.method === "GET" && url.pathname === "/api/client-session") {
       if (request.headers.authorization === `Bearer ${options.instanceAdminToken}`) {

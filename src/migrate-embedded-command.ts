@@ -16,6 +16,7 @@ async function main() {
   }
   const dataDirectory = values.get("--data-dir"); const attachmentRoot = values.get("--attachment-root"); const mode = values.get("--mode"); const sourceKeyFile = values.get("--source-key-file");
   if (!dataDirectory || !attachmentRoot || !sourceKeyFile || mode !== "preserve" && mode !== "rotate") usage();
+  if (mode === "preserve" && values.has("--destination-key-file")) throw new Error("Preserve migration does not accept a destination key file");
   const input: MigrationKeyInput = mode === "preserve" ? { mode, sourceKeyFile: resolve(sourceKeyFile) }
     : { mode, sourceKeyFile: resolve(sourceKeyFile), ...(values.get("--destination-key-file") ? { destinationKeyFile: resolve(values.get("--destination-key-file")!) } : {}) };
   const keys = await readMigrationKeys(input); const store = await EmbeddedInstanceStore.open(resolve(dataDirectory), createAuthenticationSecretCodec(keys.source));
