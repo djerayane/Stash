@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmod, cp, mkdir, mkdtemp, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, opendir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, test } from "node:test";
@@ -17,6 +17,7 @@ import { PasswordAuthService, hashPassword } from "../src/password-auth.js";
 import { paragraphDocument } from "../src/rich-text.js";
 import { PortableWorkspaceExportService } from "../src/portable-workspace-export.js";
 import { PortableWorkspaceImportService } from "../src/portable-workspace-import.js";
+import { PostgresInstanceUpgradeTarget } from "../src/postgres-instance-upgrade.js";
 
 const key = () => randomBytes(32).toString("base64");
 const recoveryCodeLookup = (code: string) => createHash("sha256").update(`stash:recovery-code:v1\0${code}`).digest("base64");
@@ -35,6 +36,17 @@ function migrationDigest(rows: Array<Record<string, unknown>>, columns: Array<{ 
     [name, type === "bigint" || type === "numeric" || type === "decimal" ? String(row[name]) : row[name]])));
   const canonical = normalized.map((row) => JSON.stringify(canonicalMigrationValue(row))).sort();
   return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+}
+async function assertDirectoryExcludesSecrets(root: string, secrets: string[]): Promise<void> {
+  const walk = async (directory: string): Promise<void> => {
+    try {
+      for await (const entry of await opendir(directory)) {
+        const path = join(directory, entry.name); if (entry.isDirectory()) await walk(path);
+        else if (entry.isFile()) { const bytes = await readFile(path); for (const secret of secrets) assert.equal(bytes.includes(Buffer.from(secret)), false, path); }
+      }
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  };
+  await walk(root);
 }
 
 describe("embedded-to-PostgreSQL migration key preflight", () => {
@@ -140,6 +152,7 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
           path: `notes/${importedNoteId}.md`, aliases: [], revision: 1 }], noteLinks: [], activities: [], noteHistory: [], durableObjects: [],
       } }; } }).export(ownerId, importedWorkspaceId);
       assert.equal(portable.status, "exported"); if (portable.status !== "exported") throw new Error("portable export failed");
+      for (const secret of [sourceKey, destinationKey]) assert.equal(Buffer.from(portable.archive).includes(Buffer.from(secret)), false);
       assert.equal((await new PortableWorkspaceImportService(source.database, new LocalAttachmentStorage(source.paths.attachments))
         .import(importId, ownerId, portable.archive)).status, "imported");
       assert.equal((await source.database.listPendingImportedIdentities(ownerId))[0]?.sourceAccountId, importedAccountId);
@@ -172,6 +185,8 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
         destinationDatabaseAvailableBytes: BigInt(Number.MAX_SAFE_INTEGER),
         keys: { source: sourceKey, destination: destinationKey, mode: "rotate" } });
       assert.ok(result.tables > 20); assert.ok(result.rows > 2);
+      await assertDirectoryExcludesSecrets(attachmentRoot, [sourceKey, destinationKey]);
+      for (const secret of [sourceKey, destinationKey]) assert.equal(JSON.stringify(result).includes(secret), false);
       const migrated = new (await import("../src/postgres-database.js")).PostgresDatabase(scoped, createAuthenticationSecretCodec(destinationKey));
       try { await migrated.verifyConnection();
         for (const [email, id, role] of [["ada@example.test", ownerId, "Owner"], ["admin@example.test", adminId, "Admin"], ["member@example.test", memberId, "Member"]] as const) {
@@ -208,10 +223,11 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
       await assert.rejects(migrateEmbeddedInstance({ source, destinationDatabaseUrl: scoped, destinationAttachmentRoot: destinationAttachments,
         destinationConfigurationRoot: destinationConfiguration,
         destinationDatabaseAvailableBytes: 0n, keys: { source: sourceKey, destination: sourceKey, mode: "preserve" } }), /PostgreSQL capacity is insufficient/i);
-      await migrateEmbeddedInstance({ source, destinationDatabaseUrl: scoped, destinationAttachmentRoot: destinationAttachments,
+      const result = await migrateEmbeddedInstance({ source, destinationDatabaseUrl: scoped, destinationAttachmentRoot: destinationAttachments,
         destinationConfigurationRoot: destinationConfiguration,
         destinationDatabaseAvailableBytes: BigInt(Number.MAX_SAFE_INTEGER),
         keys: { source: sourceKey, destination: sourceKey, mode: "preserve" } });
+      await assertDirectoryExcludesSecrets(destinationRoot, [sourceKey]); assert.equal(JSON.stringify(result).includes(sourceKey), false);
       const migrated = new (await import("../src/postgres-database.js")).PostgresDatabase(scoped, createAuthenticationSecretCodec(sourceKey));
       try { await migrated.verifyConnection(); assert.equal((await migrated.findAccountByEmail("grace@example.test"))?.passwordHash, "preserved-hash"); }
       finally { await migrated.close(); }
@@ -305,6 +321,42 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
       assert.ok(result.rows > 0); assert.equal(await readFile(join(attachments, "rollback.bin"), "utf8"), "rollback Attachment");
       assert.equal(Number((await admin.query(`SELECT count(*) count FROM ${schema}.stash_organizations`)).rows[0].count), 1);
       assert.equal(await exists(`${attachments}.migration-journal.json`), false);
+    } finally { await source.close(); await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined); await admin.end(); }
+  });
+
+  test("preserves a compatible upgraded Instance format boundary", async () => {
+    const sourceKey = key(); const source = await EmbeddedInstanceStore.open(await mkdtemp(join(tmpdir(), "stash-migration-versioned-source-")), createAuthenticationSecretCodec(sourceKey));
+    const admin = new Pool({ connectionString: postgresUrl! }); const schema = `embedded_versioned_${randomUUID().replaceAll("-", "")}`; const root = await mkdtemp(join(tmpdir(), "stash-migration-versioned-destination-"));
+    try {
+      await source.database.verifyConnection(); await source.database.prepareInstanceStore();
+      const sourceUpgrade = new PostgresInstanceUpgradeTarget("embedded://local", async () => undefined, source.upgradeDatabase); await sourceUpgrade.apply("0.0.0", "0.1.0");
+      await admin.query(`CREATE SCHEMA ${schema}`); const scoped = new URL(postgresUrl!); scoped.searchParams.set("options", `-csearch_path=${schema}`);
+      const destination = new (await import("../src/postgres-database.js")).PostgresDatabase(scoped.toString(), createAuthenticationSecretCodec(sourceKey));
+      await destination.verifyConnection(); await destination.prepareInstanceStore(); const destinationUpgrade = new PostgresInstanceUpgradeTarget(scoped.toString(), async () => undefined);
+      await destinationUpgrade.apply("0.0.0", "0.1.0"); await destination.close(); await destinationUpgrade.close();
+      await migrateEmbeddedInstance({ source, destinationDatabaseUrl: scoped.toString(), destinationAttachmentRoot: join(root, "attachments"),
+        destinationConfigurationRoot: join(root, "configuration"), destinationDatabaseAvailableBytes: BigInt(Number.MAX_SAFE_INTEGER),
+        keys: { source: sourceKey, destination: sourceKey, mode: "preserve" } });
+      assert.equal((await admin.query(`SELECT version FROM ${schema}.stash_instance_format WHERE singleton=TRUE`)).rows[0]?.version, "0.1.0");
+    } finally { await source.close(); await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined); await admin.end(); }
+  });
+
+  test("rejects corrupt protected source state before cutover and leaves both Instances restartable", async () => {
+    const sourceKey = key(); const sourceRoot = await mkdtemp(join(tmpdir(), "stash-migration-corrupt-source-"));
+    let source = await EmbeddedInstanceStore.open(sourceRoot, createAuthenticationSecretCodec(sourceKey));
+    const admin = new Pool({ connectionString: postgresUrl! }); const schema = `embedded_corrupt_${randomUUID().replaceAll("-", "")}`; const root = await mkdtemp(join(tmpdir(), "stash-migration-corrupt-destination-"));
+    try {
+      await source.database.verifyConnection(); await source.database.prepareInstanceStore(); await source.database.createFirstOrganizationOwner({ organizationId: randomUUID(), organizationName: "Corrupt",
+        ownerId: randomUUID(), ownerName: "Owner", ownerEmail: "corrupt@example.test", passwordHash: "protected-password", role: "Owner" });
+      await source.upgradeDatabase.query("UPDATE stash_accounts SET password_hash='corrupt-envelope'");
+      await admin.query(`CREATE SCHEMA ${schema}`); const scoped = new URL(postgresUrl!); scoped.searchParams.set("options", `-csearch_path=${schema}`);
+      const destination = new (await import("../src/postgres-database.js")).PostgresDatabase(scoped.toString(), createAuthenticationSecretCodec(sourceKey));
+      await destination.verifyConnection(); await destination.prepareInstanceStore(); await destination.close();
+      await assert.rejects(migrateEmbeddedInstance({ source, destinationDatabaseUrl: scoped.toString(), destinationAttachmentRoot: join(root, "attachments"),
+        destinationConfigurationRoot: join(root, "configuration"), destinationDatabaseAvailableBytes: BigInt(Number.MAX_SAFE_INTEGER),
+        keys: { source: sourceKey, destination: sourceKey, mode: "preserve" } }), /encrypted authentication material|authentication secret envelope|ciphertext/i);
+      assert.equal(Number((await admin.query(`SELECT count(*) count FROM ${schema}.stash_accounts`)).rows[0].count), 0);
+      await source.close(); source = await EmbeddedInstanceStore.open(sourceRoot, createAuthenticationSecretCodec(sourceKey)); await source.database.verifyConnection();
     } finally { await source.close(); await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined); await admin.end(); }
   });
 });

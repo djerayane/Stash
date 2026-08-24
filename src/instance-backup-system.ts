@@ -155,6 +155,7 @@ export class EmbeddedLocalInstanceRestoreTarget implements InstanceBackupRestore
         const target = join(stagedConfiguration, ...file.path.split("/"));
         await mkdir(dirname(target), { recursive: true, mode: 0o700 }); await writeFile(target, file.content, { mode: 0o600, flag: "wx" });
       }
+      await this.options.store.prepareCoordinatedRestore(staged, stagedConfiguration);
       return { attachments: staged, configuration: stagedConfiguration };
     } catch (error) { await Promise.all([rm(staged, { recursive: true, force: true }), rm(stagedConfiguration, { recursive: true, force: true })]); throw error; }
   }
@@ -162,21 +163,9 @@ export class EmbeddedLocalInstanceRestoreTarget implements InstanceBackupRestore
   restoreDatabase(source: string): Promise<void> { return this.options.store.restoreDatabase(source); }
   async commitAttachments(prepared: unknown): Promise<void> {
     if (!prepared || typeof prepared !== "object" || !("attachments" in prepared) || !("configuration" in prepared)) throw new Error("invalid prepared Attachment restore");
-    const staged = prepared as { attachments: string; configuration: string };
-    const destinations = [this.options.store.paths.attachments, this.options.store.paths.configuration];
-    const stagedPaths = [staged.attachments, staged.configuration];
-    const previous = destinations.map((destination) => `${destination}.restore-previous-${process.pid}`);
-    await Promise.all(previous.map((path) => rm(path, { recursive: true, force: true })));
-    let previousCount = 0; let committedCount = 0;
-    try {
-      for (let index = 0; index < destinations.length; index += 1) { await rename(destinations[index]!, previous[index]!); previousCount += 1; }
-      for (let index = 0; index < destinations.length; index += 1) { await rename(stagedPaths[index]!, destinations[index]!); committedCount += 1; }
-    } catch (error) {
-      for (let index = 0; index < committedCount; index += 1) await rm(destinations[index]!, { recursive: true, force: true }).catch(() => undefined);
-      for (let index = 0; index < previousCount; index += 1) await rename(previous[index]!, destinations[index]!).catch(() => undefined);
-      throw error;
-    }
-    await Promise.all(previous.map((path) => rm(path, { recursive: true, force: true })));
+    // The embedded store coordinates database, Attachment, and configuration
+    // cutover durably inside restoreDatabase; this method preserves the common
+    // restore-target protocol and confirms preparation reached that boundary.
   }
   async discardPreparedAttachments(prepared: unknown): Promise<void> {
     if (prepared && typeof prepared === "object") {

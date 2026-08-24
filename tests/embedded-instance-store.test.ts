@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, test } from "node:test";
@@ -113,5 +114,30 @@ describe("embedded Instance store", () => {
     await store.close(); stores.splice(stores.indexOf(store), 1);
     const reopened = await EmbeddedInstanceStore.open(root, createAuthenticationSecretCodec(key)); stores.push(reopened); await reopened.database.verifyConnection();
     assert.deepEqual(JSON.parse(await readFile(configurationPath, "utf8")), { locale: "fr-FR", registration: "closed" });
+  });
+
+  test("recovers one coordinated database, Attachment, and configuration snapshot after every restore rename crash point", async () => {
+    const key = masterKey();
+    for (let renameCount = 0; renameCount <= 6; renameCount += 1) {
+      const root = await mkdtemp(join(tmpdir(), `stash-embedded-restore-crash-${renameCount}-`));
+      const store = await EmbeddedInstanceStore.open(root, createAuthenticationSecretCodec(key)); await store.database.verifyConnection();
+      const backup = join(store.paths.backups, "crash-point"); const service = new InstanceBackupService(
+        new EmbeddedLocalInstanceBackupSource({ store, publicOrigin: "http://127.0.0.1:3000" }), { masterKey: key });
+      await writeFile(join(store.paths.attachments, "state.txt"), "backup"); await writeFile(join(store.paths.configuration, "runtime.json"), JSON.stringify({ state: "backup" }));
+      await service.create(backup);
+      await store.database.createFirstOrganizationOwner({ organizationId: randomUUID(), organizationName: "Live", ownerId: randomUUID(), ownerName: "Live",
+        ownerEmail: `live-${renameCount}@example.test`, passwordHash: "live-hash", role: "Owner" });
+      await writeFile(join(store.paths.attachments, "state.txt"), "live"); await writeFile(join(store.paths.configuration, "runtime.json"), JSON.stringify({ state: "live" }));
+      await store.close();
+      const child = spawnSync(process.execPath, ["--import", "tsx", "tests/helpers/embedded-restore-crash.ts", root, join(backup, "database.dump"), String(renameCount)],
+        { cwd: process.cwd(), encoding: "utf8" });
+      assert.equal(child.signal, "SIGKILL", `rename ${renameCount}: ${child.stderr}`);
+      const recovered = await EmbeddedInstanceStore.open(root, createAuthenticationSecretCodec(key)); stores.push(recovered); await recovered.database.verifyConnection();
+      assert.equal(await readFile(join(recovered.paths.attachments, "state.txt"), "utf8"), "backup");
+      assert.deepEqual(JSON.parse(await readFile(join(recovered.paths.configuration, "runtime.json"), "utf8")), { state: "backup" });
+      assert.equal(await recovered.database.createFirstOrganizationOwner({ organizationId: randomUUID(), organizationName: "Recovered", ownerId: randomUUID(), ownerName: "Recovered",
+        ownerEmail: `recovered-${renameCount}@example.test`, passwordHash: "recovered-hash", role: "Owner" }), true);
+      await recovered.close(); stores.splice(stores.indexOf(recovered), 1);
+    }
   });
 });

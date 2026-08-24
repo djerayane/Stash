@@ -153,6 +153,8 @@ export async function migrateEmbeddedInstance(options: {
   if (typeof check !== "string") throw new Error("Embedded source has no authentication key check");
   verifyAuthenticationKeyCheck(sourceCodec, check);
   const tables = orderedTables(keyCheck);
+  for (const table of tables) for (const row of table.rows) rotateRow(table.name, row, options.keys.source, options.keys.source);
+  const sourceFormat = String(tables.find(({ name }) => name === "stash_instance_format")?.rows[0]?.version ?? "0.0.0");
   const destinationAttachments = resolve(options.destinationAttachmentRoot);
   const destinationConfiguration = resolve(options.destinationConfigurationRoot);
   const journalPath = `${destinationAttachments}.migration-journal.json`;
@@ -212,6 +214,9 @@ export async function migrateEmbeddedInstance(options: {
       try { verifyAuthenticationKeyCheck(createAuthenticationSecretCodec(options.keys.destination), configured.rows[0]!.encrypted_check); }
       catch { throw new Error("Migration destination Instance master key does not match the configured destination key"); }
     } else throw new Error("Migration destination Instance must be prepared with its configured master key before migration");
+    const destinationFormat = existingTables.includes("stash_instance_format")
+      ? String((await preflightPool.query<{ version: string }>("SELECT version FROM stash_instance_format WHERE singleton=TRUE")).rows[0]?.version ?? "invalid") : "0.0.0";
+    if (destinationFormat !== sourceFormat) throw new Error(`Migration destination Instance format ${destinationFormat} is incompatible with source format ${sourceFormat}`);
     for (const table of existingTables.filter((name) => name !== "stash_authentication_key_check" && name !== "stash_instance_format")) {
       if (Number((await preflightPool.query(`SELECT count(*) count FROM ${quote(table)}`)).rows[0]?.count) !== 0) throw new Error("Migration destination PostgreSQL Instance must be empty");
     }
@@ -247,9 +252,11 @@ export async function migrateEmbeddedInstance(options: {
       const targetColumns = targetColumnRecords.map((row) => row.column_name);
       if (JSON.stringify(targetColumns) !== JSON.stringify(table.columns)) throw new Error(`Migration destination schema is incompatible at ${table.name}`);
       const targetCount = Number((await client.query(`SELECT count(*) count FROM ${quote(table.name)}`)).rows[0]?.count);
-      if (table.name === "stash_authentication_key_check") {
-        if (targetCount !== 1) throw new Error("Migration destination authentication key boundary is invalid");
+      if (table.name === "stash_authentication_key_check" || table.name === "stash_instance_format") {
+        if (targetCount !== 1) throw new Error(`Migration destination ${table.name === "stash_instance_format" ? "Instance format" : "authentication key"} boundary is invalid`);
         const boundary = (await client.query<Record<string, unknown>>(`SELECT ${table.columns.map(quote).join(",")} FROM ${quote(table.name)}`)).rows;
+        if (table.name === "stash_instance_format" && semanticDigest(boundary, targetColumnRecords) !== semanticDigest(table.rows, targetColumnRecords))
+          throw new Error("Migration destination Instance format boundary changed after preflight");
         tableDigests[table.name] = semanticDigest(boundary, targetColumnRecords);
         continue;
       }
