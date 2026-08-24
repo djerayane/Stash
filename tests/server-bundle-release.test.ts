@@ -115,7 +115,7 @@ describe("self-contained Instance bundle packaging", () => {
     const smoke = await readFile(new URL("../scripts/smoke-server-bundle.mjs", import.meta.url), "utf8");
     assert.match(smoke, /process\.kill\(-child\.pid/); assert.match(smoke, /taskkill[\s\S]*"\/T"/);
     assert.match(smoke, /sandbox-exec/); assert.match(smoke, /\.docker\/run\/docker\.sock/); assert.match(smoke, /strace[\s\S]*trace=process,network,file/);
-    assert.match(smoke, /sudo[\s\S]*--non-interactive[\s\S]*bwrap[\s\S]*--uid[\s\S]*--gid[\s\S]*--tmpfs[\s\S]*\/run[\s\S]*\/dev\/null/); assert.match(smoke, /netsh/); assert.match(smoke, /dir=out[\s\S]*action=block/);
+    assert.match(smoke, /sudo[\s\S]*--non-interactive[\s\S]*bwrap[\s\S]*--unshare-user[\s\S]*--uid[\s\S]*--gid[\s\S]*--tmpfs[\s\S]*\/run[\s\S]*\/dev\/null/); assert.match(smoke, /netsh/); assert.match(smoke, /dir=out[\s\S]*action=block/);
     assert.match(smoke, /deny network-outbound[\s\S]*localhost:/);
     const windowsIsolation = await readFile(new URL("../scripts/windows-bundle-isolation.ps1", import.meta.url), "utf8"); assert.match(windowsIsolation, /Get-Command docker\.exe,podman\.exe -All[\s\S]*Move-Item[\s\S]*remains executable/);
     assert.match(smoke, /Standalone descendant retained port/);
