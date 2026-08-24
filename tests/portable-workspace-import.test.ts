@@ -103,6 +103,26 @@ describe("Portable Workspace import", () => {
     assert.ok(repository.committed?.transformations?.some(({kind,reason})=>kind==="ambiguous"&&reason==="multiple_note_targets"));
     assert.ok(repository.committed?.transformations?.some(({kind,reason})=>kind==="skipped"&&reason==="hidden_vault_metadata"));
   });
+  it("preserves frontmatter properties while reporting only tags that were actually extracted",async()=>{
+    const repository=new ImportMemory();const service=new PortableWorkspaceImportService(repository,{async put(){},async get(){return Buffer.alloc(0)},async delete(){}});
+    await service.importMarkdown(randomUUID(),actor.localAccountId,markdownZip({"Properties.md":"---\ntitle: Durable title\naliases: [One, Two]\ncssclasses: wide\nexample: \"```\"\n---\n# Body","No tags.md":"---\ntitle: Still here\n---\nText"}));
+    const [properties,noTags]=repository.committed!.state.notes;
+    assert.match(properties!.content,/````yaml\ntitle: Durable title\naliases: \[One, Two\]\ncssclasses: wide\nexample: "```"\n````/);
+    assert.match(noTags!.content,/```yaml\ntitle: Still here\n```/);
+    assert.equal(repository.committed!.transformations!.filter(({reason})=>reason==="frontmatter_tags_extracted").length,0);
+    assert.equal(repository.committed!.transformations!.filter(({reason})=>reason==="frontmatter_preserved").length,2);
+  });
+  it("extracts native Obsidian inline tags without treating code or link fragments as tags",async()=>{
+    const repository=new ImportMemory();const service=new PortableWorkspaceImportService(repository,{async put(){},async get(){return Buffer.alloc(0)},async delete(){}});
+    await service.importMarkdown(randomUUID(),actor.localAccountId,markdownZip({"Tags.md":"# Plan\nShip #project/roadmap and #ready-now. Keep `#inline-code`, [jump](#section), and:\n```txt\n#fenced-code\n```"}));
+    assert.deepEqual(repository.committed!.state.notes[0]!.tags,["project/roadmap","ready-now"]);
+    assert.equal(repository.committed!.transformations!.filter(({reason})=>reason==="inline_tags_extracted").length,1);
+  });
+  it("imports an empty Markdown file as an untitled Note",async()=>{
+    const repository=new ImportMemory();const service=new PortableWorkspaceImportService(repository,{async put(){},async get(){return Buffer.alloc(0)},async delete(){}});
+    await service.importMarkdown(randomUUID(),actor.localAccountId,markdownZip({"Empty.md":""}));
+    assert.equal(repository.committed!.state.notes[0]!.content,"# Untitled");
+  });
   it("rejects unsafe Markdown ZIP paths without repository or Attachment side effects",async()=>{
     const repository=new ImportMemory();let writes=0;const service=new PortableWorkspaceImportService(repository,{async put(){writes++},async get(){return Buffer.alloc(0)},async delete(){}});
     await assert.rejects(service.importMarkdown(randomUUID(),actor.localAccountId,markdownZip({"../escape.md":"# no"})),InvalidPortableWorkspaceImport);

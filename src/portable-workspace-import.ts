@@ -159,6 +159,12 @@ function contentType(path: string): string {
   const extension=posix.extname(path).toLowerCase();
   return new Map([[".png","image/png"],[".jpg","image/jpeg"],[".jpeg","image/jpeg"],[".gif","image/gif"],[".webp","image/webp"],[".svg","image/svg+xml"],[".pdf","application/pdf"],[".txt","text/plain"]]).get(extension) ?? "application/octet-stream";
 }
+function inlineTags(markdown:string):string[]{
+  const visible=markdown.replace(/^(`{3,})[^\n]*\n[\s\S]*?^\1\s*$/gm,"").replace(/`+[^`\n]*`+/g,"")
+    .replace(/(!?\[[^\]]*\])\((?:<[^>]*>|[^)]*)\)/g,"$1");
+  return [...visible.matchAll(/(?:^|[\s([{'"])(#([\p{L}\p{N}_-]+(?:\/[\p{L}\p{N}_-]+)*))/gu)].map((match)=>match[2]!);
+}
+function preserveFrontmatter(value:string):string{const longest=Math.max(2,...[...value.matchAll(/`+/g)].map((match)=>match[0].length));const fence="`".repeat(longest+1);return `${fence}yaml\n${value}\n${fence}`;}
 function markdownBundle(archive: Buffer, destinationOwnerAccountId: string, limits: {maxEntries:number;maxFileBytes:number;maxArchiveBytes?:number}): PortableWorkspaceImportBundle {
   const entries=unzipStored(archive,limits).filter(({path})=>!path.endsWith("/"));
   const rootParts=entries.length ? entries[0]!.path.split("/") : [];
@@ -190,7 +196,11 @@ function markdownBundle(archive: Buffer, destinationOwnerAccountId: string, limi
       if(inline) tags.push(...inline[1]!.split(",").map((tag)=>tag.trim().replace(/^['"]|['"]$/g,"")));
       else if(scalar) tags.push(...scalar[1]!.split(/[ ,]+/).map((tag)=>tag.trim().replace(/^#/,"")));
       const block=front[1]!.match(/^tags:\s*\r?\n((?:\s+-\s*[^\n]+\r?\n?)*)/m); if(block) tags.push(...block[1]!.split(/\r?\n/).map((line)=>line.replace(/^\s+-\s*/,"").trim()).filter(Boolean));
-      text=text.slice(front[0].length); transformations.push({kind:"transformed",object:`Note:${entry.path}`,reason:"frontmatter_tags_extracted"}); }
+      text=`${preserveFrontmatter(front[1]!)}\n\n${text.slice(front[0].length)}`;
+      transformations.push({kind:"transformed",object:`Note:${entry.path}`,reason:"frontmatter_preserved"});
+      if(tags.length)transformations.push({kind:"transformed",object:`Note:${entry.path}`,reason:"frontmatter_tags_extracted"}); }
+    const nativeTags=inlineTags(text);tags.push(...nativeTags);
+    if(nativeTags.length)transformations.push({kind:"transformed",object:`Note:${entry.path}`,reason:"inline_tags_extracted"});
     text=text.replace(/(!?)\[([^\]]*)\]\((?:<([^>]+)>|([^\s)]+))(?:\s+"[^"]*")?\)/g,(whole,embed:string,label:string,angled?:string,plain?:string)=>{
       const raw=angled??plain??""; if(/^(?:[a-z]+:|#|\/)/i.test(raw)) return whole; let decoded:string; try{decoded=decodeURIComponent(raw);}catch{return whole;}
       const target=posix.normalize(posix.join(posix.dirname(entry.path),decoded)); const attachmentId=attachmentByPath.get(target);
@@ -208,8 +218,8 @@ function markdownBundle(archive: Buffer, destinationOwnerAccountId: string, limi
       noteLinks.push({schema:"stash.note-link.v2",id:linkId,workspaceId,sourceNoteId:current.id,targetPath:decoded,candidateNoteIds:candidates.map(({id})=>id),label:cleanLabel,revision:1});
       transformations.push({kind:candidates.length?"ambiguous":"skipped",object:`Link:${entry.path}->${decoded}`,reason:candidates.length?"multiple_note_targets":"note_target_not_found"}); return whole;
     });
-    try { markdownToRichText(text); } catch { throw new InvalidPortableWorkspaceImport(`unsupported_markdown:${entry.path}`); }
     if(!text.trim()) text="# Untitled";
+    try { markdownToRichText(text); } catch { throw new InvalidPortableWorkspaceImport(`unsupported_markdown:${entry.path}`); }
     return {schema:"stash.note.v1" as const,id:current.id,workspaceId,content:text,tags:[...new Set(tags.filter(Boolean))],createdAt,createdBy:identity};
   });
   const state:PortableWorkspaceCanonicalState={workspace:{schema:"stash.workspace.v1",id:workspaceId,name:commonRoot.slice(0,-1)||"Imported Markdown",owner:{type:"personal",identity},createdBy:identity},notes,tasks:[],boards:[],attachments,
