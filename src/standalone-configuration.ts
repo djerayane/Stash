@@ -29,6 +29,6 @@ export async function loadStandaloneConfiguration(dataDirectory: string, hostArg
   } else await writeFile(masterKeyFile, `${randomBytes(32).toString("base64")}\n`, { mode: 0o600, flag: "wx" });
   if (process.platform !== "win32") await chmod(masterKeyFile, 0o600);
   const configuration: StandaloneRuntimeConfiguration = { schema: "stash.standalone-config.v1", publicOrigin: `http://localhost:${port}`, host, port, masterKeyFile };
-  await writeFile(configurationPath, `${JSON.stringify(configuration, null, 2)}\n`, { mode: 0o600 });
+  if (!saved) await writeFile(configurationPath, `${JSON.stringify(configuration, null, 2)}\n`, { mode: 0o600 });
   return { configuration, masterKey: (await readFile(masterKeyFile, "utf8")).trim() };
 }
