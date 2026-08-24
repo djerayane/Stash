@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { cp, lstat, mkdir, opendir, readFile, rename, rm, stat } from "node:fs/promises";
+import { cp, lstat, mkdir, opendir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { Pool } from "pg";
 
@@ -100,6 +100,26 @@ export async function migrateEmbeddedInstance(options: {
   verifyAuthenticationKeyCheck(sourceCodec, check);
   const tables = orderedTables(keyCheck);
   const destinationAttachments = resolve(options.destinationAttachmentRoot);
+  const journalPath = `${destinationAttachments}.migration-journal.json`;
+  try {
+    const journal = JSON.parse(await readFile(journalPath, "utf8")) as { staged: string; state: "committing" | "database_committed"; tables: number; rows: number; attachments: number };
+    if (journal.state === "committing") {
+      const recoveryPool = new Pool({ connectionString: options.destinationDatabaseUrl, connectionTimeoutMillis: 2_000, max: 1 });
+      try {
+        const counts = await Promise.all(tables.map(async (table) => Number((await recoveryPool.query(`SELECT count(*) count FROM ${quote(table.name)}`)).rows[0]?.count)));
+        if (counts.reduce((sum, count) => sum + count, 0) !== journal.rows) throw new Error("Migration commit outcome is unknown and requires operator recovery");
+      } finally { await recoveryPool.end(); }
+    }
+    const stagedExists = await stat(journal.staged).then((metadata) => metadata.isDirectory()).catch(() => false);
+    const recovered = stagedExists ? await attachmentFiles(journal.staged) : [];
+    if (!stagedExists || recovered.length !== journal.attachments) {
+      const finalized = await attachmentFiles(destinationAttachments);
+      if (finalized.length !== journal.attachments) throw new Error("Migration journal Attachment validation failed");
+      await rm(journalPath); return { tables: journal.tables, rows: journal.rows, attachments: journal.attachments };
+    }
+    await mkdir(dirname(destinationAttachments), { recursive: true, mode: 0o700 }); await rename(journal.staged, destinationAttachments); await rm(journalPath);
+    return { tables: journal.tables, rows: journal.rows, attachments: journal.attachments };
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   const existingAttachments = await attachmentFiles(destinationAttachments);
   if (existingAttachments.length) throw new Error("Migration destination Attachment storage must be empty");
   const stagedAttachments = join(dirname(destinationAttachments), `.stash-migration-${process.pid}-${Date.now()}`);
@@ -107,12 +127,27 @@ export async function migrateEmbeddedInstance(options: {
   await cp(options.source.paths.attachments, stagedAttachments, { recursive: true, force: false });
   const sourceAttachments = await attachmentFiles(options.source.paths.attachments); const staged = await attachmentFiles(stagedAttachments);
   if (JSON.stringify(sourceAttachments) !== JSON.stringify(staged)) { await rm(stagedAttachments, { recursive: true, force: true }); throw new Error("Attachment checksum validation failed"); }
+  const preflightPool = new Pool({ connectionString: options.destinationDatabaseUrl, connectionTimeoutMillis: 2_000, max: 1 });
+  try {
+    const existingTables = (await preflightPool.query<{ table_name: string }>(`SELECT table_name FROM information_schema.tables
+      WHERE table_schema=current_schema() AND table_type='BASE TABLE' AND table_name LIKE 'stash_%' ORDER BY table_name`)).rows.map(({ table_name }) => table_name);
+    if (existingTables.includes("stash_authentication_key_check")) {
+      const configured = await preflightPool.query<{ encrypted_check: string }>("SELECT encrypted_check FROM stash_authentication_key_check WHERE singleton=TRUE");
+      if (configured.rowCount !== 1) throw new Error("Migration destination authentication key boundary is invalid");
+      try { verifyAuthenticationKeyCheck(createAuthenticationSecretCodec(options.keys.destination), configured.rows[0]!.encrypted_check); }
+      catch { throw new Error("Migration destination Instance master key does not match the configured destination key"); }
+    } else if (existingTables.length) throw new Error("Migration destination has a partial Stash schema without an authentication key boundary");
+    for (const table of existingTables.filter((name) => name !== "stash_authentication_key_check" && name !== "stash_instance_format")) {
+      if (Number((await preflightPool.query(`SELECT count(*) count FROM ${quote(table)}`)).rows[0]?.count) !== 0) throw new Error("Migration destination PostgreSQL Instance must be empty");
+    }
+  } catch (error) { await rm(stagedAttachments, { recursive: true, force: true }); throw error; }
+  finally { await preflightPool.end(); }
   const targetPreparation = new PostgresDatabase(options.destinationDatabaseUrl, createAuthenticationSecretCodec(options.keys.destination));
   try { await targetPreparation.verifyConnection(); await targetPreparation.prepareInstanceStore(); }
-  catch (error) { throw new Error("Migration destination Instance master key does not match the configured destination key", { cause: error }); }
+  catch (error) { await rm(stagedAttachments, { recursive: true, force: true }); throw new Error("Migration destination Instance preparation failed", { cause: error }); }
   finally { await targetPreparation.close(); }
   const pool = new Pool({ connectionString: options.destinationDatabaseUrl, connectionTimeoutMillis: 2_000, max: 1 }); const client = await pool.connect();
-  let attachmentsCommitted = false;
+  let commitAttempted = false;
   try {
     await client.query("BEGIN");
     const destinationCheck = await client.query<{ encrypted_check: string }>("SELECT encrypted_check FROM stash_authentication_key_check WHERE singleton=TRUE");
@@ -137,14 +172,14 @@ export async function migrateEmbeddedInstance(options: {
     const copiedRows = tables.reduce((count, table) => count + table.rows.length, 0);
     const destinationRows = (await Promise.all(tables.map(async (table) => Number((await client.query(`SELECT count(*) count FROM ${quote(table.name)}`)).rows[0]?.count)))).reduce((sum, count) => sum + count, 0);
     if (destinationRows !== copiedRows) throw new Error("Migration post-copy semantic row-count validation failed");
-    await mkdir(dirname(destinationAttachments), { recursive: true, mode: 0o700 });
-    await rm(destinationAttachments, { recursive: true, force: true }); await rename(stagedAttachments, destinationAttachments); attachmentsCommitted = true;
+    await writeFile(journalPath, JSON.stringify({ staged: stagedAttachments, state: "committing", tables: tables.length, rows: copiedRows, attachments: sourceAttachments.length }), { mode: 0o600, flag: "wx" });
+    commitAttempted = true;
     await client.query("COMMIT");
+    await writeFile(journalPath, JSON.stringify({ staged: stagedAttachments, state: "database_committed", tables: tables.length, rows: copiedRows, attachments: sourceAttachments.length }), { mode: 0o600 });
+    await mkdir(dirname(destinationAttachments), { recursive: true, mode: 0o700 }); await rename(stagedAttachments, destinationAttachments); await rm(journalPath);
     return { tables: tables.length, rows: tables.reduce((count, table) => count + table.rows.length, 0), attachments: sourceAttachments.length };
   } catch (error) {
-    await client.query("ROLLBACK").catch(() => undefined);
-    if (attachmentsCommitted) await rm(destinationAttachments, { recursive: true, force: true }).catch(() => undefined);
-    else await rm(stagedAttachments, { recursive: true, force: true }).catch(() => undefined);
+    if (!commitAttempted) { await client.query("ROLLBACK").catch(() => undefined); await rm(stagedAttachments, { recursive: true, force: true }).catch(() => undefined); await rm(journalPath, { force: true }).catch(() => undefined); }
     throw error;
   } finally { client.release(); await pool.end(); }
 }

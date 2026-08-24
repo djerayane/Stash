@@ -24,6 +24,7 @@ describe("embedded Instance store", () => {
     const target = new PostgresInstanceUpgradeTarget("embedded://local", async () => undefined, store.upgradeDatabase);
     const before = await target.inspect("0.1.0"); assert.equal(before.currentVersion, "0.0.0"); assert.equal(before.checks.every(({ status }) => status === "pass"), true);
     await target.apply("0.0.0", "0.1.0"); assert.equal((await target.inspect("0.1.0")).currentVersion, "0.1.0");
+    await target.close(); await store.close(); stores.splice(stores.indexOf(store), 1);
   });
   test("persists PostgreSQL state beneath the selected data directory across a clean restart", async () => {
     const root = await mkdtemp(join(tmpdir(), "stash-embedded-restart-"));
@@ -101,6 +102,7 @@ describe("embedded Instance store", () => {
     await service.create(backup);
     const target = new EmbeddedLocalInstanceRestoreTarget({ store, publicOrigin: "http://127.0.0.1:3000" });
     assert.deepEqual(await service.restore(backup, target, { dryRun: false }), { status: "restored" }); assert.equal(service.requiresRestart(), true);
+    await store.database.verifyConnection();
     await store.close(); stores.splice(stores.indexOf(store), 1);
     const reopened = await EmbeddedInstanceStore.open(root, createAuthenticationSecretCodec(key)); stores.push(reopened); await reopened.database.verifyConnection();
   });

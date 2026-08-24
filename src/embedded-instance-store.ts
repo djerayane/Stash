@@ -53,10 +53,12 @@ async function queryEngine<T extends Record<string, unknown>>(engine: PGlite, sq
  */
 class PGlitePoolAdapter {
   readonly #mutex = new Mutex();
-  constructor(readonly engine: PGlite) {}
+  #engine: PGlite;
+  constructor(engine: PGlite) { this.#engine = engine; }
+  get engine(): PGlite { return this.#engine; }
   async query<T extends Record<string, unknown> = Record<string, unknown>>(sql: string, values?: unknown[]) {
     const release = await this.#mutex.acquire();
-    try { return await queryEngine<T>(this.engine, sql, values); }
+    try { return await queryEngine<T>(this.#engine, sql, values); }
     finally { release(); }
   }
   async connect() {
@@ -64,17 +66,21 @@ class PGlitePoolAdapter {
     let released = false;
     return {
       query: async <T extends Record<string, unknown> = Record<string, unknown>>(sql: string, values?: unknown[]) => {
-        const result = await queryEngine<T>(this.engine, sql, values);
+        const result = await queryEngine<T>(this.#engine, sql, values);
         // PGlite 0.5.x does not flush at the end of its transaction helper.
         // Stash uses explicit transaction statements, so make COMMIT the
         // durability boundary promised by the repository interface.
-        if (/^\s*COMMIT\b/i.test(sql)) await this.engine.syncToFs();
+        if (/^\s*COMMIT\b/i.test(sql)) await this.#engine.syncToFs();
         return result;
       },
       release: () => { if (!released) { released = true; releaseMutex(); } },
     };
   }
-  async end() { await this.engine.close(); }
+  async exclusive<T>(operation: (engine: PGlite, replace: (engine: PGlite) => void) => Promise<T>): Promise<T> {
+    const release = await this.#mutex.acquire();
+    try { return await operation(this.#engine, (engine) => { this.#engine = engine; }); } finally { release(); }
+  }
+  async end() { await this.exclusive(async (engine) => { if (!engine.closed) await engine.close(); }); }
 }
 
 interface LockRecord { pid: number }
@@ -119,7 +125,7 @@ export class EmbeddedInstanceStore {
     readonly database: PostgresDatabase,
     readonly upgradeDatabase: import("./postgres-instance-upgrade.js").UpgradeDatabase,
     private readonly releaseLock: () => Promise<void>,
-    private readonly engine: PGlite,
+    private readonly pool: PGlitePoolAdapter,
   ) {}
 
   static async open(dataDirectory: string, authenticationSecrets: AuthenticationSecretCodec): Promise<EmbeddedInstanceStore> {
@@ -132,61 +138,67 @@ export class EmbeddedInstanceStore {
       await Promise.all([paths.database, paths.attachments, paths.backups, paths.configuration]
         .map((path) => mkdir(path, { recursive: true, mode: 0o700 })));
       const engine = await PGlite.create(paths.database, { relaxedDurability: false });
-      const pool = new PGlitePoolAdapter(engine) as unknown as Pool;
-      const database = new PostgresDatabase("embedded://local", authenticationSecrets, { pool });
-      return new EmbeddedInstanceStore(paths, database, pool as unknown as import("./postgres-instance-upgrade.js").UpgradeDatabase, releaseLock, engine);
+      const pool = new PGlitePoolAdapter(engine);
+      const database = new PostgresDatabase("embedded://local", authenticationSecrets, { pool: pool as unknown as Pool });
+      return new EmbeddedInstanceStore(paths, database, pool as unknown as import("./postgres-instance-upgrade.js").UpgradeDatabase, releaseLock, pool);
     } catch (error) { await releaseLock().catch(() => undefined); throw error; }
   }
 
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
-    try { if (!this.engine.closed) await this.database.close(); } finally { await this.releaseLock(); }
+    try { await this.database.close(); } finally { await this.releaseLock(); }
   }
 
   async captureDatabase(destination: string): Promise<void> {
     if (this.#closed) throw new Error("Embedded Instance store is closed");
-    const dump = await this.engine.dumpDataDir("gzip");
-    await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
-    await writeFile(destination, Buffer.from(await dump.arrayBuffer()), { mode: 0o600 });
+    await this.pool.exclusive(async (engine) => {
+      const dump = await engine.dumpDataDir("gzip");
+      await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+      await writeFile(destination, Buffer.from(await dump.arrayBuffer()), { mode: 0o600 });
+    });
   }
 
   async restoreDatabase(source: string): Promise<void> {
-    const staged = `${this.paths.database}.restore-staged-${process.pid}`; const previous = `${this.paths.database}.restore-previous-${process.pid}`;
-    await rm(staged, { recursive: true, force: true }); await rm(previous, { recursive: true, force: true });
-    const bytes = await readFile(source); const restored = await PGlite.create({ dataDir: staged, loadDataDir: new Blob([bytes]) }); await restored.close();
-    if (!this.engine.closed) await this.engine.close();
-    let movedPrevious = false;
-    try {
-      await rename(this.paths.database, previous); movedPrevious = true; await rename(staged, this.paths.database); await rm(previous, { recursive: true, force: true });
-    } catch (error) {
-      await rm(this.paths.database, { recursive: true, force: true }).catch(() => undefined);
-      if (movedPrevious) await rename(previous, this.paths.database).catch(() => undefined);
-      await rm(staged, { recursive: true, force: true }).catch(() => undefined); throw error;
-    }
+    await this.pool.exclusive(async (engine, replace) => {
+      const staged = `${this.paths.database}.restore-staged-${process.pid}`; const previous = `${this.paths.database}.restore-previous-${process.pid}`;
+      await rm(staged, { recursive: true, force: true }); await rm(previous, { recursive: true, force: true });
+      const bytes = await readFile(source); const restored = await PGlite.create({ dataDir: staged, loadDataDir: new Blob([bytes]) }); await restored.close();
+      if (!engine.closed) await engine.close(); let movedPrevious = false;
+      try {
+        await rename(this.paths.database, previous); movedPrevious = true; await rename(staged, this.paths.database);
+        const reopened = await PGlite.create(this.paths.database, { relaxedDurability: false }); replace(reopened); await rm(previous, { recursive: true, force: true });
+      } catch (error) {
+        await rm(this.paths.database, { recursive: true, force: true }).catch(() => undefined);
+        if (movedPrevious) await rename(previous, this.paths.database).catch(() => undefined);
+        const reopened = await PGlite.create(this.paths.database, { relaxedDurability: false }); replace(reopened);
+        await rm(staged, { recursive: true, force: true }).catch(() => undefined); throw error;
+      }
+    });
   }
 
   async semanticSnapshot(): Promise<EmbeddedTableSnapshot[]> {
     if (this.#closed) throw new Error("Embedded Instance store is closed");
-    await this.engine.query("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY");
+    const engine = this.pool.engine;
+    await engine.query("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY");
     try {
-      const tables = await this.engine.query<{ table_name: string }>(`SELECT table_name FROM information_schema.tables
+      const tables = await engine.query<{ table_name: string }>(`SELECT table_name FROM information_schema.tables
         WHERE table_schema=current_schema() AND table_type='BASE TABLE' AND table_name LIKE 'stash_%' ORDER BY table_name`);
       const result: EmbeddedTableSnapshot[] = [];
       for (const { table_name: name } of tables.rows) {
-        const columns = (await this.engine.query<{ column_name: string }>(`SELECT column_name FROM information_schema.columns
+        const columns = (await engine.query<{ column_name: string }>(`SELECT column_name FROM information_schema.columns
           WHERE table_schema=current_schema() AND table_name=$1 AND is_generated='NEVER' ORDER BY ordinal_position`, [name])).rows.map((row) => row.column_name);
-        const dependencies = (await this.engine.query<{ referenced_table: string }>(`SELECT DISTINCT referenced.relname AS referenced_table
+        const dependencies = (await engine.query<{ referenced_table: string }>(`SELECT DISTINCT referenced.relname AS referenced_table
           FROM pg_constraint constraint_record
           JOIN pg_class referenced ON referenced.oid=constraint_record.confrelid
           WHERE constraint_record.contype='f' AND constraint_record.conrelid=$1::regclass AND constraint_record.confrelid<>constraint_record.conrelid
           ORDER BY referenced.relname`, [name])).rows.map((row) => row.referenced_table);
         const identifier = `"${name.replaceAll('"', '""')}"`;
-        const rows = (await this.engine.query<Record<string, unknown>>(`SELECT * FROM ${identifier}`)).rows;
+        const rows = (await engine.query<Record<string, unknown>>(`SELECT * FROM ${identifier}`)).rows;
         result.push({ name, columns, dependsOn: dependencies, rows });
       }
-      await this.engine.query("COMMIT");
+      await engine.query("COMMIT");
       return result;
-    } catch (error) { await this.engine.query("ROLLBACK").catch(() => undefined); throw error; }
+    } catch (error) { await engine.query("ROLLBACK").catch(() => undefined); throw error; }
   }
 }
