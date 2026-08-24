@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 
 const noteId = "99999999-9999-4999-8999-999999999999";
 const secondNoteId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-const richNoteId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const richNoteId = `cccccccc-cccc-4ccc-8ccc-${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
 const emptyCodeNoteId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 const markdownNoteId = "14141414-1414-4414-8414-141414141414";
 const principalBoundaryNoteId = "12121212-1212-4212-8212-121212121212";
@@ -63,8 +63,10 @@ test("preserves every checklist item and callout paragraph with stable identitie
   await page.getByRole("button", { name: "Insert callout" }).click();
   await page.keyboard.press("End"); await page.keyboard.press("Enter"); await page.keyboard.type("Second callout paragraph");
   await page.keyboard.type(".");
-  const authoredItems = editor.locator("li[data-block-key]").filter({ hasText: /First acceptance item|Second acceptance item|Nested acceptance item/ });
-  const itemKeys = await authoredItems.evaluateAll((items) => items.map((item) => item.getAttribute("data-block-key")));
+  const authoredItems = ["First acceptance item", "Second acceptance item", "Nested acceptance item"].map((content) =>
+    editor.getByText(content, { exact: true }).locator("xpath=ancestor::li[@data-block-key][1]"));
+  await Promise.all(authoredItems.map((item) => expect(item).toHaveCount(1)));
+  const itemKeys = await Promise.all(authoredItems.map((item) => item.getAttribute("data-block-key")));
   expect(itemKeys).toHaveLength(3); expect(new Set(itemKeys).size).toBe(3);
   const calloutParagraphs = editor.locator("[data-callout] p[data-block-key]");
   await expect(calloutParagraphs).toHaveCount(2);
