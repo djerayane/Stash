@@ -218,7 +218,10 @@ export async function migrateEmbeddedInstance(options: {
   if (JSON.stringify(sourceAttachments) !== JSON.stringify(staged)) { await rm(stagedAttachments, { recursive: true, force: true }); throw new Error("Attachment checksum validation failed"); }
   await rm(stagedConfiguration, { recursive: true, force: true }); await mkdir(stagedConfiguration, { recursive: false, mode: 0o700 });
   await cp(options.source.paths.configuration, stagedConfiguration, { recursive: true, force: false });
-  if (JSON.stringify(sourceConfiguration) !== JSON.stringify(await attachmentFiles(stagedConfiguration))) throw new Error("Configuration checksum validation failed");
+  if (JSON.stringify(sourceConfiguration) !== JSON.stringify(await attachmentFiles(stagedConfiguration))) {
+    await Promise.all([rm(stagedAttachments, { recursive: true, force: true }), rm(stagedConfiguration, { recursive: true, force: true })]);
+    throw new Error("Configuration checksum validation failed");
+  }
   const pool = new Pool({ connectionString: options.destinationDatabaseUrl, connectionTimeoutMillis: 2_000, max: 1 }); const client = await pool.connect();
   let commitAttempted = false;
   try {
