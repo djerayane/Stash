@@ -22,7 +22,8 @@ describe("core React workflows", () => {
     render(<QueryClientProvider client={client}><MemoryRouter initialEntries={["/app/search?q=release&object=task"]}><SearchPage workspaceId="workspace-1" token="member" fetcher={fetcher as typeof fetch} /></MemoryRouter></QueryClientProvider>);
     expect(await screen.findByRole("link", { name: /Release plan/ })).toHaveAttribute("href", "/app/notes/note-1");
     expect(screen.getByRole("link", { name: /STASH-42/ })).toHaveAttribute("href", "/app/projects/project-1/tasks/STASH-42");
-    expect(screen.getByText(/Ada/)).toBeVisible(); expect(screen.getByText(/In Review/)).toBeVisible();
+    await waitFor(() => expect(screen.getByText(/Ada/)).toBeVisible());
+    expect(screen.getByText(/In Review/)).toBeVisible();
     expect(String(fetcher.mock.calls[0]?.[0])).toContain("q=release&object=task");
     fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Object type" })).toHaveValue(""));
