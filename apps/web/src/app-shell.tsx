@@ -118,6 +118,37 @@ function SignIn({ returnTo }: { readonly returnTo: string }) {
       <p>Your Instance manages access. Use the authentication method configured by your administrator.</p>
       <div className={styles.authMethods} role="group" aria-label="Authentication method">{(["password", "passkey", "recovery", "email", "emailToken", "oidc"] as const).map((item) => <button aria-pressed={method === item} key={item} onClick={() => setMethod(item)} type="button">{item === "recovery" ? "Recovery code" : item === "email" ? "Email recovery" : item === "emailToken" ? "Recovery link" : item === "oidc" ? "OpenID Connect" : item[0]!.toUpperCase() + item.slice(1)}</button>)}</div>
       <form className={styles.signInForm} onSubmit={(event) => { event.preventDefault(); signIn.mutate(); }}>{method !== "oidc" && method !== "emailToken" ? <label>Email<input autoComplete="email" required type="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label> : method === "oidc" ? <label>Organization ID<input required value={organizationId} onChange={(event) => setOrganizationId(event.target.value)} /></label> : null}{method === "password" ? <label>Password<input autoComplete="current-password" minLength={12} required type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label> : method === "recovery" ? <label>Recovery code<input autoComplete="one-time-code" required value={code} onChange={(event) => setCode(event.target.value)} /></label> : method === "emailToken" ? <label>Email recovery token<input autoComplete="one-time-code" required value={code} onChange={(event) => setCode(event.target.value)} /></label> : null}<button className={styles.primaryButton} disabled={signIn.isPending} type="submit">{signIn.isPending ? "Working…" : method === "email" ? "Send recovery email" : method === "oidc" ? "Continue with OpenID Connect" : "Sign in"}</button>{method === "email" && signIn.isSuccess ? <p className={styles.authenticationNotice} role="status">If the account exists, recovery instructions have been queued.</p> : null}{signIn.isError ? <p className={styles.authenticationNotice} role="alert">{signIn.error.message}</p> : null}</form>
+      <p className={styles.authSwitch}>New to this Instance? <Link className={styles.textLink} to={`/sign-up?returnTo=${encodeURIComponent(returnTo)}`}>Create an account</Link></p>
+    </section>
+  </main>;
+}
+
+function SignUp({ returnTo }: { readonly returnTo: string }) {
+  const [name, setName] = useState(""); const [email, setEmail] = useState(""); const [password, setPassword] = useState(""); const [confirmation, setConfirmation] = useState(""); const [enabled, setEnabled] = useState<boolean>();
+  useEffect(() => { let active = true; void fetch("/api/auth/registration").then(async (response) => {
+    const body = await response.json() as { enabled?: boolean }; if (active) setEnabled(response.ok && body.enabled === true);
+  }).catch(() => { if (active) setEnabled(false); }); return () => { active = false; }; }, []);
+  const registration = useMutation({ mutationFn: async () => {
+    if (password !== confirmation) throw new Error("Passwords do not match.");
+    const response = await fetch("/api/auth/registration", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, email, password }) });
+    const body = await response.json() as { token?: string; message?: string };
+    if (!response.ok || !body.token) throw new Error(body.message || "Account registration could not be completed.");
+    localStorage.setItem("stash.member-session", JSON.stringify({ token: body.token })); window.location.assign(returnTo);
+  } });
+  return <main className={styles.signIn}>
+    <div className={styles.signInBrand}><span className={styles.brandMark}>S</span><span>Stash</span></div>
+    <section className={styles.signInPanel} aria-labelledby="sign-up-title">
+      <p className={styles.kicker}>Your own place to think</p><h1 id="sign-up-title">Create an account</h1>
+      <p>Start with a personal Workspace on this Instance. Your information remains portable.</p>
+      {enabled === false ? <p className={styles.authenticationNotice} role="status">Account registration is closed on this Instance. Ask an Instance Administrator for access.</p> : <form className={styles.signInForm} onSubmit={(event) => { event.preventDefault(); registration.mutate(); }}>
+        <label>Name<input autoComplete="name" required value={name} onChange={(event) => setName(event.target.value)} /></label>
+        <label>Email<input autoComplete="email" required type="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label>
+        <label>Password<input autoComplete="new-password" minLength={12} required type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
+        <label>Confirm password<input autoComplete="new-password" minLength={12} required type="password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></label>
+        <button className={styles.primaryButton} disabled={registration.isPending || enabled === undefined} type="submit">{registration.isPending ? "Creating account…" : "Create account"}</button>
+        {registration.isError ? <p className={styles.authenticationNotice} role="alert">{registration.error.message}</p> : null}
+      </form>}
+      <p className={styles.authSwitch}>Already have an account? <Link className={styles.textLink} to={`/sign-in?returnTo=${encodeURIComponent(returnTo)}`}>Sign in</Link></p>
     </section>
   </main>;
 }
@@ -236,9 +267,10 @@ export function AppShell({ session = { status: "loading" } }: AppShellProps) {
   if (session.status === "loading" || session.status === "error") return <StateScreen state={session} />;
   if (session.status === "anonymous") {
     if (location.pathname === "/sign-in") return <SignIn returnTo={resolveReturnTo(location.search)} />;
+    if (location.pathname === "/sign-up") return <SignUp returnTo={resolveReturnTo(location.search)} />;
     return <Navigate replace to={`/sign-in?returnTo=${encodeURIComponent(`${location.pathname}${location.search}`)}`} />;
   }
-  if (location.pathname === "/sign-in") return <Navigate replace to={resolveReturnTo(location.search)} />;
+  if (location.pathname === "/sign-in" || location.pathname === "/sign-up") return <Navigate replace to={resolveReturnTo(location.search)} />;
   if (location.pathname === "/") return <Navigate replace to="/app" />;
   return <WorkspaceShell session={session} />;
 }

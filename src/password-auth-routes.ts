@@ -5,8 +5,9 @@ import {
   type AuthenticatedMember,
   type PasswordAuthService,
 } from "./password-auth.js";
+import type { AuthenticationFailureReporter } from "./account-registration-routes.js";
 
-function errorResponse(response: Parameters<HttpRoute["handle"]>[1], error: unknown): void {
+function errorResponse(response: Parameters<HttpRoute["handle"]>[1], error: unknown, reportFailure?: AuthenticationFailureReporter): void {
   if (error instanceof Error && error.message === "body_too_large") {
     json(response, 413, { error: "body_too_large", message: "Request body exceeds the 64 KiB limit." });
   } else if (error instanceof InvalidAuthenticationInput) {
@@ -16,6 +17,7 @@ function errorResponse(response: Parameters<HttpRoute["handle"]>[1], error: unkn
   } else if (error instanceof SyntaxError) {
     json(response, 400, { error: "invalid_json", message: "Request body must be valid JSON." });
   } else {
+    reportFailure?.({ operation: "password_sign_in", cause: error });
     json(response, 503, { error: "authentication_unavailable", message: "Authentication is temporarily unavailable. Try again." });
   }
 }
@@ -26,7 +28,7 @@ async function authenticate(service: PasswordAuthService, authorization: string 
   return member;
 }
 
-export function passwordAuthRoute(service: PasswordAuthService): HttpRoute {
+export function passwordAuthRoute(service: PasswordAuthService, reportFailure?: AuthenticationFailureReporter): HttpRoute {
   return {
     matches: (_request, url) => url.pathname.startsWith("/api/auth/"),
     async handle(request, response, url) {
@@ -63,7 +65,9 @@ export function passwordAuthRoute(service: PasswordAuthService): HttpRoute {
         }
         return false;
       } catch (error) {
-        errorResponse(response, error);
+        const signInFailureReporter = request.method === "POST" && url.pathname === "/api/auth/sessions"
+          ? reportFailure : undefined;
+        errorResponse(response, error, signInFailureReporter);
         return true;
       }
     },

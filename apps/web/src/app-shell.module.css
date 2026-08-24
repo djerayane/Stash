@@ -63,6 +63,7 @@
 .authMethods button[aria-pressed="true"] { color: var(--stash-color-accent-contrast); background: var(--stash-color-accent); border-color: var(--stash-color-accent); }
 .signInForm label { display: grid; gap: var(--stash-space-2); color: var(--stash-color-muted); font-size: .8rem; font-weight: 700; }
 .signInForm input { min-height: 2.8rem; padding: .7rem .8rem; color: var(--stash-color-ink); background: var(--stash-color-surface); border: 1px solid var(--stash-border-strong); border-radius: var(--stash-radius-sm); }
+.authSwitch { margin: var(--stash-space-6) 0 0; color: var(--stash-color-muted); font-size: .84rem; }
 @keyframes rotate { to { transform: rotate(360deg); } }
 @media (max-width: 760px) {
   .shell { grid-template-columns: 1fr; padding-bottom: 4.5rem; }

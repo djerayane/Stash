@@ -62,6 +62,7 @@ describe("built-in password authentication on a running Stash Instance", () => {
 
   async function run() {
     const database = new ProtocolCompatibleAuthDatabase();
+    const reportedFailures: Array<{ operation: string; cause: unknown }> = [];
     database.account = {
       id: "account-1",
       name: "Ada Lovelace",
@@ -74,8 +75,9 @@ describe("built-in password authentication on a running Stash Instance", () => {
       port: 0,
       instanceAdminToken: "test-instance-admin-token",
       passwordAuth: new PasswordAuthService(database),
+      reportAuthenticationFailure: (event) => reportedFailures.push(event),
     });
-    return { database, baseUrl: instance.url };
+    return { database, baseUrl: instance.url, reportedFailures };
   }
 
   async function signIn(baseUrl: string, password = "correct horse battery staple") {
@@ -182,7 +184,7 @@ describe("built-in password authentication on a running Stash Instance", () => {
   });
 
   it("makes invalid input and recoverable persistence failures visible without leaking secrets", async () => {
-    const { baseUrl, database } = await run();
+    const { baseUrl, database, reportedFailures } = await run();
     const invalid = await fetch(`${baseUrl}/api/auth/sessions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -195,5 +197,6 @@ describe("built-in password authentication on a running Stash Instance", () => {
     assert.equal(failed.status, 503);
     const text = await failed.text();
     assert.doesNotMatch(text, /postgres|secret|correct horse/i);
+    assert.deepEqual(reportedFailures.map(({ operation }) => operation), ["password_sign_in"]);
   });
 });

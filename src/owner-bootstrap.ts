@@ -9,6 +9,9 @@ export interface BootstrapRecord {
   ownerEmail: string;
   passwordHash: string;
   role: "Owner";
+  workspaceId?: string;
+  workspaceName?: string;
+  createdAt?: string;
 }
 
 export interface OwnerBootstrapRepository {
@@ -65,6 +68,9 @@ export class OwnerBootstrapService {
       ownerEmail: value.ownerEmail.trim().toLowerCase(),
       passwordHash: await this.#passwords.hash(value.password),
       role: "Owner",
+      workspaceId: randomUUID(),
+      workspaceName: `${value.organizationName.trim()} Workspace`,
+      createdAt: new Date().toISOString(),
     };
 
     if (!(await this.#repository.createFirstOrganizationOwner(record))) return undefined;

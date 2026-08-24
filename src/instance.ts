@@ -72,6 +72,8 @@ import { mcpRoute } from "./mcp-route.js";
 import type { AgentGrantService } from "./agent-grants.js";
 import { instanceUpgradeRoute } from "./instance-upgrade-routes.js";
 import type { InstanceUpgradeService } from "./instance-upgrade.js";
+import { accountRegistrationRoute, type AuthenticationFailureReporter } from "./account-registration-routes.js";
+import type { AccountRegistrationService } from "./account-registration.js";
 
 export interface DatabaseProbe {
   verifyConnection(): Promise<void>;
@@ -103,6 +105,8 @@ export interface InstanceOptions {
   instanceAdminToken: string;
   ownerBootstrap?: OwnerBootstrapService;
   passwordAuth?: PasswordAuthService;
+  accountRegistration?: AccountRegistrationService;
+  reportAuthenticationFailure?: AuthenticationFailureReporter;
   workspaceProjects?: WorkspaceProjectService;
   notes?: NoteService;
   noteCollaboration?: NoteCollaborationService;
@@ -239,7 +243,8 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
     ...(options.accountRecovery && options.passwordAuth ? [accountRecoveryRoute(options.accountRecovery, {
       resolve: (authorization) => options.passwordAuth!.authenticateBearer(authorization),
     })] : []),
-    ...(options.passwordAuth ? [passwordAuthRoute(options.passwordAuth)] : []),
+    accountRegistrationRoute(options.accountRegistration, options.reportAuthenticationFailure),
+    ...(options.passwordAuth ? [passwordAuthRoute(options.passwordAuth, options.reportAuthenticationFailure)] : []),
     diagnosticsSchemaRoute(diagnostics),
     requireInstanceAdministrator(options.instanceAdminToken, diagnosticsAdminRoute(diagnostics)),
     requireInstanceAdministrator(options.instanceAdminToken, instanceAdminRoute(acceleration)),
@@ -339,7 +344,8 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
             return;
           }
           json(response, 200, { authenticated: true, ...principal });
-        } catch {
+        } catch (error) {
+          options.reportAuthenticationFailure?.({ operation: "client_session", cause: error });
           json(response, 503, { error: "client_session_unavailable", message: "The Member session could not be loaded." });
         }
         return;
