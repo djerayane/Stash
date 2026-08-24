@@ -123,6 +123,12 @@ describe("Portable Workspace import", () => {
     await service.importMarkdown(randomUUID(),actor.localAccountId,markdownZip({"Empty.md":""}));
     assert.equal(repository.committed!.state.notes[0]!.content,"# Untitled");
   });
+  it("imports a zero-byte non-Markdown file as a reported Attachment",async()=>{
+    const repository=new ImportMemory();const stored:Buffer[]=[];const service=new PortableWorkspaceImportService(repository,{async put(_key,content){stored.push(content)},async get(){return Buffer.alloc(0)},async delete(){}});
+    await service.importMarkdown(randomUUID(),actor.localAccountId,markdownZip({"Home.md":"# Home","empty.txt":""}));
+    assert.equal(repository.committed!.state.attachments.length,1);assert.equal(repository.committed!.state.attachments[0]!.filename,"empty.txt");assert.equal(repository.committed!.state.attachments[0]!.size,0);
+    assert.deepEqual(stored,[Buffer.alloc(0)]);assert.ok(repository.committed!.transformations!.some(({object,reason})=>object==="Attachment:empty.txt"&&reason==="attachment_staged"));
+  });
   it("rejects unsafe Markdown ZIP paths without repository or Attachment side effects",async()=>{
     const repository=new ImportMemory();let writes=0;const service=new PortableWorkspaceImportService(repository,{async put(){writes++},async get(){return Buffer.alloc(0)},async delete(){}});
     await assert.rejects(service.importMarkdown(randomUUID(),actor.localAccountId,markdownZip({"../escape.md":"# no"})),InvalidPortableWorkspaceImport);

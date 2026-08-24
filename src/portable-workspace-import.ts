@@ -180,7 +180,7 @@ function markdownBundle(archive: Buffer, destinationOwnerAccountId: string, limi
   for(const note of noteByPath.values()){ const key=posix.basename(note.path,".md").toLowerCase(); basename.set(key,[...(basename.get(key)??[]),note]); }
   const attachmentContent=new Map<string,Buffer>(); const attachments:PortableWorkspaceCanonicalState["attachments"]=[];
   const attachmentByPath=new Map<string,string>();
-  for(const entry of normalized.filter(({path,content})=>!path.toLowerCase().endsWith(".md")&&!path.split("/").some((part)=>part.startsWith("."))&&content.length>0)){
+  for(const entry of normalized.filter(({path})=>!path.toLowerCase().endsWith(".md")&&!path.split("/").some((part)=>part.startsWith(".")))){
     const id=randomUUID(); attachmentByPath.set(entry.path,id); attachmentContent.set(id,entry.content);
     attachments.push({schema:"stash.attachment.v1",id,workspaceId,filename:posix.basename(entry.path),contentType:contentType(entry.path),size:entry.content.length,
       relativePath:`./attachments/${id}/${encodePortableFilename(posix.basename(entry.path))}`,source:"upload",createdAt,createdBy:identity});
@@ -419,7 +419,7 @@ function parseState(content: Buffer): PortableWorkspaceCanonicalState {
       || typeof item.schema !== "string" || !("payload" in item))) throw new InvalidPortableWorkspaceImport("invalid_canonical_state");
   for (const attachment of value.attachments) {
     if (!object(attachment) || typeof attachment.relativePath !== "string" || typeof attachment.size !== "number"
-      || !Number.isSafeInteger(attachment.size) || attachment.size < 1 || typeof attachment.contentType !== "string"
+      || !Number.isSafeInteger(attachment.size) || attachment.size < 0 || typeof attachment.contentType !== "string"
       || !["upload","paste"].includes(String(attachment.source)) || !timestamp(attachment.createdAt)) throw new InvalidPortableWorkspaceImport("invalid_canonical_state");
     const expected = `./attachments/${String(attachment.id)}/${encodePortableFilename(String(attachment.filename))}`;
     if (!uuid.test(String(attachment.id)) || typeof attachment.filename !== "string" || attachment.relativePath !== expected)
