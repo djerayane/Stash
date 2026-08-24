@@ -92,14 +92,16 @@ describe("Portable Workspace import", () => {
   it("preflights an Obsidian vault and reports tags, links, attachments, ambiguity, and skipped metadata",async()=>{
     const repository=new ImportMemory();const storage={async put(){},async get(){return Buffer.alloc(0)},async delete(){}};
     const service=new PortableWorkspaceImportService(repository,storage);const result=await service.importMarkdown(randomUUID(),actor.localAccountId,markdownZip({
-      "Vault/":"", "Vault/Folder/":"", "Vault/Home.md":"---\ntags: [start, knowledge]\n---\n# Home\n[[Folder/Target]] [[Same]] ![[image.png]] [Target](Folder/Target.md) ![Image](image.png)",
+      "Vault/":"", "Vault/Folder/":"", "Vault/Home.md":"---\ntags: [start, knowledge]\n---\n# Home\n[[Folder/Target]] [[Same]] ![[image.png]] [Target](Folder/Target.md) ![Image](image.png) [Missing](Missing.md)",
       "Vault/Folder/Target.md":"# Target","Vault/A/Same.md":"# A","Vault/B/Same.md":"# B","Vault/image.png":Buffer.from([1,2,3]),"Vault/.obsidian/config":"{}",
     }));
     assert.equal(result.status,"imported");assert.equal(repository.committed?.state.notes.length,4);assert.deepEqual(repository.committed?.state.notes[0]?.tags,["start","knowledge"]);
-    assert.equal(repository.committed?.state.attachments.length,1);assert.equal(repository.committed?.state.noteLinks.length,3);
+    assert.equal(repository.committed?.state.attachments.length,1);assert.equal(repository.committed?.state.noteLinks.length,4);
     assert.match(repository.committed?.state.notes[0]?.content??"",/\.\/attachments\//);
     assert.ok(repository.committed?.transformations?.some(({kind,reason})=>kind==="transformed"&&reason==="relative_note_link"));
     assert.ok(repository.committed?.transformations?.some(({kind,reason})=>kind==="transformed"&&reason==="relative_attachment_link"));
+    assert.ok(repository.committed?.transformations?.some(({kind,reason})=>kind==="skipped"&&reason==="relative_note_target_not_found"));
+    assert.ok(repository.committed?.state.noteLinks.some((link)=>link.schema==="stash.note-link.v2"&&link.targetPath==="Missing.md"&&!link.targetNoteId));
     assert.ok(repository.committed?.transformations?.some(({kind,reason})=>kind==="ambiguous"&&reason==="multiple_note_targets"));
     assert.ok(repository.committed?.transformations?.some(({kind,reason})=>kind==="skipped"&&reason==="hidden_vault_metadata"));
   });
@@ -112,9 +114,16 @@ describe("Portable Workspace import", () => {
     assert.equal(repository.committed!.transformations!.filter(({reason})=>reason==="frontmatter_tags_extracted").length,0);
     assert.equal(repository.committed!.transformations!.filter(({reason})=>reason==="frontmatter_preserved").length,2);
   });
+  it("preserves and reports ambiguous YAML tag syntax instead of corrupting it",async()=>{
+    const repository=new ImportMemory();const service=new PortableWorkspaceImportService(repository,{async put(){},async get(){return Buffer.alloc(0)},async delete(){}});
+    await service.importMarkdown(randomUUID(),actor.localAccountId,markdownZip({"Quoted tags.md":"---\ntags: [\"research, design\", roadmap]\n---\n# Plan"}));
+    assert.deepEqual(repository.committed!.state.notes[0]!.tags,[]);assert.match(repository.committed!.state.notes[0]!.content,/tags: \["research, design", roadmap\]/);
+    assert.ok(repository.committed!.transformations!.some(({kind,reason})=>kind==="skipped"&&reason==="frontmatter_tags_unsupported"));
+    assert.ok(!repository.committed!.transformations!.some(({reason})=>reason==="frontmatter_tags_extracted"));
+  });
   it("extracts native Obsidian inline tags without treating code or link fragments as tags",async()=>{
     const repository=new ImportMemory();const service=new PortableWorkspaceImportService(repository,{async put(){},async get(){return Buffer.alloc(0)},async delete(){}});
-    await service.importMarkdown(randomUUID(),actor.localAccountId,markdownZip({"Tags.md":"# Plan\nShip #project/roadmap and #ready-now. Keep `#inline-code`, [jump](#section), and:\n```txt\n#fenced-code\n```"}));
+    await service.importMarkdown(randomUUID(),actor.localAccountId,markdownZip({"Tags.md":"# Plan\nShip #project/roadmap and #ready-now. Keep `#inline-code`, [jump](#section), [[#Heading]], and:\n```txt\n#backtick-code\n````\n\n~~~txt\n#tilde-code\n~~~~"}));
     assert.deepEqual(repository.committed!.state.notes[0]!.tags,["project/roadmap","ready-now"]);
     assert.equal(repository.committed!.transformations!.filter(({reason})=>reason==="inline_tags_extracted").length,1);
   });

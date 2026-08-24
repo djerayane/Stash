@@ -159,8 +159,12 @@ function contentType(path: string): string {
   const extension=posix.extname(path).toLowerCase();
   return new Map([[".png","image/png"],[".jpg","image/jpeg"],[".jpeg","image/jpeg"],[".gif","image/gif"],[".webp","image/webp"],[".svg","image/svg+xml"],[".pdf","application/pdf"],[".txt","text/plain"]]).get(extension) ?? "application/octet-stream";
 }
+function withoutFencedCode(markdown:string):string{
+  let marker="";return markdown.split("\n").map((line)=>{if(marker){const closing=line.match(/^(`+|~+)\s*$/)?.[1]??"";if(closing[0]===marker[0]&&closing.length>=marker.length)marker="";return "";}
+    const opening=line.match(/^(`{3,}|~{3,})/)?.[1]??"";if(opening){marker=opening;return "";}return line;}).join("\n");
+}
 function inlineTags(markdown:string):string[]{
-  const visible=markdown.replace(/^(`{3,})[^\n]*\n[\s\S]*?^\1\s*$/gm,"").replace(/`+[^`\n]*`+/g,"")
+  const visible=withoutFencedCode(markdown).replace(/`+[^`\n]*`+/g,"").replace(/!?\[\[[^\]]*\]\]/g,"")
     .replace(/(!?\[[^\]]*\])\((?:<[^>]*>|[^)]*)\)/g,"$1");
   return [...visible.matchAll(/(?:^|[\s([{'"])(#([\p{L}\p{N}_-]+(?:\/[\p{L}\p{N}_-]+)*))/gu)].map((match)=>match[2]!);
 }
@@ -193,11 +197,13 @@ function markdownBundle(archive: Buffer, destinationOwnerAccountId: string, limi
     if(Buffer.from(text,"utf8").length!==entry.content.length) throw new InvalidPortableWorkspaceImport("invalid_markdown_utf8");
     const tags:string[]=[]; const front=text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n/);
     if(front){ const inline=front[1]!.match(/^tags:\s*\[([^\]]*)\]\s*$/m); const scalar=front[1]!.match(/^tags:\s*([^\n]+)$/m);
-      if(inline) tags.push(...inline[1]!.split(",").map((tag)=>tag.trim().replace(/^['"]|['"]$/g,"")));
-      else if(scalar) tags.push(...scalar[1]!.split(/[ ,]+/).map((tag)=>tag.trim().replace(/^#/,"")));
+      let unsupportedTags=false;
+      if(inline) {unsupportedTags=/['"]/.test(inline[1]!);if(!unsupportedTags)tags.push(...inline[1]!.split(",").map((tag)=>tag.trim()));}
+      else if(scalar) {unsupportedTags=/['"]/.test(scalar[1]!);if(!unsupportedTags)tags.push(...scalar[1]!.split(/[ ,]+/).map((tag)=>tag.trim().replace(/^#/,"")));}
       const block=front[1]!.match(/^tags:\s*\r?\n((?:\s+-\s*[^\n]+\r?\n?)*)/m); if(block) tags.push(...block[1]!.split(/\r?\n/).map((line)=>line.replace(/^\s+-\s*/,"").trim()).filter(Boolean));
       text=`${preserveFrontmatter(front[1]!)}\n\n${text.slice(front[0].length)}`;
       transformations.push({kind:"transformed",object:`Note:${entry.path}`,reason:"frontmatter_preserved"});
+      if(unsupportedTags)transformations.push({kind:"skipped",object:`Note:${entry.path}`,reason:"frontmatter_tags_unsupported"});
       if(tags.length)transformations.push({kind:"transformed",object:`Note:${entry.path}`,reason:"frontmatter_tags_extracted"}); }
     const nativeTags=inlineTags(text);tags.push(...nativeTags);
     if(nativeTags.length)transformations.push({kind:"transformed",object:`Note:${entry.path}`,reason:"inline_tags_extracted"});
@@ -205,7 +211,9 @@ function markdownBundle(archive: Buffer, destinationOwnerAccountId: string, limi
       const raw=angled??plain??""; if(/^(?:[a-z]+:|#|\/)/i.test(raw)) return whole; let decoded:string; try{decoded=decodeURIComponent(raw);}catch{return whole;}
       const target=posix.normalize(posix.join(posix.dirname(entry.path),decoded)); const attachmentId=attachmentByPath.get(target);
       if(attachmentId){transformations.push({kind:"transformed",object:`Link:${entry.path}->${decoded}`,reason:"relative_attachment_link"});return `${embed?"!":""}[${label}](<./attachments/${attachmentId}/${encodePortableFilename(posix.basename(target))}>)`;}
-      const candidate=noteByPath.get(target); if(!embed&&candidate){noteLinks.push({schema:"stash.note-link.v2",id:randomUUID(),workspaceId,sourceNoteId:current.id,targetNoteId:candidate.id,targetPath:candidate.path,candidateNoteIds:[],label:(label.trim()||posix.basename(target,".md")).slice(0,200),revision:1});transformations.push({kind:"transformed",object:`Link:${entry.path}->${decoded}`,reason:"relative_note_link"});}
+      const candidate=noteByPath.get(target); if(!embed){const cleanLabel=(label.trim()||posix.basename(target,".md")).slice(0,200);
+        noteLinks.push({schema:"stash.note-link.v2",id:randomUUID(),workspaceId,sourceNoteId:current.id,...(candidate?{targetNoteId:candidate.id,targetPath:candidate.path}:{targetPath:target}),candidateNoteIds:[],label:cleanLabel,revision:1});
+        transformations.push({kind:candidate?"transformed":"skipped",object:`Link:${entry.path}->${decoded}`,reason:candidate?"relative_note_link":"relative_note_target_not_found"});}
       return whole;
     });
     text=text.replace(/(!?)\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]/g,(whole,embed:string,target:string,label?:string)=>{

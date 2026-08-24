@@ -23,9 +23,10 @@ test("ordinary Members cannot discover or deep-link Organization administration"
 });
 
 test("@a11y imports an Obsidian vault by keyboard and exposes every conversion outcome",async({page})=>{
-  await authenticate(page);let uploads=0;await page.route("**/api/workspace-imports/markdown",async route=>{uploads+=1;expect(route.request().headers().authorization).toBe("Bearer browser-acceptance-member-token");await route.fulfill({status:201,json:{status:"imported",report:{transformed:[{object:"Note:Home.md",reason:"frontmatter_tags_extracted"}],skipped:[{object:".obsidian/config",reason:"hidden_vault_metadata"}],ambiguous:[{object:"Link:Home.md->Idea",reason:"multiple_note_targets"}]}}});});
+  await authenticate(page);let uploads=0;await page.route("**/api/workspace-imports/markdown",async route=>{uploads+=1;expect(route.request().headers().authorization).toBe("Bearer browser-acceptance-member-token");await route.fulfill({status:201,json:{status:"imported",report:{workspaceId:"99999999-9999-4999-8999-999999999999",transformed:[{object:"Note:Home.md",reason:"frontmatter_tags_extracted"}],skipped:[{object:".obsidian/config",reason:"hidden_vault_metadata"}],ambiguous:[{object:"Link:Home.md->Idea",reason:"multiple_note_targets"}]}}});});
   await page.emulateMedia({reducedMotion:"reduce"});await page.goto("/app/settings/data");await page.getByLabel("Markdown or Obsidian vault").focus();await page.keyboard.press("Space");await page.getByLabel("ZIP archive").setInputFiles({name:"vault.zip",mimeType:"application/zip",buffer:Buffer.from("fixture")});await page.getByRole("button",{name:"Validate and import"}).focus();await page.keyboard.press("Enter");
   await expect(page.getByRole("heading",{name:"Import committed"})).toBeVisible();await expect(page.getByRole("heading",{name:"Ambiguous (1)"})).toBeVisible();expect(uploads).toBe(1);expect((await new AxeBuilder({page}).analyze()).violations).toEqual([]);
+  await page.getByRole("button",{name:"Open imported Workspace"}).click();await expect(page).toHaveURL(/\/app\/notes$/);await expect(page.getByText("Imported Workspace",{exact:true})).toBeVisible();
 });
 
 test("confirms recovery-code replacement and Role authority changes before mutation", async ({ page }) => {
