@@ -165,9 +165,10 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
   const location = useLocation();
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
+  const [activeWorkspace,setActiveWorkspace]=useState(session.workspace);
   const shellRef = useRef<HTMLDivElement>(null);
   const mainRef = useRef<HTMLElement>(null);
-  const workspaceName = displayLabel(session.workspace.name, "Personal workspace");
+  const workspaceName = displayLabel(activeWorkspace.name, "Personal workspace");
   const memberName = displayLabel(session.member.name, displayLabel(session.member.email, "Member"));
   const memberEmail = displayLabel(session.member.email, "Signed in");
   useGSAP(() => {
@@ -200,11 +201,11 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
         : <main id="workspace-content" className={styles.content} ref={mainRef} tabIndex={-1}>
         <Routes>
           <Route path="/app" element={<EmptyHome />} />
-          <Route path="/app/inbox" element={<InboxPage workspaceId={session.workspace.id ?? ""} token={session.token ?? ""} />} />
-          <Route path="/app/notes" element={<NotesPage workspaceId={session.workspace.id ?? ""} token={session.token ?? ""} />} />
+          <Route path="/app/inbox" element={<InboxPage workspaceId={activeWorkspace.id ?? ""} token={session.token ?? ""} />} />
+          <Route path="/app/notes" element={<NotesPage workspaceId={activeWorkspace.id ?? ""} token={session.token ?? ""} />} />
           <Route path="/app/notes/new" element={<Navigate replace to="/app/notes" />} />
           <Route path="/app/notes/:noteId/history" element={<NoteHistoryPage token={session.token ?? ""} />} />
-          <Route path="/app/tasks" element={<ProjectGatewayPage workspaceId={session.workspace.id ?? ""} token={session.token ?? ""} />} />
+          <Route path="/app/tasks" element={<ProjectGatewayPage workspaceId={activeWorkspace.id ?? ""} token={session.token ?? ""} />} />
           <Route path="/app/projects/:projectId/boards" element={<BoardsPage token={session.token ?? ""} />} />
           <Route path="/app/projects/:projectId/boards/:boardId" element={<BoardsPage token={session.token ?? ""} />} />
           <Route path="/app/notes/:targetId/discussions" element={<DiscussionsPage targetKind="note" token={session.token ?? ""} />} />
@@ -215,12 +216,12 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
           <Route path="/app/projects/:projectId/notifications" element={<ProjectNotificationsPage token={session.token} />} />
           <Route path="/app/settings/members" element={<MemberAdministrationPage administrations={session.organizationAdministrations} activeOrganizationId={session.activeOrganizationId} currentMemberId={session.member.id} token={session.token} />} />
           <Route path="/app/settings" element={<MemberSettingsPage token={session.token ?? ""} />} />
-          <Route path="/app/settings/data" element={<WorkspaceDataPage token={session.token ?? ""} workspaceId={session.workspace.id ?? ""} memberId={session.member.id} />} />
+          <Route path="/app/settings/data" element={<WorkspaceDataPage token={session.token ?? ""} workspaceId={activeWorkspace.id ?? ""} memberId={session.member.id} onOpenWorkspace={(workspaceId)=>{setActiveWorkspace({id:workspaceId,name:"Imported Workspace"});navigate("/app/notes");}} />} />
           <Route path="/app/settings/organization" element={session.organizationAdministrations?.length ? <OrganizationSettingsPage token={session.token ?? ""} administrations={session.organizationAdministrations} activeOrganizationId={session.activeOrganizationId} /> : <Navigate replace to="/app/settings" />} />
           <Route path="/app/settings/imported-identities" element={<ImportedIdentitiesPage administrations={session.organizationAdministrations} currentMember={session.member} token={session.token} />} />
-          <Route path="/app/activity" element={<ActivityPage workspaceId={session.workspace.id ?? ""} token={session.token ?? ""} />} />
+          <Route path="/app/activity" element={<ActivityPage workspaceId={activeWorkspace.id ?? ""} token={session.token ?? ""} />} />
           <Route path="/app/notifications" element={<NotificationsPage token={session.token ?? ""} />} />
-          <Route path="/app/search" element={<SearchPage workspaceId={session.workspace.id ?? ""} token={session.token ?? ""} />} />
+          <Route path="/app/search" element={<SearchPage workspaceId={activeWorkspace.id ?? ""} token={session.token ?? ""} />} />
           <Route path="/app/settings/agents" element={<AgentGrantsPage organizationId={session.activeOrganizationId} token={session.token} />} />
           <Route path="*" element={<PlaceholderPage workspaceName={workspaceName} title="Not found" description="This Workspace route does not exist." action="Go home" actionTo="/app" />} />
         </Routes>

@@ -5,11 +5,12 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { deflateRawSync } from "node:zlib";
 import { Pool } from "pg";
 
 import { startInstance } from "../src/instance.js";
 import { PortableWorkspaceExportService, type PortableWorkspaceExportSnapshot } from "../src/portable-workspace-export.js";
-import { PortableWorkspaceImportService, publishedPortableWorkspaceExportSchemas, type PortableWorkspaceImportBundle, type PortableWorkspaceImportReport, type PortableWorkspaceImportRepository } from "../src/portable-workspace-import.js";
+import { InvalidPortableWorkspaceImport, PortableWorkspaceImportService, PortableWorkspaceImportTooLarge, publishedPortableWorkspaceExportSchemas, type PortableWorkspaceImportBundle, type PortableWorkspaceImportReport, type PortableWorkspaceImportRepository } from "../src/portable-workspace-import.js";
 import { LocalAttachmentStorage } from "../src/attachments.js";
 import { PostgresDatabase } from "../src/postgres-database.js";
 import { createAuthenticationSecretCodec } from "../src/authentication-secrets.js";
@@ -81,8 +82,82 @@ function storedFiles(archive: Buffer): Map<string, Buffer> {
     cursor += 46 + nameLength + extraLength + commentLength; }
   return files;
 }
+function markdownZip(files:Record<string,string|Buffer>,compress=false):Buffer{
+  const locals:Buffer[]=[];const centrals:Buffer[]=[];let offset=0;
+  for(const [path,value] of Object.entries(files)){const name=Buffer.from(path);const content=Buffer.isBuffer(value)?value:Buffer.from(value);const stored=compress?deflateRawSync(content):content;const method=compress?8:0;const local=Buffer.alloc(30+name.length);local.writeUInt32LE(0x04034b50);local.writeUInt16LE(20,4);local.writeUInt16LE(0x800,6);local.writeUInt16LE(method,8);local.writeUInt32LE(stored.length,18);local.writeUInt32LE(content.length,22);local.writeUInt16LE(name.length,26);name.copy(local,30);locals.push(local,stored);const central=Buffer.alloc(46+name.length);central.writeUInt32LE(0x02014b50);central.writeUInt16LE(20,4);central.writeUInt16LE(20,6);central.writeUInt16LE(0x800,8);central.writeUInt16LE(method,10);central.writeUInt32LE(stored.length,20);central.writeUInt32LE(content.length,24);central.writeUInt16LE(name.length,28);central.writeUInt32LE(offset,42);name.copy(central,46);centrals.push(central);offset+=local.length+stored.length;}
+  const directory=Buffer.concat(centrals);const end=Buffer.alloc(22);end.writeUInt32LE(0x06054b50);end.writeUInt16LE(centrals.length,8);end.writeUInt16LE(centrals.length,10);end.writeUInt32LE(directory.length,12);end.writeUInt32LE(offset,16);return Buffer.concat([...locals,directory,end]);
+}
 
 describe("Portable Workspace import", () => {
+  it("preflights an Obsidian vault and reports tags, links, attachments, ambiguity, and skipped metadata",async()=>{
+    const repository=new ImportMemory();const storage={async put(){},async get(){return Buffer.alloc(0)},async delete(){}};
+    const service=new PortableWorkspaceImportService(repository,storage);const result=await service.importMarkdown(randomUUID(),actor.localAccountId,markdownZip({
+      "Vault/":"", "Vault/Folder/":"", "Vault/Home.md":"---\ntags: [start, knowledge]\n---\n# Home\n[[Folder/Target]] [[Same]] ![[image.png]] [Target](Folder/Target.md) ![Image](image.png) [Missing](Missing.md)",
+      "Vault/Folder/Target.md":"# Target","Vault/A/Same.md":"# A","Vault/B/Same.md":"# B","Vault/image.png":Buffer.from([1,2,3]),"Vault/.obsidian/config":"{}",
+    }));
+    assert.equal(result.status,"imported");assert.equal(repository.committed?.state.notes.length,4);assert.deepEqual(repository.committed?.state.notes[0]?.tags,["start","knowledge"]);
+    assert.equal(repository.committed?.state.attachments.length,1);assert.equal(repository.committed?.state.noteLinks.length,4);
+    assert.match(repository.committed?.state.notes[0]?.content??"",/\.\/attachments\//);
+    assert.ok(repository.committed?.transformations?.some(({kind,reason})=>kind==="transformed"&&reason==="relative_note_link"));
+    assert.ok(repository.committed?.transformations?.some(({kind,reason})=>kind==="transformed"&&reason==="relative_attachment_link"));
+    assert.ok(repository.committed?.transformations?.some(({kind,reason})=>kind==="skipped"&&reason==="relative_note_target_not_found"));
+    assert.ok(repository.committed?.state.noteLinks.some((link)=>link.schema==="stash.note-link.v2"&&link.targetPath==="Missing.md"&&!link.targetNoteId));
+    assert.ok(repository.committed?.transformations?.some(({kind,reason})=>kind==="ambiguous"&&reason==="multiple_note_targets"));
+    assert.ok(repository.committed?.transformations?.some(({kind,reason})=>kind==="skipped"&&reason==="hidden_vault_metadata"));
+  });
+  it("preserves frontmatter properties while reporting only tags that were actually extracted",async()=>{
+    const repository=new ImportMemory();const service=new PortableWorkspaceImportService(repository,{async put(){},async get(){return Buffer.alloc(0)},async delete(){}});
+    await service.importMarkdown(randomUUID(),actor.localAccountId,markdownZip({"Properties.md":"---\ntitle: Durable title\naliases: [One, Two]\ncssclasses: wide\nexample: \"```\"\n---\n# Body","No tags.md":"---\ntitle: Still here\n---\nText"}));
+    const [properties,noTags]=repository.committed!.state.notes;
+    assert.match(properties!.content,/````yaml\ntitle: Durable title\naliases: \[One, Two\]\ncssclasses: wide\nexample: "```"\n````/);
+    assert.match(noTags!.content,/```yaml\ntitle: Still here\n```/);
+    assert.equal(repository.committed!.transformations!.filter(({reason})=>reason==="frontmatter_tags_extracted").length,0);
+    assert.equal(repository.committed!.transformations!.filter(({reason})=>reason==="frontmatter_preserved").length,2);
+  });
+  it("preserves and reports ambiguous YAML tag syntax instead of corrupting it",async()=>{
+    const repository=new ImportMemory();const service=new PortableWorkspaceImportService(repository,{async put(){},async get(){return Buffer.alloc(0)},async delete(){}});
+    await service.importMarkdown(randomUUID(),actor.localAccountId,markdownZip({"Quoted tags.md":"---\ntags: [\"research, design\", roadmap]\n---\n# Plan"}));
+    assert.deepEqual(repository.committed!.state.notes[0]!.tags,[]);assert.match(repository.committed!.state.notes[0]!.content,/tags: \["research, design", roadmap\]/);
+    assert.ok(repository.committed!.transformations!.some(({kind,reason})=>kind==="skipped"&&reason==="frontmatter_tags_unsupported"));
+    assert.ok(!repository.committed!.transformations!.some(({reason})=>reason==="frontmatter_tags_extracted"));
+  });
+  it("extracts native Obsidian inline tags without treating code or link fragments as tags",async()=>{
+    const repository=new ImportMemory();const service=new PortableWorkspaceImportService(repository,{async put(){},async get(){return Buffer.alloc(0)},async delete(){}});
+    await service.importMarkdown(randomUUID(),actor.localAccountId,markdownZip({"Tags.md":"# Plan\nShip #project/roadmap and #ready-now. Keep `#inline-code`, [jump](#section), [[#Heading]], and:\n```txt\n#backtick-code\n````\n\n~~~txt\n#tilde-code\n~~~~"}));
+    assert.deepEqual(repository.committed!.state.notes[0]!.tags,["project/roadmap","ready-now"]);
+    assert.equal(repository.committed!.transformations!.filter(({reason})=>reason==="inline_tags_extracted").length,1);
+  });
+  it("imports an empty Markdown file as an untitled Note",async()=>{
+    const repository=new ImportMemory();const service=new PortableWorkspaceImportService(repository,{async put(){},async get(){return Buffer.alloc(0)},async delete(){}});
+    await service.importMarkdown(randomUUID(),actor.localAccountId,markdownZip({"Empty.md":""}));
+    assert.equal(repository.committed!.state.notes[0]!.content,"# Untitled");
+  });
+  it("imports a zero-byte non-Markdown file as a reported Attachment",async()=>{
+    const repository=new ImportMemory();const stored:Buffer[]=[];const service=new PortableWorkspaceImportService(repository,{async put(_key,content){stored.push(content)},async get(){return Buffer.alloc(0)},async delete(){}});
+    await service.importMarkdown(randomUUID(),actor.localAccountId,markdownZip({"Home.md":"# Home","empty.txt":""}));
+    assert.equal(repository.committed!.state.attachments.length,1);assert.equal(repository.committed!.state.attachments[0]!.filename,"empty.txt");assert.equal(repository.committed!.state.attachments[0]!.size,0);
+    assert.deepEqual(stored,[Buffer.alloc(0)]);assert.ok(repository.committed!.transformations!.some(({object,reason})=>object==="Attachment:empty.txt"&&reason==="attachment_staged"));
+  });
+  it("rejects unsafe Markdown ZIP paths without repository or Attachment side effects",async()=>{
+    const repository=new ImportMemory();let writes=0;const service=new PortableWorkspaceImportService(repository,{async put(){writes++},async get(){return Buffer.alloc(0)},async delete(){}});
+    await assert.rejects(service.importMarkdown(randomUUID(),actor.localAccountId,markdownZip({"../escape.md":"# no"})),InvalidPortableWorkspaceImport);
+    assert.equal(repository.committed,undefined);assert.equal(writes,0);
+  });
+  it("rejects Markdown archives whose combined expanded content exceeds the safe limit",async()=>{
+    const repository=new ImportMemory();let writes=0;const service=new PortableWorkspaceImportService(repository,{async put(){writes++},async get(){return Buffer.alloc(0)},async delete(){}},{maxArchiveBytes:400,maxEntries:10,maxFileBytes:300});
+    await assert.rejects(service.importMarkdown(randomUUID(),actor.localAccountId,markdownZip({"One.md":"# One\n"+"a".repeat(195),"Two.md":"# Two\n"+"b".repeat(195)},true)),PortableWorkspaceImportTooLarge);
+    assert.equal(repository.committed,undefined);assert.equal(writes,0);
+  });
+  it("imports Markdown through a running Instance as the authenticated Member",async()=>{
+    const repository=new ImportMemory();const service=new PortableWorkspaceImportService(repository,{async put(){},async get(){return Buffer.alloc(0)},async delete(){}});
+    const instance=await startInstance({database:{async verifyConnection(){},async close(){}},host:"127.0.0.1",port:0,instanceAdminToken:"admin",portableWorkspaceImports:service,
+      memberAccess:{async authenticateBearer(value){return value==="Bearer member"?{accountId:actor.localAccountId,sessionId:"session"}:undefined;}}});
+    try{const archive=markdownZip({"Home.md":"# Home"});
+      assert.equal((await fetch(`${instance.url}/api/workspace-imports/markdown`,{method:"POST",headers:{authorization:"Bearer admin","idempotency-key":randomUUID()},body:new Uint8Array(archive)})).status,401);
+      const response=await fetch(`${instance.url}/api/workspace-imports/markdown`,{method:"POST",headers:{authorization:"Bearer member","idempotency-key":randomUUID()},body:new Uint8Array(archive)});
+      assert.equal(response.status,201);assert.equal(repository.committed?.destinationOwnerAccountId,actor.localAccountId);
+    }finally{await instance.close();}
+  });
   it("keeps every published Portable Workspace Export schema in the compatibility registry", () => {
     assert.deepEqual(publishedPortableWorkspaceExportSchemas, ["stash.portable-workspace-export.v1"]);
   });

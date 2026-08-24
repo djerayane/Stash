@@ -4321,7 +4321,7 @@ export class PostgresDatabase implements
         await this.#recordPortableProjection(client,item.kind as any,item.id,item.schema as any,item.payload);
       const ownership: ImportTransformation = {kind:"transformed",object:`Workspace:${state.workspace.id}`,
         reason:`ownership_mapped:${bundle.destinationOwnerAccountId}`};
-      const transformations: ImportTransformation[] = [ownership,...bundle.identityStubs.map((identity) => ({ kind:"transformed" as const,
+      const transformations: ImportTransformation[] = [ownership,...(bundle.transformations ?? []),...bundle.identityStubs.map((identity) => ({ kind:"transformed" as const,
         object:`Identity:${identity.sourceAccountId}`,reason:"identity_stub_created" })),...integrationTransformations];
       const report: PortableWorkspaceImportReport = { schema:"stash.portable-workspace-import-report.v1",importId,
         workspaceId:state.workspace.id,archiveSha256:bundle.archiveSha256,identityStubs:bundle.identityStubs,
