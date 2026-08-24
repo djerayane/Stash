@@ -4633,19 +4633,19 @@ export class PostgresDatabase implements
          FROM stash_portable_projection_outbox projection
          WHERE projection.object_kind IN ('Project','Workflow','GuestProjectAccess','RepositoryConnection','Discussion','DiscussionWorkLink')
            AND (
-             (projection.object_kind='Project' AND projection.payload->>'workspaceId'=$1
+             (projection.object_kind='Project' AND projection.payload->>'workspaceId'=$1::text
                AND ($2::boolean OR projection.object_id=ANY($3::uuid[])))
              OR (projection.object_kind='Workflow'
-               AND (projection.payload->>'projectId')::uuid IN (SELECT id FROM stash_projects WHERE workspace_id=$1)
+               AND (projection.payload->>'projectId')::uuid IN (SELECT id FROM stash_projects WHERE workspace_id=$1::uuid)
                AND ($2::boolean OR (projection.payload->>'projectId')::uuid=ANY($3::uuid[])))
              OR (projection.object_kind='GuestProjectAccess' AND $2::boolean AND EXISTS (
                SELECT 1 FROM jsonb_array_elements(projection.payload->'projects') selected
-               WHERE selected->>'workspaceId'=$1))
-             OR (projection.object_kind IN ('Discussion','DiscussionWorkLink') AND projection.payload->>'workspaceId'=$1
+               WHERE selected->>'workspaceId'=$1::text))
+             OR (projection.object_kind IN ('Discussion','DiscussionWorkLink') AND projection.payload->>'workspaceId'=$1::text
                AND $2::boolean)
              OR (projection.object_kind='RepositoryConnection' AND $2::boolean AND EXISTS (
                SELECT 1 FROM jsonb_array_elements_text(projection.payload->'projectIds') project_id
-               WHERE project_id::uuid IN (SELECT id FROM stash_projects WHERE workspace_id=$1)))
+               WHERE project_id::uuid IN (SELECT id FROM stash_projects WHERE workspace_id=$1::uuid)))
            )
          ORDER BY projection.object_kind,projection.object_id,projection.revision DESC`,
         [workspaceId, permission.member, guestProjectIds]);
