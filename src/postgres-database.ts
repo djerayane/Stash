@@ -57,7 +57,6 @@ export interface IdlePostgresClientFailure {
 export interface PostgresDatabaseOptions {
   pool?: Pool;
   reportIdleClientFailure?: (diagnostic: IdlePostgresClientFailure) => void;
-  registrationCheckpoint?: (stage: "session_inserted") => void | Promise<void>;
 }
 
 function safeIdleClientFailure(cause: unknown): IdlePostgresClientFailure {
@@ -250,7 +249,6 @@ export class PostgresDatabase implements
 {
   readonly #pool: Pool;
   readonly #authenticationSecrets: AuthenticationSecretCodec;
-  readonly #registrationCheckpoint?: PostgresDatabaseOptions["registrationCheckpoint"];
 
   constructor(connectionString: string, authenticationSecrets: AuthenticationSecretCodec, options: PostgresDatabaseOptions = {}) {
     this.#pool = options.pool ?? new Pool({ connectionString, connectionTimeoutMillis: 2_000 });
@@ -262,7 +260,6 @@ export class PostgresDatabase implements
     });
     this.#pool.on("error", (cause) => report(safeIdleClientFailure(cause)));
     this.#authenticationSecrets = authenticationSecrets;
-    this.#registrationCheckpoint = options.registrationCheckpoint;
   }
 
   async verifyConnection(): Promise<void> {
@@ -342,7 +339,6 @@ export class PostgresDatabase implements
         createdBy: { localAccountId: record.account.id, displayName: record.account.name },
       });
       await this.#insertSession(client, record.session);
-      await this.#registrationCheckpoint?.("session_inserted");
       return true;
     });
   }
