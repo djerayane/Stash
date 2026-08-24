@@ -56,6 +56,7 @@ class PGlitePoolAdapter {
   #engine: PGlite;
   constructor(engine: PGlite) { this.#engine = engine; }
   get engine(): PGlite { return this.#engine; }
+  on() { return this; }
   async query<T extends Record<string, unknown> = Record<string, unknown>>(sql: string, values?: unknown[]) {
     const release = await this.#mutex.acquire();
     try { return await queryEngine<T>(this.#engine, sql, values); }
