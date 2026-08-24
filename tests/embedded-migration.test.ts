@@ -15,6 +15,8 @@ import { deriveEmailRecoveryLookup } from "../src/account-recovery.js";
 import { InvitationService } from "../src/invitations.js";
 import { PasswordAuthService, hashPassword } from "../src/password-auth.js";
 import { paragraphDocument } from "../src/rich-text.js";
+import { PortableWorkspaceExportService } from "../src/portable-workspace-export.js";
+import { PortableWorkspaceImportService } from "../src/portable-workspace-import.js";
 
 const key = () => randomBytes(32).toString("base64");
 const recoveryCodeLookup = (code: string) => createHash("sha256").update(`stash:recovery-code:v1\0${code}`).digest("base64");
@@ -111,6 +113,20 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
       }
       await source.database.saveOidcConfiguration({ organizationId, issuer: "https://identity.example.test", clientId: "stash-migration", clientSecret: "oidc-secret" });
       assert.equal(await source.database.linkOidcIdentity({ organizationId, issuer: "https://identity.example.test", subject: "ada-subject" }, ownerId), true);
+      const importedWorkspaceId = randomUUID(); const importedNoteId = randomUUID(); const importedAccountId = randomUUID(); const importId = randomUUID();
+      const importedActor = { localAccountId: importedAccountId, displayName: "Imported Author" };
+      const portable = await new PortableWorkspaceExportService({ async readExportSnapshot() { return { status: "found" as const, snapshot: {
+        workspace: { schema: "stash.workspace.v1" as const, id: importedWorkspaceId, name: "Imported Workspace",
+          owner: { type: "personal" as const, identity: importedActor }, createdBy: importedActor },
+        notes: [{ schema: "stash.note.v1" as const, id: importedNoteId, workspaceId: importedWorkspaceId, content: "Imported identity",
+          tags: [], createdAt: "2026-08-24T09:20:00.000Z", createdBy: importedActor }], tasks: [], boards: [], attachments: [],
+        noteLocations: [{ schema: "stash.note-location.v1" as const, noteId: importedNoteId, workspaceId: importedWorkspaceId,
+          path: `notes/${importedNoteId}.md`, aliases: [], revision: 1 }], noteLinks: [], activities: [], noteHistory: [], durableObjects: [],
+      } }; } }).export(ownerId, importedWorkspaceId);
+      assert.equal(portable.status, "exported"); if (portable.status !== "exported") throw new Error("portable export failed");
+      assert.equal((await new PortableWorkspaceImportService(source.database, new LocalAttachmentStorage(source.paths.attachments))
+        .import(importId, ownerId, portable.archive)).status, "imported");
+      assert.equal((await source.database.listPendingImportedIdentities(ownerId))[0]?.sourceAccountId, importedAccountId);
       const workspaceId = randomUUID(); const noteId = randomUUID();
       await source.database.createWorkspace({ id: workspaceId, name: "Migrated Workspace", owner: { type: "organization", id: organizationId }, createdByMemberId: ownerId },
         { localAccountId: ownerId, displayName: "Ada" });
@@ -148,6 +164,8 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
         }
         assert.deepEqual(await migrated.findOidcConfiguration(organizationId), { organizationId, issuer: "https://identity.example.test", clientId: "stash-migration", clientSecret: "oidc-secret" });
         assert.equal((await migrated.findOidcIdentity({ organizationId, issuer: "https://identity.example.test", subject: "ada-subject" }))?.accountId, ownerId);
+        const pendingImported = await migrated.listPendingImportedIdentities(ownerId);
+        assert.equal(pendingImported.some((identity) => identity.importId === importId && identity.sourceAccountId === importedAccountId), true);
         assert.equal((await migrated.listNoteHistory(ownerId, noteId)).status, "found"); assert.equal((await migrated.listWorkspaceActivity(ownerId, workspaceId)).status, "found");
         if (attachment.status === "created") assert.deepEqual((await new AttachmentService(migrated, new LocalAttachmentStorage(destinationAttachments))
           .get(ownerId, attachment.record.id))?.content, attachmentBytes);
