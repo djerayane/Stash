@@ -40,6 +40,18 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run check
       - run: pnpm run test
+      - name: Install PostgreSQL 17 client tools
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail --show-error --silent -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install --yes postgresql-client-17
+      - name: Verify shared adapter parity and standalone migration on PostgreSQL 17
+        run: node --import tsx --test --test-concurrency=1 tests/instance-store-contract.test.ts tests/embedded-migration.test.ts
+        env:
+          STASH_TEST_DATABASE_URL: postgresql://stash:stash-ci-only@127.0.0.1:5432/stash
       - name: Verify PostgreSQL account registration transaction
         run: node --import tsx --test tests/postgres-account-registration.test.ts
         env:

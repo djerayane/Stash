@@ -35,6 +35,7 @@ class FakeSource implements InstanceBackupSource {
 
 class Probe implements DatabaseProbe { async verifyConnection() {} async close() {} }
 class FakeRestoreTarget implements InstanceBackupRestoreTarget {
+  readonly databaseFormat = "postgresql-custom" as const;
   readonly calls: string[] = [];
   commitFailure: Error | undefined;
   rollbackFailure: Error | undefined;
@@ -71,6 +72,38 @@ describe("coordinated Instance Backup", () => {
     }
   });
 
+  it("closes the mutation boundary and drains in-flight work before capturing coordinated state", async () => {
+    const root = await mkdtemp(join(tmpdir(), "stash-backup-drain-")); const source = new FakeSource();
+    const service = new InstanceBackupService(source, { masterKey }); let releaseMutation!: () => void; let enteredBarrier!: () => void;
+    const mutation = new Promise<void>((resolve) => { releaseMutation = () => { source.calls.push("mutation_committed"); resolve(); }; });
+    const barrierEntered = new Promise<void>((resolve) => { enteredBarrier = resolve; });
+    service.setBackupUnavailableBarrier(async () => { enteredBarrier(); await mutation; });
+    const backup = service.create(join(root, "backup")); await barrierEntered;
+    assert.equal(service.availability(), "backup_in_progress"); assert.deepEqual(source.calls, []);
+    releaseMutation(); await backup;
+    assert.deepEqual(source.calls, ["mutation_committed", "database", "attachments", "configuration"]);
+  });
+
+  it("wires the running Instance drain without making the backup request wait on itself", async () => {
+    const root = await mkdtemp(join(tmpdir(), "stash-backup-instance-drain-")); const source = new FakeSource();
+    const service = new InstanceBackupService(source, { masterKey }); let releaseRequest!: () => void; let enteredRequest!: () => void;
+    const requestGate = new Promise<void>((resolve) => { releaseRequest = resolve; });
+    const requestEntered = new Promise<void>((resolve) => { enteredRequest = resolve; });
+    const database: DatabaseProbe = { async verifyConnection() {}, async close() {}, async resolveClientSessionPrincipal() {
+      enteredRequest(); await requestGate; return { member: { id: "member", name: "Member", email: "member@stash.test" },
+        workspace: { id: "workspace", name: "Workspace" }, capabilities: [] }; } };
+    const instance = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin",
+      memberAccess: { async authenticateBearer() { return { accountId: "member", sessionId: "session" }; } },
+      instanceBackups: service, instanceBackupRoot: join(root, "backups") }); instances.push(instance);
+    const active = fetch(`${instance.url}/api/client-session`, { headers: { authorization: "Bearer member" } }); await requestEntered;
+    const backup = fetch(`${instance.url}/api/instance/backups`, { method: "POST", headers: { authorization: "Bearer admin" } });
+    while (service.availability() !== "backup_in_progress") await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(source.calls, []);
+    assert.equal((await fetch(`${instance.url}/api/v1/workspaces`, { method: "POST", headers: { authorization: "Bearer member" }, body: "{}" })).status, 503);
+    releaseRequest(); assert.equal((await active).status, 200); assert.equal((await backup).status, 201);
+    assert.deepEqual(source.calls, ["database", "attachments", "configuration"]);
+  });
+
   it("creates, verifies, and restores an Instance with no Attachments", async () => {
     const root = await mkdtemp(join(tmpdir(), "stash-backup-empty-"));
     const source = new FakeSource(); source.emptyAttachments = true;
@@ -81,6 +114,15 @@ describe("coordinated Instance Backup", () => {
     target.prepareAttachments = async (sourcePath, paths) => { assert.match(sourcePath, /attachments$/); assert.deepEqual(paths, []); target.calls.push("prepare"); return "prepared"; };
     assert.deepEqual(await service.restore(path, target, { dryRun: false }), { status: "restored" });
     assert.deepEqual(target.calls, ["configuration", "prepare", "snapshot", "database", "commit", "discard"]);
+  });
+
+  it("rejects a database adapter mismatch during dry-run before restore preparation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "stash-backup-adapter-mismatch-"));
+    const path = join(root, "backup"); const service = new InstanceBackupService(new FakeSource(), { masterKey });
+    await service.create(path); const target = new FakeRestoreTarget();
+    Object.defineProperty(target, "databaseFormat", { value: "pglite-data-directory-v1" });
+    await assert.rejects(service.restore(path, target, { dryRun: true }), /database storage adapter/i);
+    assert.deepEqual(target.calls, []);
   });
 
   it("rejects misspelled restore flags and surplus CLI arguments before reading configuration or restoring", () => {

@@ -6,6 +6,8 @@ import { dirname, join, resolve, sep } from "node:path";
 export const instanceBackupSchema = "stash.instance-backup.v1" as const;
 
 export interface InstanceBackupSource {
+  /** Storage-adapter-native database snapshot format. */
+  readonly databaseFormat?: "postgresql-custom" | "pglite-data-directory-v1";
   /** A transactionally consistent representation containing all PostgreSQL state. */
   captureDatabase(destination: string): Promise<void>;
   /** Attachment keys are immutable once committed, so copying after the DB snapshot is safe. */
@@ -14,6 +16,7 @@ export interface InstanceBackupSource {
   captureConfiguration(): Promise<Record<string, string | number | boolean | null>>;
 }
 export interface InstanceBackupRestoreTarget {
+  readonly databaseFormat: "postgresql-custom" | "pglite-data-directory-v1";
   validateConfiguration(configuration: Record<string, unknown>): Promise<void>;
   prepareAttachments(source: string, paths: ReadonlyArray<string>): Promise<unknown>;
   snapshotDatabase(destination: string): Promise<void>;
@@ -29,7 +32,7 @@ interface BackupManifest {
   createdAt: string;
   instanceVersion: string;
   consistency: "coordinated";
-  database: { format: "postgresql-custom"; path: "database.dump" };
+  database: { format: "postgresql-custom" | "pglite-data-directory-v1"; path: "database.dump" };
   masterKey: { required: true; verification: string; included: false };
   files: BackupFile[];
   verification?: { verifiedAt: string; proof: string };
@@ -62,6 +65,15 @@ function parseMasterKey(encoded: string): Buffer {
   if (key.length !== 32 || key.toString("base64") !== encoded) throw new Error("INSTANCE_MASTER_KEY must be a base64-encoded 32-byte key");
   return key;
 }
+function containsEncodedSecret(value: unknown, secret: string): boolean {
+  if (typeof value === "string") {
+    if (value.includes(secret)) return true;
+    const decoded = Buffer.from(value, "base64");
+    return decoded.length > 0 && decoded.toString("base64") === value && decoded.toString("utf8").includes(secret);
+  }
+  if (Array.isArray(value)) return value.some((item) => containsEncodedSecret(item, secret));
+  return Boolean(value && typeof value === "object" && Object.values(value).some((item) => containsEncodedSecret(item, secret)));
+}
 function safeRelativePath(path: string): string {
   if (!path || path.startsWith("/") || path.includes("\\") || path.split("/").some((part) => !part || part === "." || part === "..")) {
     throw new Error("invalid backup file path");
@@ -78,6 +90,7 @@ function childPath(root: string, relative: string): string {
 export class InstanceBackupService {
   #health: BackupHealth = { status: "never_created" };
   #operation: "idle" | "backup" | "restore_preflight" | "restoring" | "restart_required" = "idle";
+  #backupUnavailableBarrier: () => Promise<void> = async () => undefined;
   #restoreUnavailableBarrier: () => Promise<void> = async () => undefined;
   readonly #key: Buffer;
   readonly #now: () => Date;
@@ -98,6 +111,7 @@ export class InstanceBackupService {
     return "available";
   }
   requiresRestart(): boolean { return this.#operation === "restart_required"; }
+  setBackupUnavailableBarrier(barrier: () => Promise<void>): void { this.#backupUnavailableBarrier = barrier; }
   setRestoreUnavailableBarrier(barrier: () => Promise<void>): void { this.#restoreUnavailableBarrier = barrier; }
 
   async create(destination: string): Promise<{ status: "created"; manifest: BackupManifest }> {
@@ -105,6 +119,7 @@ export class InstanceBackupService {
     this.#operation = "backup";
     const temporary = `${destination}.partial-${randomUUID()}`;
     try {
+      await this.#backupUnavailableBarrier();
       await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
       await mkdir(temporary, { recursive: false, mode: 0o700 });
       const files: BackupFile[] = [];
@@ -129,12 +144,17 @@ export class InstanceBackupService {
         if (seen.has(path)) throw new Error("duplicate Attachment path in Instance Backup");
         seen.add(path); await record(path, "attachment");
       }
-      const configuration = Buffer.from(stableJson(await this.source.captureConfiguration()));
+      const capturedConfiguration = await this.source.captureConfiguration();
+      const encodedKey = this.#key.toString("base64");
+      if (containsEncodedSecret(capturedConfiguration, encodedKey)) {
+        throw new Error("Instance Backup configuration contains master-key material");
+      }
+      const configuration = Buffer.from(stableJson(capturedConfiguration));
       await writeFile(childPath(temporary, "configuration.json"), configuration, { mode: 0o600, flag: "wx" });
       await record("configuration.json", "configuration");
       const createdAt = this.#now().toISOString();
       const manifest: BackupManifest = { schema: instanceBackupSchema, createdAt, instanceVersion: this.#instanceVersion,
-        consistency: "coordinated", database: { format: "postgresql-custom", path: "database.dump" },
+        consistency: "coordinated", database: { format: this.source.databaseFormat ?? "postgresql-custom", path: "database.dump" },
         masterKey: { required: true, verification: keyVerification(this.#key), included: false },
         files: files.sort((left, right) => left.path.localeCompare(right.path)) };
       await writeFile(join(temporary, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600, flag: "wx" });
@@ -156,7 +176,8 @@ export class InstanceBackupService {
     if (typeof manifest.schema !== "string" || typeof manifest.createdAt !== "string") throw new Error("Instance Backup manifest is invalid");
     if (manifest.schema !== instanceBackupSchema) throw new Error(`unsupported Instance Backup version: ${manifest.schema}`);
     if (!Number.isFinite(Date.parse(manifest.createdAt)) || manifest.consistency !== "coordinated" || manifest.database?.path !== "database.dump"
-      || manifest.database?.format !== "postgresql-custom" || manifest.masterKey?.included !== false || manifest.masterKey?.required !== true) {
+      || !["postgresql-custom", "pglite-data-directory-v1"].includes(manifest.database?.format)
+      || manifest.masterKey?.included !== false || manifest.masterKey?.required !== true) {
       throw new Error("Instance Backup manifest is invalid");
     }
     const actualKey = Buffer.from(keyVerification(this.#key), "hex");
@@ -193,6 +214,8 @@ export class InstanceBackupService {
     this.#operation = "restore_preflight";
     try {
     await this.verify(source);
+    const manifest = JSON.parse(await readFile(join(source, "manifest.json"), "utf8")) as BackupManifest;
+    if (manifest.database.format !== target.databaseFormat) throw new Error("Instance Backup database storage adapter does not match this restore environment");
     let configuration: Record<string, unknown>;
     try {
       const decoded: unknown = JSON.parse(await readFile(childPath(source, "configuration.json"), "utf8"));
@@ -201,7 +224,6 @@ export class InstanceBackupService {
     } catch { throw new Error("Instance Backup configuration is invalid"); }
     await target.validateConfiguration(configuration);
     if (options.dryRun) { this.#operation = "idle"; return { status: "verified" }; }
-    const manifest = JSON.parse(await readFile(join(source, "manifest.json"), "utf8")) as BackupManifest;
     const attachmentPaths = manifest.files.filter((file) => file.kind === "attachment")
       .map((file) => file.path.slice("attachments/".length));
     const prepared = await target.prepareAttachments(childPath(source, "attachments"), attachmentPaths);
