@@ -17,6 +17,7 @@ import { EmbeddedLocalInstanceBackupSource, EmbeddedLocalInstanceRestoreTarget, 
 import { PortableWorkspaceExportService } from "../src/portable-workspace-export.js";
 import { PostgresDatabase } from "../src/postgres-database.js";
 import { PostgresInstanceUpgradeTarget } from "../src/postgres-instance-upgrade.js";
+import { composeInstanceRuntime } from "../src/instance-runtime.js";
 
 interface ContractHarness {
   database: PostgresDatabase;
@@ -25,6 +26,8 @@ interface ContractHarness {
   upgrade: PostgresInstanceUpgradeTarget;
   backupRoot: string;
   attachmentRoot: string;
+  runtimeEnvironment: NodeJS.ProcessEnv;
+  suspendForRuntime(): Promise<void>;
   reopen(): Promise<PostgresDatabase>;
   close(): Promise<void>;
 }
@@ -85,6 +88,29 @@ function contract(adapter: ContractAdapter): void {
       } finally { await harness.close(); }
     });
 
+    test("boots the production public runtime with authentication, authorization, mobile sync, backup, and upgrade routes", async () => {
+      const harness = await adapter.open();
+      await harness.suspendForRuntime();
+      const runtime = await composeInstanceRuntime(harness.runtimeEnvironment);
+      try {
+        const health = await fetch(`${runtime.instance.url}/health/ready`);
+        assert.equal(health.status, 200);
+        const registration = await fetch(`${runtime.instance.url}/api/auth/registration`, {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: "Runtime Member", email: `${randomUUID()}@example.test`, password: "runtime-password-long-enough" }),
+        });
+        assert.equal(registration.status, 201);
+        const registered = await registration.json() as { token: string; member: { id: string }; workspace: { id: string } };
+        const session = await fetch(`${runtime.instance.url}/api/client-session`, { headers: { authorization: `Bearer ${registered.token}` } });
+        assert.equal(session.status, 200);
+        assert.equal((await session.json() as { workspace: { id: string } }).workspace.id, registered.workspace.id);
+        assert.equal((await fetch(`${runtime.instance.url}/api/mobile/v1/workspaces/${registered.workspace.id}/capture-options`,
+          { headers: { authorization: `Bearer ${registered.token}` } })).status, 200);
+        assert.equal((await fetch(`${runtime.instance.url}/api/instance/backups`, { headers: { authorization: "Bearer contract-admin" } })).status, 200);
+        assert.notEqual((await fetch(`${runtime.instance.url}/api/instance/upgrade`, { headers: { authorization: "Bearer contract-admin" } })).status, 404);
+      } finally { await runtime.close(); await harness.close(); }
+    });
+
     test("shares backup/restore and upgrade lifecycle behavior", async () => {
       const harness = await adapter.open();
       try {
@@ -141,9 +167,11 @@ contract({ name: "embedded PGlite", exclusions: ["external PostgreSQL process ad
     const root = await mkdtemp(join(tmpdir(), "stash-contract-embedded-")); const masterKey = key();
     let store = await EmbeddedInstanceStore.open(root, createAuthenticationSecretCodec(masterKey));
     return { database: store.database, backupRoot: store.paths.backups, attachmentRoot: store.paths.attachments,
+      runtimeEnvironment: { STASH_DATA_DIR: root, INSTANCE_MASTER_KEY: masterKey, INSTANCE_ADMIN_TOKEN: "contract-admin", PUBLIC_ORIGIN: "http://localhost", HOST: "127.0.0.1", PORT: "0", OPEN_REGISTRATION: "true" },
       backup: new InstanceBackupService(new EmbeddedLocalInstanceBackupSource({ store, publicOrigin: "http://127.0.0.1:3000" }), { masterKey }),
       restoreTarget: new EmbeddedLocalInstanceRestoreTarget({ store, publicOrigin: "http://127.0.0.1:3000" }),
       upgrade: new PostgresInstanceUpgradeTarget("embedded://local", async () => undefined, store.upgradeDatabase),
+      async suspendForRuntime() { await store.close(); },
       async reopen() { await store.close(); store = await EmbeddedInstanceStore.open(root, createAuthenticationSecretCodec(masterKey)); return store.database; },
       async close() { await store.close(); await rm(root, { recursive: true, force: true }); } };
   } });
@@ -157,9 +185,12 @@ contract({ name: "external PostgreSQL", skip: postgresUrl ? false : "STASH_TEST_
     const masterKey = key(); let database = new PostgresDatabase(databaseUrl, createAuthenticationSecretCodec(masterKey));
     const attachments = join(root, "attachments"); const backupRoot = join(root, "backups");
     return { database, backupRoot, attachmentRoot: attachments,
+      runtimeEnvironment: { DATABASE_URL: databaseUrl, ATTACHMENT_STORAGE_PATH: attachments, INSTANCE_BACKUP_PATH: backupRoot,
+        INSTANCE_MASTER_KEY: masterKey, INSTANCE_ADMIN_TOKEN: "contract-admin", PUBLIC_ORIGIN: "http://localhost", HOST: "127.0.0.1", PORT: "0", OPEN_REGISTRATION: "true" },
       backup: new InstanceBackupService(new PostgresLocalInstanceBackupSource({ databaseUrl, attachmentRoot: attachments, publicOrigin: "http://127.0.0.1:3000" }), { masterKey }),
       restoreTarget: new PostgresLocalInstanceRestoreTarget({ databaseUrl, attachmentRoot: attachments, publicOrigin: "http://127.0.0.1:3000" }),
       upgrade: new PostgresInstanceUpgradeTarget(databaseUrl, async () => undefined),
+      async suspendForRuntime() { await database.close(); },
       async reopen() { await database.close(); database = new PostgresDatabase(databaseUrl, createAuthenticationSecretCodec(masterKey)); return database; },
-      async close() { await database.close(); await administrator.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); await administrator.end(); await rm(root, { recursive: true, force: true }); } };
+      async close() { await database.close().catch(() => undefined); await administrator.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); await administrator.end(); await rm(root, { recursive: true, force: true }); } };
   } });

@@ -156,6 +156,7 @@ export async function migrateEmbeddedInstance(options: {
   const destinationAttachments = resolve(options.destinationAttachmentRoot);
   const destinationConfiguration = resolve(options.destinationConfigurationRoot);
   const journalPath = `${destinationAttachments}.migration-journal.json`;
+  let recoveredRolledBackCommit = false;
   try {
     const journal = JSON.parse(await readFile(journalPath, "utf8")) as { staged: string; state: "committing" | "database_committed"; tables: number; rows: number; attachments: number;
       attachmentFiles?: Array<{ relative: string; digest: string }>; configurationStaged?: string;
@@ -164,19 +165,29 @@ export async function migrateEmbeddedInstance(options: {
       const recoveryPool = new Pool({ connectionString: options.destinationDatabaseUrl, connectionTimeoutMillis: 2_000, max: 1 });
       try {
         if (!journal.tableDigests) throw new Error("Migration commit outcome is unknown and requires operator recovery");
+        const copiedTableCounts = await Promise.all(tables.filter(({ name }) => name !== "stash_authentication_key_check" && name !== "stash_instance_format")
+          .map(async (table) => Number((await recoveryPool.query(`SELECT count(*) count FROM ${quote(table.name)}`)).rows[0]?.count)));
+        if (copiedTableCounts.every((count) => count === 0)) {
+          recoveredRolledBackCommit = true;
+        } else {
         for (const table of tables) {
           const columns = (await recoveryPool.query<{ column_name: string; data_type: string }>(`SELECT column_name,data_type FROM information_schema.columns
             WHERE table_schema=current_schema() AND table_name=$1 AND is_generated='NEVER' ORDER BY ordinal_position`, [table.name])).rows;
           const rows = (await recoveryPool.query<Record<string, unknown>>(`SELECT ${table.columns.map(quote).join(",")} FROM ${quote(table.name)}`)).rows;
           if (semanticDigest(rows, columns) !== journal.tableDigests[table.name]) throw new Error("Migration commit outcome is unknown and requires operator recovery");
         }
+        }
       } finally { await recoveryPool.end(); }
     }
     if (!journal.attachmentFiles || !journal.configurationStaged || !journal.configurationFiles) throw new Error("Migration journal is incomplete");
-    await recoverFiles(journal.staged, destinationAttachments, journal.attachmentFiles, "Attachment");
-    await recoverFiles(journal.configurationStaged, destinationConfiguration, journal.configurationFiles, "configuration");
-    await rm(journalPath);
-    return { tables: journal.tables, rows: journal.rows, attachments: journal.attachments };
+    if (recoveredRolledBackCommit) {
+      await Promise.all([rm(journal.staged, { recursive: true, force: true }), rm(journal.configurationStaged, { recursive: true, force: true }), rm(journalPath, { force: true })]);
+    } else {
+      await recoverFiles(journal.staged, destinationAttachments, journal.attachmentFiles, "Attachment");
+      await recoverFiles(journal.configurationStaged, destinationConfiguration, journal.configurationFiles, "configuration");
+      await rm(journalPath);
+      return { tables: journal.tables, rows: journal.rows, attachments: journal.attachments };
+    }
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   const existingAttachments = await attachmentFiles(destinationAttachments);
   if (existingAttachments.length) throw new Error("Migration destination Attachment storage must be empty");

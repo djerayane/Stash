@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, test } from "node:test";
@@ -20,6 +20,22 @@ import { PortableWorkspaceImportService } from "../src/portable-workspace-import
 
 const key = () => randomBytes(32).toString("base64");
 const recoveryCodeLookup = (code: string) => createHash("sha256").update(`stash:recovery-code:v1\0${code}`).digest("base64");
+const exists = (path: string) => stat(path).then(() => true).catch(() => false);
+function canonicalMigrationValue(value: unknown): unknown {
+  if (value instanceof Date) return value.toISOString();
+  if (value instanceof Uint8Array) return { bytes: Buffer.from(value).toString("base64") };
+  if (Array.isArray(value)) return value.map(canonicalMigrationValue);
+  if (value !== null && typeof value === "object") return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => left.localeCompare(right)).map(([name, nested]) => [name, canonicalMigrationValue(nested)]));
+  if (typeof value === "bigint") return value.toString();
+  return value;
+}
+function migrationDigest(rows: Array<Record<string, unknown>>, columns: Array<{ column_name: string; data_type: string }>): string {
+  const normalized = rows.map((row) => Object.fromEntries(columns.map(({ column_name: name, data_type: type }) =>
+    [name, type === "bigint" || type === "numeric" || type === "decimal" ? String(row[name]) : row[name]])));
+  const canonical = normalized.map((row) => JSON.stringify(canonicalMigrationValue(row))).sort();
+  return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+}
 
 describe("embedded-to-PostgreSQL migration key preflight", () => {
   test("reads preserve keys only from owner-private files", async () => {
@@ -199,6 +215,96 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
       const migrated = new (await import("../src/postgres-database.js")).PostgresDatabase(scoped, createAuthenticationSecretCodec(sourceKey));
       try { await migrated.verifyConnection(); assert.equal((await migrated.findAccountByEmail("grace@example.test"))?.passwordHash, "preserved-hash"); }
       finally { await migrated.close(); }
+    } finally { await source.close(); await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined); await admin.end(); }
+  });
+
+  test("rolls back a deterministic pre-commit failure without mutating files and reruns safely", async () => {
+    const sourceKey = key(); const source = await EmbeddedInstanceStore.open(await mkdtemp(join(tmpdir(), "stash-migration-rollback-source-")), createAuthenticationSecretCodec(sourceKey));
+    const admin = new Pool({ connectionString: postgresUrl! }); const schema = `embedded_rollback_${randomUUID().replaceAll("-", "")}`;
+    const destinationRoot = await mkdtemp(join(tmpdir(), "stash-migration-rollback-destination-"));
+    const destinationAttachments = join(destinationRoot, "attachments"); const destinationConfiguration = join(destinationRoot, "configuration");
+    try {
+      await source.database.verifyConnection(); await source.database.prepareInstanceStore();
+      await source.database.createFirstOrganizationOwner({ organizationId: randomUUID(), organizationName: "Rollback", ownerId: randomUUID(), ownerName: "Owner",
+        ownerEmail: "rollback@example.test", passwordHash: "rollback-hash", role: "Owner" });
+      await writeFile(join(source.paths.attachments, "kept.bin"), Buffer.from("kept Attachment"));
+      await writeFile(join(source.paths.configuration, "runtime.json"), JSON.stringify({ locale: "en" }));
+      await admin.query(`CREATE SCHEMA ${schema}`); const scoped = new URL(postgresUrl!); scoped.searchParams.set("options", `-csearch_path=${schema}`);
+      const destination = new (await import("../src/postgres-database.js")).PostgresDatabase(scoped.toString(), createAuthenticationSecretCodec(sourceKey));
+      await destination.verifyConnection(); await destination.prepareInstanceStore(); await destination.close();
+      await admin.query(`CREATE FUNCTION ${schema}.fail_migration() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected migration failure'; END $$`);
+      await admin.query(`CREATE TRIGGER fail_migration BEFORE INSERT ON ${schema}.stash_organizations FOR EACH ROW EXECUTE FUNCTION ${schema}.fail_migration()`);
+      const migrate = () => migrateEmbeddedInstance({ source, destinationDatabaseUrl: scoped.toString(), destinationAttachmentRoot: destinationAttachments,
+        destinationConfigurationRoot: destinationConfiguration, destinationDatabaseAvailableBytes: BigInt(Number.MAX_SAFE_INTEGER),
+        keys: { source: sourceKey, destination: sourceKey, mode: "preserve" } });
+      await assert.rejects(migrate(), /injected migration failure/);
+      assert.equal(Number((await admin.query(`SELECT count(*) count FROM ${schema}.stash_organizations`)).rows[0].count), 0);
+      assert.equal(await exists(destinationAttachments), false); assert.equal(await exists(destinationConfiguration), false);
+      assert.equal(await readFile(join(source.paths.attachments, "kept.bin"), "utf8"), "kept Attachment");
+      await admin.query(`DROP TRIGGER fail_migration ON ${schema}.stash_organizations`);
+      await migrate();
+      assert.equal(Number((await admin.query(`SELECT count(*) count FROM ${schema}.stash_organizations`)).rows[0].count), 1);
+      assert.equal(await readFile(join(destinationAttachments, "kept.bin"), "utf8"), "kept Attachment");
+    } finally { await source.close(); await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined); await admin.end(); }
+  });
+
+  test("recovers an ambiguous COMMIT acknowledgement from its journal without deleting committed state", async () => {
+    const sourceKey = key(); const source = await EmbeddedInstanceStore.open(await mkdtemp(join(tmpdir(), "stash-migration-ambiguous-source-")), createAuthenticationSecretCodec(sourceKey));
+    const admin = new Pool({ connectionString: postgresUrl! }); const schema = `embedded_ambiguous_${randomUUID().replaceAll("-", "")}`;
+    const destinationRoot = await mkdtemp(join(tmpdir(), "stash-migration-ambiguous-destination-"));
+    const attachments = join(destinationRoot, "attachments"); const configuration = join(destinationRoot, "configuration");
+    try {
+      await source.database.verifyConnection(); await source.database.prepareInstanceStore();
+      await source.database.createFirstOrganizationOwner({ organizationId: randomUUID(), organizationName: "Committed", ownerId: randomUUID(), ownerName: "Owner",
+        ownerEmail: "committed@example.test", passwordHash: "committed-hash", role: "Owner" });
+      await writeFile(join(source.paths.attachments, "committed.bin"), Buffer.from("committed Attachment")); await writeFile(join(source.paths.configuration, "runtime.json"), "{}");
+      await admin.query(`CREATE SCHEMA ${schema}`); const scoped = new URL(postgresUrl!); scoped.searchParams.set("options", `-csearch_path=${schema}`);
+      const destination = new (await import("../src/postgres-database.js")).PostgresDatabase(scoped.toString(), createAuthenticationSecretCodec(sourceKey));
+      await destination.verifyConnection(); await destination.prepareInstanceStore(); await destination.close();
+      const options = { source, destinationDatabaseUrl: scoped.toString(), destinationAttachmentRoot: attachments, destinationConfigurationRoot: configuration,
+        destinationDatabaseAvailableBytes: BigInt(Number.MAX_SAFE_INTEGER), keys: { source: sourceKey, destination: sourceKey, mode: "preserve" as const } };
+      const result = await migrateEmbeddedInstance(options); const staged = join(destinationRoot, "ambiguous-attachments"); const configurationStaged = join(destinationRoot, "ambiguous-configuration");
+      await rename(attachments, staged); await rename(configuration, configurationStaged);
+      const tableNames = (await admin.query<{ table_name: string }>(`SELECT table_name FROM information_schema.tables WHERE table_schema=$1 AND table_name LIKE 'stash_%' ORDER BY table_name`, [schema])).rows.map(({ table_name }) => table_name);
+      const tableDigests: Record<string, string> = {};
+      for (const table of tableNames) {
+        const columns = (await admin.query<{ column_name: string; data_type: string }>(`SELECT column_name,data_type FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2 AND is_generated='NEVER' ORDER BY ordinal_position`, [schema, table])).rows;
+        tableDigests[table] = migrationDigest((await admin.query(`SELECT ${columns.map(({ column_name }) => `"${column_name}"`).join(",")} FROM ${schema}."${table}"`)).rows, columns);
+      }
+      await writeFile(`${attachments}.migration-journal.json`, JSON.stringify({ staged, configurationStaged, state: "committing", ...result,
+        attachmentFiles: [{ relative: "committed.bin", digest: createHash("sha256").update("committed Attachment").digest("hex") }],
+        configurationFiles: [{ relative: "runtime.json", digest: createHash("sha256").update("{}").digest("hex") }], tableDigests }), { mode: 0o600 });
+      assert.deepEqual(await migrateEmbeddedInstance(options), result);
+      assert.equal(await readFile(join(attachments, "committed.bin"), "utf8"), "committed Attachment");
+      assert.equal(Number((await admin.query(`SELECT count(*) count FROM ${schema}.stash_organizations`)).rows[0].count), 1);
+      assert.equal(await exists(`${attachments}.migration-journal.json`), false);
+      await assert.rejects(migrateEmbeddedInstance(options), /Attachment storage must be empty/);
+    } finally { await source.close(); await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined); await admin.end(); }
+  });
+
+  test("converges a journaled COMMIT with a rolled-back database outcome and reruns safely", async () => {
+    const sourceKey = key(); const source = await EmbeddedInstanceStore.open(await mkdtemp(join(tmpdir(), "stash-migration-unknown-rollback-source-")), createAuthenticationSecretCodec(sourceKey));
+    const admin = new Pool({ connectionString: postgresUrl! }); const schema = `embedded_unknown_rollback_${randomUUID().replaceAll("-", "")}`;
+    const root = await mkdtemp(join(tmpdir(), "stash-migration-unknown-rollback-destination-")); const attachments = join(root, "attachments"); const configuration = join(root, "configuration");
+    try {
+      await source.database.verifyConnection(); await source.database.prepareInstanceStore();
+      await source.database.createFirstOrganizationOwner({ organizationId: randomUUID(), organizationName: "Rolled back", ownerId: randomUUID(), ownerName: "Owner",
+        ownerEmail: "unknown-rollback@example.test", passwordHash: "rollback-hash", role: "Owner" });
+      await writeFile(join(source.paths.attachments, "rollback.bin"), "rollback Attachment"); await writeFile(join(source.paths.configuration, "runtime.json"), "{}");
+      await admin.query(`CREATE SCHEMA ${schema}`); const scoped = new URL(postgresUrl!); scoped.searchParams.set("options", `-csearch_path=${schema}`);
+      const destination = new (await import("../src/postgres-database.js")).PostgresDatabase(scoped.toString(), createAuthenticationSecretCodec(sourceKey));
+      await destination.verifyConnection(); await destination.prepareInstanceStore(); await destination.close();
+      const staged = join(root, "unknown-attachments"); const configurationStaged = join(root, "unknown-configuration");
+      await cp(source.paths.attachments, staged, { recursive: true }); await cp(source.paths.configuration, configurationStaged, { recursive: true });
+      const attachmentDigest = createHash("sha256").update("rollback Attachment").digest("hex"); const configurationDigest = createHash("sha256").update("{}").digest("hex");
+      await writeFile(`${attachments}.migration-journal.json`, JSON.stringify({ staged, configurationStaged, state: "committing", tables: 0, rows: 0, attachments: 1,
+        attachmentFiles: [{ relative: "rollback.bin", digest: attachmentDigest }], configurationFiles: [{ relative: "runtime.json", digest: configurationDigest }], tableDigests: {} }), { mode: 0o600 });
+      const result = await migrateEmbeddedInstance({ source, destinationDatabaseUrl: scoped.toString(), destinationAttachmentRoot: attachments,
+        destinationConfigurationRoot: configuration, destinationDatabaseAvailableBytes: BigInt(Number.MAX_SAFE_INTEGER),
+        keys: { source: sourceKey, destination: sourceKey, mode: "preserve" } });
+      assert.ok(result.rows > 0); assert.equal(await readFile(join(attachments, "rollback.bin"), "utf8"), "rollback Attachment");
+      assert.equal(Number((await admin.query(`SELECT count(*) count FROM ${schema}.stash_organizations`)).rows[0].count), 1);
+      assert.equal(await exists(`${attachments}.migration-journal.json`), false);
     } finally { await source.close(); await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined); await admin.end(); }
   });
 });
