@@ -32,7 +32,7 @@ import { GitHubArtifactService } from "./github-artifacts.js";
 import { GitHubSignalService } from "./github-signals.js";
 import { fileURLToPath } from "node:url";
 import { InstanceBackupService } from "./instance-backup.js";
-import { PostgresLocalInstanceBackupSource, PostgresLocalInstanceRestoreTarget } from "./instance-backup-system.js";
+import { EmbeddedLocalInstanceBackupSource, EmbeddedLocalInstanceRestoreTarget, PostgresLocalInstanceBackupSource, PostgresLocalInstanceRestoreTarget } from "./instance-backup-system.js";
 import { NotificationService } from "./notifications.js";
 import { AutomationService } from "./automations.js";
 import { NoteCollaborationService } from "./note-collaboration.js";
@@ -43,6 +43,7 @@ import { PostgresInstanceUpgradeTarget } from "./postgres-instance-upgrade.js";
 import { readStashReleaseVersion } from "./release-version.js";
 import { databaseUrlFromEnvironment, openRegistrationFromEnvironment, validateComposeExposure } from "./deployment-configuration.js";
 import { AccountRegistrationService } from "./account-registration.js";
+import { EmbeddedInstanceStore } from "./embedded-instance-store.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -52,10 +53,14 @@ function requiredEnvironment(name: string): string {
 
 async function main(): Promise<void> {
   validateComposeExposure(process.env);
-  const databaseUrl = databaseUrlFromEnvironment(process.env);
   const authenticationSecrets = createAuthenticationSecretCodec(requiredEnvironment("INSTANCE_MASTER_KEY"));
-  const database = new PostgresDatabase(databaseUrl, authenticationSecrets);
+  const embeddedDataDirectory = process.env.STASH_DATA_DIR?.trim();
+  if (embeddedDataDirectory && process.env.DATABASE_URL?.trim()) throw new Error("Configure STASH_DATA_DIR or DATABASE_URL, not both");
+  const databaseUrl = embeddedDataDirectory ? undefined : databaseUrlFromEnvironment(process.env);
+  const embeddedStore = embeddedDataDirectory ? await EmbeddedInstanceStore.open(embeddedDataDirectory, authenticationSecrets) : undefined;
+  const database = embeddedStore?.database ?? new PostgresDatabase(databaseUrl!, authenticationSecrets);
   await database.verifyConnection();
+  if (embeddedStore) await database.prepareInstanceStore();
   const redisUrl = process.env.REDIS_URL?.trim();
   let redis: RunningRedisAcceleration | undefined;
   if (redisUrl) {
@@ -73,8 +78,10 @@ async function main(): Promise<void> {
   const passwordAuth = new PasswordAuthService(database);
   const notifications = new NotificationService(database);
   const automations = new AutomationService(database, notifications);
-  const attachmentStoragePath = process.env.ATTACHMENT_STORAGE_PATH?.trim() || "/var/lib/stash/attachments";
+  const attachmentStoragePath = embeddedStore?.paths.attachments ?? (process.env.ATTACHMENT_STORAGE_PATH?.trim() || "/var/lib/stash/attachments");
+  if (embeddedStore && process.env.ATTACHMENT_STORAGE_PATH?.trim()) throw new Error("Embedded Instance Attachments must remain beneath STASH_DATA_DIR");
   const s3AttachmentStorage = s3AttachmentStorageFromEnvironment(process.env);
+  if (embeddedStore && s3AttachmentStorage) throw new Error("Embedded Instance storage requires local Attachments beneath STASH_DATA_DIR");
   const attachmentStorage = s3AttachmentStorage ?? new LocalAttachmentStorage(attachmentStoragePath);
   const attachmentStorageKind = s3AttachmentStorage ? "s3" as const : "local" as const;
   const githubAppId = process.env.GITHUB_APP_ID?.trim();
@@ -82,15 +89,17 @@ async function main(): Promise<void> {
   if (Boolean(githubAppId) !== Boolean(githubAppPrivateKey)) throw new Error("GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY must be configured together");
   const githubApp = githubAppId && githubAppPrivateKey ? new GitHubAppClient(githubAppId, githubAppPrivateKey) : undefined;
   const githubWebhookSecret = process.env.GITHUB_WEBHOOK_SECRET?.trim();
-  const instanceBackups = new InstanceBackupService(new PostgresLocalInstanceBackupSource({
-    databaseUrl, attachmentRoot: attachmentStoragePath, ...(s3AttachmentStorage ? { attachmentStorage: s3AttachmentStorage } : {}),
-    attachmentStorageKind, publicOrigin,
-  }), { masterKey: requiredEnvironment("INSTANCE_MASTER_KEY") });
-  const instanceBackupRoot = process.env.INSTANCE_BACKUP_PATH?.trim();
-  const instanceBackupRestoreTarget = new PostgresLocalInstanceRestoreTarget({ databaseUrl, attachmentRoot: attachmentStoragePath,
-    ...(s3AttachmentStorage ? { attachmentStorage: s3AttachmentStorage } : {}), attachmentStorageKind, publicOrigin });
-  const instanceUpgrades = instanceBackupRoot ? new InstanceUpgradeService({ backups: instanceBackups, backupRoot: instanceBackupRoot, targetVersion: await readStashReleaseVersion(),
-    target: new PostgresInstanceUpgradeTarget(databaseUrl, async (backupPath) => { await instanceBackups.restore(backupPath, instanceBackupRestoreTarget, { dryRun: false }); }) }) : undefined;
+  const instanceBackups = new InstanceBackupService(embeddedStore
+    ? new EmbeddedLocalInstanceBackupSource({ store: embeddedStore, publicOrigin })
+    : new PostgresLocalInstanceBackupSource({ databaseUrl: databaseUrl!, attachmentRoot: attachmentStoragePath,
+      ...(s3AttachmentStorage ? { attachmentStorage: s3AttachmentStorage } : {}), attachmentStorageKind, publicOrigin }),
+  { masterKey: requiredEnvironment("INSTANCE_MASTER_KEY") });
+  const instanceBackupRoot = process.env.INSTANCE_BACKUP_PATH?.trim() ?? embeddedStore?.paths.backups;
+  const instanceBackupRestoreTarget = embeddedStore ? new EmbeddedLocalInstanceRestoreTarget({ store: embeddedStore, publicOrigin })
+    : new PostgresLocalInstanceRestoreTarget({ databaseUrl: databaseUrl!, attachmentRoot: attachmentStoragePath,
+      ...(s3AttachmentStorage ? { attachmentStorage: s3AttachmentStorage } : {}), attachmentStorageKind, publicOrigin });
+  const instanceUpgrades = instanceBackupRoot && !embeddedStore ? new InstanceUpgradeService({ backups: instanceBackups, backupRoot: instanceBackupRoot, targetVersion: await readStashReleaseVersion(),
+    target: new PostgresInstanceUpgradeTarget(databaseUrl!, async (backupPath) => { await instanceBackups.restore(backupPath, instanceBackupRestoreTarget, { dryRun: false }); }) }) : undefined;
   const smtpUrl = process.env.SMTP_URL?.trim();
   const emailRecoveryFrom = process.env.EMAIL_RECOVERY_FROM?.trim();
   const recoveryEmail = createRecoveryEmailSender({
@@ -171,6 +180,7 @@ async function main(): Promise<void> {
     console.log("Stopping Stash Instance");
     if (emailRecoveryTimer) clearInterval(emailRecoveryTimer);
     await instance.close();
+    await embeddedStore?.close();
     await redis?.close();
     process.exit(0);
   };

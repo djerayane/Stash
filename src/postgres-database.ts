@@ -267,6 +267,24 @@ export class PostgresDatabase implements
     await this.#verifyAuthenticationKey();
   }
 
+  /** Prepare every storage capability for contract validation or an empty semantic migration target. */
+  async prepareInstanceStore(): Promise<void> {
+    const foundation = await this.#pool.connect();
+    try { await this.#ensureBootstrapSchema(foundation); await this.#ensureWorkspaceProjectSchema(foundation); }
+    finally { foundation.release(); }
+    await this.#ensureAuthSchema(); await this.#ensureOidcSchema(); await this.#ensureRecoverySchema();
+    await this.#ensureRepositoryConnectionSchema(); await this.#ensureGitHubSignalSchema(); await this.#ensureNotificationSchema();
+    await this.#ensureMemberLocalizationSchema(); await this.#ensureNoteSchemaForPool();
+    const client = await this.#pool.connect();
+    try {
+      await this.#ensureAutomationSchema(client, true);
+      await this.#ensureNoteSchema(client); await this.#ensureBoardSchema(client); await this.#ensureAttachmentSchema(client);
+      await this.#ensureDiscussionSchema(client); await this.#ensureInvitationSchema(client); await this.#ensurePortableProjectionSchema(client);
+      await this.#ensureNoteHistorySchema(client); await this.#ensureMemberDepartureSchema(client); await this.#ensureWorkspaceImportSchema(client);
+      await this.#ensureCollaborationSchema(client);
+    } finally { client.release(); }
+  }
+
   async createFirstOrganizationOwner(record: BootstrapRecord): Promise<boolean> {
     const client = await this.#pool.connect();
     try {
@@ -2769,8 +2787,9 @@ export class PostgresDatabase implements
   }
 
   async listAutomationState(memberId: string, projectId: string, taskKey: string): Promise<AutomationState | undefined> {
+    await this.#ensureGitHubSignalSchema();
     return this.#withTransaction(async (client) => {
-      await this.#ensureAutomationSchema(client);
+      await this.#ensureAutomationSchema(client, true);
       const visible = await client.query<any>(taskPlanningSelect, [projectId, taskKey, memberId]);
       const task = visible.rows[0]; if (!task) return undefined;
       const recipes = await client.query<any>(`SELECT recipe.*, status.name AS target_status_name FROM stash_automation_recipes recipe
@@ -2784,8 +2803,9 @@ export class PostgresDatabase implements
   }
 
   async enableAutomation(memberId: string, projectId: string, trigger: AutomationTrigger, targetStatusId: string) {
+    await this.#ensureGitHubSignalSchema();
     return this.#withTransaction(async (client) => {
-      await this.#ensureAutomationSchema(client);
+      await this.#ensureAutomationSchema(client, true);
       const access = await this.#findProjectWorkflowAccess(client, memberId, projectId, true);
       if (access === "forbidden") return "forbidden" as const;
       if (access === "not_found") return "not_found" as const;
@@ -2801,8 +2821,9 @@ export class PostgresDatabase implements
   }
 
   async reverseAutomation(memberId: string, projectId: string, taskKey: string, transitionId: string) {
+    await this.#ensureGitHubSignalSchema();
     return this.#withTransaction(async (client) => {
-      await this.#ensureAutomationSchema(client);
+      await this.#ensureAutomationSchema(client, true);
       const access = await this.#findProjectWorkflowAccess(client, memberId, projectId, true);
       if (access === "forbidden") return "forbidden" as const;
       if (access === "not_found") return "not_found" as const;
@@ -2830,6 +2851,7 @@ export class PostgresDatabase implements
   async applySignalAutomations(signal: { id: string; trigger?: AutomationTrigger }, candidates: ReadonlyArray<AutomationCandidate>) {
     if (!signal.trigger) return { failed: false, notifications: [] };
     const triggeredSignal = { id: signal.id, trigger: signal.trigger };
+    await this.#ensureGitHubSignalSchema();
     const notifications: AutomationFailureNotification[] = [];
     let failed = false;
     for (const candidate of candidates.filter(({ status }) => status === "confirmed")) {
@@ -2842,7 +2864,7 @@ export class PostgresDatabase implements
       let failedRun: FailedAutomationRun | undefined;
       try {
         await this.#withTransaction(async (client) => {
-          await this.#ensureAutomationSchema(client);
+          await this.#ensureAutomationSchema(client, true);
         const result = await client.query<any>(`SELECT recipe.id AS automation_id,recipe.target_status_id,recipe.created_by_account_id,
           configurer.name AS created_by_name,task.*,current_status.name AS status_name,current_status.category AS status_category
           FROM stash_automation_recipes recipe JOIN stash_tasks task ON task.id=$1 AND task.project_id=recipe.project_id
@@ -2876,8 +2898,9 @@ export class PostgresDatabase implements
   }
 
   async #recordSignalAutomationFailure(signalId: string, run: FailedAutomationRun): Promise<AutomationFailureNotification | undefined> {
+    await this.#ensureGitHubSignalSchema();
     return this.#withTransaction(async (client) => {
-      await this.#ensureAutomationSchema(client);
+      await this.#ensureAutomationSchema(client, true);
         const activity: ActivityRecord = { schema: "stash.activity.v1", id: randomUUID(), workspaceId: run.workspaceId,
           object: { kind: "Task", id: run.taskId }, action: "automation_execution_failed",
           actor: { localAccountId: run.configuringMemberId, displayName: run.configuringMemberName },
@@ -2903,8 +2926,9 @@ export class PostgresDatabase implements
   async #existingSignalAutomationFailureNotifications(signalId: string, candidate: AutomationCandidate): Promise<
     { found: boolean; notifications: AutomationFailureNotification[] }
   > {
+    await this.#ensureGitHubSignalSchema();
     return this.#withTransaction(async (client) => {
-      await this.#ensureAutomationSchema(client);
+      await this.#ensureAutomationSchema(client, true);
       const stored = await client.query<{ activity: ActivityRecord; recipient_member_id: string; summary: string }>(`SELECT activity,recipient_member_id,summary
         FROM stash_automation_failures WHERE signal_id=$1 AND task_id=$2 AND project_id=$3`, [signalId, candidate.taskId, candidate.projectId]);
       const notifications: AutomationFailureNotification[] = [];
@@ -3664,9 +3688,9 @@ export class PostgresDatabase implements
     `);
   }
 
-  async #ensureAutomationSchema(client: PoolClient): Promise<void> {
+  async #ensureAutomationSchema(client: PoolClient, dependenciesPrepared = false): Promise<void> {
     await this.#ensureNoteSchema(client);
-    await this.#ensureGitHubSignalSchema();
+    if (!dependenciesPrepared) await this.#ensureGitHubSignalSchema();
     await client.query(`
       CREATE TABLE IF NOT EXISTS stash_automation_recipes (
         id UUID PRIMARY KEY, project_id UUID NOT NULL REFERENCES stash_projects(id) ON DELETE CASCADE,
@@ -3720,6 +3744,11 @@ export class PostgresDatabase implements
         next_task_number INTEGER NOT NULL DEFAULT 1 CHECK (next_task_number > 0),
         workflow_revision INTEGER NOT NULL DEFAULT 0 CHECK (workflow_revision >= 0),
         UNIQUE (workspace_id, project_key)
+      );
+      CREATE TABLE IF NOT EXISTS stash_project_guests (
+        project_id UUID NOT NULL REFERENCES stash_projects(id),
+        account_id UUID NOT NULL REFERENCES stash_accounts(id),
+        PRIMARY KEY (project_id, account_id)
       );
       ALTER TABLE stash_projects ADD COLUMN IF NOT EXISTS next_task_number INTEGER NOT NULL DEFAULT 1 CHECK (next_task_number > 0);
       ALTER TABLE stash_projects ADD COLUMN IF NOT EXISTS workflow_revision INTEGER NOT NULL DEFAULT 0 CHECK (workflow_revision >= 0);

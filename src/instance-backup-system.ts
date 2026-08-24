@@ -4,6 +4,7 @@ import { dirname, join, relative, resolve } from "node:path";
 
 import { UnsafeAttachmentRollbackError, type InstanceBackupRestoreTarget, type InstanceBackupSource } from "./instance-backup.js";
 import type { AttachmentStorage } from "./attachments.js";
+import type { EmbeddedInstanceStore } from "./embedded-instance-store.js";
 
 async function command(program: string, arguments_: string[], environment: NodeJS.ProcessEnv): Promise<void> {
   await new Promise<void>((resolvePromise, reject) => {
@@ -86,6 +87,54 @@ export class PostgresLocalInstanceBackupSource implements InstanceBackupSource {
   async captureConfiguration() {
     return { publicOrigin: this.options.publicOrigin, attachmentStorage: this.options.attachmentStorageKind ?? "local", masterKeyRequired: true, redisIncluded: false };
   }
+}
+
+export class EmbeddedLocalInstanceBackupSource implements InstanceBackupSource {
+  readonly databaseFormat = "pglite-data-directory-v1" as const;
+  constructor(private readonly options: { store: EmbeddedInstanceStore; publicOrigin: string }) {}
+  captureDatabase(destination: string): Promise<void> { return this.options.store.captureDatabase(destination); }
+  async captureAttachments(destination: string): Promise<ReadonlyArray<string>> {
+    const files = await regularFiles(this.options.store.paths.attachments);
+    for (const file of files) {
+      const target = join(destination, ...file.split("/"));
+      await mkdir(dirname(target), { recursive: true });
+      await cp(join(this.options.store.paths.attachments, ...file.split("/")), target, { preserveTimestamps: true });
+    }
+    return files;
+  }
+  async captureConfiguration() {
+    return { publicOrigin: this.options.publicOrigin, attachmentStorage: "local", storageMode: "embedded", masterKeyRequired: true, redisIncluded: false };
+  }
+}
+
+export class EmbeddedLocalInstanceRestoreTarget implements InstanceBackupRestoreTarget {
+  constructor(private readonly options: { store: EmbeddedInstanceStore; publicOrigin: string }) {}
+  async validateConfiguration(configuration: Record<string, unknown>): Promise<void> {
+    if (configuration.storageMode !== "embedded" || configuration.attachmentStorage !== "local") throw new Error("Instance Backup is not an embedded local-storage backup");
+    if (configuration.publicOrigin !== this.options.publicOrigin) throw new Error("Instance Backup PUBLIC_ORIGIN does not match this restore environment");
+    if (configuration.masterKeyRequired !== true) throw new Error("Instance Backup does not declare its master-key requirement");
+  }
+  async prepareAttachments(source: string, paths: ReadonlyArray<string>): Promise<unknown> {
+    const staged = `${this.options.store.paths.attachments}.restore-staged-${process.pid}`; await rm(staged, { recursive: true, force: true });
+    await mkdir(staged, { recursive: false, mode: 0o700 });
+    try {
+      for (const path of paths) { const from = join(source, ...path.split("/")); const metadata = await lstat(from);
+        if (!metadata.isFile() || metadata.isSymbolicLink()) throw new Error(`Invalid verified Attachment: ${path}`);
+        const target = join(staged, ...path.split("/")); await mkdir(dirname(target), { recursive: true, mode: 0o700 }); await cp(from, target, { errorOnExist: true, preserveTimestamps: true }); }
+      return staged;
+    } catch (error) { await rm(staged, { recursive: true, force: true }); throw error; }
+  }
+  snapshotDatabase(destination: string): Promise<void> { return this.options.store.captureDatabase(destination); }
+  restoreDatabase(source: string): Promise<void> { return this.options.store.restoreDatabase(source); }
+  async commitAttachments(prepared: unknown): Promise<void> {
+    if (typeof prepared !== "string") throw new Error("invalid prepared Attachment restore");
+    const destination = this.options.store.paths.attachments; const previous = `${destination}.restore-previous-${process.pid}`;
+    await rm(previous, { recursive: true, force: true }); let movedPrevious = false;
+    try { await rename(destination, previous); movedPrevious = true; await rename(prepared, destination); }
+    catch (error) { if (movedPrevious) await rename(previous, destination).catch(() => undefined); throw error; }
+    await rm(previous, { recursive: true, force: true });
+  }
+  async discardPreparedAttachments(prepared: unknown): Promise<void> { if (typeof prepared === "string") await rm(prepared, { recursive: true, force: true }); }
 }
 
 export class PostgresLocalInstanceRestoreTarget implements InstanceBackupRestoreTarget {

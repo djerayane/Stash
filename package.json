@@ -25,10 +25,12 @@
     "test:a11y": "pnpm run build:web && playwright test --grep @a11y",
     "test:server": "node --import tsx --test tests/**/*.test.ts",
     "smoke": "node --import tsx scripts/smoke.ts",
-    "backup": "node --import tsx src/backup-command.ts"
+    "backup": "node --import tsx src/backup-command.ts",
+    "migrate:embedded": "node --import tsx src/migrate-embedded-command.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1116.0",
+    "@electric-sql/pglite": "^0.5.7",
     "@simplewebauthn/server": "^13.3.2",
     "@stash/domain-types": "workspace:*",
     "@stash/rich-text": "workspace:*",

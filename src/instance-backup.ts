@@ -6,6 +6,8 @@ import { dirname, join, resolve, sep } from "node:path";
 export const instanceBackupSchema = "stash.instance-backup.v1" as const;
 
 export interface InstanceBackupSource {
+  /** Storage-adapter-native database snapshot format. */
+  readonly databaseFormat?: "postgresql-custom" | "pglite-data-directory-v1";
   /** A transactionally consistent representation containing all PostgreSQL state. */
   captureDatabase(destination: string): Promise<void>;
   /** Attachment keys are immutable once committed, so copying after the DB snapshot is safe. */
@@ -29,7 +31,7 @@ interface BackupManifest {
   createdAt: string;
   instanceVersion: string;
   consistency: "coordinated";
-  database: { format: "postgresql-custom"; path: "database.dump" };
+  database: { format: "postgresql-custom" | "pglite-data-directory-v1"; path: "database.dump" };
   masterKey: { required: true; verification: string; included: false };
   files: BackupFile[];
   verification?: { verifiedAt: string; proof: string };
@@ -134,7 +136,7 @@ export class InstanceBackupService {
       await record("configuration.json", "configuration");
       const createdAt = this.#now().toISOString();
       const manifest: BackupManifest = { schema: instanceBackupSchema, createdAt, instanceVersion: this.#instanceVersion,
-        consistency: "coordinated", database: { format: "postgresql-custom", path: "database.dump" },
+        consistency: "coordinated", database: { format: this.source.databaseFormat ?? "postgresql-custom", path: "database.dump" },
         masterKey: { required: true, verification: keyVerification(this.#key), included: false },
         files: files.sort((left, right) => left.path.localeCompare(right.path)) };
       await writeFile(join(temporary, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600, flag: "wx" });
@@ -156,7 +158,8 @@ export class InstanceBackupService {
     if (typeof manifest.schema !== "string" || typeof manifest.createdAt !== "string") throw new Error("Instance Backup manifest is invalid");
     if (manifest.schema !== instanceBackupSchema) throw new Error(`unsupported Instance Backup version: ${manifest.schema}`);
     if (!Number.isFinite(Date.parse(manifest.createdAt)) || manifest.consistency !== "coordinated" || manifest.database?.path !== "database.dump"
-      || manifest.database?.format !== "postgresql-custom" || manifest.masterKey?.included !== false || manifest.masterKey?.required !== true) {
+      || !["postgresql-custom", "pglite-data-directory-v1"].includes(manifest.database?.format)
+      || manifest.masterKey?.included !== false || manifest.masterKey?.required !== true) {
       throw new Error("Instance Backup manifest is invalid");
     }
     const actualKey = Buffer.from(keyVerification(this.#key), "hex");
