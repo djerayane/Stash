@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { ActivityPage, DiscussionsPage, InboxPage, NoteHistoryPage, NotificationsPage } from "./core-workflows";
+import { ActivityPage, DiscussionsPage, InboxPage, NoteHistoryPage, NotificationsPage, SearchPage } from "./core-workflows";
 
 function renderWorkflow(node: React.ReactNode) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
@@ -13,6 +13,34 @@ function renderWorkflow(node: React.ReactNode) {
 afterEach(() => vi.restoreAllMocks());
 
 describe("core React workflows", () => {
+  it("searches canonical Note and Task results with URL-backed filters and deep links", async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => Response.json({ results: [
+      { id: "note-1", kind: "note", title: "Release plan", excerpt: "Rollback context", author: "Ada", occurredAt: "2026-08-20T12:00:00.000Z", href: "/app/notes/note-1" },
+      { id: "task-1", kind: "task", title: "STASH-42 · Ship release", status: "In Review", assignee: "Grace", href: "/app/projects/project-1/tasks/STASH-42" },
+    ] }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={client}><MemoryRouter initialEntries={["/app/search?q=release&object=task"]}><SearchPage workspaceId="workspace-1" token="member" fetcher={fetcher as typeof fetch} /></MemoryRouter></QueryClientProvider>);
+    expect(await screen.findByRole("link", { name: /Release plan/ })).toHaveAttribute("href", "/app/notes/note-1");
+    expect(screen.getByRole("link", { name: /STASH-42/ })).toHaveAttribute("href", "/app/projects/project-1/tasks/STASH-42");
+    expect(screen.getByText(/Ada/)).toBeVisible(); expect(screen.getByText(/In Review/)).toBeVisible();
+    expect(String(fetcher.mock.calls[0]?.[0])).toContain("q=release&object=task");
+    fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Object type" })).toHaveValue(""));
+  });
+
+  it("keeps a failed Workspace search recoverable without losing its filters", async () => {
+    let attempts = 0;
+    const fetcher = vi.fn(async () => ++attempts === 1
+      ? new Response(JSON.stringify({ message: "Search is temporarily unavailable." }), { status: 503 })
+      : Response.json({ results: [] }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={client}><MemoryRouter initialEntries={["/app/search?q=release&status=Ready"]}><SearchPage workspaceId="workspace-1" token="member" fetcher={fetcher as typeof fetch} /></MemoryRouter></QueryClientProvider>);
+    const alert = await screen.findByRole("alert"); await waitFor(() => expect(alert).toHaveFocus());
+    expect(screen.getByRole("textbox", { name: "Status" })).toHaveValue("Ready");
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("No permitted matches")).toBeVisible();
+  });
+
   it("captures an Inbox Note through the canonical API and refreshes the list", async () => {
     let notes: { id: string; content: string }[] = [];
     const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
