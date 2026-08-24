@@ -18,6 +18,7 @@ import type { ActivityRecord, NotificationDelivery } from "@stash/domain-types";
 const noteId = "99999999-9999-4999-8999-999999999999";
 const secondNoteId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const richNoteId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const richNoteNamespace = "cccccccc-cccc-4ccc-8ccc-";
 const emptyCodeNoteId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 const markdownNoteId = "14141414-1414-4414-8414-141414141414";
 const principalBoundaryNoteId = "12121212-1212-4212-8212-121212121212";
@@ -43,6 +44,12 @@ const collaborations = new Map<string, CollaborationSnapshot>([
   [markdownNoteId, { noteId: markdownNoteId, sequence: 0, update: Y.encodeStateAsUpdate(markdownSeededDocument), updatedAt: new Date(0).toISOString(), updatedByMemberId: "browser-member", access: "edit" }],
   [principalBoundaryNoteId, { noteId: principalBoundaryNoteId, sequence: 0, update: Y.encodeStateAsUpdate(principalBoundaryDocument), updatedAt: new Date(0).toISOString(), updatedByMemberId: "browser-member", access: "edit" }],
 ]);
+const richSeedUpdate = collaborations.get(richNoteId)!.update;
+function ensureRichNote(requestedNoteId: string): void {
+  if (!requestedNoteId.startsWith(richNoteNamespace) || collaborations.has(requestedNoteId)) return;
+  collaborations.set(requestedNoteId, { noteId: requestedNoteId, sequence: 0, update: richSeedUpdate.slice(),
+    updatedAt: new Date(0).toISOString(), updatedByMemberId: "browser-member", access: "edit" });
+}
 seededDocument.destroy();
 secondSeededDocument.destroy();
 richSeededDocument.destroy();
@@ -52,10 +59,12 @@ principalBoundaryDocument.destroy();
 const collaborationRepository = {
   async loadNoteCollaboration(memberId: string, requestedNoteId: string) {
     if (![browserMemberId, "browser-second-member", "browser-guest"].includes(memberId)) return undefined;
+    ensureRichNote(requestedNoteId);
     const snapshot = collaborations.get(requestedNoteId);
     return snapshot ? { ...snapshot, access: memberId === "browser-guest" ? "read" as const : "edit" as const } : undefined;
   },
   async appendNoteCollaboration(memberId: string, requestedNoteId: string, update: Uint8Array) {
+    ensureRichNote(requestedNoteId);
     const collaboration = collaborations.get(requestedNoteId);
     if (![browserMemberId, "browser-second-member"].includes(memberId) || !collaboration) return undefined;
     const document = new Y.Doc(); Y.applyUpdate(document, collaboration.update); Y.applyUpdate(document, update);
@@ -192,8 +201,10 @@ const instance = await startInstance({
     async listDecisions() { return { status: "found", notes: [{ id: noteId, workspaceId: browserWorkspaceId, content: "Release collaboration plan", createdAt: new Date(0).toISOString() }] }; },
     async capture(memberId: string, workspaceId: string, value: { content?: string }) { const note = { id: "abababab-abab-4bab-8bab-abababababab", workspaceId, content: value.content ?? "", document: { type: "doc", blocks: [] }, revision: 1, tags: [], createdByMemberId: memberId, createdAt: new Date().toISOString() }; inboxNotes = [note]; return { status: "created", note, projection: { schema: "stash.note.v2" } }; },
     async triage(memberId: string, workspaceId: string, requestedNoteId: string, value: { action?: string }) { const note = inboxNotes.find(({ id }) => id === requestedNoteId); if (memberId !== browserMemberId || workspaceId !== browserWorkspaceId) return { status: "workspace_forbidden" }; if (!note) return { status: "note_not_found" }; if (value.action === "archive") { inboxNotes = []; return { status: "updated", result: { kind: "archived", note: { ...note, archivedAt: new Date().toISOString() }, projections: [{ schema: "stash.note-state.v1" }] } }; } return { status: "project_forbidden" }; },
-    async get(memberId: string, requestedNoteId: string) { if (![browserMemberId, "browser-second-member", "browser-guest"].includes(memberId) || !collaborations.has(requestedNoteId)) return undefined;
-    if (requestedNoteId === richNoteId) { const current = new Y.Doc(); Y.applyUpdate(current, collaborations.get(requestedNoteId)!.update);
+    async get(memberId: string, requestedNoteId: string) { if (![browserMemberId, "browser-second-member", "browser-guest"].includes(memberId)) return undefined;
+    ensureRichNote(requestedNoteId);
+    if (!collaborations.has(requestedNoteId)) return undefined;
+    if (requestedNoteId.startsWith(richNoteNamespace)) { const current = new Y.Doc(); Y.applyUpdate(current, collaborations.get(requestedNoteId)!.update);
       const document = richTextFromCollaborativeDocument(current); current.destroy(); return {
         id: requestedNoteId, workspaceId: "88888888-8888-4888-8888-888888888888", content: richTextToMarkdown(document), revision: collaborations.get(requestedNoteId)!.sequence + 1,
         document, tags: [], createdByMemberId: memberId, createdAt: new Date(0).toISOString(),
