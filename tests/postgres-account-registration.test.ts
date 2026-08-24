@@ -40,7 +40,7 @@ describe("PostgreSQL built-in account registration", { skip: !databaseUrl }, () 
     const failingEmail = `rollback-${randomUUID()}@stash.test`;
     await inspection.query(`CREATE FUNCTION fail_registration_session_insert() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN RAISE EXCEPTION 'injected registration session failure'; END $$`);
-    await inspection.query(`CREATE TRIGGER fail_registration_session_insert BEFORE INSERT ON stash_sessions
+    await inspection.query(`CREATE TRIGGER fail_registration_session_insert AFTER INSERT ON stash_sessions
       FOR EACH ROW EXECUTE FUNCTION fail_registration_session_insert()`);
     try {
       const failed = await fetch(`${instance.url}/api/auth/registration`, { method: "POST", headers: { "content-type": "application/json" },
