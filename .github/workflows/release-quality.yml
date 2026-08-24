@@ -192,7 +192,7 @@ jobs:
       - name: Smoke the extracted archive without an installed runtime or Docker
         shell: bash
         run: |
-          archive="$(find artifacts/server -type f \( -name '*.tar.gz' -o -name '*.zip' \) -print -quit)"
+          archive="$(find artifacts/server -maxdepth 1 -type f \( -name 'stash-instance-*.tar.gz' -o -name 'stash-instance-*.zip' \) -print -quit)"
           test -n "$archive"
           pnpm run smoke:server-bundle -- --archive "$archive"
       - name: Preserve the exact archives tested by release quality
@@ -238,7 +238,7 @@ jobs:
         env: { STASH_VERSION: 0.1.0-ci-migration, STASH_SOURCE_COMMIT: "${{ github.sha }}" }
       - name: Migrate the extracted rich fixture in preserve and rotate modes
         run: |
-          archive="$(find artifacts/server -name '*.tar.gz' -print -quit)"
+          archive="$(find artifacts/server -maxdepth 1 -name 'stash-instance-*.tar.gz' -print -quit)"
           pnpm run smoke:server-bundle -- --archive "$archive" --postgres-url postgresql://stash:stash-ci-only@127.0.0.1:5432/stash
       - if: always()
         run: sudo iptables -D OUTPUT -p tcp -m owner --uid-owner "$(id -u)" --dport 2375:2376 -j REJECT

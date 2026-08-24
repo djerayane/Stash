@@ -70,7 +70,11 @@ async function main() {
     const result = spawnSync("powershell", ["-NoProfile", "-Command", `Compress-Archive -Path '${stage}' -DestinationPath '${archive}' -CompressionLevel Optimal`], { encoding: "utf8" });
     if (result.status !== 0) throw new Error(`Archive creation failed: ${result.stderr}`);
   } else {
-    const tar = spawnSync("tar", ["--uid", "0", "--gid", "0", "--uname", "root", "--gname", "root", "-cf", "-", "-C", paths.output, basename(stage)], { maxBuffer: 1024 * 1024 * 1024 });
+    const tarVersion = spawnSync("tar", ["--version"], { encoding: "utf8" });
+    const tarFlags = tarVersion.status === 0 && tarVersion.stdout.includes("GNU tar")
+      ? ["--sort=name", "--owner=0", "--group=0", "--numeric-owner", "--mtime=@0"]
+      : ["--uid", "0", "--gid", "0", "--uname", "root", "--gname", "root"];
+    const tar = spawnSync("tar", [...tarFlags, "-cf", "-", "-C", paths.output, basename(stage)], { maxBuffer: 1024 * 1024 * 1024 });
     if (tar.status !== 0) throw new Error(`Archive creation failed: ${tar.stderr}`);
     const gzip = spawnSync("gzip", ["-n", "-9"], { input: tar.stdout, maxBuffer: 1024 * 1024 * 1024 });
     if (gzip.status !== 0) throw new Error(`Archive compression failed: ${gzip.stderr}`); await writeFile(archive, gzip.stdout);

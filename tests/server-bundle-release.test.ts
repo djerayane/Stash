@@ -95,12 +95,21 @@ describe("self-contained Instance bundle packaging", () => {
     assert.equal(archiveFixture(paths).status, 0); assert.deepEqual(await readFile(archive), first); assert.deepEqual(await readFile(`${archive}.sha256`), firstChecksum);
   });
 
+  test("uses deterministic owner and ordering flags supported by GNU and BSD tar", async () => {
+    const packager = await readFile(new URL("../scripts/package-server.mjs", import.meta.url), "utf8");
+    assert.match(packager, /spawnSync\("tar", \["--version"\]/);
+    assert.match(packager, /--owner/);
+    assert.match(packager, /--uid/);
+    assert.match(packager, /--sort=name/);
+  });
+
   test("keeps pull requests non-publishing and gates target bundles plus the release publisher", async () => {
     const quality = await readFile(new URL("../.github/workflows/release-quality.yml", import.meta.url), "utf8");
     const release = await readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
     assert.match(quality, /server-bundle-smoke:[\s\S]*matrix:[\s\S]*ubuntu-latest[\s\S]*macos-15-intel[\s\S]*macos-14[\s\S]*windows-latest/);
     assert.doesNotMatch(quality, /macos-13/);
     assert.match(quality, /package:server[\s\S]*smoke:server-bundle/);
+    assert.match(quality, /find artifacts\/server -maxdepth 1 -type f/);
     assert.match(quality, /server-bundle-postgres-migration:[\s\S]*postgres:17-alpine[\s\S]*--postgres-url/);
     assert.match(quality, /runner\.os == 'Linux'[\s\S]*install --yes bubblewrap iptables strace[\s\S]*--dport 2375:2376 -j REJECT/);
     const smoke = await readFile(new URL("../scripts/smoke-server-bundle.mjs", import.meta.url), "utf8");
@@ -115,5 +124,6 @@ describe("self-contained Instance bundle packaging", () => {
     assert.match(release, /SHA256SUMS/);
     assert.doesNotMatch(await readFile(new URL("../.github/workflows/compose-quick-start.yml", import.meta.url), "utf8"), /upload-release-asset|gh release/);
     assert.match(await readFile(new URL("../.github/workflows/compose-quick-start.yml", import.meta.url), "utf8"), /permissions:\s*\n\s*contents: read\s*\n\s*packages: read/);
+    assert.match(await readFile(new URL("../scripts/prepare-server-deploy.mjs", import.meta.url), "utf8"), /fileURLToPath/);
   });
 });
