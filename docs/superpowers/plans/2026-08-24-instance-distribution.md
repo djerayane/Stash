@@ -21,6 +21,8 @@
 - `INSTANCE_MASTER_KEY` remains operator-managed outside storage and must never appear in a bundle, migration artifact, backup payload, process argument, diagnostic, or log.
 - Pull requests must never publish release artifacts.
 - Only canonical SemVer 2.0.0 tags prefixed with `v` may publish artifacts from the tested revision; prereleases are allowed and build metadata is rejected so the version maps losslessly to an OCI tag.
+- Prerelease tags publish OCI/server artifacts and an Android preview APK, but skip the store AAB and IPA. Stable `vMAJOR.MINOR.PATCH` maps exactly to iOS `CFBundleShortVersionString` and Android `versionName` `MAJOR.MINOR.PATCH`.
+- EAS remotely allocates strictly increasing Android `versionCode` and iOS `buildNumber` values; preflight rejects semantic-version or native-build-number collisions before submission.
 - Every publish job must directly `needs: release-quality`; common quality and artifact-smoke checks run for pull requests without secrets, while ref, collision, credential, and signing preflight runs only when the workflow's explicit `release` input is `true` and may receive explicitly mapped `EXPO_TOKEN`.
 - Release preflight must reject a tag/ref mismatch or any existing GitHub Release, asset, GHCR version tag, or EAS version association; publishers never overwrite an existing artifact.
 - OCI manifest and SHA-256 digests are immutable artifact identities. A moved or recreated Git tag fails collision/ref checks and cannot replace a prior release.
@@ -143,10 +145,11 @@
 
 - [ ] Initialize the existing `stash-capture` app under EAS owner `djerayane`; commit the real non-secret `extra.eas.projectId` UUID returned by `eas init`, retain iOS bundle identifier and Android package `app.stash.capture`, and add tests that reject missing, placeholder, or mismatched identity fields.
 - [ ] Add Expo configuration validation and native-generation checks to the reusable workflow's unconditional common path so pull requests need no secret or tag context.
-- [ ] Define preview and production EAS profiles with non-interactive version sourcing and the APK, AAB, and IPA artifact contracts.
+- [ ] Define EAS preview and production profiles with remote app-version sourcing and automatic native-build-number increments. Prerelease tags enable only the preview APK; stable tags enable the AAB and conditional IPA, map `MAJOR.MINOR.PATCH` exactly to Android `versionName` and iOS `CFBundleShortVersionString`, and never put prerelease identifiers into App Store version fields.
 - [ ] Extend the `release: true` gate with non-interactive `EXPO_TOKEN`, Android-keystore, and iOS certificate/profile capability probes. Specify the exact missing-token and Android failure messages; specify missing iOS as an explicit skipped capability that does not suppress Android and never claims an IPA.
-- [ ] Extend tag-only preflight to reject an existing EAS release association for the semantic version before either mobile publisher runs.
-- [ ] Extend the central tag workflow with Android and conditional iOS publishers. Make each publisher directly `needs: release-quality`, scope `EXPO_TOKEN` only to tag preflight and these jobs, and preserve Android publication when iOS capability is absent.
+- [ ] Extend tag-only preflight to reject an existing EAS release association, read the remote Android `versionCode` and iOS `buildNumber`, require each candidate to be strictly greater than its platform's prior value, and expose stable/prerelease publisher conditions before any mobile job runs.
+- [ ] Extend the central tag workflow with Android preview APK, stable-only AAB, and stable-only conditional iOS publishers. Make each publisher directly `needs: release-quality`, scope `EXPO_TOKEN` only to tag preflight and applicable jobs, and verify the completed EAS build reports the allocated native number before claiming its artifact.
+- [ ] For prereleases, report `Android store prerelease skipped: Play Store version requires a stable semantic version` and exactly `iOS prerelease skipped: App Store version requires a stable semantic version`; do not run iOS signing probes or claim an AAB/IPA. For stable releases, preserve Android publication when iOS capability is absent.
 - [ ] Document direct Instance pairing, supported artifacts, and signing prerequisites.
 - [ ] Commit with `ci(mobile): build installable release artifacts`.
 
@@ -163,7 +166,7 @@
 - Consumes: commands and artifact names produced by Tasks 1 through 5.
 - Produces: executable contract validation and one operator guide comparing source Compose, prebuilt image, and standalone bundle installation.
 
-- [ ] Add executable workflow-contract checks proving every container, GitHub Release/server-bundle, Android, and conditional iOS publisher directly `needs: release-quality`; the PR call is `release: false` and secret-free; tag preflight is `release: true`; and `EXPO_TOKEN` is scoped only to tag preflight and mobile publishers.
+- [ ] Add executable workflow-contract checks proving every container, GitHub Release/server-bundle, Android APK/AAB, and conditional iOS publisher directly `needs: release-quality`; the PR call is `release: false` and secret-free; tag preflight is `release: true`; prereleases skip AAB/IPA with the specified statuses; stable mobile versions map exactly and allocate monotonic native numbers; and `EXPO_TOKEN` is scoped only to tag preflight and mobile publishers.
 - [ ] Write executable documentation checks for every shell command and artifact name that can be validated without release credentials.
 - [ ] Document prerequisites, first startup, URL, exact `127.0.0.1:${STASH_PORT:-3000}:3000` binding, persistence, production hardening, upgrades, checksums, architectures, `ghcr.io/djerayane/stash`, standalone data-directory backup, and standalone-to-PostgreSQL preserve-key and rotate-key migration, including destination configuration, preflight, rollback, and secret-handling guarantees.
 - [ ] Link the guide from the README before detailed configuration material.
