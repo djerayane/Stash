@@ -23,11 +23,19 @@ async function main() {
   const input: MigrationKeyInput = mode === "preserve" ? { mode, sourceKeyFile: resolve(sourceKeyFile) }
     : { mode, sourceKeyFile: resolve(sourceKeyFile), ...(values.get("--destination-key-file") ? { destinationKeyFile: resolve(values.get("--destination-key-file")!) } : {}) };
   const keys = await readMigrationKeys(input); const store = await EmbeddedInstanceStore.open(resolve(dataDirectory), createAuthenticationSecretCodec(keys.source));
+  const auditedSurfaces = new Set<string>();
+  const audit = (surface: string, content: string | Uint8Array) => {
+    const bytes = typeof content === "string" ? Buffer.from(content) : Buffer.from(content);
+    for (const secret of [keys.source, keys.destination]) if (bytes.includes(Buffer.from(secret))) throw new Error(`Migration secret audit rejected ${surface}`);
+    auditedSurfaces.add(surface);
+  };
   try {
     await store.database.verifyConnection();
+    audit("process_arguments", JSON.stringify(process.argv)); audit("diagnostics", JSON.stringify({ operation: "embedded_migration", mode }));
     const result = await migrateEmbeddedInstance({ source: store, destinationDatabaseUrl: requiredEnvironment("DESTINATION_DATABASE_URL"),
-      destinationAttachmentRoot: resolve(attachmentRoot), destinationConfigurationRoot: resolve(configurationRoot), destinationDatabaseAvailableBytes: requiredCapacity(), keys });
-    process.stdout.write(`${JSON.stringify({ status: "migrated", ...result })}\n`);
+      destinationAttachmentRoot: resolve(attachmentRoot), destinationConfigurationRoot: resolve(configurationRoot), destinationDatabaseAvailableBytes: requiredCapacity(), keys, audit });
+    audit("result", JSON.stringify(result)); audit("operator_log", "Embedded Instance migration completed");
+    process.stdout.write(`${JSON.stringify({ status: "migrated", ...result, auditedSurfaces: [...auditedSurfaces].sort() })}\n`);
   } finally { await store.close(); }
 }
 

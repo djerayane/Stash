@@ -367,8 +367,17 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
         const sourceKey = key(); const destinationKey = mode === "preserve" ? sourceKey : key();
         const root = await mkdtemp(join(tmpdir(), `stash-migration-cli-${mode}-`)); const sourceRoot = join(root, "source");
         const source = await EmbeddedInstanceStore.open(sourceRoot, createAuthenticationSecretCodec(sourceKey));
-        await source.database.verifyConnection(); await source.database.prepareInstanceStore(); await source.database.createFirstOrganizationOwner({ organizationId: randomUUID(),
-          organizationName: "CLI", ownerId: randomUUID(), ownerName: "CLI Owner", ownerEmail: `${mode}@example.test`, passwordHash: "cli-password", role: "Owner" }); await source.close();
+        const organizationId = randomUUID(); const ownerId = randomUUID(); const workspaceId = randomUUID();
+        await source.database.verifyConnection(); await source.database.prepareInstanceStore(); await source.database.createFirstOrganizationOwner({ organizationId,
+          organizationName: "CLI", ownerId, ownerName: "CLI Owner", ownerEmail: `${mode}@example.test`, passwordHash: "cli-password", role: "Owner" });
+        await source.database.createWorkspace({ id: workspaceId, name: "CLI Workspace", owner: { type: "organization", id: organizationId }, createdByMemberId: ownerId },
+          { localAccountId: ownerId, displayName: "CLI Owner" });
+        const portable = await new PortableWorkspaceExportService(source.database, new LocalAttachmentStorage(source.paths.attachments)).export(ownerId, workspaceId);
+        assert.equal(portable.status, "exported"); if (portable.status === "exported") for (const secret of [sourceKey, destinationKey])
+          assert.equal(Buffer.from(portable.archive).includes(Buffer.from(secret)), false);
+        await writeFile(join(source.paths.attachments, "audit.txt"), "migration audit Attachment");
+        await writeFile(join(source.paths.configuration, "runtime.json"), JSON.stringify({ diagnostics: "local" }));
+        await source.close();
         const keyRoot = await mkdtemp(join(tmpdir(), "stash-migration-cli-keys-")); const sourceKeyFile = join(keyRoot, "source.key"); const destinationKeyFile = join(keyRoot, "destination.key");
         await writeFile(sourceKeyFile, sourceKey, { mode: 0o600 }); if (mode === "rotate") await writeFile(destinationKeyFile, destinationKey, { mode: 0o600 });
         const schema = `embedded_cli_${mode}_${randomUUID().replaceAll("-", "")}`; await admin.query(`CREATE SCHEMA ${schema}`);
@@ -381,6 +390,8 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
         const processResult = spawnSync(process.execPath, arguments_, { cwd: process.cwd(), encoding: "utf8", env: { ...process.env,
           DESTINATION_DATABASE_URL: scoped.toString(), DESTINATION_DATABASE_AVAILABLE_BYTES: String(Number.MAX_SAFE_INTEGER) } });
         assert.equal(processResult.status, 0, processResult.stderr); assert.match(processResult.stdout, /"status":"migrated"/);
+        for (const surface of ["process_arguments", "diagnostics", "transient_staging", "transient_journal", "result", "operator_log"])
+          assert.match(processResult.stdout, new RegExp(surface));
         for (const secret of [sourceKey, destinationKey]) { assert.equal(processResult.stdout.includes(secret), false); assert.equal(processResult.stderr.includes(secret), false); }
         await assertDirectoryExcludesSecrets(sourceRoot, [sourceKey, destinationKey]); await assertDirectoryExcludesSecrets(root, [sourceKey, destinationKey]);
         await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);

@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, test } from "node:test";
 
 import { createAuthenticationSecretCodec } from "../src/authentication-secrets.js";
-import { EmbeddedInstanceStore, EmbeddedInstanceStoreLocked } from "../src/embedded-instance-store.js";
+import { abortPreparedEmbeddedRestore, EmbeddedInstanceStore, EmbeddedInstanceStoreLocked } from "../src/embedded-instance-store.js";
 import { paragraphDocument } from "../src/rich-text.js";
 import { InstanceBackupService } from "../src/instance-backup.js";
 import { EmbeddedLocalInstanceBackupSource, EmbeddedLocalInstanceRestoreTarget } from "../src/instance-backup-system.js";
@@ -133,7 +133,7 @@ describe("embedded Instance store", () => {
 
   test("recovers one coordinated database, Attachment, and configuration snapshot after every restore rename crash point", async () => {
     const key = masterKey();
-    for (let renameCount = 0; renameCount <= 6; renameCount += 1) {
+    for (let renameCount = 0; renameCount <= 7; renameCount += 1) {
       const root = await mkdtemp(join(tmpdir(), `stash-embedded-restore-crash-${renameCount}-`));
       const store = await EmbeddedInstanceStore.open(root, createAuthenticationSecretCodec(key)); await store.database.verifyConnection();
       const backup = join(store.paths.backups, "crash-point"); const service = new InstanceBackupService(
@@ -147,6 +147,13 @@ describe("embedded Instance store", () => {
       const child = spawnSync(process.execPath, ["--import", "tsx", "tests/helpers/embedded-restore-crash.ts", root, join(backup, "database.dump"), String(renameCount)],
         { cwd: process.cwd(), encoding: "utf8" });
       assert.equal(child.signal, "SIGKILL", `rename ${renameCount}: ${child.stderr}`);
+      const stagedAttachments = join(root, "attachments.restore-staged-crash"); const stagedConfiguration = join(root, "config.restore-staged-crash");
+      const recoveryPaths = [join(root, ".restore-journal.json"), stagedAttachments, stagedConfiguration, join(root, "database.restore-staged-crash"),
+        join(root, "database.restore-previous-crash"), join(root, "attachments.restore-previous-crash"), join(root, "config.restore-previous-crash")];
+      const beforeAbort = await Promise.all(recoveryPaths.map((path) => stat(path).then(({ size }) => String(size)).catch(() => "missing")));
+      assert.equal(await abortPreparedEmbeddedRestore(root, stagedAttachments, stagedConfiguration), false);
+      const afterAbort = await Promise.all(recoveryPaths.map((path) => stat(path).then(({ size }) => String(size)).catch(() => "missing")));
+      assert.deepEqual(afterAbort, beforeAbort);
       const recovered = await EmbeddedInstanceStore.open(root, createAuthenticationSecretCodec(key)); stores.push(recovered); await recovered.database.verifyConnection();
       assert.equal(await readFile(join(recovered.paths.attachments, "state.txt"), "utf8"), "backup");
       assert.deepEqual(JSON.parse(await readFile(join(recovered.paths.configuration, "runtime.json"), "utf8")), { state: "backup" });

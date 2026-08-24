@@ -145,6 +145,7 @@ export async function migrateEmbeddedInstance(options: {
   source: EmbeddedInstanceStore; destinationDatabaseUrl: string; destinationAttachmentRoot: string; destinationConfigurationRoot: string;
   destinationDatabaseAvailableBytes: bigint;
   keys: { source: string; destination: string; mode: "preserve" | "rotate" };
+  audit?: (surface: string, content: string | Uint8Array) => void;
 }): Promise<{ tables: number; rows: number; attachments: number }> {
   if (!/^postgres(?:ql)?:\/\//.test(options.destinationDatabaseUrl)) throw new Error("Migration destination must be external PostgreSQL");
   const sourceCodec = createAuthenticationSecretCodec(options.keys.source);
@@ -230,10 +231,12 @@ export async function migrateEmbeddedInstance(options: {
   if (await filesystemAvailableBytes(dirname(destinationConfiguration)) < requiredConfigurationBytes) throw new Error("Migration destination configuration capacity is insufficient");
   await rm(stagedAttachments, { recursive: true, force: true }); await mkdir(stagedAttachments, { recursive: false, mode: 0o700 });
   await cp(options.source.paths.attachments, stagedAttachments, { recursive: true, force: false });
+  for (const file of sourceAttachments) options.audit?.("transient_staging", await readFile(join(stagedAttachments, ...file.relative.split("/"))));
   const staged = await attachmentFiles(stagedAttachments);
   if (JSON.stringify(sourceAttachments) !== JSON.stringify(staged)) { await rm(stagedAttachments, { recursive: true, force: true }); throw new Error("Attachment checksum validation failed"); }
   await rm(stagedConfiguration, { recursive: true, force: true }); await mkdir(stagedConfiguration, { recursive: false, mode: 0o700 });
   await cp(options.source.paths.configuration, stagedConfiguration, { recursive: true, force: false });
+  for (const file of sourceConfiguration) options.audit?.("transient_staging", await readFile(join(stagedConfiguration, ...file.relative.split("/"))));
   if (JSON.stringify(sourceConfiguration) !== JSON.stringify(await attachmentFiles(stagedConfiguration))) {
     await Promise.all([rm(stagedAttachments, { recursive: true, force: true }), rm(stagedConfiguration, { recursive: true, force: true })]);
     throw new Error("Configuration checksum validation failed");
@@ -277,14 +280,16 @@ export async function migrateEmbeddedInstance(options: {
     const copiedRows = tables.reduce((count, table) => count + table.rows.length, 0);
     const destinationRows = (await Promise.all(tables.map(async (table) => Number((await client.query(`SELECT count(*) count FROM ${quote(table.name)}`)).rows[0]?.count)))).reduce((sum, count) => sum + count, 0);
     if (destinationRows !== copiedRows) throw new Error("Migration post-copy semantic row-count validation failed");
-    await writeFile(journalPath, JSON.stringify({ staged: stagedAttachments, state: "committing", tables: tables.length, rows: copiedRows,
+    const committingJournal = JSON.stringify({ staged: stagedAttachments, state: "committing", tables: tables.length, rows: copiedRows,
       attachments: sourceAttachments.length, attachmentFiles: sourceAttachments, configurationStaged: stagedConfiguration,
-      configurationFiles: sourceConfiguration, tableDigests }), { mode: 0o600, flag: "wx" });
+      configurationFiles: sourceConfiguration, tableDigests }); options.audit?.("transient_journal", committingJournal);
+    await writeFile(journalPath, committingJournal, { mode: 0o600, flag: "wx" });
     commitAttempted = true;
     await client.query("COMMIT");
-    await writeFile(journalPath, JSON.stringify({ staged: stagedAttachments, state: "database_committed", tables: tables.length, rows: copiedRows,
+    const committedJournal = JSON.stringify({ staged: stagedAttachments, state: "database_committed", tables: tables.length, rows: copiedRows,
       attachments: sourceAttachments.length, attachmentFiles: sourceAttachments, configurationStaged: stagedConfiguration,
-      configurationFiles: sourceConfiguration, tableDigests }), { mode: 0o600 });
+      configurationFiles: sourceConfiguration, tableDigests }); options.audit?.("transient_journal", committedJournal);
+    await writeFile(journalPath, committedJournal, { mode: 0o600 });
     await finalizeAttachments(stagedAttachments, destinationAttachments); await finalizeAttachments(stagedConfiguration, destinationConfiguration); await rm(journalPath);
     return { tables: tables.length, rows: tables.reduce((count, table) => count + table.rows.length, 0), attachments: sourceAttachments.length };
   } catch (error) {

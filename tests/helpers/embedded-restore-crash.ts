@@ -15,4 +15,5 @@ await mkdir(staged.configuration, { recursive: true }); await writeFile(join(sta
 await writeFile(join(root, ".restore-journal.json"), JSON.stringify({ state: "cutting_over", staged, previous }), { mode: 0o600 });
 const operations = (["database", "attachments", "configuration"] as const).flatMap((name) => [[live[name], previous[name]], [staged[name], live[name]]] as const);
 for (const [index, operation] of operations.entries()) { if (index >= renameCount) break; await rename(...operation); }
+if (renameCount > operations.length) await writeFile(join(root, ".restore-journal.json"), JSON.stringify({ state: "committed", staged, previous }), { mode: 0o600 });
 process.kill(process.pid, "SIGKILL");

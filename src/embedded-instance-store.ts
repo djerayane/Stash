@@ -60,6 +60,16 @@ async function recoverEmbeddedRestore(root: string): Promise<"none" | "discarded
   await rm(journalPath);
   return "committed";
 }
+export async function abortPreparedEmbeddedRestore(root: string, attachments: string, configuration: string): Promise<boolean> {
+  const journalPath = join(root, ".restore-journal.json");
+  let journal: EmbeddedRestoreJournal;
+  try { journal = JSON.parse(await readFile(journalPath, "utf8")) as EmbeddedRestoreJournal; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return true; throw error; }
+  if (journal.state !== "prepared") return false;
+  if (journal.staged.attachments !== attachments || journal.staged.configuration !== configuration)
+    throw new Error("embedded restore preparation does not own the pending journal");
+  await rm(journal.staged.database, { recursive: true, force: true }); await rm(journalPath); return true;
+}
 
 export class EmbeddedInstanceStoreLocked extends Error {
   constructor(readonly dataDirectory: string, readonly ownerPid?: number) {
@@ -238,16 +248,8 @@ export class EmbeddedInstanceStore {
     await writeJournal(journalPath, journal);
   }
 
-  async abortPreparedRestore(attachments: string, configuration: string): Promise<void> {
-    const journalPath = join(this.paths.root, ".restore-journal.json");
-    let journal: EmbeddedRestoreJournal;
-    try { journal = JSON.parse(await readFile(journalPath, "utf8")) as EmbeddedRestoreJournal; }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
-    if (journal.state !== "prepared") return;
-    if (journal.staged.attachments !== attachments || journal.staged.configuration !== configuration)
-      throw new Error("embedded restore preparation does not own the pending journal");
-    await rm(journal.staged.database, { recursive: true, force: true });
-    await rm(journalPath);
+  async abortPreparedRestore(attachments: string, configuration: string): Promise<boolean> {
+    return abortPreparedEmbeddedRestore(this.paths.root, attachments, configuration);
   }
 
   async semanticSnapshot(): Promise<EmbeddedTableSnapshot[]> {
