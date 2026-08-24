@@ -1,0 +1,4 @@
+# Publish one Instance through multiple distribution paths
+
+Stash publishes the same server core and web application as a multi-architecture OCI image and as checksummed standalone server bundles that do not require a local Node or pnpm toolchain. The supported source-based baseline remains Docker Compose with one Stash application container and PostgreSQL, and a fresh checkout supplies clearly marked localhost-only defaults so `docker compose up` starts an evaluable Instance without prior configuration. Standalone bundles still require PostgreSQL and the same production configuration; they do not create an embedded or local-only storage model. Tagged releases may also produce signed Expo mobile artifacts that connect directly to a Member-supplied HTTPS Instance. Pull requests verify artifacts without publishing, while version tags publish immutable artifacts from the same tested source revision.
+
