@@ -18,13 +18,15 @@ The Vite build is the sole browser application. The server hosts its static asse
 
 ## Run an Instance
 
-Docker Compose starts the supported baseline: one Stash application container and PostgreSQL. From a fresh checkout, the complete local evaluation path is:
+From a fresh checkout, start a localhost evaluation Instance with one command:
 
 ```sh
 docker compose up -d
 ```
 
-Wait for the `stash` service to become healthy, then open <http://localhost:3000>. Use `docker compose ps` to inspect readiness and `docker compose logs stash` to inspect startup. Stop the Instance with `docker compose down`. PostgreSQL, local Attachments, and Instance Backups remain in the `stash-postgres`, `stash-attachments`, and `stash-backups` named volumes; removing those volumes deletes local Instance data and is intentionally not part of the normal stop command.
+Open <http://localhost:3000>. Docker Compose starts the supported baseline: one Stash application container and PostgreSQL, bound to localhost by default. The [Installation guide](docs/installation.md) compares source Compose, the prebuilt GHCR image, self-contained bundles, and mobile artifacts, and covers production hardening, persistence, backups, upgrades, and checksums.
+
+Use `docker compose ps` to inspect readiness and `docker compose logs stash` to inspect startup. Stop the Instance with `docker compose down`. PostgreSQL, local Attachments, and Instance Backups remain in the `stash-postgres`, `stash-attachments`, and `stash-backups` named volumes; removing those volumes deletes local Instance data and is intentionally not part of the normal stop command.
 
 The signed-out page offers **Create an account** in the localhost Compose evaluation configuration. Registration creates a built-in password account and a personal Workspace, then signs the new Member in. Set `OPEN_REGISTRATION=false` to close registration. The application default is closed, so non-Compose deployments must explicitly set `OPEN_REGISTRATION=true` to enable it. Existing built-in accounts always use the Password sign-in method.
 To use a published multi-architecture image instead of building from the checkout, set `STASH_IMAGE`. Compose retains the same PostgreSQL, persistence, health, and localhost-only defaults:
