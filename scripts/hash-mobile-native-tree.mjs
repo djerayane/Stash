@@ -16,8 +16,26 @@ async function filesBeneath(root, path = root) {
 function normalize(path, bytes) {
   if (!path.endsWith("project.pbxproj")) return bytes;
   const lines = bytes.toString("utf8").replaceAll("\r\n", "\n")
-    .replace(/\b[A-F0-9]{24}\b/g, "XCODE_GENERATED_ID")
-    .split("\n").sort();
+    .replace(/\b[A-F0-9]{24}\b/g, "XCODE_GENERATED_ID").split("\n");
+  for (let begin = 0; begin < lines.length; begin += 1) {
+    if (!/^\/\* Begin \w+ section \*\/$/.test(lines[begin] ?? "")) continue;
+    const end = lines.findIndex((line, index) => index > begin && /^\/\* End \w+ section \*\/$/.test(line));
+    if (end < 0) continue;
+    const prefix = []; const records = []; let current = null;
+    for (const line of lines.slice(begin + 1, end)) {
+      if (current) {
+        current.push(line);
+        if (line === "\t\t};") { records.push(current); current = null; }
+      } else if (/^\t\t\S.* = \{/.test(line)) {
+        current = [line];
+        if (line.endsWith("};")) { records.push(current); current = null; }
+      } else prefix.push(line);
+    }
+    if (current) records.push(current);
+    const canonical = records.sort((left, right) => left.join("\n").localeCompare(right.join("\n"))).flat();
+    lines.splice(begin + 1, end - begin - 1, ...prefix, ...canonical);
+    begin += prefix.length + canonical.length;
+  }
   return Buffer.from(lines.join("\n"));
 }
 

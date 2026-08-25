@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { parseMobileReleaseTag } from "../scripts/mobile-release-version.mjs";
-import { inspectIosSigningCapability } from "../scripts/ios-signing-capability.mjs";
+import { inspectIosSigningCapability, probeIosSigningCapability } from "../scripts/ios-signing-capability.mjs";
 import { hashNativeTree } from "../scripts/hash-mobile-native-tree.mjs";
 
 const root = new URL("../", import.meta.url);
@@ -95,6 +95,12 @@ describe("mobile release contract", () => {
     assert.deepEqual(inspectIosSigningCapability(missing, new Date("2029-01-01T00:00:00.000Z")), { ready: false });
   });
 
+  it("distinguishes unavailable signing credentials from a failed capability probe", async () => {
+    await assert.rejects(() => probeIosSigningCapability({ projectId: "project", token: "token", fetchImpl: async () => new Response("unauthorized", { status: 401 }) }), /HTTP 401/);
+    await assert.rejects(() => probeIosSigningCapability({ projectId: "project", token: "token", fetchImpl: async () => Response.json({ errors: [{ message: "schema changed" }] }) }), /rejected/);
+    await assert.rejects(() => probeIosSigningCapability({ projectId: "project", token: "token", fetchImpl: async () => Response.json({ data: null }) }), /malformed/);
+  });
+
   it("compares normalized content across the complete generated native tree", async () => {
     const parent = await mkdtemp(join(tmpdir(), "stash-native-hash-"));
     const first = join(parent, "first"); const second = join(parent, "second");
@@ -104,5 +110,8 @@ describe("mobile release contract", () => {
     assert.equal(await hashNativeTree(first), await hashNativeTree(second));
     await writeFile(join(second, "ios", "project.pbxproj"), "111122223333444455556666 link 111122223333444455556666\nvalue=two\n");
     assert.notEqual(await hashNativeTree(first), await hashNativeTree(second));
+    await writeFile(join(first, "ios", "project.pbxproj"), "children = (\nAAAABBBBCCCCDDDDEEEEFFFF /* One */,\n111122223333444455556666 /* Two */,\n);\n");
+    await writeFile(join(second, "ios", "project.pbxproj"), "children = (\n111122223333444455556666 /* Two */,\nAAAABBBBCCCCDDDDEEEEFFFF /* One */,\n);\n");
+    assert.notEqual(await hashNativeTree(first), await hashNativeTree(second), "ordered Xcode arrays must remain order-sensitive");
   });
 });
