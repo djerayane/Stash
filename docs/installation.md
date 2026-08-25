@@ -203,11 +203,13 @@ export STASH_DESTINATION_KEY_FILE=/srv/.stash-standalone.master-key
 For rotate mode, initialize with the distinct destination key while still supplying the source key so the same protected input contract is checked:
 
 ```sh
+openssl rand -base64 32 > /run/secrets/stash-destination-key
+chmod 600 /run/secrets/stash-destination-key
 export STASH_DESTINATION_KEY_FILE=/run/secrets/stash-destination-key
 ./stash migrate prepare-destination --mode rotate --source-key-file /srv/.stash-standalone.master-key --destination-key-file "$STASH_DESTINATION_KEY_FILE"
 ```
 
-The initializer reports `"status":"prepared"` and exits before migration, leaving no destination application process that could race writes. A raw empty database or a normally started application without this preparation is insufficient. Verify the destination has no accounts, Organizations, Workspaces, or other domain rows, and create empty operator-owned Attachment and configuration roots:
+The initializer rejects every pre-existing user object in the destination schema, including tables, views, materialized views, sequences, foreign tables, functions, and user-defined types. It creates the complete schema, authentication key check, and Instance format in one transaction on one connection. Any failure rolls that transaction back without leaving a partial key boundary or schema, so the same protected command can be retried against the still-empty destination. It reports `"status":"prepared"` only after commit and exits before migration, leaving no destination application process that could race writes. A raw empty database or a normally started application without this preparation is insufficient. Verify the destination has no accounts, Organizations, Workspaces, or other domain rows, and create empty operator-owned Attachment and configuration roots:
 
 ```sh
 install -d -m 700 /srv/stash-postgres/attachments /srv/stash-postgres/config
@@ -224,8 +226,6 @@ export DESTINATION_DATABASE_AVAILABLE_BYTES=107374182400
 In rotate mode, configure the destination Instance with a distinct new key and pass both protected files so encrypted authentication, recovery, and integration state is re-encrypted:
 
 ```sh
-openssl rand -base64 32 > /run/secrets/stash-destination-key
-chmod 600 /run/secrets/stash-destination-key
 ./stash migrate --data-dir /srv/stash-standalone --attachment-root /srv/stash-postgres/attachments --configuration-root /srv/stash-postgres/config --mode rotate --source-key-file /srv/.stash-standalone.master-key --destination-key-file /run/secrets/stash-destination-key
 ```
 

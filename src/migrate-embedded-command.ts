@@ -1,11 +1,9 @@
 import { resolve } from "node:path";
-import { Pool } from "pg";
 
 import { createAuthenticationSecretCodec } from "./authentication-secrets.js";
 import { EmbeddedInstanceStore } from "./embedded-instance-store.js";
 import { migrateEmbeddedInstance, readMigrationKeys, type MigrationKeyInput } from "./embedded-instance-migration.js";
 import { PostgresDatabase } from "./postgres-database.js";
-import { PostgresInstanceUpgradeTarget } from "./postgres-instance-upgrade.js";
 import { readStashReleaseVersion } from "./release-version.js";
 
 function requiredEnvironment(name: string): string { const value = process.env[name]?.trim(); if (!value) throw new Error(`${name} must be configured`); return value; }
@@ -31,22 +29,12 @@ async function main() {
   const keys = await readMigrationKeys(input);
   if (operation === "prepare-destination") {
     const destinationDatabaseUrl = requiredEnvironment("DESTINATION_DATABASE_URL");
-    const inspection = new Pool({ connectionString: destinationDatabaseUrl, connectionTimeoutMillis: 2_000, max: 1 });
-    try {
-      const existing = await inspection.query<{ table_name: string }>(`SELECT table_name FROM information_schema.tables
-        WHERE table_schema=current_schema() AND table_type='BASE TABLE' ORDER BY table_name`);
-      if (existing.rowCount) throw new Error("Migration destination PostgreSQL schema must be empty before preparation");
-    } finally { await inspection.end(); }
     const database = new PostgresDatabase(destinationDatabaseUrl, createAuthenticationSecretCodec(keys.destination));
-    try { await database.verifyConnection(); await database.prepareInstanceStore(); }
-    finally { await database.close(); }
-    const target = new PostgresInstanceUpgradeTarget(destinationDatabaseUrl, async () => undefined);
     try {
-      const targetVersion = await readStashReleaseVersion(); const plan = await target.inspect(targetVersion);
-      if (plan.checks.some((check) => check.status === "fail")) throw new Error("Migration destination Instance format preparation failed");
-      if (plan.currentVersion !== targetVersion) await target.apply(plan.currentVersion, targetVersion);
+      const targetVersion = await readStashReleaseVersion();
+      await database.prepareEmptyMigrationDestination(targetVersion);
       process.stdout.write(`${JSON.stringify({ status: "prepared", targetVersion })}\n`);
-    } finally { await target.close(); }
+    } finally { await database.close(); }
     return;
   }
   const store = await EmbeddedInstanceStore.open(resolve(dataDirectory!), createAuthenticationSecretCodec(keys.source));

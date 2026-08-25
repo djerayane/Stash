@@ -97,13 +97,12 @@ describe("installation documentation contract", () => {
     assert.match(migration, /stash_authentication_key_check/);
     assert.match(migration, /stash_instance_format/);
     assert.match(migration, /must be prepared with its configured master key before migration/);
-    assert.match(database, /async prepareInstanceStore\(\)/);
+    assert.match(database, /async prepareInstanceStore\(transactionClient\?: PoolClient\)/);
     assert.match(upgrade, /class PostgresInstanceUpgradeTarget/);
     assert.match(command, /prepare-destination/);
-    assert.match(command, /prepareInstanceStore/);
-    assert.match(command, /PostgresInstanceUpgradeTarget/);
-    assert.match(command, /information_schema\.tables/);
-    assert.match(command, /schema must be empty before preparation/);
+    assert.match(command, /prepareEmptyMigrationDestination/);
+    assert.match(database, /pg_class/); assert.match(database, /pg_proc/); assert.match(database, /pg_type/);
+    assert.match(database, /schema must be empty before preparation/);
     for (const fragment of [
       "STASH_DESTINATION_KEY_FILE=",
       "./stash migrate prepare-destination", "ghcr.io/djerayane/stash:<version>",
@@ -112,6 +111,20 @@ describe("installation documentation contract", () => {
     assert.match(guide, /schema.*Instance format.*authentication key check/is);
     assert.match(guide, /preserve mode.*source key file.*rotate mode.*destination key file/is);
     assert.match(guide, /initializer.*exits.*before.*migrat/is);
+  });
+
+  it("creates the rotate destination key once before preparation and reuses it for migration", async () => {
+    const guide = await read("docs/installation.md");
+    const generate = "openssl rand -base64 32 > /run/secrets/stash-destination-key";
+    assert.equal(guide.split(generate).length - 1, 1, "rotate destination key must be generated exactly once");
+    const chmod = "chmod 600 /run/secrets/stash-destination-key";
+    assert.equal(guide.split(chmod).length - 1, 1, "rotate destination key must be protected exactly once");
+    const generatedAt = guide.indexOf(generate); const preparedAt = guide.indexOf("./stash migrate prepare-destination --mode rotate");
+    const rotateMigrationSection = guide.indexOf("In rotate mode, configure", preparedAt);
+    const migratedAt = guide.indexOf("./stash migrate --data-dir", rotateMigrationSection);
+    assert.ok(generatedAt >= 0 && generatedAt < preparedAt && preparedAt < migratedAt);
+    assert.match(guide.slice(preparedAt, migratedAt), /--destination-key-file "\$STASH_DESTINATION_KEY_FILE"/);
+    assert.match(guide.slice(migratedAt, migratedAt + 500), /--destination-key-file \/run\/secrets\/stash-destination-key/);
   });
 
   it("copies a coordinated Compose backup out of the hardcoded named-volume path", async () => {
