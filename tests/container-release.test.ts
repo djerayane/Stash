@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 
 const root = new URL("..", import.meta.url);
@@ -10,6 +12,30 @@ async function workflow(name: string): Promise<string> {
 }
 
 describe("container release contract", () => {
+  it("excludes repository-local worktrees from the Docker build context", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "stash-docker-context-"));
+    const output = join(fixture, "output");
+
+    try {
+      await writeFile(join(fixture, ".dockerignore"), await readFile(new URL(".dockerignore", root)));
+      await writeFile(join(fixture, "included.txt"), "included\n");
+      await mkdir(join(fixture, ".worktrees", "local-branch"), { recursive: true });
+      await writeFile(join(fixture, ".worktrees", "local-branch", "sentinel.txt"), "must not enter context\n");
+
+      const result = spawnSync(
+        "docker",
+        ["build", "--output", `type=local,dest=${output}`, "--file", "-", fixture],
+        { encoding: "utf8", input: "FROM scratch\nCOPY . /\n" },
+      );
+
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(await readFile(join(output, "included.txt"), "utf8"), "included\n");
+      await assert.rejects(readFile(join(output, ".worktrees", "local-branch", "sentinel.txt")), { code: "ENOENT" });
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
+    }
+  });
+
   it("uses one secret-free reusable quality gate for pull requests", async () => {
     const quality = await workflow("release-quality.yml");
     const pullRequest = await workflow("compose-quick-start.yml");
