@@ -22,6 +22,8 @@ on:
         value: ${{ jobs.release-preflight.outputs.ios-previous-build-number }}
       ios-signing-configured:
         value: ${{ jobs.release-preflight.outputs.ios-signing-configured }}
+      ios-apple-team-id:
+        value: ${{ jobs.release-preflight.outputs.ios-apple-team-id }}
 
 permissions:
   contents: read
@@ -277,13 +279,14 @@ jobs:
         working-directory: apps/mobile
         run: |
           pnpm exec expo prebuild --clean --no-install --platform all
-          find android ios -type f -print | LC_ALL=C sort > /tmp/native-first.files
+          android_first="$(node ../../scripts/hash-mobile-native-tree.mjs android)"
+          ios_first="$(node ../../scripts/hash-mobile-native-tree.mjs ios)"
           grep -Eq "applicationId ['\"]app.stash.capture['\"]" android/app/build.gradle
           grep -q 'PRODUCT_BUNDLE_IDENTIFIER = app.stash.capture' ios/StashCapture.xcodeproj/project.pbxproj
           rm -rf android ios
           pnpm exec expo prebuild --clean --no-install --platform all
-          find android ios -type f -print | LC_ALL=C sort > /tmp/native-second.files
-          diff -u /tmp/native-first.files /tmp/native-second.files
+          test "$android_first" = "$(node ../../scripts/hash-mobile-native-tree.mjs android)"
+          test "$ios_first" = "$(node ../../scripts/hash-mobile-native-tree.mjs ios)"
 
   release-preflight:
     if: inputs.release
@@ -297,8 +300,9 @@ jobs:
       mobile-version: ${{ steps.mobile.outputs.version }}
       stable: ${{ steps.mobile.outputs.stable }}
       android-previous-version-code: ${{ steps.eas.outputs.android-previous }}
-      ios-previous-build-number: ${{ steps.eas.outputs.ios-previous }}
-      ios-signing-configured: ${{ steps.eas.outputs.ios-signing-configured }}
+      ios-previous-build-number: ${{ steps.ios-version.outputs.ios-previous }}
+      ios-signing-configured: ${{ steps.signing.outputs.ios-signing-configured }}
+      ios-apple-team-id: ${{ steps.signing.outputs.apple-team-id }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -367,8 +371,6 @@ jobs:
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
           EAS_PROJECT_ID: ${{ vars.EAS_PROJECT_ID }}
-          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
-          IOS_SIGNING_CONFIGURED: ${{ vars.IOS_SIGNING_CONFIGURED }}
           MOBILE_VERSION: ${{ steps.mobile.outputs.version }}
         run: |
           if [ -z "$EXPO_TOKEN" ]; then
@@ -386,16 +388,25 @@ jobs:
           }
           android="$(pnpm dlx eas-cli@16.4.0 build:version:get --platform android --profile production --json --non-interactive)"
           android_previous="$(node -e 'const x=JSON.parse(process.argv[1]);process.stdout.write(String(x.versionCode??x.android?.versionCode??0))' "$android")"
-          ios_previous=0
-          ios_signing_configured=false
-          if [ "${{ steps.mobile.outputs.stable }}" = true ] && [ "$IOS_SIGNING_CONFIGURED" = true ] && [[ "$APPLE_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]]; then
-            ios="$(pnpm dlx eas-cli@16.4.0 build:version:get --platform ios --profile production --json --non-interactive)"
-            ios_previous="$(node -e 'const x=JSON.parse(process.argv[1]);process.stdout.write(String(x.buildNumber??x.ios?.buildNumber??0))' "$ios")"
-            ios_signing_configured=true
-          fi
-          [[ "$android_previous" =~ ^[0-9]+$ && "$ios_previous" =~ ^[0-9]+$ ]] || { echo "EAS native versions must be numeric" >&2; exit 1; }
-          {
-            echo "android-previous=$android_previous"
-            echo "ios-previous=$ios_previous"
-            echo "ios-signing-configured=$ios_signing_configured"
-          } >> "$GITHUB_OUTPUT"
+          [[ "$android_previous" =~ ^[0-9]+$ ]] || { echo "EAS Android versionCode must be numeric" >&2; exit 1; }
+          echo "android-previous=$android_previous" >> "$GITHUB_OUTPUT"
+      - id: signing
+        if: steps.mobile.outputs.stable == 'true'
+        name: Probe stored EAS iOS signing capability
+        working-directory: apps/mobile
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          EAS_PROJECT_ID: ${{ vars.EAS_PROJECT_ID }}
+        run: node ../../scripts/probe-ios-signing.mjs
+      - id: ios-version
+        if: steps.signing.outputs.ios-signing-configured == 'true'
+        name: Read the iOS native version allocation baseline
+        working-directory: apps/mobile
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          EAS_PROJECT_ID: ${{ vars.EAS_PROJECT_ID }}
+        run: |
+          ios="$(pnpm dlx eas-cli@16.4.0 build:version:get --platform ios --profile production --json --non-interactive)"
+          ios_previous="$(node -e 'const x=JSON.parse(process.argv[1]);process.stdout.write(String(x.buildNumber??x.ios?.buildNumber??0))' "$ios")"
+          [[ "$ios_previous" =~ ^[0-9]+$ ]] || { echo "EAS iOS buildNumber must be numeric" >&2; exit 1; }
+          echo "ios-previous=$ios_previous" >> "$GITHUB_OUTPUT"
