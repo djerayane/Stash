@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
+import { Buffer } from "node:buffer";
 import { Schema } from "@tiptap/pm/model";
 import { prosemirrorJSONToYDoc } from "y-prosemirror";
 import * as Y from "yjs";
@@ -39,7 +40,16 @@ it("does not acknowledge an unsent local contribution when an older server snaps
 it("encodes updates up to the server limit without overflowing the browser call stack", () => {
   const update = new Uint8Array(1_048_576);
   for (let index = 0; index < update.length; index += 1) update[index] = index % 251;
-  expect(Uint8Array.from(atob(encodeUpdateBase64(update)), (character) => character.charCodeAt(0))).toEqual(update);
+  const fromCharCode = vi.spyOn(String, "fromCharCode");
+  try {
+    expect(encodeUpdateBase64(update)).toBe(Buffer.from(update).toString("base64"));
+    const maximumConversionCalls = update.byteLength / 0x4000; // Permit 16–32 KiB chunks without allowing tiny-chunk work amplification.
+    expect(fromCharCode.mock.calls.length).toBeGreaterThan(1);
+    expect(fromCharCode.mock.calls.length).toBeLessThanOrEqual(maximumConversionCalls);
+    expect(Math.max(...fromCharCode.mock.calls.map((characters) => characters.length))).toBeLessThanOrEqual(0x8000);
+  } finally {
+    fromCharCode.mockRestore();
+  }
 });
 
 it("loads an authorized collaborative Note and exposes keyboard-operable rich-text controls", async () => {
