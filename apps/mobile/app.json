@@ -1,6 +1,7 @@
 {
   "expo": {
     "name": "Stash Capture",
+    "owner": "djerayane",
     "slug": "stash-capture",
     "scheme": "stash",
     "version": "0.1.0",

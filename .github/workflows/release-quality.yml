@@ -8,6 +8,20 @@ on:
         required: false
         type: boolean
         default: false
+    secrets:
+      EXPO_TOKEN:
+        required: false
+    outputs:
+      mobile-version:
+        value: ${{ jobs.release-preflight.outputs.mobile-version }}
+      stable:
+        value: ${{ jobs.release-preflight.outputs.stable }}
+      android-previous-version-code:
+        value: ${{ jobs.release-preflight.outputs.android-previous-version-code }}
+      ios-previous-build-number:
+        value: ${{ jobs.release-preflight.outputs.ios-previous-build-number }}
+      ios-signing-configured:
+        value: ${{ jobs.release-preflight.outputs.ios-signing-configured }}
 
 permissions:
   contents: read
@@ -243,13 +257,48 @@ jobs:
       - if: always()
         run: sudo iptables -D OUTPUT -p tcp -m owner --uid-owner "$(id -u)" --dport 2375:2376 -j REJECT
 
+  mobile-native-generation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Validate the public Expo and EAS configuration
+        working-directory: apps/mobile
+        run: |
+          pnpm exec expo config --type public --json > /tmp/stash-expo-config.json
+          node -e 'const c=require("/tmp/stash-expo-config.json"); if(c.owner!=="djerayane"||c.slug!=="stash-capture"||c.ios.bundleIdentifier!=="app.stash.capture"||c.android.package!=="app.stash.capture"||c.extra?.eas?.projectId) process.exit(1)'
+      - name: Reproducibly generate both native projects without credentials
+        working-directory: apps/mobile
+        run: |
+          pnpm exec expo prebuild --clean --no-install --platform all
+          find android ios -type f -print | LC_ALL=C sort > /tmp/native-first.files
+          grep -Eq "applicationId ['\"]app.stash.capture['\"]" android/app/build.gradle
+          grep -q 'PRODUCT_BUNDLE_IDENTIFIER = app.stash.capture' ios/StashCapture.xcodeproj/project.pbxproj
+          rm -rf android ios
+          pnpm exec expo prebuild --clean --no-install --platform all
+          find android ios -type f -print | LC_ALL=C sort > /tmp/native-second.files
+          diff -u /tmp/native-first.files /tmp/native-second.files
+
   release-preflight:
     if: inputs.release
     runs-on: ubuntu-latest
+    environment: mobile-release
     timeout-minutes: 10
     permissions:
       contents: read
       packages: read
+    outputs:
+      mobile-version: ${{ steps.mobile.outputs.version }}
+      stable: ${{ steps.mobile.outputs.stable }}
+      android-previous-version-code: ${{ steps.eas.outputs.android-previous }}
+      ios-previous-build-number: ${{ steps.eas.outputs.ios-previous }}
+      ios-signing-configured: ${{ steps.eas.outputs.ios-signing-configured }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -259,6 +308,11 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: pnpm install --frozen-lockfile
       - name: Validate immutable release candidate
         env:
           GH_TOKEN: ${{ github.token }}
@@ -304,3 +358,44 @@ jobs:
             cat ghcr-error >&2
             exit 1
           fi
+      - id: mobile
+        name: Resolve the mobile marketing version
+        run: node scripts/configure-mobile-release.mjs "$GITHUB_REF_NAME"
+      - id: eas
+        name: Validate EAS release identity and native version allocation baseline
+        working-directory: apps/mobile
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          EAS_PROJECT_ID: ${{ vars.EAS_PROJECT_ID }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          IOS_SIGNING_CONFIGURED: ${{ vars.IOS_SIGNING_CONFIGURED }}
+          MOBILE_VERSION: ${{ steps.mobile.outputs.version }}
+        run: |
+          if [ -z "$EXPO_TOKEN" ]; then
+            echo "Mobile release unavailable: configure the EXPO_TOKEN GitHub Actions secret" >&2
+            exit 1
+          fi
+          if ! [[ "$EAS_PROJECT_ID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then
+            echo "Mobile release unavailable: configure the EAS_PROJECT_ID environment variable with the @djerayane/stash-capture project UUID" >&2
+            exit 1
+          fi
+          builds="$(pnpm dlx eas-cli@16.4.0 build:list --platform all --app-version "$MOBILE_VERSION" --limit 1 --json --non-interactive)"
+          [ "$(node -e 'const x=JSON.parse(process.argv[1]);process.stdout.write(String(x.length))' "$builds")" = 0 ] || {
+            echo "EAS already associates a build with mobile version $MOBILE_VERSION" >&2
+            exit 1
+          }
+          android="$(pnpm dlx eas-cli@16.4.0 build:version:get --platform android --profile production --json --non-interactive)"
+          android_previous="$(node -e 'const x=JSON.parse(process.argv[1]);process.stdout.write(String(x.versionCode??x.android?.versionCode??0))' "$android")"
+          ios_previous=0
+          ios_signing_configured=false
+          if [ "${{ steps.mobile.outputs.stable }}" = true ] && [ "$IOS_SIGNING_CONFIGURED" = true ] && [[ "$APPLE_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]]; then
+            ios="$(pnpm dlx eas-cli@16.4.0 build:version:get --platform ios --profile production --json --non-interactive)"
+            ios_previous="$(node -e 'const x=JSON.parse(process.argv[1]);process.stdout.write(String(x.buildNumber??x.ios?.buildNumber??0))' "$ios")"
+            ios_signing_configured=true
+          fi
+          [[ "$android_previous" =~ ^[0-9]+$ && "$ios_previous" =~ ^[0-9]+$ ]] || { echo "EAS native versions must be numeric" >&2; exit 1; }
+          {
+            echo "android-previous=$android_previous"
+            echo "ios-previous=$ios_previous"
+            echo "ios-signing-configured=$ios_signing_configured"
+          } >> "$GITHUB_OUTPUT"

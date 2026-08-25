@@ -1,5 +1,15 @@
 # Stash Capture
 
+## Install and pair
+
+Version-tag release workflows provide an Android preview APK for direct installation. Stable releases also provide an Android App Bundle (AAB) for store distribution and, when Apple signing is configured, an iOS IPA. Download the named artifact from the tag workflow's retained artifacts or its recorded EAS build, and verify the release metadata before installing. An AAB is intended for Google Play and is not directly installable; use the APK for direct Android testing.
+
+On first launch, enter the public URL of the Stash Instance you want to use and complete its Member pairing flow. The URL must use HTTPS (except explicit localhost development), and the app connects to that Instance directly. There is no Stash-hosted relay.
+
+Maintainers with access to the `djerayane` Expo account must create or link `@djerayane/stash-capture` once with `eas init`. Record its non-secret UUID as the `EAS_PROJECT_ID` variable in the protected `mobile-release` GitHub environment; do not invent a UUID. Initialize the remote Android `versionCode` and iOS `buildNumber` once with `eas build:version:set` before the first tag. The same environment supplies `EXPO_TOKEN` only to tag release jobs. Pull requests intentionally receive neither value and validate the unlinked public config and generated native projects.
+
+Configure the EAS Android keystore and, optionally, the Apple distribution certificate and provisioning profile for `app.stash.capture`. Set the environment's `APPLE_TEAM_ID` to the 10-character Apple Developer team identifier and `IOS_SIGNING_CONFIGURED` to `true` only after both Apple credentials are available in EAS. Missing Apple capability skips the IPA without affecting Android; missing Android signing fails with remediation rather than publishing an unsigned artifact.
+
 The Expo mobile client pairs directly with a Member-provided HTTPS Stash Instance. On native platforms, a Keychain/Keystore-backed key encrypts pairing, outbox, Project, tag, and reminder state with AES-GCM; SQLite stores only ciphertext and is not constrained by SecureStore payload limits. The web build is deliberately tab-memory-only: neither its key nor encrypted state enters browser storage, so credentials and Workspace metadata are never durably persisted. There is no relay service.
 
 Text, checklist, photo, file, and voice captures are saved locally before synchronization. Media bytes remain inside the encrypted outbox until the original is accepted as a Workspace Attachment and its portable relative link is captured in the Note. A failed Note request remembers the accepted Attachment so a retry does not upload another copy. Retriable network and server failures preserve the outbox; permission, authorization, and validation failures remain visible for correction. The stable client capture UUID makes Note retries idempotent at the Instance protocol.
