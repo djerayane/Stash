@@ -101,7 +101,10 @@ describe("installation documentation contract", () => {
     assert.match(upgrade, /class PostgresInstanceUpgradeTarget/);
     assert.match(command, /prepare-destination/);
     assert.match(command, /prepareEmptyMigrationDestination/);
-    assert.match(database, /pg_class/); assert.match(database, /pg_proc/); assert.match(database, /pg_type/);
+    for (const catalog of ["pg_class", "pg_proc", "pg_type", "pg_collation", "pg_operator", "pg_opfamily", "pg_opclass", "pg_conversion",
+      "pg_ts_config", "pg_ts_dict", "pg_ts_parser", "pg_ts_template", "pg_statistic_ext", "pg_extension", "pg_constraint", "pg_default_acl"]) {
+      assert.match(database, new RegExp(catalog));
+    }
     assert.match(database, /schema must be empty before preparation/);
     for (const fragment of [
       "STASH_DESTINATION_KEY_FILE=",

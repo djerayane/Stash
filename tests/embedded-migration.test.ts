@@ -97,18 +97,21 @@ describe("embedded-to-PostgreSQL migration key preflight", () => {
   });
 
   test("rolls back every destination object on injected preparation failure and permits a clean retry", async () => {
-    const statements: string[] = []; const client = {
+    const statements: string[] = []; let failPortableProjection = true; const client = {
       async query(sql: string) {
         statements.push(sql.trim());
         if (sql.includes("SELECT object_name FROM")) return { rows: [], rowCount: 0 };
         if (sql.includes("SELECT encrypted_check FROM stash_authentication_key_check")) return { rows: [], rowCount: 0 };
+        if (failPortableProjection && sql.includes("CREATE TABLE IF NOT EXISTS stash_portable_projection_outbox")) {
+          failPortableProjection = false; throw new Error("injected portable projection failure");
+        }
         return { rows: [], rowCount: 0 };
       },
       release() { statements.push("RELEASE"); },
     };
     const pool = { on() {}, async connect() { return client; }, async end() {} };
     const database = new PostgresDatabase("postgresql://unused", createAuthenticationSecretCodec(key()), { pool: pool as any });
-    await assert.rejects(database.prepareEmptyMigrationDestination("0.1.0", async () => { throw new Error("injected preparation failure"); }), /injected preparation failure/);
+    await assert.rejects(database.prepareEmptyMigrationDestination("0.1.0"), /injected portable projection failure/);
     assert.equal(statements.filter((sql) => sql === "BEGIN").length, 1);
     assert.equal(statements.filter((sql) => sql === "ROLLBACK").length, 1);
     assert.equal(statements.filter((sql) => sql === "COMMIT").length, 0);
@@ -118,7 +121,33 @@ describe("embedded-to-PostgreSQL migration key preflight", () => {
     assert.ok(statements.some((sql) => sql.includes("pg_class")));
     assert.ok(statements.some((sql) => sql.includes("pg_proc")));
     assert.ok(statements.some((sql) => sql.includes("pg_type")));
-    assert.ok(statements.some((sql) => sql.includes("'f','c'")), "foreign tables and composite types must be rejected");
+    assert.ok(statements.some((sql) => /'f'.*'c'.*'i'.*'I'/.test(sql)), "foreign tables, composite types, and indexes must be rejected");
+    for (const catalog of ["pg_collation", "pg_operator", "pg_opfamily", "pg_opclass", "pg_conversion", "pg_ts_config", "pg_ts_dict",
+      "pg_ts_parser", "pg_ts_template", "pg_statistic_ext", "pg_extension", "pg_constraint", "pg_default_acl"]) {
+      assert.ok(statements.some((sql) => sql.includes(catalog)), `${catalog} objects must be rejected`);
+    }
+    const portableLock = "SELECT pg_advisory_xact_lock(1094218495)";
+    assert.ok(statements.filter((sql) => sql === portableLock).length >= 2, "each attempt must acquire a transaction-owned schema lock");
+    assert.equal(statements.filter((sql) => sql.includes("pg_advisory_unlock")).length, 0);
+    assert.ok(statements.indexOf(portableLock) < statements.indexOf("ROLLBACK"), "the failed locked block must roll back its transaction-owned lock");
+  });
+
+  test("normal Instance-store preparation owns the transaction containing its schema locks", async () => {
+    const statements: string[] = []; const client = {
+      async query(sql: string) { statements.push(sql.trim()); return { rows: [], rowCount: 0 }; },
+      release() { statements.push("RELEASE"); },
+    };
+    const pool = { on() {}, async connect() { return client; }, async end() {} };
+    const database = new PostgresDatabase("postgresql://unused", createAuthenticationSecretCodec(key()), { pool: pool as any });
+    await database.prepareInstanceStore();
+    assert.equal(statements[0], "BEGIN");
+    assert.equal(statements.at(-2), "COMMIT"); assert.equal(statements.at(-1), "RELEASE");
+    for (const lock of ["SELECT pg_advisory_xact_lock(1094218495)", "SELECT pg_advisory_xact_lock(1465271063)"]) {
+      const lockedAt = statements.indexOf(lock); assert.ok(lockedAt > 0 && lockedAt < statements.indexOf("COMMIT"), `${lock} must be transaction-scoped`);
+    }
+    assert.equal(statements.filter((sql) => sql === "BEGIN").length, 1);
+    assert.equal(statements.filter((sql) => sql === "COMMIT").length, 1);
+    assert.equal(statements.filter((sql) => sql.includes("pg_advisory_unlock")).length, 0);
   });
 });
 
@@ -145,7 +174,8 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
     try {
       for (const create of ["CREATE TABLE OBJECT (id INTEGER)", "CREATE VIEW OBJECT AS SELECT 1 id", "CREATE MATERIALIZED VIEW OBJECT AS SELECT 1 id",
         "CREATE SEQUENCE OBJECT", "CREATE FUNCTION OBJECT() RETURNS integer LANGUAGE SQL AS 'SELECT 1'", "CREATE TYPE OBJECT AS ENUM ('one')",
-        "CREATE TYPE OBJECT AS (value integer)"]) {
+        "CREATE TYPE OBJECT AS (value integer)", "CREATE COLLATION OBJECT (LOCALE = 'C')", "CREATE OPERATOR FAMILY OBJECT USING btree",
+        "CREATE TEXT SEARCH CONFIGURATION OBJECT (COPY = pg_catalog.simple)", "CREATE TEXT SEARCH DICTIONARY OBJECT (TEMPLATE = pg_catalog.simple)"]) {
         const schema = `embedded_prepare_nonempty_${randomUUID().replaceAll("-", "")}`; await admin.query(`CREATE SCHEMA ${schema}`);
         try {
           await admin.query(create.replace("OBJECT", `${schema}.unrelated`)); const separator = postgresUrl!.includes("?") ? "&" : "?";

@@ -271,6 +271,7 @@ export class PostgresDatabase implements
   async prepareInstanceStore(transactionClient?: PoolClient): Promise<void> {
     const client = transactionClient ?? await this.#pool.connect();
     try {
+      if (!transactionClient) await client.query("BEGIN");
       await this.#ensureBootstrapSchema(client); await this.#ensureWorkspaceProjectSchema(client);
       await this.#ensureAuthSchema(client); await this.#ensureOidcSchema(client); await this.#ensureRecoverySchema(client);
       await this.#ensureRepositoryConnectionSchema(client); await this.#ensureGitHubSignalSchema(client); await this.#ensureNotificationSchema(client);
@@ -280,6 +281,10 @@ export class PostgresDatabase implements
       await this.#ensureDiscussionSchema(client); await this.#ensureInvitationSchema(client); await this.#ensurePortableProjectionSchema(client);
       await this.#ensureNoteHistorySchema(client); await this.#ensureMemberDepartureSchema(client); await this.#ensureWorkspaceImportSchema(client);
       await this.#ensureCollaborationSchema(client);
+      if (!transactionClient) await client.query("COMMIT");
+    } catch (error) {
+      if (!transactionClient) await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
     } finally { if (!transactionClient) client.release(); }
   }
 
@@ -289,10 +294,23 @@ export class PostgresDatabase implements
       await client.query("BEGIN");
       const existing = await client.query<{ object_name: string }>(`SELECT object_name FROM (
         SELECT c.relname AS object_name FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-          WHERE n.nspname=current_schema() AND c.relkind IN ('r','p','v','m','S','f','c')
+          WHERE n.nspname=current_schema() AND c.relkind IN ('r','p','v','m','S','f','c','i','I')
         UNION ALL SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=current_schema()
         UNION ALL SELECT t.typname FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace
           WHERE n.nspname=current_schema() AND t.typrelid=0
+        UNION ALL SELECT coll.collname FROM pg_collation coll JOIN pg_namespace n ON n.oid=coll.collnamespace WHERE n.nspname=current_schema()
+        UNION ALL SELECT o.oprname FROM pg_operator o JOIN pg_namespace n ON n.oid=o.oprnamespace WHERE n.nspname=current_schema()
+        UNION ALL SELECT f.opfname FROM pg_opfamily f JOIN pg_namespace n ON n.oid=f.opfnamespace WHERE n.nspname=current_schema()
+        UNION ALL SELECT c.opcname FROM pg_opclass c JOIN pg_namespace n ON n.oid=c.opcnamespace WHERE n.nspname=current_schema()
+        UNION ALL SELECT c.conname FROM pg_conversion c JOIN pg_namespace n ON n.oid=c.connamespace WHERE n.nspname=current_schema()
+        UNION ALL SELECT c.cfgname FROM pg_ts_config c JOIN pg_namespace n ON n.oid=c.cfgnamespace WHERE n.nspname=current_schema()
+        UNION ALL SELECT d.dictname FROM pg_ts_dict d JOIN pg_namespace n ON n.oid=d.dictnamespace WHERE n.nspname=current_schema()
+        UNION ALL SELECT p.prsname FROM pg_ts_parser p JOIN pg_namespace n ON n.oid=p.prsnamespace WHERE n.nspname=current_schema()
+        UNION ALL SELECT t.tmplname FROM pg_ts_template t JOIN pg_namespace n ON n.oid=t.tmplnamespace WHERE n.nspname=current_schema()
+        UNION ALL SELECT s.stxname FROM pg_statistic_ext s JOIN pg_namespace n ON n.oid=s.stxnamespace WHERE n.nspname=current_schema()
+        UNION ALL SELECT e.extname FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE n.nspname=current_schema()
+        UNION ALL SELECT co.conname FROM pg_constraint co JOIN pg_namespace n ON n.oid=co.connamespace WHERE n.nspname=current_schema()
+        UNION ALL SELECT 'default privileges' FROM pg_default_acl d WHERE d.defaclnamespace=current_schema()::regnamespace
       ) objects ORDER BY object_name LIMIT 1`);
       if (existing.rowCount) throw new Error("Migration destination PostgreSQL schema must be empty before preparation; pre-existing user objects were found");
       await this.#verifyAuthenticationKey(client);
@@ -4248,9 +4266,8 @@ export class PostgresDatabase implements
   }
 
   async #ensurePortableProjectionSchema(client: PoolClient): Promise<void> {
-    await client.query("SELECT pg_advisory_lock(1094218495)");
-      try {
-        await client.query(`
+    await client.query("SELECT pg_advisory_xact_lock(1094218495)");
+    await client.query(`
         CREATE TABLE IF NOT EXISTS stash_portable_projection_outbox (
           object_kind TEXT NOT NULL CONSTRAINT stash_portable_projection_outbox_object_kind_check CHECK (object_kind IN (${portableProjectionObjectKindSql})),
           object_id UUID NOT NULL,
@@ -4275,10 +4292,7 @@ export class PostgresDatabase implements
           END IF;
         END
         $portable_projection$;
-      `);
-    } finally {
-      await client.query("SELECT pg_advisory_unlock(1094218495)").catch(() => undefined);
-    }
+    `);
   }
 
   async #recordPortableProjection(
