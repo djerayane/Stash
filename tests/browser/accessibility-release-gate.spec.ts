@@ -10,6 +10,7 @@ async function authenticate(page: Page) {
 async function expectWcag22Aa(page: Page, context: string) {
   const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21aa", "wcag22aa"]).analyze();
   expect(results.violations, context).toEqual([]);
+  expect(results.incomplete.filter(({ id }) => id === "target-size"), `${context}: unresolved target-size checks`).toEqual([]);
 }
 
 async function expectVisibleFocus(locator: Locator) {
@@ -33,10 +34,26 @@ async function expectNoHorizontalPageScroll(page: Page, context: string) {
   expect(dimensions.scrollWidth, context).toBeLessThanOrEqual(dimensions.clientWidth);
 }
 
+async function expectMinimumTargetSize(locator: Locator, context: string) {
+  const boxes = await locator.evaluateAll((elements) => elements.filter((element) => {
+    const style = getComputedStyle(element);
+    return style.visibility !== "hidden" && style.display !== "none";
+  }).map((element) => {
+    const box = element.getBoundingClientRect();
+    return { name: element.getAttribute("aria-label") || element.textContent?.trim() || element.tagName, width: box.width, height: box.height };
+  }));
+  expect(boxes.length, `${context}: representative controls exist`).toBeGreaterThan(0);
+  for (const box of boxes) {
+    expect(box.width, `${context}: ${box.name} width`).toBeGreaterThanOrEqual(24);
+    expect(box.height, `${context}: ${box.name} height`).toBeGreaterThanOrEqual(24);
+  }
+}
+
 test("@a11y authenticates by keyboard and focuses a recoverable error without losing input", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 720 });
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto("/sign-in");
+  await expectMinimumTargetSize(page.getByRole("group", { name: "Authentication method" }).getByRole("button"), "authentication methods");
 
   const email = page.getByRole("textbox", { name: "Email" });
   const password = page.getByLabel("Password", { exact: true });
@@ -99,8 +116,13 @@ test("@a11y keeps required Member flows reflowed, named, and axe-clean at 320 CS
     await expectWcag22Aa(page, path);
   }
 
+  await page.goto("/app/settings");
+  await expectMinimumTargetSize(page.getByRole("tab"), "settings security tabs");
+  await expectMinimumTargetSize(page.getByRole("navigation", { name: "Workspace" }).getByRole("link"), "compact Workspace navigation");
+
   await page.goto("/app/projects/22222222-2222-4222-8222-222222222222/boards/abababab-abab-4bab-8bab-abababababa1");
   const move = page.getByRole("combobox", { name: /Move Task STASH-32/ });
+  await expectMinimumTargetSize(move, "non-drag Task movement");
   await expectVisibleFocus(move);
   await move.selectOption("done");
   await expect(page.getByRole("status")).toHaveText("STASH-32 moved.");
