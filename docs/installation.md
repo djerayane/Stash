@@ -59,14 +59,53 @@ export STASH_BIND_ADDRESS="0.0.0.0"
 docker compose up -d
 ```
 
-Store `INSTANCE_MASTER_KEY` outside PostgreSQL and backups. Configure `INSTANCE_BACKUP_PATH`, create a coordinated backup through the protected API, verify its health, copy the published backup off the Docker host, and preserve the key separately:
+Store `INSTANCE_MASTER_KEY` outside PostgreSQL and backups. Compose fixes `INSTANCE_BACKUP_PATH` to `/var/lib/stash/backups`, backed by the `stash-backups` named volume. Create a coordinated backup through the protected API and verify its health:
 
 ```sh
 curl -X POST https://stash.example.com/api/instance/backups -H "Authorization: Bearer $INSTANCE_ADMIN_TOKEN"
 curl https://stash.example.com/api/instance/backups/health -H "Authorization: Bearer $INSTANCE_ADMIN_TOKEN"
 ```
 
-For an upgrade, take and verify a backup, set `STASH_IMAGE` to the desired immutable digest, run `docker compose pull stash` and `docker compose up -d --no-build`, then confirm `docker compose ps` reports the application healthy. Never roll a database forward without a verified rollback point.
+The create response returns its safe relative `path`. Copy that directory off the Docker host without altering the named volume; refuse to overwrite an earlier copy:
+
+```sh
+BACKUP_NAME=2026-08-25T02-30-00.000Z
+mkdir -p ./stash-backups
+test ! -e "./stash-backups/$BACKUP_NAME"
+docker compose cp "stash:/var/lib/stash/backups/$BACKUP_NAME" "./stash-backups/$BACKUP_NAME"
+```
+
+Preserve the matching `INSTANCE_MASTER_KEY` separately. A copied backup is not complete disaster-recovery material without that key.
+
+### Upgrade a container Instance
+
+Starting a new container does not upgrade durable Instance data. First take and verify a backup, set `STASH_IMAGE` to the desired immutable digest, then replace only the application container:
+
+```sh
+docker compose pull stash
+docker compose up -d --no-build stash
+```
+
+The new application exposes a protected plan without mutating data. Read it, require every check to pass, and submit the exact returned `targetVersion` as `confirmation`:
+
+```sh
+export STASH_URL=https://stash.example.com
+UPGRADE_PLAN="$(curl --fail "$STASH_URL/api/instance/upgrade" -H "Authorization: Bearer $INSTANCE_ADMIN_TOKEN")"
+TARGET_VERSION="$(printf '%s' "$UPGRADE_PLAN" | jq -er 'select(.status == "ready") | .targetVersion')"
+curl --fail -X POST "$STASH_URL/api/instance/upgrade" \
+  -H "Authorization: Bearer $INSTANCE_ADMIN_TOKEN" -H "Content-Type: application/json" \
+  --data "{\"confirmation\":\"$TARGET_VERSION\"}"
+```
+
+The successful POST creates its own verified rollback backup, applies the migration, and returns `"restartRequired":true`; readiness then deliberately returns 503. Restart the application process and require readiness before reopening traffic:
+
+```sh
+docker compose restart stash
+curl --retry 20 --retry-delay 1 --retry-connrefused --fail "$STASH_URL/health/ready"
+docker compose ps
+```
+
+Never infer upgrade success from `docker compose up`. The supported sequence is protected GET plan, POST exact target-version confirmation, restart, then readiness.
 
 ## Self-contained Instance bundle
 
@@ -123,13 +162,56 @@ Stop the standalone process before offline backup or restore. Backup paths must 
 ./stash backup restore --data-dir /srv/stash-standalone --backup /srv/stash-backups/pre-upgrade
 ```
 
-An Instance Backup never contains `INSTANCE_MASTER_KEY`; preserve the matching key file independently. To upgrade, verify the new archive's SHA-256 checksum, create and verify a backup with the old launcher, stop the old process, then run the new launcher against the same data directory. Upgrade preflight creates a rollback point and leaves the prior directory recoverable if validation or migration fails.
+An Instance Backup never contains `INSTANCE_MASTER_KEY`; preserve the matching key file independently. To upgrade, verify the new archive's SHA-256 checksum, create and verify a backup with the old launcher, and stop the old process. Starting the new launcher against the existing data directory does not upgrade it automatically.
+
+Start the new launcher with the same one-command start in one terminal:
+
+```sh
+./stash --data-dir /srv/stash-standalone
+```
+
+In another terminal, use the same protected protocol against the loopback Instance:
+
+```sh
+export STASH_URL=http://localhost:3000
+export INSTANCE_ADMIN_TOKEN=stash-development-only-admin-token
+UPGRADE_PLAN="$(curl --fail "$STASH_URL/api/instance/upgrade" -H "Authorization: Bearer $INSTANCE_ADMIN_TOKEN")"
+TARGET_VERSION="$(printf '%s' "$UPGRADE_PLAN" | jq -er 'select(.status == "ready") | .targetVersion')"
+curl --fail -X POST "$STASH_URL/api/instance/upgrade" \
+  -H "Authorization: Bearer $INSTANCE_ADMIN_TOKEN" -H "Content-Type: application/json" \
+  --data "{\"confirmation\":\"$TARGET_VERSION\"}"
+```
+
+After the POST returns `"restartRequired":true`, stop the launcher normally, run `./stash --data-dir /srv/stash-standalone` again, and require `curl --fail "$STASH_URL/health/ready"` to succeed. The upgrade service creates a rollback point before changing durable state and restores it when migration fails. A failed rollback keeps the Instance offline for manual recovery.
 
 ### Migrate standalone storage to external PostgreSQL
 
-Migration requires an empty, compatible destination PostgreSQL database, empty destination Attachment and configuration directories, adequate measured capacity, and a stopped source holding its exclusive process boundary. The command stages and validates all data before cutover; on validation, copy, checksum, or re-encryption failure it rolls back the destination and leaves the standalone source authoritative and restartable.
+Migration requires a prepared but otherwise empty, compatible destination PostgreSQL Instance, empty destination Attachment and configuration directories, adequate measured capacity, and a stopped source holding its exclusive process boundary. The destination is not a raw empty database: it must already contain the release schema, matching Instance format, and singleton authentication key check created with the intended destination `INSTANCE_MASTER_KEY`. The command stages and validates all data before cutover; on validation, copy, checksum, or re-encryption failure it rolls back the destination and leaves the standalone source authoritative and restartable.
 
-`INSTANCE_MASTER_KEY` stays outside both storage engines and is never copied into migration output or passed as a command-line value. Use permission-protected key files.
+`INSTANCE_MASTER_KEY` stays outside both storage engines and is never copied into migration output or passed as a command-line value. Use permission-protected key files. In preserve mode the destination key file is the source key file; in rotate mode it is the distinct destination key file.
+
+Prepare a newly created PostgreSQL database with the same release version as the standalone archive. The bundled preparation command creates every empty semantic table, writes the authentication key check with the selected protected key file, and records the bundle's Instance format. It does not copy source data or start an Instance.
+
+For preserve mode, select the source key file as the destination key boundary:
+
+```sh
+export DESTINATION_DATABASE_URL='postgresql://stash:strong-password@db.example/stash'
+export STASH_DESTINATION_KEY_FILE=/srv/.stash-standalone.master-key
+./stash migrate prepare-destination --mode preserve --source-key-file "$STASH_DESTINATION_KEY_FILE"
+```
+
+For rotate mode, initialize with the distinct destination key while still supplying the source key so the same protected input contract is checked:
+
+```sh
+export STASH_DESTINATION_KEY_FILE=/run/secrets/stash-destination-key
+./stash migrate prepare-destination --mode rotate --source-key-file /srv/.stash-standalone.master-key --destination-key-file "$STASH_DESTINATION_KEY_FILE"
+```
+
+The initializer reports `"status":"prepared"` and exits before migration, leaving no destination application process that could race writes. A raw empty database or a normally started application without this preparation is insufficient. Verify the destination has no accounts, Organizations, Workspaces, or other domain rows, and create empty operator-owned Attachment and configuration roots:
+
+```sh
+install -d -m 700 /srv/stash-postgres/attachments /srv/stash-postgres/config
+```
 
 In preserve mode, configure the destination Instance to reference the same key as the source. Do not supply a destination key file:
 

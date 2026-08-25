@@ -80,10 +80,52 @@ describe("embedded-to-PostgreSQL migration key preflight", () => {
     const secret = key(); const result = spawnSync(process.execPath, ["--import", "tsx", "src/migrate-embedded-command.ts", "--source-key", secret], { cwd: process.cwd(), encoding: "utf8" });
     assert.notEqual(result.status, 0); assert.match(result.stderr, /protected key files/i); assert.doesNotMatch(result.stderr, new RegExp(secret.replace(/[+/=]/g, "\\$&")));
   });
+
+  test("fails closed on invalid destination-preparation key modes before database effects", async () => {
+    const root = await mkdtemp(join(tmpdir(), "stash-prepare-key-modes-")); const source = join(root, "source.key"); const destination = join(root, "destination.key");
+    await writeFile(source, key(), { mode: 0o600 }); await writeFile(destination, key(), { mode: 0o600 });
+    const run = (arguments_: string[]) => spawnSync(process.execPath, ["--import", "tsx", "src/migrate-embedded-command.ts", "prepare-destination", ...arguments_],
+      { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, DESTINATION_DATABASE_URL: "" } });
+    const preserveExtra = run(["--mode", "preserve", "--source-key-file", source, "--destination-key-file", destination]);
+    assert.notEqual(preserveExtra.status, 0); assert.match(preserveExtra.stderr, /Preserve migration does not accept a destination key file/);
+    const rotateMissing = run(["--mode", "rotate", "--source-key-file", source]);
+    assert.notEqual(rotateMissing.status, 0); assert.match(rotateMissing.stderr, /Rotate migration requires a destination key file/);
+    const validProtectedInput = run(["--mode", "preserve", "--source-key-file", source]);
+    assert.notEqual(validProtectedInput.status, 0); assert.match(validProtectedInput.stderr, /DESTINATION_DATABASE_URL must be configured/);
+    assert.doesNotMatch(`${preserveExtra.stderr}${rotateMissing.stderr}${validProtectedInput.stderr}`, new RegExp((await readFile(source, "utf8")).trim().replace(/[+/=]/g, "\\$&")));
+  });
 });
 
 const postgresUrl = process.env.STASH_TEST_DATABASE_URL;
 describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? false : "STASH_TEST_DATABASE_URL is not configured" }, () => {
+  test("prepares an empty destination schema, format, and authentication key boundary from a protected file", async () => {
+    const admin = new Pool({ connectionString: postgresUrl! }); const schema = `embedded_prepare_${randomUUID().replaceAll("-", "")}`;
+    const root = await mkdtemp(join(tmpdir(), "stash-prepare-destination-")); const sourceKeyFile = join(root, "source.key"); await writeFile(sourceKeyFile, key(), { mode: 0o600 });
+    try {
+      await admin.query(`CREATE SCHEMA ${schema}`); const separator = postgresUrl!.includes("?") ? "&" : "?";
+      const scoped = `${postgresUrl}${separator}options=-csearch_path%3D${schema}`;
+      const result = spawnSync(process.execPath, ["--import", "tsx", "src/migrate-embedded-command.ts", "prepare-destination", "--mode", "preserve", "--source-key-file", sourceKeyFile],
+        { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, DESTINATION_DATABASE_URL: scoped } });
+      assert.equal(result.status, 0, result.stderr); assert.match(result.stdout, /"status":"prepared"/);
+      assert.equal((await admin.query(`SELECT count(*) count FROM ${schema}.stash_authentication_key_check`)).rows[0]?.count, "1");
+      assert.equal((await admin.query(`SELECT version FROM ${schema}.stash_instance_format WHERE singleton=TRUE`)).rows[0]?.version, "0.1.0");
+      assert.equal((await admin.query(`SELECT count(*) count FROM ${schema}.stash_accounts`)).rows[0]?.count, "0");
+    } finally { await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined); await admin.end(); }
+  });
+
+  test("refuses to prepare a nonempty destination schema", async () => {
+    const admin = new Pool({ connectionString: postgresUrl! }); const schema = `embedded_prepare_nonempty_${randomUUID().replaceAll("-", "")}`;
+    const root = await mkdtemp(join(tmpdir(), "stash-prepare-nonempty-")); const sourceKeyFile = join(root, "source.key"); await writeFile(sourceKeyFile, key(), { mode: 0o600 });
+    try {
+      await admin.query(`CREATE SCHEMA ${schema}`); await admin.query(`CREATE TABLE ${schema}.unrelated (id INTEGER)`); const separator = postgresUrl!.includes("?") ? "&" : "?";
+      const scoped = `${postgresUrl}${separator}options=-csearch_path%3D${schema}`;
+      const result = spawnSync(process.execPath, ["--import", "tsx", "src/migrate-embedded-command.ts", "prepare-destination", "--mode", "preserve", "--source-key-file", sourceKeyFile],
+        { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, DESTINATION_DATABASE_URL: scoped } });
+      assert.notEqual(result.status, 0); assert.match(result.stderr, /schema must be empty before preparation/);
+      assert.equal((await admin.query(`SELECT to_regclass('${schema}.stash_authentication_key_check') table_name`)).rows[0]?.table_name, null);
+    } finally { await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined); await admin.end(); }
+  });
+
   test("rejects an unconfigured destination instead of defining its master-key identity from migration input", async () => {
     const sourceKey = key(); const source = await EmbeddedInstanceStore.open(await mkdtemp(join(tmpdir(), "stash-migration-unconfigured-")), createAuthenticationSecretCodec(sourceKey));
     const admin = new Pool({ connectionString: postgresUrl! }); const schema = `embedded_unconfigured_${randomUUID().replaceAll("-", "")}`;
