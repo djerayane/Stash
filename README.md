@@ -214,6 +214,8 @@ be committed. See [the portable projection format](docs/portable-projection.md).
 
 ## Development and acceptance tests
 
+The focused [stable release verification guide](docs/stable-release-verification.md) documents the primary running-Instance journey and reproducible representative benchmark conditions.
+
 ```sh
 corepack enable
 pnpm install --frozen-lockfile
