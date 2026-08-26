@@ -44,7 +44,7 @@ describe("installation documentation contract", () => {
     assert.match(release, /name: stash-capture-\$\{\{ needs\.release-quality\.outputs\.mobile-version \}\}-ios-ipa/);
   });
 
-  it("documents each path's complete operating contract without inventing EAS provisioning", async () => {
+  it("documents each path's complete operating contract and current EAS provisioning", async () => {
     const guide = await read("docs/installation.md");
     for (const requirement of [
       /prerequisites/i, /localhost evaluation/i, /production/i, /HTTPS/, /persistence/i, /backup/i,
@@ -52,10 +52,14 @@ describe("installation documentation contract", () => {
       /destination PostgreSQL/i, /rollback/i, /directly with.*HTTPS Instance/is,
     ]) assert.match(guide, requirement);
     assert.match(guide, /EAS_PROJECT_ID/);
-    assert.match(guide, /must.*create or link.*@djerayane\/stash-capture/is);
-    assert.match(guide, /do not invent/i);
-    assert.match(guide, /IPA.*only when.*Apple signing/is);
-    assert.doesNotMatch(guide, /EAS_PROJECT_ID\s*=\s*[0-9a-f]{8}-[0-9a-f-]{27,}/i);
+    assert.match(guide, /@imnibis\/stash-capture/);
+    assert.match(guide, /6441a17d-b6df-4442-909e-aa01813993f4/);
+    assert.match(guide, /mobile-release.*EAS_PROJECT_ID.*EXPO_TOKEN/is);
+    assert.match(guide, /Android `versionCode` and iOS `buildNumber` baselines are both initialized to `1`/);
+    assert.match(guide, /Android signing is configured in EAS/);
+    assert.match(guide, /iOS artifact remains capability-gated/is);
+    assert.match(guide, /live, unexpired Apple distribution certificate and App Store provisioning profile/is);
+    assert.doesNotMatch(guide, /not yet provisioned|@djerayane\/stash-capture|djerayane Expo account/i);
   });
 
   it("documents executable standalone commands accepted by the bundled launcher", async () => {
