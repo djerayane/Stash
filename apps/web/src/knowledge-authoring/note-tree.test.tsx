@@ -33,7 +33,8 @@ it("creates children and offers keyboard and pointer alternatives for moving Not
       id: "55555555-5555-4555-8555-555555555555", workspaceId, parentId: roadmapId, title: "Questions", position: "2", childCount: 0,
     } }), { status: 201 });
     if (method === "POST" && path.endsWith("/branch-preview")) return Response.json({ impact: { projectAccessChanges:
-      JSON.parse(String(init?.body)).parentId === roadmapId ? [{ noteId: researchId, projectId: "project-1", effect: "gained" }] : [] } });
+      JSON.parse(String(init?.body)).parentId === roadmapId ? [{ noteId: researchId, noteTitle: "Research", projectId: "project-1", projectName: "Launch", effect: "gained" }] : [],
+      descendants: [], descendantCount: 0, collectionCount: 0, externalLinks: [] } });
     if (method === "POST" && path.endsWith("/move")) return new Response(JSON.stringify({ status: "moved", movedIds: [researchId], projectAccessChanges: [] }));
     return new Response(JSON.stringify({ nodes }));
   });
@@ -76,7 +77,7 @@ it("creates children and offers keyboard and pointer alternatives for moving Not
   Object.defineProperty(roadmapItem, "getBoundingClientRect", { value: () => ({ top: 0, height: 30, bottom: 30, left: 0, right: 300, width: 300, x: 0, y: 0, toJSON() {} }) });
   fireEvent.drop(roadmapItem, { dataTransfer: transfer, clientY: 5 });
   await waitFor(() => expect(requests).toContainEqual(expect.objectContaining({ path: `/api/notes/${researchId}/move`, body: { beforeId: roadmapId } })));
-  expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("Project access"));
+  expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("Research gains Launch"));
 });
 
 it("lists removed branches from durable Workspace state and restores them", async () => {
@@ -104,16 +105,28 @@ it("keeps contextual knowledge closed by default and restores focus after keyboa
     backlinks: [{ id: "link-2", noteId: roadmapId, title: "Roadmap", label: "Evidence" }],
     projectIds: ["project-1"],
     projects: [{ id: "project-1", name: "Launch", key: "LAUNCH" }],
+    state: "active" as const,
+    parent: { id: roadmapId, title: "Roadmap" },
+    revision: 3,
+    createdAt: "2026-08-25T10:00:00.000Z",
+    historyCount: 3,
+    access: "edit" as const,
+    accessSource: "workspace" as const,
   };
   vi.spyOn(window, "confirm").mockReturnValue(true);
   const fetcher = vi.fn<typeof fetch>(async (input, init) => {
     const path = String(input); const method = init?.method ?? "GET";
     requests.push({ path, method, ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}) });
     if (path.endsWith("/branch-preview")) return Response.json({ impact: { noteId: evidenceId, title: "Evidence", descendantCount: 2,
-      collectionCount: 1, externalLinks: [{ noteId: researchId, title: "Research", direction: "outgoing" }], projectAccessChanges: [] } });
+      descendants: [{ noteId: roadmapId, title: "Observations" }, { noteId: researchId, title: "Sources" }], collectionCount: 1,
+      externalLinks: [{ noteId: researchId, title: "Research", direction: "outgoing" }], projectAccessChanges:
+        [{ noteId: evidenceId, noteTitle: "Evidence", projectId: "project-1", projectName: "Launch", effect: "lost" }] } });
     if (path.endsWith("/archive")) return Response.json({ status: "updated", affectedIds: [evidenceId] });
     if (path.endsWith("/restore")) return Response.json({ status: "restored", restoredIds: [evidenceId], parentRestored: true });
     if (path.endsWith("/context/links") && method === "POST") return new Response(JSON.stringify({ link: { id: "new-link" } }), { status: 201 });
+    if (path.endsWith(`/notes/${evidenceId}/discussions`)) return Response.json({ discussions: [{ id: "discussion-1", target: { kind: "note" },
+      messages: [{ id: "message-1", content: "Verify the source", createdAt: "2026-08-26T10:00:00.000Z", author: { displayName: "Ada" } }] }] });
+    if (path === "/api/discussions" && method === "POST") return new Response(JSON.stringify({ discussion: { id: "discussion-2" } }), { status: 201 });
     if (path.endsWith("/note-tree")) return Response.json({ nodes: [{ id: evidenceId, title: "Evidence" }, { id: researchId, title: "Research" }] });
     return Response.json(context);
   });
@@ -134,19 +147,35 @@ it("keeps contextual knowledge closed by default and restores focus after keyboa
   await waitFor(() => expect(requests).toContainEqual(expect.objectContaining({ path: `/api/notes/${evidenceId}/context/links`, method: "POST",
     body: { targetNoteId: researchId, label: "Note", relationshipType: "supports" } })));
   const linksTab = within(drawer).getByRole("tab", { name: "Links" }); linksTab.focus(); fireEvent.keyDown(linksTab, { key: "ArrowRight" });
+  expect(linksTab).toHaveAttribute("id", `note-context-${evidenceId}-tab-links`);
+  expect(linksTab).toHaveAttribute("aria-controls", `note-context-${evidenceId}-panel-links`);
   expect(within(drawer).getByRole("tab", { name: "Properties" })).toHaveFocus();
+  const propertiesPanel = within(drawer).getByRole("tabpanel", { name: "Properties" });
+  expect(propertiesPanel).toHaveAttribute("aria-labelledby", `note-context-${evidenceId}-tab-properties`);
+  expect(propertiesPanel).toHaveAttribute("id", `note-context-${evidenceId}-panel-properties`);
+  expect(propertiesPanel).toHaveTextContent("Active");
+  expect(propertiesPanel).toHaveTextContent("Roadmap");
+  expect(propertiesPanel).toHaveTextContent("Revision 3");
   expect(within(drawer).getByRole("link", { name: "Open Note history and revisions" })).toHaveAttribute("href", `/app/notes/${evidenceId}/history`);
   fireEvent.click(within(drawer).getByRole("tab", { name: "Projects" }));
   expect(within(drawer).getByRole("link", { name: "Launch" })).toHaveAttribute("href", "/app/projects/project-1/boards");
   fireEvent.click(within(drawer).getByRole("tab", { name: "Sharing" }));
-  expect(within(drawer).getByRole("link", { name: "Open Member access settings" })).toHaveAttribute("href", "/app/settings/members");
+  expect(within(drawer).getByRole("tabpanel", { name: "Sharing" })).toHaveTextContent("Can edit");
+  expect(within(drawer).getByRole("link", { name: "Review Launch Project access" })).toHaveAttribute("href", "/app/projects/project-1/boards");
   fireEvent.click(within(drawer).getByRole("tab", { name: "Discussions" }));
-  expect(within(drawer).getByRole("link", { name: "Open contextual Discussions" })).toHaveAttribute("href", `/app/notes/${evidenceId}/discussions`);
+  expect(await within(drawer).findByText("Verify the source")).toBeVisible();
+  fireEvent.change(within(drawer).getByRole("textbox", { name: "Start a Discussion" }), { target: { value: "Record the uncertainty" } });
+  fireEvent.click(within(drawer).getByRole("button", { name: "Start Discussion" }));
+  await waitFor(() => expect(requests).toContainEqual(expect.objectContaining({ path: "/api/discussions", method: "POST",
+    body: { target: { kind: "note", noteId: evidenceId }, message: "Record the uncertainty" } })));
   fireEvent.click(within(drawer).getByRole("button", { name: "Close Note context" }));
   await waitFor(() => expect(open).toHaveFocus());
 
   fireEvent.click(screen.getByRole("button", { name: "Archive Note branch" }));
   await waitFor(() => expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("2 descendants")));
+  expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("Observations, Sources"));
+  expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("outgoing Research"));
+  expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("Evidence loses Launch"));
   expect(await screen.findByRole("button", { name: "Restore Note branch" })).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Restore Note branch" }));
   await waitFor(() => expect(requests).toContainEqual(expect.objectContaining({ path: `/api/notes/${evidenceId}/restore`, method: "POST" })));

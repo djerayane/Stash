@@ -104,6 +104,7 @@ test("preserves every checklist item and callout paragraph with stable identitie
 test("edits technical constructs through portable Markdown and rejects unsupported source without data loss", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto(`/app/notes/${markdownNoteId}`);
+  await expect(page.getByRole("textbox", { name: "Note content" })).toContainText("Technical source seed");
   await page.getByRole("tab", { name: "Rich text" }).focus();
   await page.keyboard.press("ArrowRight");
   await expect(page.getByRole("tab", { name: "Markdown source" })).toBeFocused();
@@ -118,6 +119,7 @@ test("edits technical constructs through portable Markdown and rejects unsupport
   await expect(page).toHaveURL(`/app/notes/${markdownNoteId}`);
   page.once("dialog", (dialog) => void dialog.accept());
   await page.reload();
+  await expect(page.getByRole("textbox", { name: "Note content" })).toHaveAttribute("aria-readonly", "false");
   await page.getByRole("tab", { name: "Markdown source" }).focus();
   await page.keyboard.press("Enter");
   await expect(page.getByRole("textbox", { name: "Markdown source" })).toHaveValue(technicalDraft);

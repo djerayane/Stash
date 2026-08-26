@@ -9,7 +9,7 @@ import { createAuthenticationSecretCodec } from "../../src/authentication-secret
 import { createCapabilityRegistry } from "../../src/capability-registry.js";
 import { EmbeddedInstanceStore } from "../../src/embedded-instance-store.js";
 import { startInstance, type RunningInstance } from "../../src/instance.js";
-import { NoteTreeService } from "../../src/knowledge-authoring/note-tree.js";
+import { EmptyCollectionImpactInspector, NoteTreeService } from "../../src/knowledge-authoring/note-tree.js";
 import { noteTreeRoutes } from "../../src/knowledge-authoring/note-tree-routes.js";
 import { WorkspaceProjectService, type MemberAccessResolver } from "../../src/workspaces-projects.js";
 
@@ -34,7 +34,8 @@ describe("Note Tree HTTP", () => {
       return header === "Bearer owner" ? { accountId: ownerId, sessionId: "session" } : undefined;
     } };
     instance = await startInstance({ database: store.database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin",
-      capabilities: createCapabilityRegistry([{ name: "knowledge-authoring", routes: () => [noteTreeRoutes(new NoteTreeService(store.database.noteTreeRepository()), access)] }]) });
+      capabilities: createCapabilityRegistry([{ name: "knowledge-authoring", routes: () => [noteTreeRoutes(new NoteTreeService(
+        store.database.noteTreeRepository(), new EmptyCollectionImpactInspector()), access)] }]) });
   });
 
   after(async () => { await instance.close(); await store.close(); });
@@ -66,6 +67,13 @@ describe("Note Tree HTTP", () => {
     const preview = await request(`/api/notes/${root.id}/branch-preview`, { method: "POST", body: JSON.stringify({ action: "trash" }) });
     assert.equal(preview.status, 200);
     assert.equal((await preview.json() as any).impact.descendantCount, 1);
+    for (const action of ["archive", "trash", "restore"]) {
+      const unsafe = await request(`/api/notes/${root.id}/${action}`);
+      assert.equal(unsafe.status, 405);
+      assert.equal(unsafe.headers.get("allow"), "POST");
+    }
+    assert.equal((await request(`/api/notes/${root.id}/archive`, { method: "PUT" })).status, 405);
+    assert.equal((await request(`/api/notes/${child.id}/context`)).status, 200);
     assert.equal((await request(`/api/notes/${root.id}/trash`, { method: "POST" })).status, 200);
     assert.equal((await request(`/api/notes/${child.id}/context`)).status, 404);
     const removed = await request(`/api/workspaces/${workspaceId}/note-tree/removed`);

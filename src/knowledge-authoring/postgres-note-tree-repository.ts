@@ -8,6 +8,16 @@ import type { NoteTreeAccessChange, NoteTreeNode, NoteTreeRepository } from "./n
 
 type PrepareNotes = (client: PostgresQueryable) => Promise<void>;
 
+const workspaceMember = (workspace: "workspace" | "stash_workspaces", member = "$2") =>
+  `((${workspace}.owner_type='personal' AND ${workspace}.personal_owner_id=${member}) OR
+    (${workspace}.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+      WHERE membership.organization_id=${workspace}.organization_owner_id AND membership.account_id=${member})))`;
+
+const inheritedProjectGuest = (note: "note", member = "$2") => `EXISTS(WITH RECURSIVE ancestry AS (
+  SELECT ${note}.id,${note}.parent_id,${note}.project_id UNION ALL
+  SELECT parent.id,parent.parent_id,parent.project_id FROM stash_notes parent JOIN ancestry ON ancestry.parent_id=parent.id
+) SELECT 1 FROM ancestry JOIN stash_project_guests guest ON guest.project_id=ancestry.project_id WHERE guest.account_id=${member})`;
+
 /** Capability-owned Note Tree persistence over the shared PostgreSQL kernel. */
 export class PostgresNoteTreeRepository implements NoteTreeRepository {
   constructor(private readonly kernel: PostgresKernel, private readonly prepareNotes: PrepareNotes) {}
@@ -69,9 +79,7 @@ export class PostgresNoteTreeRepository implements NoteTreeRepository {
     input: { id: string; title: string; parentId?: string; beforeId?: string }) {
     return this.kernel.transaction(async (client) => {
       await this.prepare(client);
-      const access = await client.query<{ allowed: boolean }>(`SELECT ((owner_type='personal' AND personal_owner_id=$2) OR
-        (owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
-          WHERE membership.organization_id=stash_workspaces.organization_owner_id AND membership.account_id=$2))) AS allowed
+      const access = await client.query<{ allowed: boolean }>(`SELECT ${workspaceMember("stash_workspaces")} AS allowed
         FROM stash_workspaces WHERE id=$1 FOR UPDATE`, [workspaceId, memberId]);
       if (!access.rows[0]?.allowed) return { status: "workspace_forbidden" as const };
       if (input.parentId && !(await client.query(`SELECT 1 FROM stash_notes WHERE id=$1 AND workspace_id=$2
@@ -111,9 +119,7 @@ export class PostgresNoteTreeRepository implements NoteTreeRepository {
   async listNoteTree(memberId: string, workspaceId: string) {
     return this.kernel.withSession(async (client) => {
       await this.prepare(client);
-      const access = await client.query<{ allowed: boolean }>(`SELECT ((owner_type='personal' AND personal_owner_id=$2) OR
-        (owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
-          WHERE membership.organization_id=stash_workspaces.organization_owner_id AND membership.account_id=$2))) AS allowed
+      const access = await client.query<{ allowed: boolean }>(`SELECT ${workspaceMember("stash_workspaces")} AS allowed
         FROM stash_workspaces WHERE id=$1`, [workspaceId, memberId]);
       if (!access.rows[0]?.allowed) return { status: "workspace_forbidden" as const };
       const result = await client.query<any>(`WITH RECURSIVE tree AS (
@@ -140,14 +146,14 @@ export class PostgresNoteTreeRepository implements NoteTreeRepository {
 
   async #accessChanges(client: PostgresQueryable, noteId: string, destinationParentId?: string,
     removing = false): Promise<NoteTreeAccessChange[]> {
-    const branch = await client.query<{ id: string; parent_id: string | null; project_id: string | null }>(`WITH RECURSIVE branch AS (
-      SELECT id,parent_id,project_id,tree_position,ARRAY[tree_position] AS ordering FROM stash_notes WHERE id=$1
-      UNION ALL SELECT child.id,child.parent_id,child.project_id,child.tree_position,branch.ordering || child.tree_position
+    const branch = await client.query<{ id: string; title: string; parent_id: string | null; project_id: string | null }>(`WITH RECURSIVE branch AS (
+      SELECT id,title,parent_id,project_id,tree_position,ARRAY[tree_position] AS ordering FROM stash_notes WHERE id=$1
+      UNION ALL SELECT child.id,child.title,child.parent_id,child.project_id,child.tree_position,branch.ordering || child.tree_position
         FROM stash_notes child JOIN branch ON child.parent_id=branch.id
-    ) SELECT id,parent_id,project_id FROM branch ORDER BY ordering,id`, [noteId]);
+    ) SELECT id,title,parent_id,project_id FROM branch ORDER BY ordering,id`, [noteId]);
     const byId = new Map(branch.rows.map((row) => [row.id, row]));
     const destinationProjects = new Set(await this.#effectiveProjects(client, destinationParentId));
-    const changes: NoteTreeAccessChange[] = [];
+    const changes: Array<Omit<NoteTreeAccessChange, "projectName">> = [];
     for (const row of branch.rows) {
       const before = new Set(await this.#effectiveProjects(client, row.id));
       const after = new Set<string>();
@@ -157,28 +163,30 @@ export class PostgresNoteTreeRepository implements NoteTreeRepository {
         cursor = cursor.parent_id ? byId.get(cursor.parent_id) : undefined;
       }
       if (!removing) for (const projectId of destinationProjects) after.add(projectId);
-      for (const projectId of [...before].sort()) if (!after.has(projectId)) changes.push({ noteId: row.id, projectId, effect: "lost" });
-      for (const projectId of [...after].sort()) if (!before.has(projectId)) changes.push({ noteId: row.id, projectId, effect: "gained" });
+      for (const projectId of [...before].sort()) if (!after.has(projectId)) changes.push({ noteId: row.id, noteTitle: row.title, projectId, effect: "lost" });
+      for (const projectId of [...after].sort()) if (!before.has(projectId)) changes.push({ noteId: row.id, noteTitle: row.title, projectId, effect: "gained" });
     }
-    return changes;
+    if (!changes.length) return [];
+    const projects = await client.query<{ id: string; name: string }>(
+      "SELECT id,name FROM stash_projects WHERE id=ANY($1::uuid[])", [[...new Set(changes.map(({ projectId }) => projectId))]]);
+    const names = new Map(projects.rows.map(({ id, name }) => [id, name]));
+    return changes.map((change) => ({ ...change, projectName: names.get(change.projectId) ?? "Project" }));
   }
 
   async moveNoteTreeBranch(memberId: string, noteId: string, destination: { parentId?: string; beforeId?: string }) {
     return this.kernel.transaction(async (client) => {
       await this.prepare(client);
       const preliminary = await client.query<{ workspace_id: string }>(`SELECT note.workspace_id FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id=note.workspace_id
-        WHERE note.id=$1 AND note.archived_at IS NULL AND note.trashed_at IS NULL AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2)
-          OR (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
-            WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2)))`, [noteId, memberId]);
+        WHERE note.id=$1 AND note.archived_at IS NULL AND note.trashed_at IS NULL AND ${workspaceMember("workspace")}`, [noteId, memberId]);
       if (!preliminary.rows[0]) return { status: "note_not_found" as const };
       await client.query("SELECT id FROM stash_workspaces WHERE id=$1 FOR UPDATE", [preliminary.rows[0].workspace_id]);
       const found = await client.query<any>(`SELECT note.* FROM stash_notes note WHERE note.id=$1
         AND note.archived_at IS NULL AND note.trashed_at IS NULL FOR UPDATE`, [noteId]);
       const note = found.rows[0]; if (!note) return { status: "note_not_found" as const };
-      const branch = await client.query<{ id: string }>(`WITH RECURSIVE branch AS (
-        SELECT id,tree_position,ARRAY[tree_position] AS ordering FROM stash_notes WHERE id=$1
-        UNION ALL SELECT child.id,child.tree_position,branch.ordering || child.tree_position FROM stash_notes child JOIN branch ON child.parent_id=branch.id)
-        SELECT id FROM branch ORDER BY ordering,id`, [noteId]);
+      const branch = await client.query<{ id: string; title: string }>(`WITH RECURSIVE branch AS (
+        SELECT id,title,tree_position,ARRAY[tree_position] AS ordering FROM stash_notes WHERE id=$1
+        UNION ALL SELECT child.id,child.title,child.tree_position,branch.ordering || child.tree_position FROM stash_notes child JOIN branch ON child.parent_id=branch.id)
+        SELECT id,title FROM branch ORDER BY ordering,id`, [noteId]);
       const movedIds = branch.rows.map(({ id }) => id);
       if (destination.parentId && movedIds.includes(destination.parentId)) return { status: "cycle" as const };
       if (destination.parentId && !(await client.query(`SELECT 1 FROM stash_notes WHERE id=$1 AND workspace_id=$2
@@ -218,14 +226,12 @@ export class PostgresNoteTreeRepository implements NoteTreeRepository {
     return this.kernel.withSession(async (client) => {
       await this.prepare(client);
       const found = await client.query<any>(`SELECT note.id,note.workspace_id,note.title FROM stash_notes note JOIN stash_workspaces workspace
-        ON workspace.id=note.workspace_id WHERE note.id=$1 AND note.trashed_at IS NULL AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2)
-          OR (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
-            WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2)))`, [noteId, memberId]);
+        ON workspace.id=note.workspace_id WHERE note.id=$1 AND note.trashed_at IS NULL AND ${workspaceMember("workspace")}`, [noteId, memberId]);
       const note = found.rows[0]; if (!note) return { status: "note_not_found" as const };
-      const branch = await client.query<{ id: string }>(`WITH RECURSIVE branch AS (
-        SELECT id,tree_position,ARRAY[tree_position] AS ordering FROM stash_notes WHERE id=$1
-        UNION ALL SELECT child.id,child.tree_position,branch.ordering || child.tree_position FROM stash_notes child JOIN branch ON child.parent_id=branch.id)
-        SELECT id FROM branch ORDER BY ordering,id`, [noteId]);
+      const branch = await client.query<{ id: string; title: string }>(`WITH RECURSIVE branch AS (
+        SELECT id,title,tree_position,ARRAY[tree_position] AS ordering FROM stash_notes WHERE id=$1
+        UNION ALL SELECT child.id,child.title,child.tree_position,branch.ordering || child.tree_position FROM stash_notes child JOIN branch ON child.parent_id=branch.id)
+        SELECT id,title FROM branch ORDER BY ordering,id`, [noteId]);
       const ids = branch.rows.map(({ id }) => id);
       if (action === "move") {
         if (destination?.parentId && ids.includes(destination.parentId)) return { status: "cycle" as const };
@@ -239,7 +245,8 @@ export class PostgresNoteTreeRepository implements NoteTreeRepository {
         SELECT target_note_id AS linked_id,'outgoing' AS direction FROM stash_note_links WHERE source_note_id=ANY($1::uuid[]) AND NOT target_note_id=ANY($1::uuid[])
         UNION ALL SELECT source_note_id AS linked_id,'incoming' AS direction FROM stash_note_links WHERE target_note_id=ANY($1::uuid[]) AND NOT source_note_id=ANY($1::uuid[])
       ) edge JOIN stash_notes linked ON linked.id=edge.linked_id ORDER BY linked.title,linked.id,edge.direction`, [ids]);
-      return { status: "found" as const, impact: { noteId, title: note.title, descendantCount: ids.length - 1, affectedNoteIds: ids,
+      return { status: "found" as const, impact: { noteId, title: note.title, descendantCount: ids.length - 1,
+        descendants: branch.rows.slice(1).map(({ id, title }) => ({ noteId: id, title })), affectedNoteIds: ids,
         externalLinks: external.rows.map(({ id, title, direction }: any) => ({ noteId: id, title, direction })),
         projectAccessChanges: await this.#accessChanges(client, noteId, destination?.parentId, action !== "move") } };
     });
@@ -248,9 +255,7 @@ export class PostgresNoteTreeRepository implements NoteTreeRepository {
   async listRemovedNoteBranches(memberId: string, workspaceId: string) {
     return this.kernel.withSession(async (client) => {
       await this.prepare(client);
-      const access = await client.query<{ allowed: boolean }>(`SELECT ((owner_type='personal' AND personal_owner_id=$2) OR
-        (owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
-          WHERE membership.organization_id=stash_workspaces.organization_owner_id AND membership.account_id=$2))) AS allowed
+      const access = await client.query<{ allowed: boolean }>(`SELECT ${workspaceMember("stash_workspaces")} AS allowed
         FROM stash_workspaces WHERE id=$1`, [workspaceId, memberId]);
       if (!access.rows[0]?.allowed) return { status: "workspace_forbidden" as const };
       const result = await client.query<any>(`SELECT note.id,note.workspace_id,note.title,
@@ -279,9 +284,7 @@ export class PostgresNoteTreeRepository implements NoteTreeRepository {
     return this.kernel.transaction(async (client) => {
       await this.prepare(client);
       const preliminary = await client.query<{ workspace_id: string }>(`SELECT note.workspace_id FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id=note.workspace_id WHERE note.id=$1
-        AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR (workspace.owner_type='organization' AND EXISTS
-          (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id=workspace.organization_owner_id
-            AND membership.account_id=$2)))`, [noteId, memberId]);
+        AND ${workspaceMember("workspace")}`, [noteId, memberId]);
       if (!preliminary.rows[0]) return { status: "note_not_found" as const };
       await client.query("SELECT id FROM stash_workspaces WHERE id=$1 FOR UPDATE", [preliminary.rows[0].workspace_id]);
       if (!(await client.query("SELECT 1 FROM stash_notes WHERE id=$1 FOR UPDATE", [noteId])).rowCount) return { status: "note_not_found" as const };
@@ -300,10 +303,7 @@ export class PostgresNoteTreeRepository implements NoteTreeRepository {
     return this.kernel.transaction(async (client) => {
       await this.prepare(client);
       const preliminary = await client.query<{ workspace_id: string }>(`SELECT note.workspace_id FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id=note.workspace_id
-        WHERE note.id=$1 AND (note.archived_at IS NOT NULL OR note.trashed_at IS NOT NULL) AND
-        ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR (workspace.owner_type='organization' AND EXISTS
-          (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id=workspace.organization_owner_id
-            AND membership.account_id=$2)))`, [noteId, memberId]);
+        WHERE note.id=$1 AND (note.archived_at IS NOT NULL OR note.trashed_at IS NOT NULL) AND ${workspaceMember("workspace")}`, [noteId, memberId]);
       if (!preliminary.rows[0]) return { status: "note_not_found" as const };
       await client.query("SELECT id FROM stash_workspaces WHERE id=$1 FOR UPDATE", [preliminary.rows[0].workspace_id]);
       const found = await client.query<any>(`SELECT * FROM stash_notes WHERE id=$1
@@ -328,18 +328,12 @@ export class PostgresNoteTreeRepository implements NoteTreeRepository {
   async readNoteTreeContext(memberId: string, noteId: string) {
     return this.kernel.withSession(async (client) => {
       await this.prepare(client);
-      const authorized = await client.query<{ workspace_id: string; workspace_access: boolean }>(`SELECT note.workspace_id,
-        ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR (workspace.owner_type='organization' AND EXISTS
-          (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id=workspace.organization_owner_id
-            AND membership.account_id=$2))) AS workspace_access
+      const authorized = await client.query<{ workspace_id: string; parent_id: string | null; revision: number; created_at: string; workspace_access: boolean }>(`SELECT
+        note.workspace_id,note.parent_id,note.revision,note.created_at,
+        ${workspaceMember("workspace")} AS workspace_access
         FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id=note.workspace_id
         WHERE note.id=$1 AND note.archived_at IS NULL AND note.trashed_at IS NULL AND
-        ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR (workspace.owner_type='organization' AND EXISTS
-          (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id=workspace.organization_owner_id
-            AND membership.account_id=$2)) OR EXISTS(WITH RECURSIVE ancestry AS (
-              SELECT note.id,note.parent_id,note.project_id UNION ALL SELECT parent.id,parent.parent_id,parent.project_id
-              FROM stash_notes parent JOIN ancestry ON ancestry.parent_id=parent.id
-            ) SELECT 1 FROM ancestry JOIN stash_project_guests guest ON guest.project_id=ancestry.project_id WHERE guest.account_id=$2))`, [noteId, memberId]);
+        (${workspaceMember("workspace")} OR ${inheritedProjectGuest("note")})`, [noteId, memberId]);
       const access = authorized.rows[0];
       if (!access) return { status: "note_not_found" as const };
       const guestProjects = access.workspace_access ? new Set<string>() : new Set((await client.query<{ project_id: string }>(
@@ -372,7 +366,12 @@ export class PostgresNoteTreeRepository implements NoteTreeRepository {
         if (access.workspace_access || [...inheritedProjects].some((projectId) => guestProjects.has(projectId)))
           visibleBreadcrumbs.push({ id: row.id, title: row.title });
       }
-      return { status: "found" as const, context: { noteId, workspaceId: access.workspace_id, breadcrumbs: visibleBreadcrumbs,
+      const parent = visibleBreadcrumbs.at(-2);
+      return { status: "found" as const, context: { noteId, workspaceId: access.workspace_id, state: "active" as const,
+        ...(parent && parent.id === access.parent_id ? { parent } : {}), revision: Number(access.revision),
+        createdAt: new Date(access.created_at).toISOString(), historyCount: Number(access.revision),
+        access: access.workspace_access ? "edit" as const : "read" as const,
+        accessSource: access.workspace_access ? "workspace" as const : "project" as const, breadcrumbs: visibleBreadcrumbs,
         outgoingLinks: links(await visibleLinks(outgoing.rows)), backlinks: links(await visibleLinks(backlinks.rows)),
         projectIds: visibleProjectIds, projects: projects.rows.map(({ id, name, project_key }) => ({ id, name, key: project_key })) } };
     });
@@ -381,16 +380,8 @@ export class PostgresNoteTreeRepository implements NoteTreeRepository {
   /** Temporary legacy collaboration delegation until the Note editor consumes this capability directly. */
   async authorizeNote(client: PostgresQueryable, memberId: string, noteId: string): Promise<"edit" | "read" | "none"> {
     const result = await client.query<{ can_edit: boolean; can_read: boolean }>(`SELECT
-      ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
-       (workspace.owner_type='organization' AND EXISTS(SELECT 1 FROM stash_organization_memberships membership
-         WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2))) AS can_edit,
-      ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
-       (workspace.owner_type='organization' AND EXISTS(SELECT 1 FROM stash_organization_memberships membership
-         WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2)) OR
-       EXISTS(WITH RECURSIVE ancestry AS (
-         SELECT note.id,note.parent_id,note.project_id UNION ALL
-         SELECT parent.id,parent.parent_id,parent.project_id FROM stash_notes parent JOIN ancestry ON ancestry.parent_id=parent.id
-       ) SELECT 1 FROM ancestry JOIN stash_project_guests guest ON guest.project_id=ancestry.project_id WHERE guest.account_id=$2)) AS can_read
+      ${workspaceMember("workspace")} AS can_edit,
+      (${workspaceMember("workspace")} OR ${inheritedProjectGuest("note")}) AS can_read
       FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id=note.workspace_id WHERE note.id=$1`, [noteId, memberId]);
     return result.rows[0]?.can_edit ? "edit" : result.rows[0]?.can_read ? "read" : "none";
   }
@@ -401,10 +392,7 @@ export class PostgresNoteTreeRepository implements NoteTreeRepository {
       await this.prepare(client);
       const source = await client.query<any>(`SELECT note.workspace_id,note.portable_path FROM stash_notes note
         JOIN stash_workspaces workspace ON workspace.id=note.workspace_id WHERE note.id=$1
-        AND note.archived_at IS NULL AND note.trashed_at IS NULL AND
-        ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
-          (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
-            WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2)))`, [sourceNoteId, memberId]);
+        AND note.archived_at IS NULL AND note.trashed_at IS NULL AND ${workspaceMember("workspace")}`, [sourceNoteId, memberId]);
       if (!source.rows[0]) return { status: "source_not_found" as const };
       const target = await client.query<{ title: string; portable_path: string }>(`SELECT title,portable_path FROM stash_notes
         WHERE id=$1 AND workspace_id=$2 AND archived_at IS NULL AND trashed_at IS NULL`, [link.targetNoteId, source.rows[0].workspace_id]);

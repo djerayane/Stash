@@ -4,9 +4,19 @@ const workspaceId = "88888888-8888-4888-8888-888888888888";
 const roadmapId = "99999999-9999-4999-8999-999999999999";
 const evidenceId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const memberSession = JSON.stringify({ token: "browser-acceptance-member-token" });
+const durableSession = JSON.stringify({ token: "browser-acceptance-durable-token" });
 
-async function authenticate(page: Page) {
-  await page.addInitScript((session) => localStorage.setItem("stash.member-session", session), memberSession);
+async function authenticate(page: Page, session = memberSession) {
+  await page.addInitScript((value) => localStorage.setItem("stash.member-session", value), session);
+}
+
+async function reloadDocument(page: Page) {
+  const identity = await page.evaluate(() => { const value = crypto.randomUUID();
+    Object.defineProperty(window, "__stashDocumentIdentity", { value, configurable: true }); return value; });
+  const navigated = page.waitForEvent("framenavigated", (frame) => frame === page.mainFrame());
+  await page.reload();
+  await navigated;
+  expect(await page.evaluate(() => (window as typeof window & { __stashDocumentIdentity?: string }).__stashDocumentIdentity ?? null)).not.toBe(identity);
 }
 
 async function mockKnowledgeApi(page: Page) {
@@ -23,13 +33,15 @@ async function mockKnowledgeApi(page: Page) {
   });
   await page.route("**/api/notes/*/context", (route) => route.fulfill({ json: { noteId: roadmapId,
     workspaceId,
+    state: "active", revision: 1, createdAt: "2026-08-26T10:00:00.000Z", historyCount: 1, access: "edit", accessSource: "workspace",
     breadcrumbs: [{ id: roadmapId, title: "Release collaboration plan" }],
     outgoingLinks: [{ id: "link-1", noteId: evidenceId, title: "Authoritative second Note", label: "Evidence", relationshipType: "supports" }],
     backlinks: [{ id: "link-2", noteId: evidenceId, title: "Authoritative second Note", label: "References" }], projectIds: [], projects: [] } }));
   await page.route("**/api/notes/*/branch-preview", async (route) => { const body = route.request().postDataJSON();
     requests.push({ path: new URL(route.request().url()).pathname, body }); await route.fulfill({ json: { impact: { noteId: roadmapId,
-      title: "Release collaboration plan", descendantCount: 1, collectionCount: 0, externalLinks: [],
-      projectAccessChanges: body.action === "move" ? [{ noteId: evidenceId, projectId: "project-1", effect: "gained" }] : [] } } }); });
+      title: "Release collaboration plan", descendantCount: 1, descendants: [{ noteId: evidenceId, title: "Authoritative second Note" }],
+      collectionCount: 0, externalLinks: [], projectAccessChanges: body.action === "move"
+        ? [{ noteId: evidenceId, noteTitle: "Authoritative second Note", projectId: "project-1", projectName: "Stash", effect: "gained" }] : [] } } }); });
   await page.route("**/api/notes/*/move", async (route) => { requests.push({ path: new URL(route.request().url()).pathname, body: route.request().postDataJSON() });
     await route.fulfill({ json: { status: "moved", movedIds: [evidenceId], projectAccessChanges: [] } }); });
   await page.route("**/api/notes/*/context/links", async (route) => { requests.push({ path: new URL(route.request().url()).pathname, body: route.request().postDataJSON() });
@@ -75,7 +87,7 @@ test("authors and recovers knowledge through the keyboard-accessible Note worksp
 });
 
 test("persists a real Note branch lifecycle through the acceptance Instance", async ({ page }) => {
-  await authenticate(page);
+  await authenticate(page, durableSession);
   page.on("dialog", (dialog) => void dialog.accept());
   await page.goto("/app/notes");
   await page.getByRole("button", { name: "Create root Note" }).last().click();
@@ -95,15 +107,39 @@ test("persists a real Note branch lifecycle through the acceptance Instance", as
   const guestContext = await page.request.get(`/api/notes/${guideId}/context`, { headers: { authorization: "Bearer browser-acceptance-guest-token" } });
   expect(guestContext.status()).toBe(200);
 
+  await page.getByRole("button", { name: "Create root Note" }).last().click();
+  await page.getByRole("textbox", { name: "Root Note title" }).fill("Private linked research");
+  await page.getByRole("button", { name: "Create root Note" }).last().click();
+  await expect(page.getByRole("treeitem", { name: "Private linked research" })).toHaveAttribute("aria-current", "page");
+  await expect(page).not.toHaveURL(new RegExp(`/app/notes/${guideId}$`));
+  const privateId = new URL(page.url()).pathname.split("/").at(-1)!;
+  await guide.getByText("Browser field guide", { exact: true }).click();
+  await page.getByRole("button", { name: "Open Note context" }).click();
+  const drawer = page.getByRole("complementary", { name: "Note context" });
+  await drawer.getByRole("combobox", { name: "Target Note" }).selectOption({ label: "Private linked research" });
+  await drawer.getByRole("textbox", { name: "Relationship type" }).fill("supports");
+  await drawer.getByRole("button", { name: "Create Note link" }).click();
+  await drawer.getByRole("button", { name: "Close Note context" }).click();
+  const memberLinkedContext = await page.request.get(`/api/notes/${guideId}/context`, { headers: { authorization: "Bearer browser-acceptance-durable-token" } });
+  expect((await memberLinkedContext.json()).outgoingLinks).toEqual(expect.arrayContaining([expect.objectContaining({ noteId: privateId, title: "Private linked research" })]));
+  const guestLinkedContext = await page.request.get(`/api/notes/${guideId}/context`, { headers: { authorization: "Bearer browser-acceptance-guest-token" } });
+  const guestBody = await guestLinkedContext.json();
+  expect(guestBody.outgoingLinks).toEqual([]);
+  expect(JSON.stringify(guestBody)).not.toContain(privateId);
+  expect(JSON.stringify(guestBody)).not.toContain("Private linked research");
+  expect((await page.request.get(`/api/notes/${privateId}/context`, { headers: { authorization: "Bearer browser-acceptance-guest-token" } })).status()).toBe(404);
+
   await expect(page).toHaveURL(new RegExp(`/app/notes/${guideId}$`));
   await page.getByRole("button", { name: "Archive Note branch" }).click();
   await expect(page.getByRole("button", { name: "Restore Note branch" })).toBeVisible();
-  await page.reload();
+  const reopened = await page.request.post("/api/test/note-tree/reopen", { headers: { authorization: "Bearer browser-acceptance-durable-token" } });
+  expect(reopened.status()).toBe(200);
+  await reloadDocument(page);
   await page.getByRole("button", { name: "Show archived and trashed branches" }).click();
   await expect(page.getByRole("region", { name: "Archived and trashed branches" })).toContainText("Browser field guide");
   await page.getByRole("button", { name: "Restore Browser field guide" }).click(); await expect(guide).toBeVisible();
   await guide.getByText("Browser field guide", { exact: true }).click(); await page.getByRole("button", { name: "Move Note branch to trash" }).click();
-  await expect(page.getByRole("button", { name: "Restore Note branch" })).toBeVisible(); await page.reload();
+  await expect(page.getByRole("button", { name: "Restore Note branch" })).toBeVisible(); await reloadDocument(page);
   await page.getByRole("button", { name: "Show archived and trashed branches" }).click();
   await page.getByRole("button", { name: "Restore Browser field guide" }).click();
   await expect(guide).toBeVisible(); await expect(observations).toBeVisible();

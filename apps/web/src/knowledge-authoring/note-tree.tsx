@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent, t
 import { useNavigate } from "react-router";
 
 import styles from "./note-tree.module.css";
+import { branchImpactConfirmation, type BranchImpact } from "./branch-impact";
 
 export interface NoteTreeNode {
   id: string;
@@ -62,9 +63,9 @@ export function NoteTree({ workspaceId, token, activeNoteId, fetcher = globalThi
     await client.invalidateQueries({ queryKey }); navigate(`/app/notes/${encodeURIComponent(node.id)}`); } });
   const move = useMutation({ mutationFn: async ({ noteId, destination }: { noteId: string; destination: { parentId?: string; beforeId?: string } }) => {
     const preview = await request(fetcher, token, `/api/notes/${encodeURIComponent(noteId)}/branch-preview`, { method: "POST",
-      body: JSON.stringify({ action: "move", ...destination }) }) as { impact: { projectAccessChanges: Array<{ effect: "gained" | "lost" }> } };
+      body: JSON.stringify({ action: "move", ...destination }) }) as { impact: BranchImpact };
     const changes = preview.impact.projectAccessChanges;
-    if (changes.length && !window.confirm(`Move this branch? Project access will change for ${changes.length} Notes.`)) return { cancelled: true as const };
+    if (changes.length && !window.confirm(branchImpactConfirmation("Move this Note branch?", preview.impact))) return { cancelled: true as const };
     await request(fetcher, token, `/api/notes/${encodeURIComponent(noteId)}/move`, { method: "POST", body: JSON.stringify(destination) });
     return { cancelled: false as const };
   },
