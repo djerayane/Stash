@@ -143,7 +143,7 @@
 **Interfaces:**
 - Produces: verified Expo identity/native generation plus Android and conditional iOS publishers in the central release workflow; iOS remains an optional release capability independent of Android.
 
-- [ ] Initialize the existing `stash-capture` app under EAS owner `djerayane`; commit the real non-secret `extra.eas.projectId` UUID returned by `eas init`, retain iOS bundle identifier and Android package `app.stash.capture`, and add tests that reject missing, placeholder, or mismatched identity fields.
+- [x] Link `@imnibis/stash-capture`; commit its real non-secret `extra.eas.projectId` UUID `6441a17d-b6df-4442-909e-aa01813993f4`, retain iOS bundle identifier and Android package `app.stash.capture`, and test the exact public identity plus fail-closed runtime mismatches. Remote Android `versionCode` and iOS `buildNumber` are initialized to `1`.
 - [ ] Add Expo configuration validation and native-generation checks to the reusable workflow's unconditional common path so pull requests need no secret or tag context.
 - [ ] Define EAS preview and production profiles with remote app-version sourcing and automatic native-build-number increments. Prerelease tags enable only the preview APK; stable tags enable the AAB and conditional IPA, map `MAJOR.MINOR.PATCH` exactly to Android `versionName` and iOS `CFBundleShortVersionString`, and never put prerelease identifiers into App Store version fields.
 - [ ] Extend the `release: true` gate with non-interactive `EXPO_TOKEN`, Android-keystore, and iOS certificate/profile capability probes. Specify the exact missing-token and Android failure messages; specify missing iOS as an explicit skipped capability that does not suppress Android and never claims an IPA.

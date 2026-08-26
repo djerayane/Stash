@@ -34,7 +34,7 @@ Each archive has a SHA-256 checksum. CI extracts every bundle and runs a startup
 
 ### Mobile builds
 
-Pull requests verify that Expo configuration and native projects can be generated without publishing. Release configuration commits the EAS owner `djerayane` and the real, non-secret EAS project UUID returned by `eas init` alongside the existing `stash-capture`, `app.stash.capture`, and `app.stash.capture` application identities. CI authenticates non-interactively only through the `EXPO_TOKEN` GitHub Actions secret, while pull requests validate all non-secret identity fields without receiving that secret.
+Pull requests verify that Expo configuration and native projects can be generated without publishing. Release configuration commits the EAS identity `@imnibis/stash-capture` and its real, non-secret project UUID `6441a17d-b6df-4442-909e-aa01813993f4` alongside the existing `app.stash.capture` iOS and Android application identities. A runtime `EAS_PROJECT_ID` is optional but must equal that committed UUID when supplied. CI authenticates non-interactively only through the `EXPO_TOKEN` GitHub Actions secret, while pull requests validate all non-secret identity fields without receiving that secret.
 
 Canonical SemVer prerelease tags publish the OCI image, server bundles, and an installable Android preview APK. They do not submit store artifacts: the AAB job records `Android store prerelease skipped: Play Store version requires a stable semantic version`, and the iOS job records exactly `iOS prerelease skipped: App Store version requires a stable semantic version`; no IPA is built, published, or claimed.
 

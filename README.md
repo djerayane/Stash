@@ -102,6 +102,10 @@ docker compose up -d
 
 Store `INSTANCE_MASTER_KEY` separately from PostgreSQL and backups; restoring encrypted Instance state requires the exact same key. External binds require a PostgreSQL password of at least 16 characters containing at least three of lowercase, uppercase, digits, and symbols. Their `PUBLIC_ORIGIN` must be canonical HTTPS with a DNS hostname; IP literals and localhost names are rejected. `STASH_PORT` changes the published host port, `STASH_BIND_ADDRESS` defaults to localhost, and `STASH_URL` tells the smoke test where to find an Instance. Application-level validation remains active for Compose overrides and fails unsafe production configuration clearly.
 
+### Mobile applications
+
+Each version-tag release workflow retains an Android preview APK. Stable releases additionally build the Play Store AAB and, when Apple signing capability is configured, an iOS IPA. Installation and signing details are in [the mobile client guide](apps/mobile/README.md). After installation, Members pair the app directly with their own HTTPS Instance; Stash operates no hosted relay.
+
 ## Configuration
 
 The application fails at startup with a clear error when required configuration is absent or invalid.

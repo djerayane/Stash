@@ -114,3 +114,118 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" artifacts/*.tar.gz artifacts/*.zip artifacts/*.sha256 artifacts/SHA256SUMS \
             --verify-tag --title "Stash ${GITHUB_REF_NAME#v}" --generate-notes
+
+  report-mobile-capabilities:
+    needs: release-quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report store artifact eligibility
+        run: |
+          if [ "${{ needs.release-quality.outputs.stable }}" != true ]; then
+            echo "Android store prerelease skipped: Play Store version requires a stable semantic version" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "iOS prerelease skipped: App Store version requires a stable semantic version" | tee -a "$GITHUB_STEP_SUMMARY"
+          elif [ "${{ needs.release-quality.outputs.ios-signing-configured }}" != true ]; then
+            echo "iOS release unavailable: configure the Apple distribution certificate and provisioning profile for app.stash.capture" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+  publish-android-preview:
+    needs: release-quality
+    runs-on: ubuntu-latest
+    environment: mobile-release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: pnpm install --frozen-lockfile
+      - id: version
+        run: node scripts/configure-mobile-release.mjs "$GITHUB_REF_NAME"
+      - name: Build the installable Android preview APK
+        working-directory: apps/mobile
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          EAS_PROJECT_ID: ${{ vars.EAS_PROJECT_ID }}
+        run: |
+          result="$(pnpm dlx eas-cli@16.4.0 build --platform android --profile preview --non-interactive --wait --json)" || {
+            echo "Android release unavailable: configure the EAS Android keystore for app.stash.capture" >&2
+            exit 1
+          }
+          url="$(node -e 'const x=JSON.parse(process.argv[1]);process.stdout.write(x[0]?.artifacts?.buildUrl??"")' "$result")"
+          version_code="$(node -e 'const x=JSON.parse(process.argv[1]);process.stdout.write(String(x[0]?.appBuildVersion??""))' "$result")"
+          test -n "$url" && [[ "$version_code" =~ ^[0-9]+$ ]]
+          test "$version_code" -gt "${{ needs.release-quality.outputs.android-previous-version-code }}"
+          curl --fail --show-error --location "$url" --output "stash-capture-${GITHUB_REF_NAME#v}-android.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stash-capture-${{ needs.release-quality.outputs.mobile-version }}-android-apk
+          path: apps/mobile/stash-capture-*-android.apk
+          if-no-files-found: error
+
+  publish-android-store:
+    if: needs.release-quality.outputs.stable == 'true'
+    needs: release-quality
+    runs-on: ubuntu-latest
+    environment: mobile-release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: pnpm install --frozen-lockfile
+      - run: node scripts/configure-mobile-release.mjs "$GITHUB_REF_NAME"
+      - name: Build the Android store AAB
+        working-directory: apps/mobile
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          EAS_PROJECT_ID: ${{ vars.EAS_PROJECT_ID }}
+        run: |
+          result="$(pnpm dlx eas-cli@16.4.0 build --platform android --profile production --non-interactive --wait --json)" || {
+            echo "Android release unavailable: configure the EAS Android keystore for app.stash.capture" >&2
+            exit 1
+          }
+          url="$(node -e 'const x=JSON.parse(process.argv[1]);process.stdout.write(x[0]?.artifacts?.buildUrl??"")' "$result")"
+          version_code="$(node -e 'const x=JSON.parse(process.argv[1]);process.stdout.write(String(x[0]?.appBuildVersion??""))' "$result")"
+          test -n "$url"
+          echo "Verify the allocated Android versionCode: $version_code > ${{ needs.release-quality.outputs.android-previous-version-code }}"
+          [[ "$version_code" =~ ^[0-9]+$ ]] && test "$version_code" -gt "${{ needs.release-quality.outputs.android-previous-version-code }}"
+          curl --fail --show-error --location "$url" --output "stash-capture-${GITHUB_REF_NAME#v}-android.aab"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stash-capture-${{ needs.release-quality.outputs.mobile-version }}-android-aab
+          path: apps/mobile/stash-capture-*-android.aab
+          if-no-files-found: error
+
+  publish-ios:
+    if: needs.release-quality.outputs.stable == 'true' && needs.release-quality.outputs.ios-signing-configured == 'true'
+    needs: release-quality
+    runs-on: ubuntu-latest
+    environment: mobile-release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: pnpm install --frozen-lockfile
+      - run: node scripts/configure-mobile-release.mjs "$GITHUB_REF_NAME"
+      - name: Build the signed iOS IPA
+        working-directory: apps/mobile
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          EAS_PROJECT_ID: ${{ vars.EAS_PROJECT_ID }}
+          APPLE_TEAM_ID: ${{ needs.release-quality.outputs.ios-apple-team-id }}
+        run: |
+          result="$(pnpm dlx eas-cli@16.4.0 build --platform ios --profile production --non-interactive --wait --json)" || {
+            echo "iOS release unavailable: configure the Apple distribution certificate and provisioning profile for app.stash.capture" >&2
+            exit 1
+          }
+          url="$(node -e 'const x=JSON.parse(process.argv[1]);process.stdout.write(x[0]?.artifacts?.buildUrl??"")' "$result")"
+          build_number="$(node -e 'const x=JSON.parse(process.argv[1]);process.stdout.write(String(x[0]?.appBuildVersion??""))' "$result")"
+          test -n "$url"
+          echo "Verify the allocated iOS buildNumber: $build_number > ${{ needs.release-quality.outputs.ios-previous-build-number }}"
+          [[ "$build_number" =~ ^[0-9]+$ ]] && test "$build_number" -gt "${{ needs.release-quality.outputs.ios-previous-build-number }}"
+          curl --fail --show-error --location "$url" --output "stash-capture-${GITHUB_REF_NAME#v}-ios.ipa"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stash-capture-${{ needs.release-quality.outputs.mobile-version }}-ios-ipa
+          path: apps/mobile/stash-capture-*-ios.ipa
+          if-no-files-found: error
