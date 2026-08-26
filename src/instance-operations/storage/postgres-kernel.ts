@@ -1,4 +1,4 @@
-import { Pool, type PoolClient, type QueryResult, type QueryResultRow } from "pg";
+import { Pool, type QueryResult, type QueryResultRow } from "pg";
 
 export interface IdlePostgresClientFailure {
   operation: "idle_client";
@@ -39,30 +39,36 @@ export class PostgresKernel implements PostgresQueryable {
     return values === undefined ? this.#pool.query<T>(text) : this.#pool.query<T>(text, [...values]);
   }
 
-  connect(): Promise<PoolClient> {
-    return this.#pool.connect();
-  }
-
-  async transaction<T>(work: (client: PoolClient) => Promise<T>): Promise<T> {
+  async withSession<T>(work: (session: PostgresQueryable) => Promise<T>): Promise<T> {
     const client = await this.#pool.connect();
     try {
-      await client.query("BEGIN");
-      const result = await work(client);
-      await client.query("COMMIT");
-      return result;
-    } catch (error) {
-      await client.query("ROLLBACK").catch(() => undefined);
-      throw error;
+      return await work(client);
     } finally {
       client.release();
     }
   }
 
+  async transaction<T>(work: (transaction: PostgresQueryable) => Promise<T>): Promise<T> {
+    return this.#transaction("BEGIN", work);
+  }
+
+  async readOnlySnapshot<T>(work: (transaction: PostgresQueryable) => Promise<T>): Promise<T> {
+    return this.#transaction("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY", work);
+  }
+
   async controlledTransaction<T>(
-    work: (client: PoolClient) => Promise<{ commit: boolean; value: T }>,
+    work: (transaction: PostgresQueryable) => Promise<{ commit: boolean; value: T }>,
+  ): Promise<T> {
+    return this.preparedControlledTransaction(async () => undefined, work);
+  }
+
+  async preparedControlledTransaction<T>(
+    prepare: (session: PostgresQueryable) => Promise<void>,
+    work: (transaction: PostgresQueryable) => Promise<{ commit: boolean; value: T }>,
   ): Promise<T> {
     const client = await this.#pool.connect();
     try {
+      await prepare(client);
       await client.query("BEGIN");
       const result = await work(client);
       await client.query(result.commit ? "COMMIT" : "ROLLBACK");
@@ -75,24 +81,40 @@ export class PostgresKernel implements PostgresQueryable {
     }
   }
 
-  async advisoryTransactionLock(client: PoolClient, lockId: number): Promise<void> {
-    if (!Number.isSafeInteger(lockId)) throw new Error("PostgreSQL advisory lock ID must be a safe integer");
+  async advisorySessionTransaction<T>(
+    lockId: number,
+    prepare: (session: PostgresQueryable) => Promise<void>,
+    work: (transaction: PostgresQueryable) => Promise<T>,
+  ): Promise<T> {
+    this.#assertAdvisoryLockId(lockId);
+    const client = await this.#pool.connect();
+    try {
+      await prepare(client);
+      await client.query(`SELECT pg_advisory_lock(${lockId})`);
+      try {
+        await client.query("BEGIN");
+        const result = await work(client);
+        await client.query("COMMIT");
+        return result;
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        throw error;
+      } finally {
+        await client.query(`SELECT pg_advisory_unlock(${lockId})`).catch(() => undefined);
+      }
+    } finally {
+      client.release();
+    }
+  }
+
+  async advisoryTransactionLock(client: PostgresQueryable, lockId: number): Promise<void> {
+    this.#assertAdvisoryLockId(lockId);
     await client.query(`SELECT pg_advisory_xact_lock(${lockId})`);
-  }
-
-  async advisorySessionLock(client: PoolClient, lockId: number): Promise<void> {
-    if (!Number.isSafeInteger(lockId)) throw new Error("PostgreSQL advisory lock ID must be a safe integer");
-    await client.query(`SELECT pg_advisory_lock(${lockId})`);
-  }
-
-  async releaseAdvisorySessionLock(client: PoolClient, lockId: number): Promise<void> {
-    if (!Number.isSafeInteger(lockId)) throw new Error("PostgreSQL advisory lock ID must be a safe integer");
-    await client.query(`SELECT pg_advisory_unlock(${lockId})`);
   }
 
   async prepareEmptySchemaVersion(
     targetVersion: string,
-    initialize: (client: PoolClient) => Promise<void>,
+    initialize: (client: PostgresQueryable) => Promise<void>,
     beforeCommit?: () => Promise<void>,
   ): Promise<void> {
     await this.transaction(async (client) => {
@@ -126,5 +148,24 @@ export class PostgresKernel implements PostgresQueryable {
 
   async close(): Promise<void> {
     await this.#pool.end();
+  }
+
+  async #transaction<T>(begin: string, work: (transaction: PostgresQueryable) => Promise<T>): Promise<T> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query(begin);
+      const result = await work(client);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  #assertAdvisoryLockId(lockId: number): void {
+    if (!Number.isSafeInteger(lockId)) throw new Error("PostgreSQL advisory lock ID must be a safe integer");
   }
 }

@@ -9,6 +9,7 @@ import { AttachmentService, LocalAttachmentStorage } from "./attachments.js";
 import { AutomationService } from "./automations.js";
 import { BoardService } from "./boards.js";
 import { DiscussionService } from "./discussions.js";
+import { createDiagnostics } from "./diagnostics.js";
 import { databaseUrlFromEnvironment, openRegistrationFromEnvironment, validateComposeExposure } from "./deployment-configuration.js";
 import { EmailRecoveryWorker } from "./email-recovery-worker.js";
 import { EmbeddedInstanceStore } from "./embedded-instance-store.js";
@@ -118,6 +119,10 @@ export async function composeInstanceRuntime(environment: NodeJS.ProcessEnv): Pr
     console.warn(`Authentication operation unavailable (operation=${operation}, cause=${causeType}, code=${causeCode}).`);
   };
   const ownerBootstrap = new OwnerBootstrapService(database);
+  const diagnostics = createDiagnostics({
+    instanceVersion: "0.1.0",
+    transport: { async submit() { throw new Error("No diagnostic transport is configured"); } },
+  });
   const accountRegistration = openRegistrationFromEnvironment(environment) ? new AccountRegistrationService(database) : undefined;
   const notes = new NoteService(database);
   const tasks = new TaskService(database, database);
@@ -125,16 +130,17 @@ export async function composeInstanceRuntime(environment: NodeJS.ProcessEnv): Pr
   const githubArtifacts = githubApp ? new GitHubArtifactService(database, githubApp) : undefined;
   const githubSignals = githubWebhookSecret ? new GitHubSignalService(database, githubWebhookSecret, automations) : undefined;
   const capabilities = createCapabilityRegistry([
-    identityAccessCapability({ passwordAuth, ...(accountRegistration ? { accountRegistration } : {}), reportAuthenticationFailure }),
+    identityAccessCapability({ passwordAuth, instanceAdminToken, ownerBootstrap,
+      ...(accountRegistration ? { accountRegistration } : {}), reportAuthenticationFailure }),
     knowledgeAuthoringCapability({ notes, memberAccess: passwordAuth }),
     workPlanningCapability({ tasks, memberAccess: passwordAuth }),
     developmentIntegrationCapability({ memberAccess: passwordAuth,
       ...(repositoryConnections ? { repositoryConnections } : {}), ...(githubArtifacts ? { githubArtifacts } : {}),
       ...(githubSignals ? { githubSignals } : {}) }),
-    instanceOperationsCapability({ instanceAdminToken, ownerBootstrap }),
+    instanceOperationsCapability({ instanceAdminToken, diagnostics }),
   ]);
   const instance = await startInstance({ database, host: environment.HOST ?? "0.0.0.0", port,
-    instanceAdminToken, capabilities,
+    instanceAdminToken, capabilities, diagnostics,
     webClientRoot: environment.WEB_CLIENT_ROOT?.trim() || fileURLToPath(new URL("../apps/web/dist", import.meta.url)),
     ownerBootstrap, passwordAuth, ...(accountRegistration ? { accountRegistration } : {}), reportAuthenticationFailure,
     workspaceProjects: new WorkspaceProjectService(database), organizationRoles: new OrganizationRoleService(database), invitations: new InvitationService(database),

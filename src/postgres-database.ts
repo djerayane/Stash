@@ -1,6 +1,4 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import type { PoolClient } from "pg";
-
 import type { DatabaseProbe } from "./instance.js";
 import { noteOperationDigest, type NoteConflictResolution, type NoteEditBatch, type NoteEditConflict, type NoteRecord, type NoteRepository, type NoteTriageChange, type NoteTriageResult, type PortableNoteLinkProjection, type PortableNoteProjection, type PortableTaskProjection, type TaskCreation } from "./notes.js";
 import { isRichTextDocument, markdownToRichText, paragraphDocument, richTextToMarkdown } from "./rich-text.js";
@@ -251,8 +249,8 @@ export class PostgresDatabase implements
   }
 
   /** Prepare every storage capability for contract validation or an empty semantic migration target. */
-  async prepareInstanceStore(transactionClient?: PoolClient): Promise<void> {
-    const prepare = async (client: PoolClient) => {
+  async prepareInstanceStore(transactionClient?: PostgresQueryable): Promise<void> {
+    const prepare = async (client: PostgresQueryable) => {
       await this.#ensureBootstrapSchema(client); await this.#ensureWorkspaceProjectSchema(client);
       await this.#ensureAuthSchema(client); await this.#ensureOidcSchema(client); await this.#ensureRecoverySchema(client);
       await this.#ensureRepositoryConnectionSchema(client); await this.#ensureGitHubSignalSchema(client); await this.#ensureNotificationSchema(client);
@@ -275,52 +273,43 @@ export class PostgresDatabase implements
   }
 
   async createFirstOrganizationOwner(record: BootstrapRecord): Promise<boolean> {
-    const client = await this.#kernel.connect();
-    try {
-      const workspaceId = record.workspaceId ?? randomUUID();
-      const workspaceName = record.workspaceName ?? `${record.organizationName} Workspace`;
-      const createdAt = record.createdAt ?? new Date().toISOString();
-      await this.#ensureWorkspaceProjectSchema(client);
-      await client.query("BEGIN");
-      await this.#kernel.advisoryTransactionLock(client, 2_080_289_093);
-      const existing = await client.query("SELECT 1 FROM stash_instance_bootstrap WHERE singleton = TRUE");
-      if (existing.rowCount) {
-        await client.query("ROLLBACK");
-        return false;
-      }
+    const workspaceId = record.workspaceId ?? randomUUID();
+    const workspaceName = record.workspaceName ?? `${record.organizationName} Workspace`;
+    const createdAt = record.createdAt ?? new Date().toISOString();
+    return this.#kernel.preparedControlledTransaction(
+      (client) => this.#ensureWorkspaceProjectSchema(client),
+      async (client) => {
+        await this.#kernel.advisoryTransactionLock(client, 2_080_289_093);
+        const existing = await client.query("SELECT 1 FROM stash_instance_bootstrap WHERE singleton = TRUE");
+        if (existing.rowCount) return { commit: false, value: false };
 
-      await client.query("INSERT INTO stash_organizations (id, name) VALUES ($1, $2)", [
-        record.organizationId,
-        record.organizationName,
-      ]);
-      await client.query(
-        "INSERT INTO stash_accounts (id, name, email, password_hash) VALUES ($1, $2, $3, $4)",
-        [record.ownerId, record.ownerName, record.ownerEmail, this.#authenticationSecrets.encrypt(record.passwordHash)],
-      );
-      await client.query(
-        "INSERT INTO stash_organization_memberships (organization_id, account_id, role) VALUES ($1, $2, $3)",
-        [record.organizationId, record.ownerId, record.role],
-      );
-      await client.query(
-        `INSERT INTO stash_workspaces
-          (id, name, owner_type, personal_owner_id, organization_owner_id, created_by_account_id, created_at)
-         VALUES ($1, $2, 'organization', NULL, $3, $4, $5)`,
-        [workspaceId, workspaceName, record.organizationId, record.ownerId, createdAt],
-      );
-      await this.#recordPortableProjection(client, "Workspace", workspaceId, "stash.workspace.v1", {
-        schema: "stash.workspace.v1", id: workspaceId, name: workspaceName,
-        owner: { type: "organization", identity: { localOrganizationId: record.organizationId, displayName: record.organizationName } },
-        createdBy: { localAccountId: record.ownerId, displayName: record.ownerName },
-      });
-      await client.query("INSERT INTO stash_instance_bootstrap (singleton) VALUES (TRUE)");
-      await client.query("COMMIT");
-      return true;
-    } catch (error) {
-      await client.query("ROLLBACK").catch(() => undefined);
-      throw error;
-    } finally {
-      client.release();
-    }
+        await client.query("INSERT INTO stash_organizations (id, name) VALUES ($1, $2)", [
+          record.organizationId,
+          record.organizationName,
+        ]);
+        await client.query(
+          "INSERT INTO stash_accounts (id, name, email, password_hash) VALUES ($1, $2, $3, $4)",
+          [record.ownerId, record.ownerName, record.ownerEmail, this.#authenticationSecrets.encrypt(record.passwordHash)],
+        );
+        await client.query(
+          "INSERT INTO stash_organization_memberships (organization_id, account_id, role) VALUES ($1, $2, $3)",
+          [record.organizationId, record.ownerId, record.role],
+        );
+        await client.query(
+          `INSERT INTO stash_workspaces
+            (id, name, owner_type, personal_owner_id, organization_owner_id, created_by_account_id, created_at)
+           VALUES ($1, $2, 'organization', NULL, $3, $4, $5)`,
+          [workspaceId, workspaceName, record.organizationId, record.ownerId, createdAt],
+        );
+        await this.#recordPortableProjection(client, "Workspace", workspaceId, "stash.workspace.v1", {
+          schema: "stash.workspace.v1", id: workspaceId, name: workspaceName,
+          owner: { type: "organization", identity: { localOrganizationId: record.organizationId, displayName: record.organizationName } },
+          createdBy: { localAccountId: record.ownerId, displayName: record.ownerName },
+        });
+        await client.query("INSERT INTO stash_instance_bootstrap (singleton) VALUES (TRUE)");
+        return { commit: true, value: true };
+      },
+    );
   }
 
   async createAccountWithPersonalWorkspaceAndSession(record: RegistrationRecord): Promise<boolean> {
@@ -351,8 +340,7 @@ export class PostgresDatabase implements
   }
 
   async findPortableMemberIdentity(memberId: string): Promise<PortableIdentity | undefined> {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureBootstrapSchema(client);
       const result = await client.query<{ id: string; name: string }>(
         "SELECT id, name FROM stash_accounts WHERE id = $1",
@@ -362,9 +350,7 @@ export class PostgresDatabase implements
       return member
         ? { localAccountId: member.id, displayName: member.name }
         : undefined;
-    } finally {
-      client.release();
-    }
+    });
   }
 
   async findMemberLocalizationPreferences(memberId: string): Promise<MemberLocalizationPreferences | undefined> {
@@ -462,8 +448,7 @@ export class PostgresDatabase implements
   }
 
   async listAccessibleWorkspaces(memberId: string) {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureWorkspaceProjectSchema(client);
       const result = await client.query<{ workspace_id: string; workspace_name: string; project_id: string | null; project_name: string | null; project_key: string | null }>(`
         SELECT workspace.id AS workspace_id, workspace.name AS workspace_name,
@@ -480,7 +465,7 @@ export class PostgresDatabase implements
       const workspaces = new Map<string, { id: string; name: string; projects: Array<{ id: string; name: string; key: string }> }>();
       for (const row of result.rows) { const workspace = workspaces.get(row.workspace_id) ?? { id: row.workspace_id, name: row.workspace_name, projects: [] }; if (row.project_id) workspace.projects.push({ id: row.project_id, name: row.project_name!, key: row.project_key! }); workspaces.set(row.workspace_id, workspace); }
       return [...workspaces.values()];
-    } finally { client.release(); }
+    });
   }
 
   async createProject(
@@ -637,8 +622,7 @@ export class PostgresDatabase implements
   }
 
   async listMobileCaptureOptions(memberId: string, workspaceId: string) {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureNoteSchema(client);
       await this.#ensureInvitationSchema(client);
       const access = await client.query(`SELECT 1 FROM stash_workspaces workspace WHERE workspace.id = $1 AND (
@@ -652,12 +636,11 @@ export class PostgresDatabase implements
           WHERE workspace_id = $1 ORDER BY tag`, [workspaceId]),
       ]);
       return { status: "found" as const, projects: projects.rows, tags: tags.rows.map(({ tag }) => tag) };
-    } finally { client.release(); }
+    });
   }
 
   async listInboxNotes(memberId: string, workspaceId: string) {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureNoteSchema(client);
       const access = await client.query(`SELECT 1 FROM stash_workspaces workspace WHERE workspace.id = $1 AND (
         (workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR
@@ -672,12 +655,11 @@ export class PostgresDatabase implements
         createdAt: new Date(row.created_at).toISOString(), ...(row.project_id ? { projectId: row.project_id } : {}),
         ...(row.reminder_at ? { reminder: { at: new Date(row.reminder_at).toISOString() } } : {}),
         ...(row.archived_at ? { archivedAt: new Date(row.archived_at).toISOString() } : {}) })) };
-    } finally { client.release(); }
+    });
   }
 
   async listNotesByTag(memberId: string, workspaceId: string, tag: string) {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureNoteSchema(client);
       const access = await client.query(`SELECT 1 FROM stash_workspaces workspace WHERE workspace.id = $1 AND (
         (workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR
@@ -700,12 +682,11 @@ export class PostgresDatabase implements
         content: row.content, document: row.document, revision: row.revision, tags: row.tags, createdByMemberId: row.created_by_account_id,
         createdAt: new Date(row.created_at).toISOString(), ...(row.project_id ? { projectId: row.project_id } : {}),
         ...(row.reminder_at ? { reminder: { at: new Date(row.reminder_at).toISOString() } } : {}) })) };
-    } finally { client.release(); }
+    });
   }
 
   async listNotes(memberId: string, workspaceId: string) {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureNoteSchema(client);
       const access = await client.query(`SELECT 1 FROM stash_workspaces workspace WHERE workspace.id = $1 AND (
         (workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR
@@ -727,12 +708,11 @@ export class PostgresDatabase implements
         content: row.content, document: row.document, revision: row.revision, tags: row.tags, createdByMemberId: row.created_by_account_id,
         createdAt: new Date(row.created_at).toISOString(), ...(row.project_id ? { projectId: row.project_id } : {}),
         ...(row.reminder_at ? { reminder: { at: new Date(row.reminder_at).toISOString() } } : {}) })) };
-    } finally { client.release(); }
+    });
   }
 
   async findAttachmentReceipt(memberId: string, workspaceId: string, operationKey: string) {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureAttachmentSchema(client);
       const result = await client.query<any>(`SELECT receipt.payload_digest, receipt.projection, attachment.*
         FROM stash_attachment_operation_receipts receipt JOIN stash_attachments attachment ON attachment.id = receipt.attachment_id
@@ -744,7 +724,7 @@ export class PostgresDatabase implements
       const row = result.rows[0];
       if (!row) return undefined;
       return { digest: row.payload_digest, record: attachmentRecord(row), projection: row.projection as PortableAttachmentProjection };
-    } finally { client.release(); }
+    });
   }
 
   async createAttachment(memberId: string, record: AttachmentRecord, projection: PortableAttachmentProjection,
@@ -775,22 +755,20 @@ export class PostgresDatabase implements
   }
 
   async canCreateAttachment(memberId: string, workspaceId: string): Promise<boolean> {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureWorkspaceProjectSchema(client);
       const access = await client.query(`SELECT 1 FROM stash_workspaces workspace WHERE workspace.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR EXISTS (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2))`, [workspaceId, memberId]);
       return access.rowCount === 1;
-    } finally { client.release(); }
+    });
   }
 
   async findAttachmentForMember(memberId: string, attachmentId: string): Promise<AttachmentRecord | undefined> {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureAttachmentSchema(client);
       const result = await client.query<AttachmentRow>(`SELECT attachment.* FROM stash_attachments attachment JOIN stash_workspaces workspace ON workspace.id = attachment.workspace_id WHERE attachment.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR EXISTS (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2))`, [attachmentId, memberId]);
       const row = result.rows[0];
       return row ? attachmentRecord(row) : undefined;
-    } finally { client.release(); }
+    });
   }
 
   async triageNote(memberId: string, workspaceId: string, noteId: string, change: NoteTriageChange) {
@@ -941,17 +919,15 @@ export class PostgresDatabase implements
   }
 
   async findDiscussion(memberId: string, discussionId: string) {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureDiscussionSchema(client);
       const discussion = await this.#readDiscussion(client, memberId, discussionId, false);
       return discussion ? { status: "found" as const, discussion } : { status: "not_found" as const };
-    } finally { client.release(); }
+    });
   }
 
   async listNoteDiscussions(memberId: string, noteId: string) {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureDiscussionSchema(client);
       const access = await client.query(`SELECT 1 FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id = note.workspace_id
         WHERE note.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR EXISTS (
@@ -966,12 +942,11 @@ export class PostgresDatabase implements
         if (discussion) discussions.push(discussion);
       }
       return { status: "found" as const, discussions };
-    } finally { client.release(); }
+    });
   }
 
   async listTaskDiscussions(memberId: string, taskId: string) {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureDiscussionSchema(client);
       const access = await client.query(`SELECT 1 FROM stash_tasks task JOIN stash_workspaces workspace ON workspace.id = task.workspace_id
         WHERE task.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR EXISTS (
@@ -986,12 +961,11 @@ export class PostgresDatabase implements
         if (discussion) discussions.push(discussion);
       }
       return { status: "found" as const, discussions };
-    } finally { client.release(); }
+    });
   }
 
   async listBlockDiscussions(memberId: string, noteId: string, blockKey: string) {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureDiscussionSchema(client);
       const note = await client.query<any>(`SELECT note.document FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id = note.workspace_id
         WHERE note.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR EXISTS (
@@ -1011,7 +985,7 @@ export class PostgresDatabase implements
         if (discussion?.target.kind === "block") discussions.push(discussion);
       }
       return { status: "found" as const, discussions };
-    } finally { client.release(); }
+    });
   }
 
   async addMessage(memberId: string, discussionId: string, message: DiscussionMessage) {
@@ -1125,8 +1099,7 @@ export class PostgresDatabase implements
   }
 
   async listLinkedTasks(memberId: string, noteId: string) {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureNoteSchema(client);
       const result = await client.query<any>(`SELECT task.id, task.task_key, task.title, status.id AS status_id,
         status.name AS status_name, status.category, source.block_id, note.document
@@ -1146,7 +1119,7 @@ export class PostgresDatabase implements
           relationshipState: matches === 1 ? "linked" : matches > 1 ? "ambiguous" : "broken" };
       });
       return { status: "found" as const, tasks };
-    } finally { client.release(); }
+    });
   }
 
   async linkTaskToBlock(memberId: string, taskId: string, noteId: string, blockKey: string) {
@@ -1213,8 +1186,7 @@ export class PostgresDatabase implements
   }
 
   async listTaskSourceBlocks(memberId: string, taskId: string) {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureNoteSchema(client);
       const result = await client.query<any>(`SELECT source.note_id, source.block_id, note.document
         FROM stash_tasks task JOIN stash_workspaces workspace ON workspace.id = task.workspace_id
@@ -1230,18 +1202,17 @@ export class PostgresDatabase implements
         return { noteId: row.note_id, blockId: row.block_id,
           state: matches === 1 ? "linked" as const : matches > 1 ? "ambiguous" as const : "broken" as const };
       }) };
-    } finally { client.release(); }
+    });
   }
 
   async findTaskByKey(memberId: string, projectId: string, taskKey: string) {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureNoteSchema(client);
       await this.#ensureInvitationSchema(client);
       const result = await client.query<any>(taskPlanningSelect, [projectId, taskKey, memberId]);
       const row = result.rows[0];
       return row ? { status: "found" as const, task: taskPlanningReadModelFromRow(row) } : { status: "not_found" as const };
-    } finally { client.release(); }
+    });
   }
 
   async findWorkflow(memberId: string, projectId: string) {
@@ -1310,7 +1281,7 @@ export class PostgresDatabase implements
     });
   }
 
-  async #findProjectWorkflowAccess(client: PoolClient, memberId: string, projectId: string, lock = false): Promise<"member" | "forbidden" | "not_found"> {
+  async #findProjectWorkflowAccess(client: PostgresQueryable, memberId: string, projectId: string, lock = false): Promise<"member" | "forbidden" | "not_found"> {
     const result = await client.query<{ member: boolean; guest: boolean }>(`SELECT
       ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2)
         OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
@@ -1324,7 +1295,7 @@ export class PostgresDatabase implements
     return !row ? "not_found" : row.member ? "member" : row.guest ? "forbidden" : "not_found";
   }
 
-  async #loadWorkflow(client: PoolClient, projectId: string): Promise<ProjectWorkflow> {
+  async #loadWorkflow(client: PostgresQueryable, projectId: string): Promise<ProjectWorkflow> {
     const project = await client.query<{ workflow_revision: number }>("SELECT workflow_revision FROM stash_projects WHERE id = $1", [projectId]);
     const statuses = await client.query<{ id: string; name: string; category: WorkflowStatus["category"]; position: number; archived: boolean }>(
       "SELECT id, name, category, position, archived FROM stash_workflow_statuses WHERE project_id = $1 ORDER BY position, id", [projectId]);
@@ -1332,13 +1303,12 @@ export class PostgresDatabase implements
   }
 
   async listBoards(memberId: string, projectId: string) {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureBoardSchema(client); await this.#ensureInvitationSchema(client);
       if (await this.#findProjectWorkflowAccess(client, memberId, projectId) === "not_found") return { status: "not_found" as const };
       const result = await client.query<any>("SELECT id, project_id, name, group_by, created_at FROM stash_boards WHERE project_id = $1 ORDER BY created_at, id", [projectId]);
       return { status: "found" as const, boards: result.rows.map(boardFromRow) };
-    } finally { client.release(); }
+    });
   }
 
   async createBoard(memberId: string, board: Board) {
@@ -1353,8 +1323,7 @@ export class PostgresDatabase implements
   }
 
   async readBoard(memberId: string, projectId: string, boardId: string) {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureBoardSchema(client); await this.#ensureInvitationSchema(client);
       if (await this.#findProjectWorkflowAccess(client, memberId, projectId) === "not_found") return { status: "not_found" as const };
       const found = await client.query<any>("SELECT id, project_id, name, group_by, created_at FROM stash_boards WHERE id = $1 AND project_id = $2", [boardId, projectId]);
@@ -1365,7 +1334,7 @@ export class PostgresDatabase implements
       const tasks: BoardTask[] = rows.rows.map((row: any) => ({ id: row.id, key: row.task_key, title: row.title,
         status: { id: row.status_id, name: row.status_name, category: row.category }, assigneeIds: row.assignee_ids, priority: row.priority, labelNames: row.label_names }));
       return { status: "found" as const, board: boardFromRow(found.rows[0]), tasks, statuses: (await this.#loadWorkflow(client, projectId)).statuses };
-    } finally { client.release(); }
+    });
   }
 
   async moveTaskOnBoard(memberId: string, projectId: string, boardId: string, taskKey: string, statusId: string) {
@@ -1571,8 +1540,7 @@ export class PostgresDatabase implements
   }
 
   async listStructuredTaskConflicts(memberId: string, projectId: string, taskKey: string) {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureNoteSchema(client); await this.#ensureInvitationSchema(client);
       const writable = await client.query(`SELECT 1 FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
         WHERE project.id=$1 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
@@ -1584,7 +1552,7 @@ export class PostgresDatabase implements
       const rows = await client.query<any>(`SELECT conflict.* FROM stash_task_edit_conflicts conflict
         WHERE conflict.task_id = $1 AND conflict.resolved_at IS NULL ORDER BY conflict.created_at, conflict.id`, [task.rows[0].id]);
       return { status: "found" as const, revision: task.rows[0].revision, conflicts: rows.rows.map(taskConflictFromRow) };
-    } finally { client.release(); }
+    });
   }
 
   async resolveStructuredTaskConflict(memberId: string, projectId: string, taskKey: string, conflictId: string,
@@ -1636,7 +1604,7 @@ export class PostgresDatabase implements
     });
   }
 
-  async #applyStructuredTaskChanges(client: PoolClient, memberId: string, row: any, update: TaskPlanningUpdate): Promise<boolean> {
+  async #applyStructuredTaskChanges(client: PostgresQueryable, memberId: string, row: any, update: TaskPlanningUpdate): Promise<boolean> {
     if (update.statusId) { const status = await client.query("SELECT 1 FROM stash_workflow_statuses WHERE id=$1 AND project_id=$2 AND archived=FALSE FOR UPDATE", [update.statusId, row.project_id]); if (!status.rowCount) return false; }
     if (update.assigneeIds) { const result = await client.query(`SELECT account.id FROM stash_accounts account JOIN stash_workspaces workspace ON workspace.id=$2
       WHERE account.id=ANY($1::uuid[]) AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=account.id) OR
@@ -1722,7 +1690,7 @@ export class PostgresDatabase implements
     });
   }
 
-  async #applyTriageChange(client: PoolClient, memberId: string, workspaceId: string, noteId: string, change: NoteTriageChange): Promise<
+  async #applyTriageChange(client: PostgresQueryable, memberId: string, workspaceId: string, noteId: string, change: NoteTriageChange): Promise<
     { result: NoteTriageResult } | { status: "project_forbidden" | "target_note_not_found" }
   > {
     switch (change.kind) {
@@ -1733,7 +1701,7 @@ export class PostgresDatabase implements
     }
   }
 
-  async #organizeInboxNote(client: PoolClient, memberId: string, workspaceId: string, noteId: string, change: Extract<NoteTriageChange, { kind: "organized" }>) {
+  async #organizeInboxNote(client: PostgresQueryable, memberId: string, workspaceId: string, noteId: string, change: Extract<NoteTriageChange, { kind: "organized" }>) {
     const project = await client.query("SELECT 1 FROM stash_projects WHERE id = $1 AND workspace_id = $2", [change.note.projectId, workspaceId]);
     if (!project.rowCount) return { status: "project_forbidden" as const };
     const before=await client.query<any>("SELECT project_id,tags FROM stash_notes WHERE id=$1",[noteId]);
@@ -1744,13 +1712,13 @@ export class PostgresDatabase implements
     return { result: change };
   }
 
-  async #archiveInboxNote(client: PoolClient, memberId: string, workspaceId: string, noteId: string, change: Extract<NoteTriageChange, { kind: "archived" }>) {
+  async #archiveInboxNote(client: PostgresQueryable, memberId: string, workspaceId: string, noteId: string, change: Extract<NoteTriageChange, { kind: "archived" }>) {
     await client.query("UPDATE stash_notes SET archived_at = $2 WHERE id = $1", [noteId, change.note.archivedAt]);
     await this.#recordDomainActivity(client,memberId,workspaceId,"Note",noteId,"note_archived",{archivedAt:null},{archivedAt:change.note.archivedAt});
     return { result: change };
   }
 
-  async #linkInboxNote(client: PoolClient, memberId: string, workspaceId: string, noteId: string, change: Extract<NoteTriageChange, { kind: "linked" }>) {
+  async #linkInboxNote(client: PostgresQueryable, memberId: string, workspaceId: string, noteId: string, change: Extract<NoteTriageChange, { kind: "linked" }>) {
     const target = await client.query("SELECT 1 FROM stash_notes WHERE id = $1 AND workspace_id = $2", [change.link.targetNoteId, workspaceId]);
     if (!target.rowCount) return { status: "target_note_not_found" as const };
     await client.query("INSERT INTO stash_note_links (id, workspace_id, source_note_id, target_note_id) VALUES ($1, $2, $3, $4)",
@@ -1759,7 +1727,7 @@ export class PostgresDatabase implements
     return { result: change };
   }
 
-  async #createTaskFromInbox(client: PoolClient, memberId: string, workspaceId: string, noteId: string, change: Extract<NoteTriageChange, { kind: "task_created" }>) {
+  async #createTaskFromInbox(client: PostgresQueryable, memberId: string, workspaceId: string, noteId: string, change: Extract<NoteTriageChange, { kind: "task_created" }>) {
     const project = await client.query("SELECT 1 FROM stash_projects WHERE id = $1 AND workspace_id = $2", [change.task.projectId, workspaceId]);
     if (!project.rowCount) return { status: "project_forbidden" as const };
     const task = await this.#createTask(client, change.task);
@@ -1770,7 +1738,7 @@ export class PostgresDatabase implements
     return { result: { kind: "task_created" as const, task, projections: [task] as [PortableTaskProjection] } };
   }
 
-  async #createTask(client: PoolClient, draft: TaskCreation): Promise<PortableTaskProjection> {
+  async #createTask(client: PostgresQueryable, draft: TaskCreation): Promise<PortableTaskProjection> {
     await client.query("SELECT id FROM stash_projects WHERE id = $1 FOR UPDATE", [draft.projectId]);
     await this.#ensureDefaultWorkflow(client, draft.projectId);
     const workflowStatus = initialWorkflowStatus(await this.#loadWorkflow(client, draft.projectId));
@@ -1783,7 +1751,7 @@ export class PostgresDatabase implements
     return { schema: "stash.task.v1", ...draft, key: `${key.project_key}-${key.task_number}`, status: workflowStatus };
   }
 
-  async #ensureDefaultWorkflow(client: PoolClient, projectId: string): Promise<void> {
+  async #ensureDefaultWorkflow(client: PostgresQueryable, projectId: string): Promise<void> {
     const statuses = [
       [randomUUID(), projectId, "Backlog", "unstarted", 0],
       [randomUUID(), projectId, "Ready", "unstarted", 1],
@@ -1897,8 +1865,7 @@ export class PostgresDatabase implements
   }
 
   async listNoteLinks(memberId: string, sourceNoteId: string) {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureNoteSchema(client);
       const source = await client.query<any>(`SELECT note.workspace_id,note.portable_path,note.location_revision,
         ARRAY(SELECT alias.path FROM stash_note_path_aliases alias WHERE alias.note_id=note.id ORDER BY alias.created_at,alias.path) aliases
@@ -1927,7 +1894,7 @@ export class PostgresDatabase implements
       }
       return { status: "found" as const, source: { noteId: sourceNoteId, workspaceId: source.rows[0].workspace_id,
         path: source.rows[0].portable_path, aliases: source.rows[0].aliases ?? [], revision: source.rows[0].location_revision }, links };
-    } finally { client.release(); }
+    });
   }
 
   async repairNoteLink(memberId: string, sourceNoteId: string, linkId: string, targetNoteId: string, expectedRevision: number,
@@ -2278,8 +2245,7 @@ export class PostgresDatabase implements
   }
 
   async searchWorkspace(memberId: string, workspaceId: string, query: WorkspaceSearchQuery) {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureDiscussionSchema(client);
       await this.#ensureAttachmentSchema(client);
       await this.#ensureInvitationSchema(client);
@@ -2375,12 +2341,11 @@ export class PostgresDatabase implements
         ...(row.occurred_at ? { occurredAt: new Date(row.occurred_at).toISOString() } : {}) })), total: envelope.total,
         facets: { kinds: envelope.kind_facets as WorkspaceSearchFacet<WorkspaceSearchKind>[],
           projects: envelope.project_facets as WorkspaceSearchFacet[], statuses: envelope.status_facets as WorkspaceSearchFacet[] } };
-    } finally { client.release(); }
+    });
   }
 
   async listWorkspaceActivity(memberId: string, workspaceId: string) {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureNoteHistorySchema(client);
       await this.#backfillLegacyNoteHistory(client);
       const permitted = await client.query(`SELECT 1 FROM stash_workspaces workspace WHERE workspace.id=$1 AND
@@ -2395,12 +2360,11 @@ export class PostgresDatabase implements
         id: row.id, workspaceId: row.workspace_id, object: { kind: row.object_kind, id: row.object_id }, action: row.action,
         actor: { localAccountId: row.actor_account_id, displayName: row.actor_name }, cause: this.#parseActivityCause(row.cause),
         occurredAt: new Date(row.occurred_at).toISOString(), before: row.before_state, after: row.after_state })) };
-    } finally { client.release(); }
+    });
   }
 
   async listNoteHistory(memberId: string, noteId: string) {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureNoteHistorySchema(client);
       await this.#backfillLegacyNoteHistory(client);
       const rows = await client.query<any>(`SELECT history.*, actor.name AS actor_name FROM stash_note_history history
@@ -2419,7 +2383,7 @@ export class PostgresDatabase implements
         workspaceId: row.workspace_id, revision: Number(row.revision), content: row.content, document: row.document,
         recordedAt: new Date(row.recorded_at).toISOString(), actor: { localAccountId: row.actor_account_id, displayName: row.actor_name },
         cause: this.#parseActivityCause(row.cause) })) };
-    } finally { client.release(); }
+    });
   }
 
   async restoreNote(memberId: string, noteId: string, targetRevision: number, expectedRevision: number, idempotencyKey: string) {
@@ -2472,8 +2436,7 @@ export class PostgresDatabase implements
   }
 
   async resolveClientSessionPrincipal(accountId: string) {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureInvitationSchema(client);
       const result = await client.query<{ account_id: string; account_name: string; account_email: string; workspace_id: string; workspace_name: string; organization_id: string | null }>(`
         SELECT account.id account_id, account.name account_name, account.email account_email,
@@ -2515,7 +2478,7 @@ export class PostgresDatabase implements
         workspace: { id: row.workspace_id, name: row.workspace_name }, capabilities: [],
         ...(organizationAdministrations.length ? { organizationAdministrations } : {}),
         ...(row.organization_id ? { activeOrganizationId: row.organization_id } : {}) };
-    } finally { client.release(); }
+    });
   }
 
   async findAccountByEmail(email: string): Promise<AccountAuthenticationRecord | undefined> {
@@ -2670,8 +2633,7 @@ export class PostgresDatabase implements
   }
 
   async canLinkArtifact(memberId: string, projectId: string, taskKey: string) {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureInvitationSchema(client);
       const result = await client.query(`SELECT 1 FROM stash_tasks task
       JOIN stash_projects project ON project.id = task.project_id
@@ -2682,7 +2644,7 @@ export class PostgresDatabase implements
           OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
             WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $3)))`, [projectId, taskKey, memberId]);
       return Boolean(result.rowCount);
-    } finally { client.release(); }
+    });
   }
 
   async linkArtifact(memberId: string, projectId: string, taskKey: string, artifact: DevelopmentArtifact) {
@@ -2930,7 +2892,7 @@ export class PostgresDatabase implements
     });
   }
 
-  async #canReceiveProjectNotification(client: PoolClient, memberId: string, projectId: string, workspaceId: string): Promise<boolean> {
+  async #canReceiveProjectNotification(client: PostgresQueryable, memberId: string, projectId: string, workspaceId: string): Promise<boolean> {
     const access = await client.query(`SELECT 1 FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
       WHERE project.id=$1 AND workspace.id=$2 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$3) OR
         (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
@@ -2938,7 +2900,7 @@ export class PostgresDatabase implements
     return Boolean(access.rowCount);
   }
 
-  async #linkSignalArtifact(client: PoolClient, taskId: string, signal: GitHubSignal, confirmingMemberId?: string, organizationId?: string) {
+  async #linkSignalArtifact(client: PostgresQueryable, taskId: string, signal: GitHubSignal, confirmingMemberId?: string, organizationId?: string) {
     const actor = confirmingMemberId ? { id: confirmingMemberId, cause: { kind: "member" } as ActivityCause }
       : (await client.query<{ id: string }>(`SELECT membership.account_id AS id FROM stash_organization_memberships membership
         WHERE membership.organization_id=$1 AND membership.role='Owner' ORDER BY membership.account_id LIMIT 1`, [organizationId])).rows[0];
@@ -2949,7 +2911,7 @@ export class PostgresDatabase implements
       confirmingMemberId ? { kind: "member" } : { kind: "signal", signalId: signal.id });
   }
 
-  async #persistTaskDevelopmentArtifact(client: PoolClient, row: any, actorId: string,
+  async #persistTaskDevelopmentArtifact(client: PostgresQueryable, row: any, actorId: string,
     artifact: Pick<DevelopmentArtifact, "kind" | "url">, action: string, cause: ActivityCause) {
     const before = taskPlanningReadModelFromRow(row); const links = before.developmentLinks ?? [];
     if (links.some(({ url }) => url === artifact.url)) return;
@@ -3132,8 +3094,7 @@ export class PostgresDatabase implements
   }
 
   async readProject(accountId: string, projectId: string): Promise<ProjectAccessSummary | undefined> {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureInvitationSchema(client);
       const result = await client.query<{ id: string; organization_id: string; name: string; project_key: string; creator_id: string; creator_name: string }>(
         `SELECT project.id, workspace.organization_owner_id AS organization_id, project.name, project.project_key,
@@ -3147,12 +3108,11 @@ export class PostgresDatabase implements
       );
       const row = result.rows[0];
       return row ? { id: row.id, organizationId: row.organization_id, name: row.name, key: row.project_key, createdBy: { localAccountId: row.creator_id, displayName: row.creator_name } } : undefined;
-    } finally { client.release(); }
+    });
   }
 
   async canWriteProject(accountId: string, projectId: string): Promise<boolean> {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureInvitationSchema(client);
       const result = await client.query(
         `SELECT 1 FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
@@ -3160,10 +3120,10 @@ export class PostgresDatabase implements
          WHERE project.id = $1 AND membership.account_id = $2`, [projectId, accountId],
       );
       return result.rowCount === 1;
-    } finally { client.release(); }
+    });
   }
 
-  async #lockedOrganizationMemberships(client: PoolClient, organizationId: string) {
+  async #lockedOrganizationMemberships(client: PostgresQueryable, organizationId: string) {
     await this.#ensureBootstrapSchema(client);
     const memberships = await client.query<{ account_id: string; role: BuiltInOrganizationRole }>(
       `SELECT account_id, role FROM stash_organization_memberships
@@ -3263,21 +3223,13 @@ export class PostgresDatabase implements
   async changePasswordAndDeleteOtherSessions(
     accountId: string, currentSessionId: string, passwordHash: string,
   ): Promise<void> {
-    const client = await this.#kernel.connect();
-    try {
-      await client.query("BEGIN");
+    await this.#kernel.transaction(async (client) => {
       await client.query(
         "UPDATE stash_accounts SET password_hash = $2 WHERE id = $1",
         [accountId, this.#authenticationSecrets.encrypt(passwordHash)],
       );
       await client.query("DELETE FROM stash_sessions WHERE account_id = $1 AND id <> $2", [accountId, currentSessionId]);
-      await client.query("COMMIT");
-    } catch (error) {
-      await client.query("ROLLBACK").catch(() => undefined);
-      throw error;
-    } finally {
-      client.release();
-    }
+    });
   }
 
   async savePasskey(record: PasskeyRecord): Promise<void> {
@@ -3379,14 +3331,14 @@ export class PostgresDatabase implements
     return result.rowCount === 1;
   }
 
-  async #insertSession(client: PoolClient, session: SessionRecord): Promise<void> {
+  async #insertSession(client: PostgresQueryable, session: SessionRecord): Promise<void> {
     await client.query(
       "INSERT INTO stash_sessions (id, account_id, token_lookup, token_hash, created_at, last_seen_at, user_agent) VALUES ($1, $2, $3, $4, $5, $6, $7)",
       [session.id, session.accountId, this.#authenticationSecrets.blindIndex(session.tokenHash), this.#authenticationSecrets.encrypt(session.tokenHash), session.createdAt, session.lastSeenAt, session.userAgent ?? null],
     );
   }
 
-  async #transaction<T>(work: (client: PoolClient) => Promise<{ commit: boolean; value: T }>): Promise<T> {
+  async #transaction<T>(work: (client: PostgresQueryable) => Promise<{ commit: boolean; value: T }>): Promise<T> {
     return this.#kernel.controlledTransaction(work);
   }
 
@@ -3466,14 +3418,14 @@ export class PostgresDatabase implements
       );
     `);
   }
-  async #verifyAuthenticationKey(transactionClient?: PoolClient): Promise<void> {
+  async #verifyAuthenticationKey(transactionClient?: PostgresQueryable): Promise<void> {
     const prepareTable = (client: PostgresQueryable) => client.query(`
         CREATE TABLE IF NOT EXISTS stash_authentication_key_check (
           singleton BOOLEAN PRIMARY KEY CHECK (singleton),
           encrypted_check TEXT NOT NULL
         )
       `);
-    const verify = async (client: PoolClient) => {
+    const verify = async (client: PostgresQueryable) => {
       await this.#kernel.advisoryTransactionLock(client, authenticationKeyCheckLockId);
       const result = await client.query<{ encrypted_check: string }>(
         "SELECT encrypted_check FROM stash_authentication_key_check WHERE singleton = TRUE",
@@ -3514,7 +3466,7 @@ export class PostgresDatabase implements
     };
   }
 
-  async #ensureBootstrapSchema(client: PoolClient): Promise<void> {
+  async #ensureBootstrapSchema(client: PostgresQueryable): Promise<void> {
     await client.query(`
       CREATE TABLE IF NOT EXISTS stash_organizations (
         id UUID PRIMARY KEY,
@@ -3538,9 +3490,8 @@ export class PostgresDatabase implements
     `);
   }
 
-  async #ensureRepositoryConnectionSchema(transactionClient?: PoolClient): Promise<void> {
-    const client = transactionClient ?? await this.#kernel.connect();
-    try {
+  async #ensureRepositoryConnectionSchema(transactionClient?: PostgresQueryable): Promise<void> {
+    const prepare = async (client: PostgresQueryable) => {
       await this.#ensureWorkspaceProjectSchema(client);
       await client.query(`
         CREATE TABLE IF NOT EXISTS stash_repository_connections (
@@ -3562,12 +3513,10 @@ export class PostgresDatabase implements
           PRIMARY KEY (connection_id, project_id)
         )
       `);
-      if (transactionClient) await this.#kernel.advisoryTransactionLock(client, 1_094_218_495);
-      else await this.#kernel.advisorySessionLock(client, 1_094_218_495);
-      if (!transactionClient) await client.query("BEGIN");
-      try {
-        await this.#ensureRepositoryConnectionStateColumns(client);
-        await client.query(`
+    };
+    const upgrade = async (client: PostgresQueryable) => {
+      await this.#ensureRepositoryConnectionStateColumns(client);
+      await client.query(`
           ALTER TABLE stash_repository_connections ADD COLUMN IF NOT EXISTS created_by_account_id UUID REFERENCES stash_accounts(id);
           ALTER TABLE stash_repository_connections ADD COLUMN IF NOT EXISTS created_by_attribution TEXT NOT NULL DEFAULT 'inferred-during-upgrade';
           UPDATE stash_repository_connections connection
@@ -3595,8 +3544,8 @@ export class PostgresDatabase implements
             END IF;
           END
           $attribution$;
-        `);
-        await client.query(`
+      `);
+      await client.query(`
           INSERT INTO stash_portable_projection_outbox
             (object_kind, object_id, revision, projection_schema, payload)
           SELECT 'RepositoryConnection', connection.id, 1, 'stash.repository-connection.v1',
@@ -3616,25 +3565,20 @@ export class PostgresDatabase implements
           JOIN stash_organizations organization ON organization.id = connection.organization_id
           JOIN stash_accounts creator ON creator.id = connection.created_by_account_id
           ON CONFLICT (object_kind, object_id, revision) DO NOTHING
-        `);
-        await client.query("ALTER TABLE stash_repository_connections DROP COLUMN IF EXISTS protected_credential");
-        if (!transactionClient) await client.query("COMMIT");
-      } catch (error) {
-        if (!transactionClient) await client.query("ROLLBACK").catch(() => undefined);
-        throw error;
-      }
-    } finally {
-      if (!transactionClient) {
-        await this.#kernel.releaseAdvisorySessionLock(client, 1_094_218_495).catch(() => undefined);
-        client.release();
-      }
+      `);
+      await client.query("ALTER TABLE stash_repository_connections DROP COLUMN IF EXISTS protected_credential");
+    };
+    if (transactionClient) {
+      await prepare(transactionClient);
+      await this.#kernel.advisoryTransactionLock(transactionClient, 1_094_218_495);
+      await upgrade(transactionClient);
+    } else {
+      await this.#kernel.advisorySessionTransaction(1_094_218_495, prepare, upgrade);
     }
   }
 
-  async #ensureGitHubSignalSchema(transactionClient?: PoolClient): Promise<void> {
-    const client = transactionClient ?? await this.#kernel.connect();
-    try {
-      if (!transactionClient) await client.query("BEGIN");
+  async #ensureGitHubSignalSchema(transactionClient?: PostgresQueryable): Promise<void> {
+    const prepare = async (client: PostgresQueryable) => {
       await this.#ensureRepositoryConnectionSchema(client);
       await this.#ensureNoteSchema(client);
       await client.query(`
@@ -3666,12 +3610,12 @@ export class PostgresDatabase implements
       CREATE INDEX IF NOT EXISTS stash_github_signal_suggestions_task_idx ON stash_github_signal_suggestions(task_id);
       ALTER TABLE stash_github_signals ADD COLUMN IF NOT EXISTS automation_trigger TEXT CHECK (automation_trigger IN ('branch_created','pull_request_completed'));
     `);
-      if (!transactionClient) await client.query("COMMIT");
-    } catch (error) { if (!transactionClient) await client.query("ROLLBACK").catch(() => undefined); throw error; }
-    finally { if (!transactionClient) client.release(); }
+    };
+    if (transactionClient) await prepare(transactionClient);
+    else await this.#kernel.transaction(prepare);
   }
 
-  async #ensureAutomationSchema(client: PoolClient, dependenciesPrepared = false): Promise<void> {
+  async #ensureAutomationSchema(client: PostgresQueryable, dependenciesPrepared = false): Promise<void> {
     await this.#ensureNoteSchema(client);
     if (!dependenciesPrepared) await this.#ensureGitHubSignalSchema(client);
     await client.query(`
@@ -3700,7 +3644,7 @@ export class PostgresDatabase implements
     `);
   }
 
-  async #ensureWorkspaceProjectSchema(client: PoolClient): Promise<void> {
+  async #ensureWorkspaceProjectSchema(client: PostgresQueryable): Promise<void> {
     await this.#ensureBootstrapSchema(client);
     await client.query(`
       CREATE TABLE IF NOT EXISTS stash_workspaces (
@@ -3739,9 +3683,8 @@ export class PostgresDatabase implements
     await this.#ensurePortableProjectionSchema(client);
   }
 
-  async #ensureNotificationSchema(transactionClient?: PoolClient): Promise<void> {
-    const client = transactionClient ?? await this.#kernel.connect();
-    try {
+  async #ensureNotificationSchema(transactionClient?: PostgresQueryable): Promise<void> {
+    const prepare = async (client: PostgresQueryable) => {
       await this.#ensureWorkspaceProjectSchema(client);
       await client.query(`CREATE TABLE IF NOT EXISTS stash_notification_preferences (
         member_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
@@ -3777,10 +3720,12 @@ export class PostgresDatabase implements
       ALTER TABLE stash_notifications ADD COLUMN IF NOT EXISTS digested_at TIMESTAMPTZ;
       ALTER TABLE stash_notifications ALTER COLUMN project_id DROP NOT NULL;
       CREATE INDEX IF NOT EXISTS stash_notifications_member_created_idx ON stash_notifications(member_id,created_at DESC)`);
-    } finally { if (!transactionClient) client.release(); }
+    };
+    if (transactionClient) await prepare(transactionClient);
+    else await this.#kernel.withSession(prepare);
   }
 
-  async #ensureNoteSchema(client: PoolClient): Promise<void> {
+  async #ensureNoteSchema(client: PostgresQueryable): Promise<void> {
     await this.#ensureWorkspaceProjectSchema(client);
     await client.query(`
       CREATE TABLE IF NOT EXISTS stash_notes (
@@ -4035,7 +3980,7 @@ export class PostgresDatabase implements
     await client.query("ALTER TABLE stash_note_conflict_operations ADD COLUMN IF NOT EXISTS operation_digest TEXT");
   }
 
-  async #ensureBoardSchema(client: PoolClient): Promise<void> {
+  async #ensureBoardSchema(client: PostgresQueryable): Promise<void> {
     await this.#ensureNoteSchema(client);
     await client.query(`CREATE TABLE IF NOT EXISTS stash_boards (
       id UUID PRIMARY KEY, project_id UUID NOT NULL REFERENCES stash_projects(id) ON DELETE CASCADE,
@@ -4044,11 +3989,10 @@ export class PostgresDatabase implements
   }
 
   async #ensureNoteSchemaForPool(): Promise<void> {
-    const client = await this.#kernel.connect();
-    try { await this.#ensureNoteSchema(client); } finally { client.release(); }
+    await this.#kernel.withSession((client) => this.#ensureNoteSchema(client));
   }
 
-  async #ensureAttachmentSchema(client: PoolClient): Promise<void> {
+  async #ensureAttachmentSchema(client: PostgresQueryable): Promise<void> {
     await this.#ensureWorkspaceProjectSchema(client);
     await client.query(`CREATE TABLE IF NOT EXISTS stash_attachments (id UUID PRIMARY KEY, workspace_id UUID NOT NULL REFERENCES stash_workspaces(id), filename TEXT NOT NULL, content_type TEXT NOT NULL, byte_size BIGINT NOT NULL CHECK (byte_size > 0), relative_path TEXT NOT NULL, storage_key TEXT NOT NULL UNIQUE, source TEXT NOT NULL CHECK (source IN ('upload','paste')), created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id), created_at TIMESTAMPTZ NOT NULL)`);
     await client.query(`CREATE TABLE IF NOT EXISTS stash_attachment_operation_receipts (
@@ -4058,7 +4002,7 @@ export class PostgresDatabase implements
       PRIMARY KEY (operation_key, workspace_id, created_by_account_id))`);
   }
 
-  async #ensureDiscussionSchema(client: PoolClient): Promise<void> {
+  async #ensureDiscussionSchema(client: PostgresQueryable): Promise<void> {
     await this.#ensureNoteSchema(client);
     await client.query(`CREATE TABLE IF NOT EXISTS stash_discussions (
       id UUID PRIMARY KEY, workspace_id UUID NOT NULL REFERENCES stash_workspaces(id),
@@ -4088,7 +4032,7 @@ export class PostgresDatabase implements
     )`);
   }
 
-  async #readDiscussion(client: PoolClient, memberId: string, discussionId: string, lock: boolean): Promise<DiscussionRecord | undefined> {
+  async #readDiscussion(client: PostgresQueryable, memberId: string, discussionId: string, lock: boolean): Promise<DiscussionRecord | undefined> {
     const result = await client.query<any>(`SELECT discussion.*, note.document FROM stash_discussions discussion
       JOIN stash_workspaces workspace ON workspace.id = discussion.workspace_id
       LEFT JOIN stash_notes note ON note.id = discussion.note_id
@@ -4122,7 +4066,7 @@ export class PostgresDatabase implements
       createdAt: new Date(row.created_at).toISOString(), ...(row.resolved_at ? { resolvedAt: new Date(row.resolved_at).toISOString() } : {}) };
   }
 
-  async #canWriteDiscussion(client: PoolClient, memberId: string, workspaceId: string): Promise<boolean> {
+  async #canWriteDiscussion(client: PostgresQueryable, memberId: string, workspaceId: string): Promise<boolean> {
     const result = await client.query(`SELECT 1 FROM stash_workspaces workspace WHERE workspace.id = $1
       AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR
         (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
@@ -4140,9 +4084,8 @@ export class PostgresDatabase implements
       ...(discussion.resolvedAt ? { resolvedAt: discussion.resolvedAt } : {}) };
   }
 
-  async #ensureMemberLocalizationSchema(transactionClient?: PoolClient): Promise<void> {
-    const client = transactionClient ?? await this.#kernel.connect();
-    try {
+  async #ensureMemberLocalizationSchema(transactionClient?: PostgresQueryable): Promise<void> {
+    const prepare = async (client: PostgresQueryable) => {
       await this.#ensureBootstrapSchema(client);
       await client.query(`
         CREATE TABLE IF NOT EXISTS stash_member_localization_preferences (
@@ -4154,12 +4097,12 @@ export class PostgresDatabase implements
           updated_at TIMESTAMPTZ NOT NULL
         )
       `);
-    } finally {
-      if (!transactionClient) client.release();
-    }
+    };
+    if (transactionClient) await prepare(transactionClient);
+    else await this.#kernel.withSession(prepare);
   }
 
-  async #ensureInvitationSchema(client: PoolClient): Promise<void> {
+  async #ensureInvitationSchema(client: PostgresQueryable): Promise<void> {
     await this.#ensureWorkspaceProjectSchema(client);
     await client.query(`
       CREATE TABLE IF NOT EXISTS stash_invitations (
@@ -4202,7 +4145,7 @@ export class PostgresDatabase implements
     `);
   }
 
-  async #ensurePortableProjectionSchema(client: PoolClient): Promise<void> {
+  async #ensurePortableProjectionSchema(client: PostgresQueryable): Promise<void> {
     await this.#kernel.advisoryTransactionLock(client, 1_094_218_495);
     await client.query(`
         CREATE TABLE IF NOT EXISTS stash_portable_projection_outbox (
@@ -4233,7 +4176,7 @@ export class PostgresDatabase implements
   }
 
   async #recordPortableProjection(
-    client: PoolClient,
+    client: PostgresQueryable,
     objectKind: "Workspace" | "Project" | "Workflow" | "Board" | "Note" | "NoteLocation" | "NoteLink" | "Task" | "GuestProjectAccess" | "RepositoryConnection" | "Attachment" | "Discussion" | "DiscussionWorkLink" | "Activity",
     objectId: string,
     projectionSchema: "stash.workspace.v1" | "stash.project.v1" | "stash.workflow.v1" | "stash.board.v1" | "stash.note.v1" | "stash.note.v2" | "stash.note-location.v1" | "stash.note-link.v1" | "stash.note-link.v2" | "stash.task.v1" | "stash.guest-project-access.v1" | "stash.repository-connection.v1" | "stash.attachment.v1" | "stash.discussion.v1" | "stash.discussion-work-link.v1" | "stash.activity.v1",
@@ -4248,13 +4191,13 @@ export class PostgresDatabase implements
     );
   }
 
-  async #recordInitialNoteLocation(client: PoolClient, noteId: string, workspaceId: string): Promise<void> {
+  async #recordInitialNoteLocation(client: PostgresQueryable, noteId: string, workspaceId: string): Promise<void> {
     const projection: PortableNoteLocationProjection = { schema: "stash.note-location.v1", noteId, workspaceId,
       path: `notes/${noteId}.md`, aliases: [], revision: 1 };
     await this.#recordPortableProjection(client, "NoteLocation", noteId, projection.schema, projection);
   }
 
-  async #recordRepositoryConnectionProjection(client: PoolClient, record: RepositoryConnectionRecord, revision: number): Promise<void> {
+  async #recordRepositoryConnectionProjection(client: PostgresQueryable, record: RepositoryConnectionRecord, revision: number): Promise<void> {
     const identities = await client.query<{ organization_name: string; account_name: string }>(
       `SELECT organization.name AS organization_name, account.name AS account_name
        FROM stash_organizations organization CROSS JOIN stash_accounts account
@@ -4280,13 +4223,12 @@ export class PostgresDatabase implements
   }
 
   async findWorkspaceImport(importId: string) {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureWorkspaceImportSchema(client);
       const found = await client.query<{ archive_sha256: string; report: PortableWorkspaceImportReport }>(
         "SELECT archive_sha256,report FROM stash_workspace_imports WHERE import_id=$1", [importId]);
       return found.rows[0] ? { archiveSha256: found.rows[0].archive_sha256, report: found.rows[0].report } : undefined;
-    } finally { client.release(); }
+    });
   }
 
   async importWorkspace(importId: string, bundle: PortableWorkspaceImportBundle) {
@@ -4482,8 +4424,7 @@ export class PostgresDatabase implements
   }
 
   async listPendingImportedIdentities(memberId: string) {
-    const client=await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureWorkspaceImportSchema(client); await this.#ensureWorkspaceProjectSchema(client);
       const result=await client.query<{import_id:string;workspace_id:string;workspace_name:string;organization_id:string|null;report:PortableWorkspaceImportReport}>(`
         SELECT imported.import_id,imported.workspace_id,workspace.name workspace_name,workspace.organization_owner_id organization_id,imported.report
@@ -4496,22 +4437,22 @@ export class PostgresDatabase implements
       return result.rows.flatMap((row)=>row.report.identityStubs.filter(({sourceAccountId})=>!resolved.has(sourceAccountId)).map((identity)=>({
         importId:row.import_id,workspaceId:row.workspace_id,workspaceName:row.workspace_name,...(row.organization_id?{organizationId:row.organization_id}:{}),...identity,
       })));
-    } finally { client.release(); }
+    });
   }
 
   async mapImportedIdentityAsMember(memberId:string,input:{importId:string;sourceAccountId:string;localAccountId:string;idempotencyKey:string}) {
-    const client=await this.#kernel.connect();
-    try {
+    const allowed = await this.#kernel.withSession(async (client) => {
       await this.#ensureWorkspaceImportSchema(client); await this.#ensureWorkspaceProjectSchema(client);
-      const allowed=await client.query(`SELECT 1 FROM stash_workspace_imports imported JOIN stash_workspaces workspace ON workspace.id=imported.workspace_id
+      const result=await client.query(`SELECT 1 FROM stash_workspace_imports imported JOIN stash_workspaces workspace ON workspace.id=imported.workspace_id
         WHERE imported.import_id=$1 AND ((workspace.personal_owner_id=$2 AND $3=$2) OR
           (workspace.organization_owner_id IS NOT NULL AND EXISTS (SELECT 1 FROM stash_organization_memberships actor
             JOIN stash_organization_memberships target ON target.organization_id=actor.organization_id
             WHERE actor.organization_id=workspace.organization_owner_id AND actor.account_id=$2
               AND actor.role IN ('Owner','Admin') AND target.account_id=$3)))`,
       [input.importId,memberId,input.localAccountId]);
-      if(!allowed.rowCount) return {status:"forbidden" as const};
-    } finally { client.release(); }
+      return Boolean(result.rowCount);
+    });
+    if (!allowed) return {status:"forbidden" as const};
     return this.mapImportedIdentity(input);
   }
 
@@ -4520,19 +4461,16 @@ export class PostgresDatabase implements
     | { status: "workspace_forbidden" | "workspace_not_found" }
   > {
     // Schema preparation is deliberately outside the read-only snapshot transaction.
-    const setup = await this.#kernel.connect();
-    try {
+    await this.#kernel.withSession(async (setup) => {
       await this.#ensureNoteSchema(setup);
       await this.#ensureNoteHistorySchema(setup);
       await this.#backfillLegacyNoteHistory(setup);
       await this.#ensureAttachmentSchema(setup);
       await this.#ensureInvitationSchema(setup);
       await this.#ensureBoardSchema(setup);
-    } finally { setup.release(); }
+    });
 
-    const client = await this.#kernel.connect();
-    try {
-      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    return this.#kernel.readOnlySnapshot(async (client) => {
       const access = await client.query<{ member: boolean; guest_project_ids: string[]; workspace_projection: PortableWorkspaceProjection | null }>(
         `SELECT
           ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2)
@@ -4547,9 +4485,9 @@ export class PostgresDatabase implements
           WHERE object_kind = 'Workspace' AND object_id = workspace.id ORDER BY revision DESC LIMIT 1) projection ON TRUE
         WHERE workspace.id = $1`, [workspaceId, memberId]);
       const permission = access.rows[0];
-      if (!permission) { await client.query("COMMIT"); return { status: "workspace_not_found" }; }
+      if (!permission) return { status: "workspace_not_found" };
       const guestProjectIds = permission.guest_project_ids ?? [];
-      if (!permission.member && guestProjectIds.length === 0) { await client.query("COMMIT"); return { status: "workspace_forbidden" }; }
+      if (!permission.member && guestProjectIds.length === 0) return { status: "workspace_forbidden" };
       if (!permission.workspace_projection) throw new Error("workspace_projection_unavailable");
 
       const notes = await client.query<{ id: string; payload: PortableNoteProjection | null }>(
@@ -4632,7 +4570,6 @@ export class PostgresDatabase implements
         || boards.rows.some(({ payload }) => !payload)
         || noteLocations.rows.some(({ payload }) => !payload) || noteLinks.rows.some(({ payload }) => !payload)
         || attachments.rows.some(({ payload }) => !payload)) throw new Error("portable_projection_unavailable");
-      await client.query("COMMIT");
       const noteProjections = notes.rows.map(({ payload }) => payload!); const taskProjections = tasks.rows.map(({ payload }) => payload!);
       const visibleNoteIds = new Set(noteProjections.map(({ id }) => id));
       const visibleTaskIds = new Set(taskProjections.map(({ id }) => id));
@@ -4660,25 +4597,11 @@ export class PostgresDatabase implements
         durableObjects: durableObjects.rows.map((row) => ({ kind: row.object_kind, id: row.object_id,
           schema: row.projection_schema, payload: row.payload })),
       } };
-    } catch (error) {
-      await client.query("ROLLBACK").catch(() => undefined);
-      throw error;
-    } finally { client.release(); }
+    });
   }
 
-  async #withTransaction<Result>(operation: (client: PoolClient) => Promise<Result>): Promise<Result> {
-    const client = await this.#kernel.connect();
-    try {
-      await client.query("BEGIN");
-      const result = await operation(client);
-      await client.query("COMMIT");
-      return result;
-    } catch (error) {
-      await client.query("ROLLBACK").catch(() => undefined);
-      throw error;
-    } finally {
-      client.release();
-    }
+  async #withTransaction<Result>(operation: (client: PostgresQueryable) => Promise<Result>): Promise<Result> {
+    return this.#kernel.transaction(operation);
   }
 
   #parseActivityCause(value: string): ActivityCause {
@@ -4697,7 +4620,7 @@ export class PostgresDatabase implements
       ...(row.archived_at ? { archivedAt: new Date(row.archived_at).toISOString() } : {}) };
   }
 
-  async #ensureNoteHistorySchema(client: PoolClient): Promise<void> {
+  async #ensureNoteHistorySchema(client: PostgresQueryable): Promise<void> {
     await this.#ensureNoteSchema(client);
     await client.query(`
       CREATE TABLE IF NOT EXISTS stash_note_history (
@@ -4732,7 +4655,7 @@ export class PostgresDatabase implements
     `);
   }
 
-  async #ensureMemberDepartureSchema(client: PoolClient): Promise<void> {
+  async #ensureMemberDepartureSchema(client: PostgresQueryable): Promise<void> {
     await this.#ensureWorkspaceProjectSchema(client);
     await client.query(`CREATE TABLE IF NOT EXISTS stash_agent_grants (
       id UUID PRIMARY KEY,
@@ -4784,8 +4707,7 @@ export class PostgresDatabase implements
   }
 
   async createAgentGrant(actorId: string, grant: StoredAgentGrant): Promise<"created" | "forbidden"> {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureMemberDepartureSchema(client);
       const allowed = await client.query(`SELECT 1 FROM stash_organization_memberships membership
         WHERE membership.organization_id=$1 AND membership.account_id=$2
@@ -4798,47 +4720,43 @@ export class PostgresDatabase implements
         VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7::jsonb,NULL,$8,$9,$10,$11)`, [grant.id, grant.organizationId, grant.projectId ?? null,
         actorId, JSON.stringify(grant.scopes), grant.expiresAt, JSON.stringify({ modes: grant.scopes }), grant.name, grant.tokenLookup, grant.tokenHash, grant.createdAt]);
       return "created";
-    } finally { client.release(); }
+    });
   }
 
   async listAgentGrants(actorId: string, organizationId: string): Promise<AgentGrant[] | undefined> {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureMemberDepartureSchema(client);
       const membership = await client.query("SELECT 1 FROM stash_organization_memberships WHERE organization_id=$1 AND account_id=$2", [organizationId, actorId]);
       if (!membership.rowCount) return undefined;
       const result = await client.query<any>(`SELECT id,organization_id,project_id,sponsoring_member_id,name,capabilities,expires_at,created_at,revoked_at
         FROM stash_agent_grants WHERE organization_id=$1 AND sponsoring_member_id=$2 ORDER BY created_at DESC,id`, [organizationId, actorId]);
       return result.rows.map(agentGrantFromRow);
-    } finally { client.release(); }
+    });
   }
 
   async revokeAgentGrant(actorId: string, organizationId: string, grantId: string): Promise<"revoked" | "not_found" | "forbidden"> {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureMemberDepartureSchema(client);
       const result = await client.query(`UPDATE stash_agent_grants SET revoked_at=CURRENT_TIMESTAMP
         WHERE id=$1 AND organization_id=$2 AND sponsoring_member_id=$3 AND revoked_at IS NULL RETURNING id`, [grantId, organizationId, actorId]);
       if (result.rowCount) return "revoked";
       const existing = await client.query<{ sponsoring_member_id: string }>("SELECT sponsoring_member_id FROM stash_agent_grants WHERE id=$1 AND organization_id=$2", [grantId, organizationId]);
       return !existing.rowCount ? "not_found" : existing.rows[0]!.sponsoring_member_id === actorId ? "revoked" : "forbidden";
-    } finally { client.release(); }
+    });
   }
 
   async findActiveAgentGrant(tokenLookup: string): Promise<StoredAgentGrant | undefined> {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureMemberDepartureSchema(client);
       const result = await client.query<any>(`SELECT id,organization_id,project_id,sponsoring_member_id,name,capabilities,expires_at,created_at,revoked_at,token_lookup,token_hash
         FROM stash_agent_grants WHERE token_lookup=$1 AND revoked_at IS NULL AND expires_at>CURRENT_TIMESTAMP`, [tokenLookup]);
       const row = result.rows[0]; if (!row?.token_hash) return undefined;
       return { ...agentGrantFromRow(row), tokenLookup: row.token_lookup, tokenHash: row.token_hash };
-    } finally { client.release(); }
+    });
   }
 
   async agentGrantOptions(actorId: string): Promise<AgentGrantOption[]> {
-    const client = await this.#kernel.connect();
-    try {
+    return this.#kernel.withSession(async (client) => {
       await this.#ensureMemberDepartureSchema(client);
       const result = await client.query<{ organization_id: string; organization_name: string; project_id: string | null; project_name: string | null }>(`
         SELECT organization.id organization_id,organization.name organization_name,project.id project_id,project.name project_name
@@ -4850,7 +4768,7 @@ export class PostgresDatabase implements
         const rows = result.rows.filter((row) => row.organization_id === organizationId); return { organizationId,
           organizationName: rows[0]!.organization_name, projects: rows.flatMap((row) => row.project_id ? [{ id: row.project_id, name: row.project_name! }] : []) };
       });
-    } finally { client.release(); }
+    });
   }
 
   async createAgentProposal(proposal: AgentProposal): Promise<void> {
@@ -4896,24 +4814,26 @@ export class PostgresDatabase implements
   }
 
   async listAgentProposals(actorId: string, organizationId: string): Promise<AgentProposal[] | undefined> {
-    const client = await this.#kernel.connect(); try { await this.#ensureMemberDepartureSchema(client);
-    const membership = await client.query("SELECT 1 FROM stash_organization_memberships WHERE organization_id=$1 AND account_id=$2", [organizationId, actorId]);
-    if (!membership.rowCount) return undefined;
-    const result = await client.query<any>(`SELECT proposal.*,grant.organization_id,grant.project_id,grant.name agent_name
-      FROM stash_agent_proposals proposal JOIN stash_agent_grants grant ON grant.id=proposal.grant_id
-      WHERE grant.organization_id=$1 AND proposal.sponsoring_member_id=$2 ORDER BY proposal.created_at DESC,proposal.id`, [organizationId, actorId]);
-    return result.rows.map(agentProposalFromRow);
-    } finally { client.release(); }
+    return this.#kernel.withSession(async (client) => {
+      await this.#ensureMemberDepartureSchema(client);
+      const membership = await client.query("SELECT 1 FROM stash_organization_memberships WHERE organization_id=$1 AND account_id=$2", [organizationId, actorId]);
+      if (!membership.rowCount) return undefined;
+      const result = await client.query<any>(`SELECT proposal.*,grant.organization_id,grant.project_id,grant.name agent_name
+        FROM stash_agent_proposals proposal JOIN stash_agent_grants grant ON grant.id=proposal.grant_id
+        WHERE grant.organization_id=$1 AND proposal.sponsoring_member_id=$2 ORDER BY proposal.created_at DESC,proposal.id`, [organizationId, actorId]);
+      return result.rows.map(agentProposalFromRow);
+    });
   }
 
   async findAgentProposal(actorId: string, organizationId: string, proposalId: string): Promise<AgentProposal | "forbidden" | undefined> {
-    const client = await this.#kernel.connect(); try { await this.#ensureMemberDepartureSchema(client);
+    return this.#kernel.withSession(async (client) => {
+      await this.#ensureMemberDepartureSchema(client);
       const membership = await client.query("SELECT 1 FROM stash_organization_memberships WHERE organization_id=$1 AND account_id=$2", [organizationId, actorId]);
       if (!membership.rowCount) return "forbidden";
       const result = await client.query<any>(`SELECT proposal.*,grant.organization_id,grant.project_id,grant.name agent_name FROM stash_agent_proposals proposal
         JOIN stash_agent_grants grant ON grant.id=proposal.grant_id WHERE proposal.id=$1 AND grant.organization_id=$2`, [proposalId, organizationId]);
       if (!result.rowCount) return undefined; if (result.rows[0].sponsoring_member_id !== actorId) return "forbidden"; return agentProposalFromRow(result.rows[0]);
-    } finally { client.release(); }
+    });
   }
 
   async claimAgentProposal(actorId: string, organizationId: string, proposalId: string, operationId: string) {
@@ -4957,7 +4877,7 @@ export class PostgresDatabase implements
     return Boolean(result.rowCount);
   }
 
-  async #markFormerAssignments(client: PoolClient, organizationId: string, accountId: string, actorId: string): Promise<string[]> {
+  async #markFormerAssignments(client: PostgresQueryable, organizationId: string, accountId: string, actorId: string): Promise<string[]> {
     const table = await client.query<{ exists: boolean }>("SELECT to_regclass('stash_tasks') IS NOT NULL AS exists");
     if (!table.rows[0]?.exists) return [];
     await client.query("ALTER TABLE stash_tasks ADD COLUMN IF NOT EXISTS former_assignee_ids JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(former_assignee_ids) = 'array')");
@@ -4987,7 +4907,7 @@ export class PostgresDatabase implements
     return ids;
   }
 
-  async #revokeDepartedMemberAuthority(client: PoolClient, organizationId: string, accountId: string) {
+  async #revokeDepartedMemberAuthority(client: PostgresQueryable, organizationId: string, accountId: string) {
     const authorityTables = await client.query<{ tablename: string }>(`SELECT tablename FROM pg_tables
       WHERE schemaname = current_schema() AND tablename = ANY($1::text[])`,
     [["stash_sessions", "stash_personal_access_tokens"]]);
@@ -5003,7 +4923,7 @@ export class PostgresDatabase implements
       revokedAgentGrants: grants.rowCount ?? 0 };
   }
 
-  async #degradePersonalConnections(client: PoolClient, organizationId: string, accountId: string): Promise<string[]> {
+  async #degradePersonalConnections(client: PostgresQueryable, organizationId: string, accountId: string): Promise<string[]> {
     const table = await client.query<{ exists: boolean }>("SELECT to_regclass('stash_repository_connections') IS NOT NULL AS exists");
     if (!table.rows[0]?.exists) return [];
     await this.#ensureRepositoryConnectionStateColumns(client);
@@ -5020,7 +4940,7 @@ export class PostgresDatabase implements
     return ids;
   }
 
-  async #ensureRepositoryConnectionStateColumns(client: PoolClient): Promise<void> {
+  async #ensureRepositoryConnectionStateColumns(client: PostgresQueryable): Promise<void> {
     await client.query(`ALTER TABLE stash_repository_connections ADD COLUMN IF NOT EXISTS ownership TEXT NOT NULL DEFAULT 'organization';
       ALTER TABLE stash_repository_connections ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'active';
       UPDATE stash_repository_connections SET ownership='organization' WHERE ownership NOT IN ('organization','personal');
@@ -5035,7 +4955,7 @@ export class PostgresDatabase implements
       END $connection_state_constraints$`);
   }
 
-  async #recordMemberDepartureAudit(client: PoolClient, input: { organizationId: string; actorId: string; accountId: string;
+  async #recordMemberDepartureAudit(client: PostgresQueryable, input: { organizationId: string; actorId: string; accountId: string;
     role: BuiltInOrganizationRole; affectedTaskIds: string[]; degradedRepositoryConnectionIds: string[];
     revokedSessions: number; revokedCredentials: number; revokedAgentGrants: number }): Promise<void> {
     const { organizationId, actorId, accountId, role, ...after } = input;
@@ -5045,7 +4965,7 @@ export class PostgresDatabase implements
     [randomUUID(), actorId, organizationId, accountId, JSON.stringify({ role, active: true }), JSON.stringify({ active: false, ...after })]);
   }
 
-  async #recordAgentExecutionAudit(client: PoolClient, memberId: string, workspaceId: string, action: string,
+  async #recordAgentExecutionAudit(client: PostgresQueryable, memberId: string, workspaceId: string, action: string,
     objectId: string, cause: Extract<ActivityCause, { kind: "agent" }>): Promise<void> {
     await this.#ensureMemberDepartureSchema(client);
     const organization = await client.query<{ organization_id: string }>(
@@ -5059,7 +4979,7 @@ export class PostgresDatabase implements
       JSON.stringify({ objectId, cause: "mcp_direct", attributed: true })]);
   }
 
-  async #ensureWorkspaceImportSchema(client: PoolClient): Promise<void> {
+  async #ensureWorkspaceImportSchema(client: PostgresQueryable): Promise<void> {
     await this.#ensureNoteHistorySchema(client);
     await this.#ensureAttachmentSchema(client);
     await this.#ensureBoardSchema(client);
@@ -5083,7 +5003,7 @@ export class PostgresDatabase implements
     )`);
   }
 
-  async #backfillLegacyNoteHistory(client: PoolClient): Promise<void> {
+  async #backfillLegacyNoteHistory(client: PostgresQueryable): Promise<void> {
     await client.query(`INSERT INTO stash_note_history
       (note_id,workspace_id,revision,content,document,actor_account_id,cause,recorded_at)
       SELECT note.id,note.workspace_id,note.revision,note.content,note.document,note.created_by_account_id,
@@ -5092,7 +5012,7 @@ export class PostgresDatabase implements
       ON CONFLICT (note_id,revision) DO NOTHING`);
   }
 
-  async #recordNoteRevisionAndActivity(client: PoolClient, memberId: string, before: NoteRecord | undefined,
+  async #recordNoteRevisionAndActivity(client: PostgresQueryable, memberId: string, before: NoteRecord | undefined,
     note: NoteRecord, action: string, cause: ActivityCause): Promise<ActivityRecord> {
     await this.#ensureNoteHistorySchema(client);
     if (before) await client.query(`INSERT INTO stash_note_history
@@ -5121,7 +5041,7 @@ export class PostgresDatabase implements
     return activity;
   }
 
-  async #recordTaskActivity(client: PoolClient, memberId: string, workspaceId: string, taskId: string,
+  async #recordTaskActivity(client: PostgresQueryable, memberId: string, workspaceId: string, taskId: string,
     action: string, before: TaskPlanningReadModel, after: TaskPlanningReadModel, cause: ActivityCause = { kind: "member" }): Promise<ActivityRecord> {
     const actor = await client.query<{ name: string }>("SELECT name FROM stash_accounts WHERE id=$1", [memberId]);
     if (!actor.rows[0]) throw new Error("member_identity_unavailable");
@@ -5132,7 +5052,7 @@ export class PostgresDatabase implements
     return activity;
   }
 
-  async #persistTaskActivity(client: PoolClient, activity: ActivityRecord): Promise<void> {
+  async #persistTaskActivity(client: PostgresQueryable, activity: ActivityRecord): Promise<void> {
     if (activity.object.kind !== "Task") throw new Error("task_activity_object_required");
     await client.query(`INSERT INTO stash_workspace_activity
       (id,workspace_id,object_kind,object_id,action,actor_account_id,cause,occurred_at,before_state,after_state)
@@ -5144,7 +5064,7 @@ export class PostgresDatabase implements
     }
   }
 
-  async #recordProjectActivityNotifications(client: PoolClient, activity: ActivityRecord): Promise<void> {
+  async #recordProjectActivityNotifications(client: PostgresQueryable, activity: ActivityRecord): Promise<void> {
     await this.#ensureNoteSchema(client);
     await this.#ensureDiscussionSchema(client);
     await this.#ensureNotificationSchema(client);
@@ -5185,7 +5105,7 @@ export class PostgresDatabase implements
     }
   }
 
-  async #recordAssignmentNotifications(client: PoolClient, projectId: string, activity: ActivityRecord,
+  async #recordAssignmentNotifications(client: PostgresQueryable, projectId: string, activity: ActivityRecord,
     before: { assigneeIds?: string[] }, after: { assigneeIds?: string[]; key?: string; title?: string }): Promise<void> {
     const inputs = assignmentNotificationInputs(activity, projectId, before, after);
     if (!inputs.length) return;
@@ -5213,7 +5133,7 @@ export class PostgresDatabase implements
     }
   }
 
-  async #recordDiscussionMentionNotifications(client: PoolClient, memberId: string, discussion: DiscussionRecord,
+  async #recordDiscussionMentionNotifications(client: PostgresQueryable, memberId: string, discussion: DiscussionRecord,
     message: DiscussionMessage): Promise<void> {
     const requestedMemberIds = directMentionMemberIds(message.content).filter((id) => id !== memberId);
     if (!requestedMemberIds.length) return;
@@ -5266,7 +5186,7 @@ export class PostgresDatabase implements
     }
   }
 
-  async #recordDomainActivity(client: PoolClient, memberId: string, workspaceId: string,
+  async #recordDomainActivity(client: PostgresQueryable, memberId: string, workspaceId: string,
     kind: ActivityRecord["object"]["kind"], objectId: string, action: string, before: object, after: object): Promise<void> {
     const actor=await client.query<{name:string}>("SELECT name FROM stash_accounts WHERE id=$1",[memberId]);
     if(!actor.rows[0]) throw new Error("member_identity_unavailable");
@@ -5354,7 +5274,7 @@ export class PostgresDatabase implements
     return result.rows[0]?.can_edit ? "edit" : result.rows[0]?.can_read ? "read" : "none";
   }
 
-  async #seedNoteCollaboration(client: PoolClient, noteId: string): Promise<any> {
+  async #seedNoteCollaboration(client: PostgresQueryable, noteId: string): Promise<any> {
     const note = (await client.query<any>("SELECT document,created_by_account_id,created_at FROM stash_notes WHERE id=$1", [noteId])).rows[0];
     if (!note) throw new Error("note_not_found");
     const document = collaborativeDocumentFromRichText(note.document);
@@ -5365,7 +5285,7 @@ export class PostgresDatabase implements
     [noteId, Buffer.from(update), note.created_by_account_id, note.created_at])).rows[0];
   }
 
-  async #ensureCollaborationSchema(client: PoolClient): Promise<void> {
+  async #ensureCollaborationSchema(client: PostgresQueryable): Promise<void> {
     await this.#ensureNoteSchema(client);
     await client.query(`CREATE TABLE IF NOT EXISTS stash_note_collaboration(
       note_id uuid PRIMARY KEY REFERENCES stash_notes(id) ON DELETE CASCADE,sequence bigint NOT NULL CHECK(sequence>=0),

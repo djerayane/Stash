@@ -102,7 +102,9 @@ describe("installation documentation contract", () => {
     assert.match(migration, /stash_authentication_key_check/);
     assert.match(migration, /stash_instance_format/);
     assert.match(migration, /must be prepared with its configured master key before migration/);
-    assert.match(database, /async prepareInstanceStore\(transactionClient\?: PoolClient\)/);
+    assert.match(database, /async prepareInstanceStore\(transactionClient\?: PostgresQueryable\)/);
+    assert.doesNotMatch(database, /PoolClient|#kernel\.connect\(\)|(?:"|`)BEGIN|(?:"|`)COMMIT|(?:"|`)ROLLBACK|\.release\(\)/);
+    assert.doesNotMatch(kernel, /\n\s*connect\(\): Promise<PoolClient>/);
     assert.match(upgrade, /class PostgresInstanceUpgradeTarget/);
     assert.match(command, /prepare-destination/);
     assert.match(command, /prepareEmptyMigrationDestination/);
