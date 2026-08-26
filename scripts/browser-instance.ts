@@ -16,6 +16,7 @@ import { NotificationService, type NotificationRepository } from "../src/notific
 import type { ActivityRecord, NotificationDelivery } from "@stash/domain-types";
 import { AccountRegistrationService, type RegistrationRecord } from "../src/account-registration.js";
 import { PasswordAuthService, hashPassword, type AccountAuthenticationRecord, type SessionRecord } from "../src/password-auth.js";
+import { PortableWorkspaceExportService } from "../src/portable-workspace-export.js";
 
 const noteId = "99999999-9999-4999-8999-999999999999";
 const secondNoteId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -270,6 +271,14 @@ const instance = await startInstance({
       facets: { kinds: [{ value: results[0]!.kind, count: results.length }],
         projects: results[0] && "projectId" in results[0] ? [{ value: results[0].projectId!, count: results.length }] : [],
         statuses: results[0] && "status" in results[0] ? [{ value: results[0].status!, count: results.length }] : [] } };
+  } }),
+  portableWorkspaceExports: new PortableWorkspaceExportService({ async readExportSnapshot(memberId, workspaceId) {
+    if (memberId !== browserMemberId || workspaceId !== browserWorkspaceId) return { status: "workspace_forbidden" as const };
+    const actor = { localAccountId: browserMemberId, displayName: "Browser Member" };
+    return { status: "found" as const, snapshot: {
+      workspace: { schema: "stash.workspace.v1" as const, id: browserWorkspaceId, name: "Acceptance Workspace", owner: { type: "personal" as const, identity: actor }, createdBy: actor },
+      notes: [], tasks: [], boards: [], attachments: [], noteLocations: [], noteLinks: [], activities: [], noteHistory: [],
+    } };
   } }),
   webClientRoot: fileURLToPath(new URL("../apps/web/dist", import.meta.url)),
 });

@@ -2,5 +2,5 @@
 html { font-family: var(--stash-font-sans); background: var(--stash-color-canvas); }
 body { min-width: 20rem; margin: 0; }
 button, input { font: inherit; }
-a:focus-visible, button:focus-visible { outline: 3px solid var(--stash-color-focus); outline-offset: 3px; }
+:where(a, button, input, select, textarea, [tabindex]):focus-visible { outline: 3px solid var(--stash-color-focus); outline-offset: 3px; }
 ::selection { color: var(--stash-color-accent-contrast); background: var(--stash-color-accent); }

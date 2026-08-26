@@ -72,7 +72,7 @@ test("navigates Notes, Boards, Discussions, notifications, and Activity through 
   await search.fill("discussion"); await search.press("Enter"); const discussionResult = page.getByRole("link", { name: /Keep this release context/ }); await expect(discussionResult).toHaveAttribute("href", `/app/notes/99999999-9999-4999-8999-999999999999/discussions`);
 });
 
-test("searches Notes and Tasks with URL-backed filters and canonical deep links", async ({ page }) => {
+test("@a11y searches Notes and Tasks with URL-backed filters and canonical deep links", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" }); await authenticate(page);
   await page.goto("/app/search?q=task&object=task&status=Ready");
   await expect(page.getByRole("combobox", { name: "Object type" })).toHaveValue("task");
@@ -129,18 +129,33 @@ test("reviews and restores authoritative Note history with keyboard error recove
   await dialog.getByRole("button", { name: "Confirm restore" }).click(); const alert = dialog.getByRole("alert"); await expect(alert).toBeFocused(); await dialog.getByRole("button", { name: "Try restore again" }).focus(); await page.keyboard.press("Enter"); await expect(page.getByRole("status")).toHaveText("Revision 1 restored."); expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 });
 
-test("isolates selected messages and exact Block Discussion actions", async ({ page }) => {
+test("@a11y isolates selected messages and exact Block Discussion actions", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" }); await authenticate(page);
   await page.goto("/app/notes/99999999-9999-4999-8999-999999999999/discussions");
   const first = page.getByText("Keep this release context").locator("xpath=ancestor::article");
   const second = page.getByText("Unrelated migration thread").locator("xpath=ancestor::article");
-  await first.getByRole("checkbox", { name: /Keep this release context/ }).check(); await second.getByRole("checkbox", { name: /Unrelated migration thread/ }).check();
-  const [workRequest] = await Promise.all([page.waitForRequest((request) => request.url().endsWith("/api/discussions/abababab-abab-4bab-8bab-abababababa2/work")), first.getByRole("button", { name: "Create Note from selection" }).click()]);
+  const firstSelection = first.getByRole("checkbox", { name: /Keep this release context/ }); await firstSelection.focus(); await page.keyboard.press("Space");
+  const secondSelection = second.getByRole("checkbox", { name: /Unrelated migration thread/ }); await secondSelection.focus(); await page.keyboard.press("Space");
+  let workAttempts = 0;
+  await page.route("**/api/discussions/abababab-abab-4bab-8bab-abababababa2/work", async (route) => {
+    workAttempts += 1;
+    if (workAttempts === 1) return route.fulfill({ status: 503, json: { message: "Discussion conversion is temporarily unavailable. No work was created." } });
+    return route.continue();
+  });
+  const createNote = first.getByRole("button", { name: "Create Note from selection" }); await createNote.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("alert")).toBeFocused();
+  await expect(page.getByRole("alert")).toHaveText("Discussion conversion is temporarily unavailable. No work was created.");
+  await expect(firstSelection).toBeChecked(); await expect(secondSelection).toBeChecked();
+  await createNote.focus();
+  const [workRequest] = await Promise.all([page.waitForRequest((request) => request.url().endsWith("/api/discussions/abababab-abab-4bab-8bab-abababababa2/work")), page.keyboard.press("Enter")]);
   expect((workRequest.postDataJSON() as { messageIds: string[] }).messageIds).toEqual(["abababab-abab-4bab-8bab-abababababa3"]);
+  await expect(page.getByRole("status", { name: "Discussion work result" })).toBeFocused();
+  await expect(page.getByRole("status", { name: "Discussion work result" })).toHaveText("Selected Discussion messages created a Note.");
   await page.goto("/app/notes/99999999-9999-4999-8999-999999999999/blocks/77777777-7777-4777-8777-777777777777/discussions");
   await expect(page.getByText("Exact Block thread")).toBeVisible(); await expect(page.getByText("Keep this release context")).toHaveCount(0); await expect(page.getByText("Unrelated Block thread")).toHaveCount(0);
-  const blockDiscussion = page.getByText("Exact Block thread").locator("xpath=ancestor::article"); await blockDiscussion.getByRole("textbox", { name: "Reply" }).fill("Exact Block reply"); await blockDiscussion.getByRole("button", { name: "Reply", exact: true }).click(); await expect(blockDiscussion.getByText("Exact Block reply")).toBeVisible();
-  await blockDiscussion.getByRole("button", { name: "Resolve Discussion" }).click(); await expect(blockDiscussion.getByText("Resolved")).toBeVisible();
+  const blockDiscussion = page.getByText("Exact Block thread").locator("xpath=ancestor::article"); const replyBox = blockDiscussion.getByRole("textbox", { name: "Reply" }); await replyBox.fill("Exact Block reply"); const replyButton = blockDiscussion.getByRole("button", { name: "Reply", exact: true }); await replyButton.focus(); await page.keyboard.press("Enter"); await expect(blockDiscussion.getByText("Exact Block reply")).toBeVisible();
+  const resolve = blockDiscussion.getByRole("button", { name: "Resolve Discussion" }); await resolve.focus(); await page.keyboard.press("Enter"); await expect(blockDiscussion.getByRole("status")).toHaveText("Resolved");
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 });
 
@@ -167,14 +182,14 @@ test("@a11y exposes email recovery and OpenID Connect errors without losing inpu
   await page.getByRole("button", { name: "Continue with OpenID Connect" }).click(); await expect(page.getByRole("alert")).toContainText("invalid or expired");
 });
 
-test("creates a Task from a Note Block and preserves the durable relationship while planning", async ({ page }) => {
+test("@a11y creates a Task from a Note Block and preserves the durable relationship while planning", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   await authenticate(page); await page.goto("/app/notes/99999999-9999-4999-8999-999999999999");
   await page.evaluate(() => window.addEventListener("beforeunload", () => sessionStorage.setItem("stash.acceptance-unloaded", "yes")));
   const editor = page.getByRole("textbox", { name: "Note content" }); await editor.getByText("Preserve this linked Block").click();
   await page.getByRole("button", { name: "Create Task from current Block" }).press("Enter");
   await page.getByRole("combobox", { name: "Project" }).selectOption("22222222-2222-4222-8222-222222222222");
-  await page.getByRole("textbox", { name: "Task title" }).fill("Ship linked release plan"); await page.getByRole("button", { name: "Create linked Task" }).click();
+  await page.getByRole("textbox", { name: "Task title" }).fill("Ship linked release plan"); const createTask = page.getByRole("button", { name: "Create linked Task" }); await createTask.focus(); await page.keyboard.press("Enter");
   const relationship = page.getByRole("link", { name: /STASH-32 · Ship linked release plan/ }); await expect(relationship).toBeVisible(); await expect(page.getByText("Ready · linked")).toBeVisible(); await relationship.click();
   await expect(page.getByRole("heading", { name: "Ship linked release plan" })).toBeVisible(); await expect(page.getByRole("link", { name: /Note 99999999/ })).toBeVisible();
   await page.getByRole("link", { name: /Note 99999999/ }).click(); await expect(page.getByRole("textbox", { name: "Note content" })).toBeVisible(); await expect.poll(() => page.evaluate(() => sessionStorage.getItem("stash.acceptance-unloaded"))).toBeNull();
@@ -189,7 +204,7 @@ test("creates a Task from a Note Block and preserves the durable relationship wh
   });
   const plannedTitle = page.getByRole("textbox", { name: "Title" });
   await plannedTitle.fill("Ship the durable plan"); await page.getByRole("button", { name: "Save Task plan" }).press("Enter");
-  await expect(page.getByRole("alert")).toContainText("temporarily unavailable"); await expect(plannedTitle).toHaveValue("Ship the durable plan");
+  await expect(page.getByRole("alert")).toContainText("temporarily unavailable"); await expect(page.getByRole("alert")).toBeFocused(); await expect(plannedTitle).toHaveValue("Ship the durable plan");
   await page.getByRole("button", { name: "Save Task plan" }).press("Enter"); await expect(page.getByRole("heading", { name: "Ship the durable plan" })).toBeVisible();
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
   await plannedTitle.fill("Restore release ownership"); await page.getByRole("button", { name: "Save Task plan" }).press("Enter");

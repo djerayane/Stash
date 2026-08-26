@@ -1,5 +1,6 @@
 import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
+import { readFile } from "node:fs/promises";
 
 async function authenticate(page: Page, token = "browser-acceptance-member-token") { await page.addInitScript((value) => localStorage.setItem("stash.member-session", JSON.stringify({ token: value })), token); }
 
@@ -27,6 +28,51 @@ test("@a11y imports an Obsidian vault by keyboard and exposes every conversion o
   await page.emulateMedia({reducedMotion:"reduce"});await page.goto("/app/settings/data");await page.getByLabel("Markdown or Obsidian vault").focus();await page.keyboard.press("Space");await page.getByLabel("ZIP archive").setInputFiles({name:"vault.zip",mimeType:"application/zip",buffer:Buffer.from("fixture")});await page.getByRole("button",{name:"Validate and import"}).focus();await page.keyboard.press("Enter");
   await expect(page.getByRole("heading",{name:"Import committed"})).toBeVisible();await expect(page.getByRole("heading",{name:"Ambiguous (1)"})).toBeVisible();expect(uploads).toBe(1);expect((await new AxeBuilder({page}).analyze()).violations).toEqual([]);
   await page.getByRole("button",{name:"Open imported Workspace"}).click();await expect(page).toHaveURL(/\/app\/notes$/);await expect(page.getByText("Imported Workspace",{exact:true})).toBeVisible();
+});
+
+test("@a11y downloads a safe Workspace archive by keyboard and recovers without losing import state", async ({ page }) => {
+  await authenticate(page);
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  let exportAttempts = 0;
+  await page.route("**/api/workspaces/*/export", async (route) => {
+    exportAttempts += 1;
+    if (exportAttempts === 1) {
+      await route.fulfill({ status: 503, json: { message: "The Workspace export could not be completed. No partial export was produced." } });
+      return;
+    }
+    await route.continue();
+  });
+  await page.goto("/app/settings/data");
+  const markdown = page.getByLabel("Markdown or Obsidian vault");
+  const archiveInput = page.getByLabel("ZIP archive");
+  await markdown.check();
+  await archiveInput.setInputFiles({ name: "preserved-vault.zip", mimeType: "application/zip", buffer: Buffer.from("preserve me") });
+
+  const downloadButton = page.getByRole("button", { name: "Download Workspace archive" });
+  await downloadButton.focus();
+  await expect(downloadButton).toBeFocused();
+  await page.keyboard.press("Enter");
+  const alert = page.getByRole("alert");
+  await expect(alert).toBeFocused();
+  await expect(alert).toHaveText("The Workspace export could not be completed. No partial export was produced.");
+  await expect(markdown).toBeChecked();
+  await expect.poll(() => archiveInput.evaluate((input: HTMLInputElement) => ({ length: input.files?.length, name: input.files?.[0]?.name })))
+    .toEqual({ length: 1, name: "preserved-vault.zip" });
+
+  await downloadButton.focus();
+  const [download] = await Promise.all([page.waitForEvent("download"), page.keyboard.press("Enter")]);
+  expect(download.suggestedFilename()).toMatch(/^stash-workspace-.+\.zip$/);
+  const path = await download.path();
+  expect(path).not.toBeNull();
+  const bytes = await readFile(path!);
+  expect(bytes.subarray(0, 4)).toEqual(Buffer.from([0x50, 0x4b, 0x03, 0x04]));
+  expect(bytes.toString("utf8")).toContain("stash.portable-workspace-export.v1");
+  expect(bytes.toString("utf8")).not.toContain("browser-acceptance-admin-token");
+  await expect(page.getByRole("status", { name: "Workspace export result" })).toBeFocused();
+  await expect(markdown).toBeChecked();
+  await expect.poll(() => archiveInput.evaluate((input: HTMLInputElement) => ({ length: input.files?.length, name: input.files?.[0]?.name })))
+    .toEqual({ length: 1, name: "preserved-vault.zip" });
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 });
 
 test("confirms recovery-code replacement and Role authority changes before mutation", async ({ page }) => {
