@@ -274,7 +274,7 @@ jobs:
         working-directory: apps/mobile
         run: |
           pnpm exec expo config --type public --json > /tmp/stash-expo-config.json
-          node -e 'const c=require("/tmp/stash-expo-config.json"); if(c.owner!=="djerayane"||c.slug!=="stash-capture"||c.ios.bundleIdentifier!=="app.stash.capture"||c.android.package!=="app.stash.capture"||c.extra?.eas?.projectId) process.exit(1)'
+          node -e 'const c=require("/tmp/stash-expo-config.json"); if(c.owner!=="imnibis"||c.slug!=="stash-capture"||c.ios.bundleIdentifier!=="app.stash.capture"||c.android.package!=="app.stash.capture"||c.extra?.eas?.projectId!=="6441a17d-b6df-4442-909e-aa01813993f4") process.exit(1)'
       - name: Reproducibly generate both native projects without credentials
         working-directory: apps/mobile
         run: |
@@ -377,8 +377,8 @@ jobs:
             echo "Mobile release unavailable: configure the EXPO_TOKEN GitHub Actions secret" >&2
             exit 1
           fi
-          if ! [[ "$EAS_PROJECT_ID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then
-            echo "Mobile release unavailable: configure the EAS_PROJECT_ID environment variable with the @djerayane/stash-capture project UUID" >&2
+          if [ -n "$EAS_PROJECT_ID" ] && [ "$EAS_PROJECT_ID" != "6441a17d-b6df-4442-909e-aa01813993f4" ]; then
+            echo "Mobile release unavailable: EAS_PROJECT_ID must equal the committed @imnibis/stash-capture project UUID" >&2
             exit 1
           fi
           builds="$(pnpm dlx eas-cli@16.4.0 build:list --platform all --app-version "$MOBILE_VERSION" --limit 1 --json --non-interactive)"

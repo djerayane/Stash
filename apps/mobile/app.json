@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Stash Capture",
-    "owner": "djerayane",
+    "owner": "imnibis",
     "slug": "stash-capture",
     "scheme": "stash",
     "version": "0.1.0",
@@ -43,6 +43,11 @@
     },
     "web": {
       "bundler": "metro"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "6441a17d-b6df-4442-909e-aa01813993f4"
+      }
     }
   }
 }

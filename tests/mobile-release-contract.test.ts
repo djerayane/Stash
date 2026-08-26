@@ -16,16 +16,14 @@ describe("mobile release contract", () => {
   it("pins the public Expo identity and explicit EAS artifact profiles", async () => {
     const app = JSON.parse(await read("apps/mobile/app.json"));
     const eas = JSON.parse(await read("apps/mobile/eas.json"));
-    assert.equal(app.expo.owner, "djerayane");
+    assert.equal(app.expo.owner, "imnibis");
     assert.equal(app.expo.slug, "stash-capture");
     assert.equal(app.expo.ios.bundleIdentifier, "app.stash.capture");
     assert.equal(app.expo.android.package, "app.stash.capture");
-    const fixtureId = "123e4567-e89b-42d3-a456-426614174000";
-    process.env.EAS_PROJECT_ID = fixtureId;
+    assert.equal(app.expo.extra.eas.projectId, "6441a17d-b6df-4442-909e-aa01813993f4");
     const require = createRequire(import.meta.url);
     const config = require("../apps/mobile/app.config.cjs")();
-    delete process.env.EAS_PROJECT_ID;
-    assert.equal(config.extra.eas.projectId, fixtureId);
+    assert.equal(config.extra.eas.projectId, "6441a17d-b6df-4442-909e-aa01813993f4");
     assert.equal(config.ios.appleTeamId, undefined);
     assert.equal(eas.cli.appVersionSource, "remote");
     assert.deepEqual(eas.build.preview, {
@@ -37,6 +35,27 @@ describe("mobile release contract", () => {
     assert.deepEqual(eas.build.production.ios, {});
   });
 
+  it("fails closed when runtime EAS identity disagrees with the committed project", () => {
+    const require = createRequire(import.meta.url);
+    process.env.EAS_PROJECT_ID = "123e4567-e89b-42d3-a456-426614174000";
+    try {
+      assert.throws(() => require("../apps/mobile/app.config.cjs")(), /must equal the committed @imnibis\/stash-capture project UUID/);
+    } finally {
+      delete process.env.EAS_PROJECT_ID;
+    }
+  });
+
+  it("accepts the optional runtime EAS identity only when it matches the committed project", () => {
+    const require = createRequire(import.meta.url);
+    process.env.EAS_PROJECT_ID = "6441a17d-b6df-4442-909e-aa01813993f4";
+    try {
+      const config = require("../apps/mobile/app.config.cjs")();
+      assert.equal(config.extra.eas.projectId, "6441a17d-b6df-4442-909e-aa01813993f4");
+    } finally {
+      delete process.env.EAS_PROJECT_ID;
+    }
+  });
+
   it("keeps PR validation secret-free and mobile publishers behind the complete gate", async () => {
     const pr = await read(".github/workflows/compose-quick-start.yml");
     const quality = await read(".github/workflows/release-quality.yml");
@@ -44,6 +63,8 @@ describe("mobile release contract", () => {
     assert.doesNotMatch(pr, /EXPO_TOKEN|secrets:/);
     assert.match(quality, /mobile-native-generation:/);
     assert.match(quality, /expo prebuild --clean --no-install/);
+    assert.match(quality, /c\.owner!=="imnibis"/);
+    assert.match(quality, /c\.extra\?\.eas\?\.projectId!=="6441a17d-b6df-4442-909e-aa01813993f4"/);
     assert.match(quality, /EAS_PROJECT_ID: \$\{\{ vars\.EAS_PROJECT_ID \}\}/);
     assert.doesNotMatch(`${quality}\n${release}`, /^    env:\n      EXPO_TOKEN:/m);
     for (const job of ["publish-android-preview", "publish-android-store", "publish-ios"]) {
@@ -86,7 +107,7 @@ describe("mobile release contract", () => {
   });
 
   it("requires live App Store certificate and provisioning-profile capability", () => {
-    const base = { data: { app: { byId: { id: "project", fullName: "@djerayane/stash-capture", iosAppCredentials: [{
+    const base = { data: { app: { byId: { id: "project", fullName: "@imnibis/stash-capture", iosAppCredentials: [{
       appleTeam: { appleTeamIdentifier: "ABCDE12345" }, appleAppIdentifier: { bundleIdentifier: "app.stash.capture" },
       iosAppBuildCredentialsList: [{ iosDistributionType: "APP_STORE", distributionCertificate: { id: "cert", validityNotAfter: "2030-01-01T00:00:00.000Z" }, provisioningProfile: { id: "profile", expiration: "2030-01-01T00:00:00.000Z" } }]
     }] } } } };

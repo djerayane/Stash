@@ -6,7 +6,7 @@ export function inspectIosSigningCapability(response, now = new Date()) {
   if (!app || !Array.isArray(app.iosAppCredentials)) {
     throw new Error("Expo API returned a malformed iOS signing-capability response");
   }
-  if (app.fullName !== "@djerayane/stash-capture") return { ready: false };
+  if (app.fullName !== "@imnibis/stash-capture") return { ready: false };
   const credentials = app.iosAppCredentials?.find(
     (entry) => entry?.appleAppIdentifier?.bundleIdentifier === "app.stash.capture"
   );
