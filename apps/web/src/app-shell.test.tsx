@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useState } from "react";
 import { MemoryRouter, useLocation } from "react-router";
 import { afterEach, expect, test, vi } from "vitest";
-import { AppShell, completeOidcBrowserCallback, displayLabel, initials, type SessionState } from "./app-shell";
+import { AppShell, completeOidcBrowserCallback, displayLabel, initials, restoreLastActiveContext, type SessionState } from "./app-shell";
 
 const member: SessionState = {
   status: "authenticated",
@@ -58,8 +58,9 @@ test("renders authenticated navigation and deep-linkable route content", async (
   expect(await screen.findByRole("heading", { name: "Tasks" })).toBeInTheDocument();
   expect(screen.getByRole("navigation", { name: "Workspace" })).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "Tasks" })).toHaveAttribute("aria-current", "page");
-  expect(screen.getAllByText("Engine Room")).not.toHaveLength(0);
-  expect(screen.getByText("ER")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Note Tree" })).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Search" })).toBeInTheDocument();
+  expect(screen.queryByText("Engine Room")).not.toBeInTheDocument();
   expect(screen.getByText("AL")).toBeInTheDocument();
 });
 
@@ -82,16 +83,16 @@ test("derives identity labels and initials with explicit fallbacks", () => {
   expect(initials("Project Atlas", "PW")).toBe("PA");
   expect(initials("", "M")).toBe("M");
   renderShell("/app/tasks", { status: "authenticated", member: { id: "member", name: "", email: "member@example.com" }, workspace: { name: "" }, capabilities: [] });
-  expect(screen.getAllByText("Personal workspace")).not.toHaveLength(0);
-  expect(screen.getByText("PW")).toBeInTheDocument();
+  expect(screen.queryByText("Personal workspace")).not.toBeInTheDocument();
+  expect(screen.queryByText("PW")).not.toBeInTheDocument();
   expect(screen.getAllByText("member@example.com")).toHaveLength(2);
   expect(screen.getByText("M")).toBeInTheDocument();
 });
 
 test("rejects a return destination outside the authenticated application", () => {
   renderShell("/sign-in?returnTo=https%3A%2F%2Fevil.example");
-  expect(screen.getByTestId("location")).toHaveTextContent("/app");
-  expect(screen.getByRole("heading", { name: "Good morning." })).toBeInTheDocument();
+  expect(screen.getByTestId("location")).toHaveTextContent("/app/notes");
+  expect(screen.getByRole("heading", { name: "Note Tree" })).toBeInTheDocument();
 });
 
 test.each([
@@ -113,10 +114,14 @@ test("offers a recoverable error action", () => {
   expect(retry).toHaveBeenCalledOnce();
 });
 
-test("provides an empty dashboard with one clear next action", () => {
+test("restores the last active Note or primary view without accepting an unsafe route", () => {
+  const storage = { getItem: vi.fn().mockReturnValue("/app/notes/note-17"), setItem: vi.fn() };
+  expect(restoreLastActiveContext("workspace-1", storage)).toBe("/app/notes/note-17");
+  storage.getItem.mockReturnValue("/app/settings/members");
+  expect(restoreLastActiveContext("workspace-1", storage)).toBe("/app/notes");
   renderShell("/app");
-  expect(screen.getByRole("heading", { name: "Nothing needs your attention" })).toBeInTheDocument();
-  expect(screen.getAllByRole("link", { name: "Capture a note" })[0]).toHaveAttribute("href", "/app/notes/new");
+  expect(screen.getByTestId("location")).toHaveTextContent("/app/notes");
+  expect(screen.getByRole("heading", { name: "Note Tree" })).toBeInTheDocument();
 });
 
 test("exposes the implemented search, capture, and notification actions", async () => {

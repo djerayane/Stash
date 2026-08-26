@@ -161,6 +161,23 @@ describe("Portable Workspace import", () => {
   it("keeps every published Portable Workspace Export schema in the compatibility registry", () => {
     assert.deepEqual(publishedPortableWorkspaceExportSchemas, ["stash.portable-workspace-export.v1"]);
   });
+  it("preserves Note Tree location and semantic-link fields in canonical imports", async () => {
+    const childId = "99999999-9999-4999-8999-999999999999";
+    const linkId = "88888888-8888-4888-8888-888888888888";
+    const source: PortableWorkspaceExportSnapshot = { ...snapshot,
+      notes: [...snapshot.notes, { ...snapshot.notes[0]!, id: childId, content: "# Child" }],
+      noteLocations: [snapshot.noteLocations[0]!, { schema: "stash.note-location.v1", noteId: childId, workspaceId,
+        path: `notes/${childId}.md`, aliases: [], revision: 3, parentId: noteId, position: "2", archivedAt: "2026-02-01T00:00:00.000Z" }],
+      noteLinks: [{ schema: "stash.note-link.v2", id: linkId, workspaceId, sourceNoteId: noteId, targetNoteId: childId,
+        label: "Evidence", relationshipType: "supports", revision: 1 }],
+    };
+    const repository = new ImportMemory();
+    const result = await new PortableWorkspaceImportService(repository, { async put() {}, async get() { return Buffer.alloc(0); }, async delete() {} })
+      .import(randomUUID(), actor.localAccountId, await archiveFor(source));
+    assert.equal(result.status, "imported");
+    assert.deepEqual(repository.committed?.state.noteLocations[1], source.noteLocations[1]);
+    assert.deepEqual(repository.committed?.state.noteLinks[0], source.noteLinks[0]);
+  });
   it("round-trips canonical semantics and Attachment bytes through a running Instance, preserving missing people as Identity Stubs", async () => {
     const repository = new ImportMemory(); const database = { async verifyConnection() {}, async close() {} };
     const instance = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin",

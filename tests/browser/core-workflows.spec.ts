@@ -48,11 +48,11 @@ test("navigates Notes, Boards, Discussions, notifications, and Activity through 
   await authenticate(page);
   await page.goto("/app/tasks"); const workspace = page.getByRole("combobox", { name: "Workspace" }); await workspace.focus(); await workspace.selectOption({ label: "Shared Workspace" }); await page.getByRole("button", { name: /Shared roadmap/ }).press("Enter"); await expect(page).toHaveURL(/\/app\/projects\/66666666-6666-4666-8666-666666666665\/boards$/);
   await page.goto("/app/notes");
-  await expect(page.getByRole("button", { name: /Decision/ })).toBeVisible();
-  const ordinary = page.getByRole("link", { name: /Authoritative second Note/ }); await expect(ordinary).toBeVisible(); await ordinary.click();
+  await expect(page.getByRole("heading", { name: "Note Tree" }).last()).toBeVisible();
+  await page.goto("/app/notes/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
   await expect(page).toHaveURL(/\/app\/notes\/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa$/); await expect(page.getByRole("textbox", { name: "Note content" })).toContainText("Authoritative second Note");
   await page.goto("/app/notes");
-  await expect(page.getByRole("heading", { name: "All Notes" }).locator("..").getByRole("link", { name: /Release collaboration plan/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Note Tree" }).last()).toBeVisible();
 
   await page.goto("/app/projects/22222222-2222-4222-8222-222222222222/boards/abababab-abab-4bab-8bab-abababababa1");
   const move = page.getByRole("combobox", { name: /Move Task/ }); await move.focus();
@@ -124,7 +124,7 @@ test("presents every relevant canonical notification without collapsing its attr
 test("reviews and restores authoritative Note history with keyboard error recovery", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" }); await authenticate(page); let restoreAttempts = 0;
   await page.route("**/api/notes/99999999-9999-4999-8999-999999999999/history/1/restore", async (route) => { restoreAttempts += 1; if (restoreAttempts === 1) await route.fulfill({ status: 503, json: { message: "Restore temporarily unavailable" } }); else await route.continue(); });
-  await page.goto("/app/notes"); const historyLink = page.getByRole("link", { name: "View history" }).last(); await historyLink.focus(); await page.keyboard.press("Enter"); await expect(page).toHaveURL(/\/app\/notes\/99999999-9999-4999-8999-999999999999\/history$/);
+  await page.goto("/app/notes/99999999-9999-4999-8999-999999999999"); const historyLink = page.getByRole("link", { name: "View history" }); await historyLink.focus(); await page.keyboard.press("Enter"); await expect(page).toHaveURL(/\/app\/notes\/99999999-9999-4999-8999-999999999999\/history$/);
   await page.getByRole("button", { name: "Review revision" }).first().focus(); await page.keyboard.press("Enter"); const dialog = page.getByRole("dialog", { name: "Restore revision 1" }); await expect(dialog.getByText("Original release plan")).toBeVisible(); expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
   await dialog.getByRole("button", { name: "Confirm restore" }).click(); const alert = dialog.getByRole("alert"); await expect(alert).toBeFocused(); await dialog.getByRole("button", { name: "Try restore again" }).focus(); await page.keyboard.press("Enter"); await expect(page.getByRole("status")).toHaveText("Revision 1 restored."); expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 });

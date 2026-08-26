@@ -12,8 +12,10 @@ import { MemberAdministrationPage, type OrganizationAdministration } from "./mem
 import { ProjectNotificationsPage } from "./project-notifications";
 import { ImportedIdentitiesPage } from "./imported-identities";
 import { MemberSettingsPage, OrganizationSettingsPage, WorkspaceDataPage } from "./product-settings";
-import { ActivityPage, BoardsPage, DiscussionsPage, InboxPage, NoteHistoryPage, NotesPage, NotificationsPage, ProjectGatewayPage, SearchPage } from "./core-workflows";
+import { ActivityPage, BoardsPage, DiscussionsPage, InboxPage, NoteHistoryPage, NotificationsPage, ProjectGatewayPage, SearchPage } from "./core-workflows";
 import { AgentGrantsPage } from "./agent-grants";
+import { NoteTree } from "./knowledge-authoring/note-tree";
+import { NoteWorkspace } from "./knowledge-authoring/note-workspace";
 
 export type SessionState =
   | { readonly status: "loading" }
@@ -39,12 +41,22 @@ export function completeOidcBrowserCallback(fragment: string, returnTo: string |
 }
 
 const navigation = [
-  { to: "/app", label: "Home", icon: "home" },
   { to: "/app/inbox", label: "Inbox", icon: "inbox" },
-  { to: "/app/notes", label: "Notes", icon: "note" },
+  { to: "/app/notes", label: "Note Tree", icon: "note" },
+  { to: "/app/search", label: "Search", icon: "search" },
   { to: "/app/tasks", label: "Tasks", icon: "task" },
-  { to: "/app/activity", label: "Activity", icon: "pulse" },
 ] as const;
+
+interface ContextStorage { getItem(key: string): string | null; setItem(key: string, value: string): void }
+const defaultContext = "/app/notes";
+export const lastActiveContextKey = (workspaceId: string) => `stash.last-active-context:${workspaceId}`;
+export function isRestorableContext(value: string): boolean {
+  return value === "/app/inbox" || value === "/app/notes" || value.startsWith("/app/notes/") || value === "/app/search" || value.startsWith("/app/search?") || value === "/app/tasks" || value.startsWith("/app/tasks?");
+}
+export function restoreLastActiveContext(workspaceId: string, storage: ContextStorage = localStorage): string {
+  try { const value = storage.getItem(lastActiveContextKey(workspaceId)); return value && isRestorableContext(value) ? value : defaultContext; }
+  catch { return defaultContext; }
+}
 
 export function displayLabel(value: string, fallback: string): string {
   return value.trim() || fallback;
@@ -208,6 +220,8 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
   const workspaceName = displayLabel(activeWorkspace.name, "Personal workspace");
   const memberName = displayLabel(session.member.name, displayLabel(session.member.email, "Member"));
   const memberEmail = displayLabel(session.member.email, "Signed in");
+  const activeNoteId = /^\/app\/notes\/[^/]+$/.test(location.pathname) && location.pathname !== "/app/notes/new"
+    ? decodeURIComponent(location.pathname.split("/")[3]!) : undefined;
   useGSAP(() => {
     if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
     gsap.from(`.${styles.sidebar} > *, .${styles.topbar} > *`, { opacity: 0, y: 8, duration: 0.45, stagger: 0.06, ease: "power2.out", clearProps: "all" });
@@ -218,28 +232,33 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
     gsap.fromTo(content, { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.38, ease: "power2.out", clearProps: "all" });
   }, { scope: shellRef, dependencies: [location.pathname] });
   useEffect(() => { mainRef.current?.focus(); }, [location.pathname]);
+  useEffect(() => {
+    if (!activeWorkspace.id || !isRestorableContext(`${location.pathname}${location.search}`) || location.pathname === "/app") return;
+    try { localStorage.setItem(lastActiveContextKey(activeWorkspace.id), `${location.pathname}${location.search}`); } catch { /* Browsing still works when local storage is unavailable. */ }
+  }, [activeWorkspace.id, location.pathname, location.search]);
   return <div className={styles.shell} ref={shellRef}>
     <a className={styles.skipLink} href="#workspace-content">Skip to content</a>
     <aside className={styles.sidebar} aria-label="Application navigation">
       <Link className={styles.brand} to="/app" aria-label="Stash home"><span className={styles.brandMark}>S</span><span>Stash</span></Link>
-      <div className={styles.workspaceIdentity}><span className={styles.workspaceMonogram} aria-hidden="true">{initials(workspaceName, "PW")}</span><span><strong>{workspaceName}</strong><small>Workspace</small></span></div>
       <NavigationMenu.Root className={styles.navigationRoot} orientation="vertical" aria-label="Workspace"><NavigationMenu.List className={styles.navigation}>
-        {navigation.map((item) => <NavigationMenu.Item key={item.to}><NavigationMenu.Link asChild><NavLink className={styles.navLink} end={item.to === "/app"} to={item.to}><Icon name={item.icon} />{item.label}</NavLink></NavigationMenu.Link></NavigationMenu.Item>)}
+        {navigation.map((item) => <NavigationMenu.Item key={item.to}><NavigationMenu.Link asChild><NavLink className={styles.navLink}
+          end={item.to === "/app/inbox" || item.to === "/app/search"} to={item.to}><Icon name={item.icon} />{item.label}</NavLink></NavigationMenu.Link></NavigationMenu.Item>)}
         <NavigationMenu.Item><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings"><Icon name="settings" />Settings</NavLink></NavigationMenu.Link></NavigationMenu.Item>
         {session.activeOrganizationId ? <NavigationMenu.Item><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/agents"><Icon name="agents" />Agents</NavLink></NavigationMenu.Link></NavigationMenu.Item> : null}
         {session.organizationAdministrations?.length ? <><NavigationMenu.Item><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/organization"><Icon name="settings" />Organization</NavLink></NavigationMenu.Link></NavigationMenu.Item><NavigationMenu.Item><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/members"><Icon name="members" />Members</NavLink></NavigationMenu.Link></NavigationMenu.Item><NavigationMenu.Item><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/imported-identities"><Icon name="import" />Imported identities</NavLink></NavigationMenu.Link></NavigationMenu.Item></> : null}
       </NavigationMenu.List></NavigationMenu.Root>
+      {activeWorkspace.id ? <NoteTree activeNoteId={activeNoteId} token={session.token ?? ""} workspaceId={activeWorkspace.id} /> : null}
       <div className={styles.sidebarFooter}><span className={styles.avatar} aria-hidden="true">{initials(memberName, "M")}</span><span><strong>{memberName}</strong><small>{memberEmail}</small></span></div>
     </aside>
     <div className={styles.workspace}>
       <header className={styles.topbar}><form className={styles.searchPreview} role="search" onSubmit={(event: FormEvent) => { event.preventDefault(); if (search.trim()) navigate(`/app/search?q=${encodeURIComponent(search.trim())}`); }}><Icon name="search" /><input aria-label="Search Workspace" type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search Notes" /></form><Link aria-label="Notifications" className={styles.notificationLink} to="/app/notifications">Notifications</Link><Link className={styles.compactCreate} to="/app/inbox"><Icon name="plus" /><span>Capture</span></Link></header>
-      {/^\/app\/notes\/[^/]+$/.test(location.pathname) && location.pathname !== "/app/notes/new"
-        ? <NoteEditor noteId={decodeURIComponent(location.pathname.split("/")[3]!)} memberId={session.member.id} token={session.token ?? ""} />
+      {activeNoteId
+        ? <NoteWorkspace noteId={activeNoteId} token={session.token ?? ""}><NoteEditor contextVisible={false} noteId={activeNoteId} memberId={session.member.id} token={session.token ?? ""} /></NoteWorkspace>
         : <main id="workspace-content" className={styles.content} ref={mainRef} tabIndex={-1}>
         <Routes>
-          <Route path="/app" element={<EmptyHome />} />
+          <Route path="/app" element={<Navigate replace to={restoreLastActiveContext(activeWorkspace.id ?? workspaceName)} />} />
           <Route path="/app/inbox" element={<InboxPage workspaceId={activeWorkspace.id ?? ""} token={session.token ?? ""} />} />
-          <Route path="/app/notes" element={<NotesPage workspaceId={activeWorkspace.id ?? ""} token={session.token ?? ""} />} />
+          <Route path="/app/notes" element={<NoteTree token={session.token ?? ""} variant="page" workspaceId={activeWorkspace.id ?? ""} />} />
           <Route path="/app/notes/new" element={<Navigate replace to="/app/notes" />} />
           <Route path="/app/notes/:noteId/history" element={<NoteHistoryPage token={session.token ?? ""} />} />
           <Route path="/app/tasks" element={<ProjectGatewayPage workspaceId={activeWorkspace.id ?? ""} token={session.token ?? ""} />} />

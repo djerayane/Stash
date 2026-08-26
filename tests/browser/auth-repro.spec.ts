@@ -13,7 +13,7 @@ test("a built-in password account can sign in", async ({ page }) => {
   await page.getByLabel("Password", { exact: true }).fill("correct horse battery staple");
   await page.getByRole("button", { name: "Sign in" }).click();
 
-  await expect(page).toHaveURL(/\/app$/, { timeout: 2_000 });
+  await expect(page).toHaveURL(/\/app\/notes$/, { timeout: 2_000 });
 });
 
 test("distinguishes invalid credentials from authentication infrastructure failures", async ({ page }) => {
@@ -38,14 +38,14 @@ test("a newly registered account can sign in", async ({ page }) => {
   await page.getByLabel("Confirm password").fill("correct horse battery staple");
   await page.getByRole("button", { name: "Create account" }).click();
 
-  await expect(page).toHaveURL(/\/app$/);
+  await expect(page).toHaveURL(/\/app\/notes$/);
   await page.evaluate(() => localStorage.removeItem("stash.member-session"));
   await page.goto("/sign-in");
   await page.getByRole("textbox", { name: "Email" }).fill("new-member@stash.test");
   await page.getByLabel("Password", { exact: true }).fill("correct horse battery staple");
   await page.getByRole("button", { name: "Sign in" }).click();
 
-  await expect(page).toHaveURL(/\/app$/);
+  await expect(page).toHaveURL(/\/app\/notes$/);
 });
 
 test("signup is accessible by keyboard and assistive technology @a11y", async ({ page }) => {

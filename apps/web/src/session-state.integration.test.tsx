@@ -48,8 +48,8 @@ test("recovers from an unavailable authenticated session check", async () => {
   expect(alert).toHaveFocus();
   expect(screen.getByRole("heading", { name: "Workspace unavailable" })).toBeInTheDocument();
   act(() => screen.getByRole("button", { name: "Try again" }).click());
-  expect(await screen.findByRole("heading", { name: "Good morning." })).toBeInTheDocument();
-  expect(screen.getAllByText("Engine Room")).not.toHaveLength(0);
+  expect((await screen.findAllByRole("heading", { name: "Note Tree" })).length).toBeGreaterThan(0);
+  expect(screen.queryByText("Engine Room")).not.toBeInTheDocument();
   expect(screen.queryByText("Forged Workspace")).not.toBeInTheDocument();
   expect(attempts).toBe(2);
 });

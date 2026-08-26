@@ -292,8 +292,15 @@ function parseState(content: Buffer): PortableWorkspaceCanonicalState {
   const projects = new Set(projectObjects.map((item) => object(item) ? String(item.id) : ""));
   if (locationIds.length !== noteIds.length || locationIds.some((id) => !notes.has(id))) throw new InvalidPortableWorkspaceImport("invalid_note_locations");
   if (value.noteLocations.some((location) => !object(location) || typeof location.path !== "string" || !Array.isArray(location.aliases)
-    || location.aliases.some((alias) => typeof alias !== "string" || !safePath(alias)) || !Number.isInteger(location.revision) || Number(location.revision) < 1))
+    || location.aliases.some((alias) => typeof alias !== "string" || !safePath(alias)) || !Number.isInteger(location.revision) || Number(location.revision) < 1
+    || location.parentId !== undefined && (!uuid.test(String(location.parentId)) || !notes.has(String(location.parentId)) || location.parentId === location.noteId)
+    || location.position !== undefined && (typeof location.position !== "string" || !/^[1-9][0-9]*$/.test(location.position))
+    || location.archivedAt !== undefined && !timestamp(location.archivedAt)
+    || location.trashedAt !== undefined && !timestamp(location.trashedAt)))
     throw new InvalidPortableWorkspaceImport("invalid_note_locations");
+  const parentByNote = new Map(value.noteLocations.map((location) => [String(location.noteId), object(location) && location.parentId ? String(location.parentId) : undefined]));
+  for (const noteId of noteIds) { const seen = new Set<string>(); let cursor: string | undefined = noteId;
+    while (cursor) { if (seen.has(cursor)) throw new InvalidPortableWorkspaceImport("invalid_note_locations"); seen.add(cursor); cursor = parentByNote.get(cursor); } }
   for (const note of value.notes) { exact(note,["schema","id","workspaceId","content","tags","createdAt","createdBy","projectId","reminder"],"note"); exactIdentity(note.createdBy,"note_creator");
     if(note.reminder!==undefined) { exact(note.reminder,["at"],"note_reminder"); if(!timestamp(note.reminder.at)) throw new InvalidPortableWorkspaceImport("invalid_note"); }
     if (typeof note.content !== "string" || !note.content.length
@@ -326,10 +333,11 @@ function parseState(content: Buffer): PortableWorkspaceCanonicalState {
   for (const board of value.boards) { exact(board,["schema","id","projectId","name","groupBy","createdAt"],"board"); if (!projects.has(String(board.projectId)) || typeof board.name !== "string"
     || !["status", "priority"].includes(String(board.groupBy)) || !timestamp(board.createdAt)) throw new InvalidPortableWorkspaceImport("invalid_board"); }
   for (const attachment of value.attachments) { exact(attachment,["schema","id","workspaceId","filename","contentType","size","relativePath","source","createdAt","createdBy"],"attachment"); exactIdentity(attachment.createdBy,"attachment_creator"); }
-  for (const location of value.noteLocations) exact(location,["schema","noteId","workspaceId","path","aliases","revision"],"note_location");
+  for (const location of value.noteLocations) exact(location,["schema","noteId","workspaceId","path","aliases","revision","parentId","position","archivedAt","trashedAt"],"note_location");
   for (const link of value.noteLinks) { exact(link,link.schema==="stash.note-link.v1"?["schema","id","workspaceId","sourceNoteId","targetNoteId"]
-    :["schema","id","workspaceId","sourceNoteId","targetNoteId","targetPath","candidateNoteIds","label","revision"],"note_link"); if (!notes.has(String(link.sourceNoteId))
+    :["schema","id","workspaceId","sourceNoteId","targetNoteId","targetPath","candidateNoteIds","label","relationshipType","revision"],"note_link"); if (!notes.has(String(link.sourceNoteId))
     || link.targetNoteId !== undefined && link.targetNoteId !== null && !notes.has(String(link.targetNoteId))
+    || link.relationshipType !== undefined && (typeof link.relationshipType !== "string" || !link.relationshipType.trim() || link.relationshipType.trim().length > 80 || /[\r\n]/.test(link.relationshipType))
     || !Number.isInteger(link.revision ?? 1) || Number(link.revision ?? 1) < 1) throw new InvalidPortableWorkspaceImport("invalid_note_link"); }
   const allowedDurable = new Map([["Project", ["stash.project.v1"]], ["Workflow", ["stash.workflow.v1"]],
     ["GuestProjectAccess", ["stash.guest-project-access.v1"]], ["RepositoryConnection", ["stash.repository-connection.v1","stash.disconnected-repository-connection.v1"]],

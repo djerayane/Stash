@@ -7,6 +7,10 @@ export interface NoteLocationRecord {
   path: string;
   aliases: string[];
   revision: number;
+  parentId?: string;
+  position?: string;
+  archivedAt?: string;
+  trashedAt?: string;
 }
 
 export interface NoteLinkRecord {
@@ -15,6 +19,7 @@ export interface NoteLinkRecord {
   sourceNoteId: string;
   targetNoteId?: string;
   label: string;
+  relationshipType?: string;
   revision: number;
   targetPath?: string;
   candidateNoteIds?: string[];
@@ -62,6 +67,12 @@ function label(value: unknown): string {
   return value.trim();
 }
 
+function relationshipType(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !value.trim() || value.trim().length > 80 || /[\r\n]/.test(value)) throw new InvalidNoteLinkInput();
+  return value.trim();
+}
+
 function relativeMarkdown(sourcePath: string, targetPath: string): string {
   const relative = posix.relative(posix.dirname(sourcePath), targetPath);
   const rooted = relative.startsWith(".") ? relative : `./${relative}`;
@@ -90,10 +101,11 @@ export class NoteLinkService {
 
   async create(memberId: string, sourceNoteId: string, value: unknown) {
     if (!uuid.test(sourceNoteId) || !plainObject(value) || typeof value.targetNoteId !== "string" || !uuid.test(value.targetNoteId)
-      || value.targetNoteId === sourceNoteId || !Object.keys(value).every((key) => ["targetNoteId", "label"].includes(key)))
+      || value.targetNoteId === sourceNoteId || !Object.keys(value).every((key) => ["targetNoteId", "label", "relationshipType"].includes(key)))
       throw new InvalidNoteLinkInput();
+    const semanticType = relationshipType(value.relationshipType);
     const record: NoteLinkRecord = { id: randomUUID(), workspaceId: "", sourceNoteId, targetNoteId: value.targetNoteId,
-      label: value.label === undefined ? "Note" : label(value.label), revision: 1 };
+      label: value.label === undefined ? "Note" : label(value.label), ...(semanticType ? { relationshipType: semanticType } : {}), revision: 1 };
     return this.repository.createNoteLink(memberId, record, { schema: "stash.note-link.v2", ...record });
   }
 

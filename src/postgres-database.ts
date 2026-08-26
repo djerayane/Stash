@@ -45,6 +45,8 @@ import { InvalidCollaborationUpdate, type CollaborationSnapshot, type NoteCollab
 import type { WorkspaceSearchFacet, WorkspaceSearchKind, WorkspaceSearchQuery, WorkspaceSearchRepository, WorkspaceSearchResult } from "./workspace-search.js";
 import { proseMirrorToRichText, richTextToProseMirror } from "@stash/rich-text";
 import type { AgentGrant, AgentGrantOption, AgentProposal, StoredAgentGrant } from "./agent-grants.js";
+import type { NoteTreeRepository } from "./knowledge-authoring/note-tree.js";
+import { PostgresNoteTreeRepository } from "./knowledge-authoring/postgres-note-tree-repository.js";
 import {
   PostgresKernel,
   type PostgresKernelOptions,
@@ -236,11 +238,17 @@ export class PostgresDatabase implements
   , WorkspaceSearchRepository
 {
   readonly #kernel: PostgresKernel;
+  readonly #noteTreeRepository: PostgresNoteTreeRepository;
   readonly #authenticationSecrets: AuthenticationSecretCodec;
 
   constructor(connectionString: string, authenticationSecrets: AuthenticationSecretCodec, options: PostgresDatabaseOptions = {}) {
     this.#kernel = new PostgresKernel(connectionString, options);
+    this.#noteTreeRepository = new PostgresNoteTreeRepository(this.#kernel, (client) => this.#ensureNoteSchema(client));
     this.#authenticationSecrets = authenticationSecrets;
+  }
+
+  noteTreeRepository(): NoteTreeRepository {
+    return this.#noteTreeRepository;
   }
 
   async verifyConnection(): Promise<void> {
@@ -256,7 +264,8 @@ export class PostgresDatabase implements
       await this.#ensureRepositoryConnectionSchema(client); await this.#ensureGitHubSignalSchema(client); await this.#ensureNotificationSchema(client);
       await this.#ensureMemberLocalizationSchema(client);
       await this.#ensureAutomationSchema(client, true);
-      await this.#ensureNoteSchema(client); await this.#ensureBoardSchema(client); await this.#ensureAttachmentSchema(client);
+      await this.#ensureNoteSchema(client); await this.#noteTreeRepository.prepare(client);
+      await this.#ensureBoardSchema(client); await this.#ensureAttachmentSchema(client);
       await this.#ensureDiscussionSchema(client); await this.#ensureInvitationSchema(client); await this.#ensurePortableProjectionSchema(client);
       await this.#ensureNoteHistorySchema(client); await this.#ensureMemberDepartureSchema(client); await this.#ensureWorkspaceImportSchema(client);
       await this.#ensureCollaborationSchema(client);
@@ -1830,9 +1839,9 @@ export class PostgresDatabase implements
       const target = notes.rows.find((row) => row.id === link.targetNoteId && row.accessible && row.workspace_id === source.workspace_id);
       if (!target) return { status: "target_not_found" as const };
       const saved = { ...link, workspaceId: source.workspace_id };
-      const inserted = await client.query(`INSERT INTO stash_note_links(id,workspace_id,source_note_id,target_note_id,target_path,label,revision)
-        VALUES($1,$2,$3,$4,$5,$6,1) ON CONFLICT(source_note_id,target_note_id) DO NOTHING RETURNING id`,
-      [saved.id, saved.workspaceId, saved.sourceNoteId, saved.targetNoteId, target.portable_path, saved.label]);
+      const inserted = await client.query(`INSERT INTO stash_note_links(id,workspace_id,source_note_id,target_note_id,target_path,label,relationship_type,revision)
+        VALUES($1,$2,$3,$4,$5,$6,$7,1) ON CONFLICT(source_note_id,target_note_id) DO NOTHING RETURNING id`,
+      [saved.id, saved.workspaceId, saved.sourceNoteId, saved.targetNoteId, target.portable_path, saved.label, saved.relationshipType ?? null]);
       if (!inserted.rowCount) return { status: "already_linked" as const };
       const projection: PortableNoteLinkStateProjection = { schema: "stash.note-link.v2", ...saved };
       await this.#recordPortableProjection(client, "NoteLink", saved.id, projection.schema, projection);
@@ -1880,7 +1889,8 @@ export class PostgresDatabase implements
       for (const row of rows.rows) {
         const link: NoteLinkRecord = { id: row.id, workspaceId: row.workspace_id, sourceNoteId: row.source_note_id,
           ...(row.target_note_id ? { targetNoteId: row.target_note_id } : {}), ...(row.target_path ? { targetPath: row.target_path } : {}),
-          ...(row.candidate_note_ids?.length ? { candidateNoteIds: row.candidate_note_ids } : {}), label: row.label, revision: row.revision };
+          ...(row.candidate_note_ids?.length ? { candidateNoteIds: row.candidate_note_ids } : {}), label: row.label,
+          ...(row.relationship_type ? { relationshipType: row.relationship_type } : {}), revision: row.revision };
         if (row.target_note_id && row.portable_path) { links.push({ link, state: "resolved", target: { noteId: row.target_note_id,
           workspaceId: row.workspace_id, path: row.portable_path, aliases: row.aliases ?? [], revision: row.location_revision } }); continue; }
         const candidates = await client.query<any>(`SELECT DISTINCT note.id,note.workspace_id,note.portable_path,note.location_revision FROM stash_notes note
@@ -3782,6 +3792,7 @@ export class PostgresDatabase implements
       ALTER TABLE stash_note_links ADD COLUMN IF NOT EXISTS target_path TEXT;
       ALTER TABLE stash_note_links ADD COLUMN IF NOT EXISTS candidate_note_ids UUID[] NOT NULL DEFAULT '{}';
       ALTER TABLE stash_note_links ADD COLUMN IF NOT EXISTS label TEXT NOT NULL DEFAULT 'Note';
+      ALTER TABLE stash_note_links ADD COLUMN IF NOT EXISTS relationship_type TEXT;
       ALTER TABLE stash_note_links ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0);
       UPDATE stash_note_links link SET target_path=note.portable_path FROM stash_notes note
         WHERE link.target_note_id=note.id AND link.target_path IS NULL;
@@ -4291,6 +4302,7 @@ export class PostgresDatabase implements
         await this.#recordPortableProjection(client,"Note",note.id,note.schema,note);
         await this.#recordPortableProjection(client,"NoteLocation",note.id,location.schema,location);
       }
+      await this.#noteTreeRepository.applyImportedLocations(client, state.noteLocations);
       for (const task of state.tasks) {
         await client.query(`INSERT INTO stash_tasks(id,workspace_id,project_id,task_key,workflow_status_id,title,created_by_account_id,created_at,
           assignee_ids,former_assignee_ids,priority,label_names,due_date,estimate,linked_note_ids,development_links)
@@ -4319,9 +4331,10 @@ export class PostgresDatabase implements
           attachment.relativePath,bundle.attachmentStorageKeys.get(attachment.id),attachment.source,accountFor(attachment.createdBy),attachment.createdAt]);
         await this.#recordPortableProjection(client,"Attachment",attachment.id,attachment.schema,attachment);
       }
-      for (const link of state.noteLinks) { await client.query(`INSERT INTO stash_note_links(id,workspace_id,source_note_id,target_note_id,target_path,candidate_note_ids,label,revision)
-        VALUES($1,$2,$3,$4,$5,$6::uuid[],$7,$8)`,[link.id,state.workspace.id,link.sourceNoteId,link.targetNoteId ?? null,
-        "targetPath" in link ? link.targetPath : null,"candidateNoteIds" in link ? link.candidateNoteIds : [],"label" in link ? link.label : "Note","revision" in link ? link.revision : 1]);
+      for (const link of state.noteLinks) { await client.query(`INSERT INTO stash_note_links(id,workspace_id,source_note_id,target_note_id,target_path,candidate_note_ids,label,relationship_type,revision)
+        VALUES($1,$2,$3,$4,$5,$6::uuid[],$7,$8,$9)`,[link.id,state.workspace.id,link.sourceNoteId,link.targetNoteId ?? null,
+        "targetPath" in link ? link.targetPath : null,"candidateNoteIds" in link ? link.candidateNoteIds : [],"label" in link ? link.label : "Note",
+        "relationshipType" in link ? link.relationshipType : null,"revision" in link ? link.revision : 1]);
         await this.#recordPortableProjection(client,"NoteLink",link.id,link.schema,link); }
       for (const revision of state.noteHistory) await client.query(`INSERT INTO stash_note_history(note_id,workspace_id,revision,content,document,actor_account_id,cause,recorded_at)
         VALUES($1,$2,$3,$4,$5::jsonb,$6,$7,$8)`,[revision.noteId,state.workspace.id,revision.revision,revision.content,JSON.stringify(revision.document),
@@ -5268,8 +5281,10 @@ export class PostgresDatabase implements
       ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
        (workspace.owner_type='organization' AND EXISTS(SELECT 1 FROM stash_organization_memberships membership
          WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2)) OR
-       (note.project_id IS NOT NULL AND EXISTS(SELECT 1 FROM stash_project_guests guest
-         WHERE guest.project_id=note.project_id AND guest.account_id=$2))) AS can_read
+       EXISTS(WITH RECURSIVE ancestry AS (
+         SELECT note.id,note.parent_id,note.project_id UNION ALL
+         SELECT parent.id,parent.parent_id,parent.project_id FROM stash_notes parent JOIN ancestry ON ancestry.parent_id=parent.id
+       ) SELECT 1 FROM ancestry JOIN stash_project_guests guest ON guest.project_id=ancestry.project_id WHERE guest.account_id=$2)) AS can_read
       FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id=note.workspace_id WHERE note.id=$1`, [noteId, memberId]);
     return result.rows[0]?.can_edit ? "edit" : result.rows[0]?.can_read ? "read" : "none";
   }

@@ -23,7 +23,7 @@ gsap.registerPlugin(useGSAP);
 
 interface Note { id: string; content: string; document: NoteDocument; revision: number }
 interface Snapshot { sequence: number; update: string; updatedAt: string; updatedByMemberId: string; access: "edit" | "read" }
-interface NoteEditorProps { noteId: string; memberId: string; fetcher?: typeof fetch; token?: string }
+interface NoteEditorProps { noteId: string; memberId: string; fetcher?: typeof fetch; token?: string; contextVisible?: boolean }
 
 const blockIdentity = (document: Y.Doc) => Extension.create({
   name: "blockIdentity",
@@ -114,7 +114,7 @@ export function NoteEditor(props: NoteEditorProps) {
   return <NoteEditorDocument key={`${props.memberId}:${props.noteId}`} {...props} />;
 }
 
-function NoteEditorDocument({ noteId, memberId, fetcher = globalThis.fetch, token = localStorage.getItem("stash.memberToken") ?? "" }: NoteEditorProps) {
+function NoteEditorDocument({ noteId, memberId, fetcher = globalThis.fetch, token = localStorage.getItem("stash.memberToken") ?? "", contextVisible = true }: NoteEditorProps) {
   const [status, setStatus] = useState("Loading collaborative document");
   const [error, setError] = useState("");
   const [editorMode, setEditorMode] = useState<"rich" | "markdown">("rich");
@@ -304,7 +304,12 @@ function NoteEditorDocument({ noteId, memberId, fetcher = globalThis.fetch, toke
       <button className={styles.retry} type="button" onClick={() => { void note.refetch(); void collaboration.refetch(); }}>Try again</button>
     </div>
   </main>;
-  return <main id="workspace-content" ref={layoutRef} className={styles.layout} aria-busy={!editor || !note.data || !collaboration.data}>
+  const taskComposer = taskComposerOpen ? <form onSubmit={(event) => { event.preventDefault(); createTask.mutate(); }}>
+    <label>Project<select required value={taskProjectId} onChange={(event) => setTaskProjectId(event.target.value)}><option value="">Choose a Project</option>{workspaces.data?.workspaces.flatMap((workspace) => workspace.projects).map((project) => <option key={project.id} value={project.id}>{project.name} · {project.key}</option>)}</select></label>
+    <label>Task title<input required value={taskTitle} onChange={(event) => setTaskTitle(event.target.value)} /></label>
+    <button disabled={createTask.isPending} type="submit">Create linked Task</button><button type="button" onClick={() => setTaskComposerOpen(false)}>Cancel</button>
+    {createTask.isError ? <p role="alert">{createTask.error.message}</p> : null}</form> : null;
+  return <main id="workspace-content" ref={layoutRef} className={`${styles.layout} ${contextVisible || taskComposerOpen ? "" : styles.contextHidden}`} aria-busy={!editor || !note.data || !collaboration.data}>
     <article className={styles.document}>
       <header className={styles.header}><p className={styles.kicker}>Collaborative Note</p><h1 className={styles.title}>{note.data?.content.split("\n")[0] || "Untitled Note"}</h1></header>
       <Tabs.Root className={styles.mode} value={editorMode} activationMode="manual">
@@ -325,7 +330,8 @@ function NoteEditorDocument({ noteId, memberId, fetcher = globalThis.fetch, toke
         <button disabled={!canEdit} type="button" aria-label="Insert link" aria-pressed={editor?.isActive("link") ?? false} onClick={() => { const href = window.prompt("Link URL"); if (href) editor?.chain().focus().extendMarkRange("link").setLink({ href }).run(); }}>Link</button>
         <button disabled={!canEdit} type="button" aria-label="Insert callout" onClick={() => editor?.chain().focus().insertContent({ type: "callout", attrs: { blockKey: crypto.randomUUID(), blockId: null, kind: "note" }, content: [{ type: "paragraph", content: [{ type: "text", text: "Callout" }] }] }).run()}>Callout</button>
         <button disabled={!canEdit} type="button" aria-label="Insert Workspace Attachment" onClick={() => { const href = window.prompt("Workspace Attachment path"); if (!href?.startsWith("./attachments/")) return; const label = window.prompt("Attachment label")?.trim() || "Attachment"; editor?.chain().focus().insertContent({ type: "workspaceAttachment", attrs: { blockKey: crypto.randomUUID(), blockId: null, href, label } }).run(); }}>Attachment</button>
-        <button disabled={!canEdit} type="button" aria-label="Create Task from current Block" onClick={() => setTaskComposerOpen(true)}>Task</button>
+        <button disabled={!canEdit} type="button" aria-label="Create Task from current Block" onClick={() => setTaskComposerOpen(true)}
+          onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setTaskComposerOpen(true); } }}>Task</button>
         <button disabled={!canEdit} type="button" aria-label="Undo" onClick={() => editor?.chain().focus().undo().run()}>Undo</button>
         <button disabled={!canEdit} type="button" aria-label="Redo" onClick={() => editor?.chain().focus().redo().run()}>Redo</button>
       </div>
@@ -339,12 +345,15 @@ function NoteEditorDocument({ noteId, memberId, fetcher = globalThis.fetch, toke
         {markdownError ? <p className={styles.error} role="alert">{markdownError}</p> : null}
       </div></Tabs.Content>
       </Tabs.Root>
+      {linkedTasks.data?.tasks?.length ? <section className={styles.linkedTasks} aria-label="Linked Tasks"><h2>Linked Tasks</h2><ul>{linkedTasks.data.tasks.map((task) => <li key={task.id}>
+        <Link to={`/app/projects/${task.projectId}/tasks/${task.key}`}>{task.key} · {task.title}</Link><span>{task.status.name} · {task.relationshipState}</span></li>)}</ul></section> : null}
     </article>
-    <aside ref={asideRef} className={styles.aside} aria-label="Note context"><h2>Collaboration</h2><p ref={statusRef} className={styles.status} role="status">{visibleStatus}</p>
+    {contextVisible ? <aside ref={asideRef} className={styles.aside} aria-label="Note context"><h2>Collaboration</h2><p ref={statusRef} className={styles.status} role="status">{visibleStatus}</p>
       {error ? <><p className={styles.error} role="alert">{error}</p><button className={styles.retry} type="button" onClick={() => void synchronize()}>Retry saving</button></> : null}
       <p>Changes merge with contributions from other Members. Offline work remains on this device until the Instance accepts it.</p>
       <h2>Linked Tasks</h2>{linkedTasks.isError ? <p role="alert">{linkedTasks.error.message}</p> : linkedTasks.data?.tasks?.length ? <ul>{linkedTasks.data.tasks.map((task) => <li key={task.id}><Link to={`/app/projects/${task.projectId}/tasks/${task.key}`}>{task.key} · {task.title}</Link><span>{task.status.name} · {task.relationshipState}</span></li>)}</ul> : <p>No Tasks are linked to this Note yet.</p>}
-      {taskComposerOpen ? <form onSubmit={(event) => { event.preventDefault(); createTask.mutate(); }}><label>Project<select required value={taskProjectId} onChange={(event) => setTaskProjectId(event.target.value)}><option value="">Choose a Project</option>{workspaces.data?.workspaces.flatMap((workspace) => workspace.projects).map((project) => <option key={project.id} value={project.id}>{project.name} · {project.key}</option>)}</select></label><label>Task title<input required value={taskTitle} onChange={(event) => setTaskTitle(event.target.value)} /></label><button disabled={createTask.isPending} type="submit">Create linked Task</button><button type="button" onClick={() => setTaskComposerOpen(false)}>Cancel</button>{createTask.isError ? <p role="alert">{createTask.error.message}</p> : null}</form> : null}
-    </aside>
+      {taskComposer}
+    </aside> : <>{taskComposerOpen ? <aside className={styles.aside} aria-label="Linked Task composer"><h2>Create linked Task</h2>{taskComposer}</aside> : null}<p ref={statusRef} className={styles.visuallyHidden} role="status">{visibleStatus}</p>
+      {error ? <p className={styles.visuallyHidden} role="alert">{error}</p> : null}</>}
   </main>;
 }

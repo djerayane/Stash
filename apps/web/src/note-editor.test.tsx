@@ -56,6 +56,8 @@ it("loads an authorized collaborative Note and exposes keyboard-operable rich-te
   const fetcher = vi.fn<typeof fetch>(async (input, init) => {
     const url = String(input);
     if (url.endsWith("/collaboration")) return new Response(JSON.stringify({ sequence: 0, update: emptyUpdate(), updatedAt: new Date(0).toISOString(), updatedByMemberId: "ada", access: "edit" }));
+    if (url === "/api/workspaces") return Response.json({ workspaces: [{ id: "workspace", name: "Research", owner: { type: "personal", memberId: "member" },
+      projects: [{ id: "project", name: "Launch", key: "LAUNCH" }] }] });
     return new Response(JSON.stringify({ id: "note", revision: 1, content: "Release plan", document: { type: "doc", blocks: [
       { type: "paragraph", blockKey: "stable-key", id: "linked-block", content: [{ text: "Preserve this Block" }] },
       { type: "image", blockKey: "image-key", id: "linked-image", src: "/diagram.png", alt: "Diagram" },
@@ -63,7 +65,7 @@ it("loads an authorized collaborative Note and exposes keyboard-operable rich-te
     ] } }));
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(<QueryClientProvider client={client}><NoteEditor noteId="note" memberId="member" fetcher={fetcher} token="member-token" /></QueryClientProvider>);
+  render(<QueryClientProvider client={client}><NoteEditor contextVisible={false} noteId="note" memberId="member" fetcher={fetcher} token="member-token" /></QueryClientProvider>);
   expect(await screen.findByRole("heading", { name: "Release plan" })).toBeInTheDocument();
   await waitFor(() => expect(screen.getByRole("textbox", { name: "Note content" })).toHaveTextContent("Preserve this Block"));
   expect(screen.getByRole("toolbar", { name: "Text formatting" })).toBeInTheDocument();
@@ -73,6 +75,9 @@ it("loads an authorized collaborative Note and exposes keyboard-operable rich-te
   expect(document.querySelector("[data-block-id='linked-image']")).toHaveAttribute("data-block-key", "image-key");
   expect(document.querySelector("table[data-block-id='linked-table']")).toHaveAttribute("data-block-key", "table-key");
   fireEvent.click(screen.getByRole("button", { name: "Bold" }));
+  expect(screen.queryByRole("complementary", { name: "Note context" })).not.toBeInTheDocument();
+  fireEvent.keyDown(screen.getByRole("button", { name: "Create Task from current Block" }), { key: "Enter" });
+  expect(screen.getByRole("combobox", { name: "Project" })).toBeInTheDocument();
   expect(fetcher).toHaveBeenCalledWith("/api/notes/note", expect.objectContaining({ headers: { authorization: "Bearer member-token" } }));
 });
 
