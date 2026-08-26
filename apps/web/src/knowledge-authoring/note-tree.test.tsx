@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, useLocation } from "react-router";
 import { expect, it, vi } from "vitest";
 
 import { NoteTree } from "./note-tree";
@@ -13,8 +13,10 @@ const researchId = "44444444-4444-4444-8444-444444444444";
 
 function wrapper(children: React.ReactNode) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  return <MemoryRouter><QueryClientProvider client={client}>{children}</QueryClientProvider></MemoryRouter>;
+  return <MemoryRouter><QueryClientProvider client={client}>{children}<LocationProbe /></QueryClientProvider></MemoryRouter>;
 }
+
+function LocationProbe() { return <div data-testid="location">{useLocation().pathname}</div>; }
 
 it("creates children and offers keyboard and pointer alternatives for moving Notes", async () => {
   const nodes = [
@@ -39,6 +41,16 @@ it("creates children and offers keyboard and pointer alternatives for moving Not
   expect(await screen.findByRole("tree", { name: "Note Tree" })).toBeInTheDocument();
   expect(screen.getByRole("treeitem", { name: "Evidence" })).toHaveAttribute("aria-current", "page");
 
+  const roadmapItem = screen.getByRole("treeitem", { name: "Roadmap" });
+  const evidenceItem = screen.getByRole("treeitem", { name: "Evidence" });
+  roadmapItem.focus(); fireEvent.keyDown(roadmapItem, { key: "ArrowRight" }); expect(evidenceItem).toHaveFocus();
+  fireEvent.keyDown(evidenceItem, { key: "ArrowLeft" }); expect(roadmapItem).toHaveFocus();
+  fireEvent.keyDown(roadmapItem, { key: "End" }); expect(screen.getByRole("treeitem", { name: "Research" })).toHaveFocus();
+  fireEvent.keyDown(screen.getByRole("treeitem", { name: "Research" }), { key: "Home" }); expect(roadmapItem).toHaveFocus();
+
+  fireEvent.keyDown(screen.getByRole("button", { name: "Add child to Roadmap" }), { key: "Enter" });
+  expect(screen.getByTestId("location")).toHaveTextContent("/");
+
   fireEvent.click(screen.getByRole("button", { name: "Add child to Roadmap" }));
   fireEvent.change(screen.getByRole("textbox", { name: "Child Note title" }), { target: { value: "Questions" } });
   fireEvent.click(screen.getByRole("button", { name: "Create child Note" }));
@@ -53,22 +65,45 @@ it("creates children and offers keyboard and pointer alternatives for moving Not
   await waitFor(() => expect(requests).toContainEqual(expect.objectContaining({ path: `/api/notes/${researchId}/move`, body: { beforeId: roadmapId } })));
   expect(screen.getByRole("status")).toHaveTextContent("Research moved");
 
+  fireEvent.keyDown(screen.getByRole("treeitem", { name: "Research" }), { key: "ArrowRight", altKey: true });
+  await waitFor(() => expect(requests).toContainEqual(expect.objectContaining({ path: `/api/notes/${researchId}/move`, body: { parentId: roadmapId } })));
+  fireEvent.keyDown(evidenceItem, { key: "ArrowLeft", altKey: true });
+  await waitFor(() => expect(requests).toContainEqual(expect.objectContaining({ path: `/api/notes/${evidenceId}/move`, body: {} })));
+
   const data = new Map<string, string>();
   const transfer = { setData: (type: string, value: string) => data.set(type, value), getData: (type: string) => data.get(type) ?? "", effectAllowed: "move" };
   fireEvent.dragStart(screen.getByRole("treeitem", { name: "Research" }), { dataTransfer: transfer });
-  fireEvent.drop(screen.getByRole("treeitem", { name: "Roadmap" }), { dataTransfer: transfer });
-  await waitFor(() => expect(requests).toContainEqual(expect.objectContaining({ path: `/api/notes/${researchId}/move`, body: { parentId: roadmapId } })));
+  Object.defineProperty(roadmapItem, "getBoundingClientRect", { value: () => ({ top: 0, height: 30, bottom: 30, left: 0, right: 300, width: 300, x: 0, y: 0, toJSON() {} }) });
+  fireEvent.drop(roadmapItem, { dataTransfer: transfer, clientY: 5 });
+  await waitFor(() => expect(requests).toContainEqual(expect.objectContaining({ path: `/api/notes/${researchId}/move`, body: { beforeId: roadmapId } })));
   expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("Project access"));
+});
+
+it("lists removed branches from durable Workspace state and restores them", async () => {
+  const removedId = "55555555-5555-4555-8555-555555555555";
+  const requests: string[] = [];
+  const fetcher = vi.fn<typeof fetch>(async (input, init) => { const path = String(input); requests.push(path);
+    if (path.endsWith("/removed")) return Response.json({ branches: [{ id: removedId, workspaceId, title: "Archived field notes", state: "archived", removedAt: "2026-08-26T10:00:00.000Z" }] });
+    if (path.endsWith("/restore") && init?.method === "POST") return Response.json({ status: "restored", restoredIds: [removedId], parentRestored: true });
+    return Response.json({ nodes: [] });
+  });
+  render(wrapper(<NoteTree fetcher={fetcher} token="member" workspaceId={workspaceId} />));
+  fireEvent.click(await screen.findByRole("button", { name: "Show archived and trashed branches" }));
+  expect(await screen.findByText("Archived field notes")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Restore Archived field notes" }));
+  await waitFor(() => expect(requests).toContain(`/api/notes/${removedId}/restore`));
 });
 
 it("keeps contextual knowledge closed by default and restores focus after keyboard use", async () => {
   const requests: Array<{ path: string; method: string; body?: any }> = [];
   const context = {
     noteId: evidenceId,
+    workspaceId,
     breadcrumbs: [{ id: roadmapId, title: "Roadmap" }, { id: evidenceId, title: "Evidence" }],
     outgoingLinks: [{ id: "link-1", noteId: researchId, title: "Research", label: "Supports", relationshipType: "supports" }],
     backlinks: [{ id: "link-2", noteId: roadmapId, title: "Roadmap", label: "Evidence" }],
     projectIds: ["project-1"],
+    projects: [{ id: "project-1", name: "Launch", key: "LAUNCH" }],
   };
   vi.spyOn(window, "confirm").mockReturnValue(true);
   const fetcher = vi.fn<typeof fetch>(async (input, init) => {
@@ -78,7 +113,8 @@ it("keeps contextual knowledge closed by default and restores focus after keyboa
       collectionCount: 1, externalLinks: [{ noteId: researchId, title: "Research", direction: "outgoing" }], projectAccessChanges: [] } });
     if (path.endsWith("/archive")) return Response.json({ status: "updated", affectedIds: [evidenceId] });
     if (path.endsWith("/restore")) return Response.json({ status: "restored", restoredIds: [evidenceId], parentRestored: true });
-    if (path.endsWith("/links") && method === "POST") return new Response(JSON.stringify({ link: { id: "new-link" } }), { status: 201 });
+    if (path.endsWith("/context/links") && method === "POST") return new Response(JSON.stringify({ link: { id: "new-link" } }), { status: 201 });
+    if (path.endsWith("/note-tree")) return Response.json({ nodes: [{ id: evidenceId, title: "Evidence" }, { id: researchId, title: "Research" }] });
     return Response.json(context);
   });
   render(wrapper(<NoteWorkspace fetcher={fetcher} noteId={evidenceId} token="member"><article>Editor stays central</article></NoteWorkspace>));
@@ -89,11 +125,23 @@ it("keeps contextual knowledge closed by default and restores focus after keyboa
   const drawer = screen.getByRole("complementary", { name: "Note context" });
   expect(drawer).toHaveTextContent("Roadmap");
   expect(drawer).toHaveTextContent("Research");
-  fireEvent.change(within(drawer).getByRole("textbox", { name: "Target Note ID" }), { target: { value: researchId } });
+  const target = within(drawer).getByRole("combobox", { name: "Target Note" });
+  await screen.findByRole("option", { name: "Research" });
+  fireEvent.change(target, { target: { value: researchId } });
+  expect(target).toHaveValue(researchId);
   fireEvent.change(within(drawer).getByRole("textbox", { name: "Relationship type" }), { target: { value: "supports" } });
-  fireEvent.click(within(drawer).getByRole("button", { name: "Create Note link" }));
-  await waitFor(() => expect(requests).toContainEqual(expect.objectContaining({ path: `/api/notes/${evidenceId}/links`, method: "POST",
+  fireEvent.submit(within(drawer).getByRole("button", { name: "Create Note link" }).closest("form")!);
+  await waitFor(() => expect(requests).toContainEqual(expect.objectContaining({ path: `/api/notes/${evidenceId}/context/links`, method: "POST",
     body: { targetNoteId: researchId, label: "Note", relationshipType: "supports" } })));
+  const linksTab = within(drawer).getByRole("tab", { name: "Links" }); linksTab.focus(); fireEvent.keyDown(linksTab, { key: "ArrowRight" });
+  expect(within(drawer).getByRole("tab", { name: "Properties" })).toHaveFocus();
+  expect(within(drawer).getByRole("link", { name: "Open Note history and revisions" })).toHaveAttribute("href", `/app/notes/${evidenceId}/history`);
+  fireEvent.click(within(drawer).getByRole("tab", { name: "Projects" }));
+  expect(within(drawer).getByRole("link", { name: "Launch" })).toHaveAttribute("href", "/app/projects/project-1/boards");
+  fireEvent.click(within(drawer).getByRole("tab", { name: "Sharing" }));
+  expect(within(drawer).getByRole("link", { name: "Open Member access settings" })).toHaveAttribute("href", "/app/settings/members");
+  fireEvent.click(within(drawer).getByRole("tab", { name: "Discussions" }));
+  expect(within(drawer).getByRole("link", { name: "Open contextual Discussions" })).toHaveAttribute("href", `/app/notes/${evidenceId}/discussions`);
   fireEvent.click(within(drawer).getByRole("button", { name: "Close Note context" }));
   await waitFor(() => expect(open).toHaveFocus());
 

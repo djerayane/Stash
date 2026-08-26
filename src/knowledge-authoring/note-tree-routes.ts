@@ -3,12 +3,16 @@ import { InvalidNoteTreeInput, type NoteTreeService } from "./note-tree.js";
 import type { MemberAccessResolver } from "../workspaces-projects.js";
 
 const workspaceTree = /^\/api\/workspaces\/[^/]+\/note-tree$/;
+const removedTree = /^\/api\/workspaces\/[^/]+\/note-tree\/removed$/;
 const noteTreeAction = /^\/api\/notes\/[^/]+\/(?:move|context|branch-preview|archive|trash|restore)$/;
+const contextLinks = /^\/api\/notes\/[^/]+\/context\/links$/;
 
 export function noteTreeRoutes(service: NoteTreeService, access: MemberAccessResolver): HttpRoute {
   return {
     matches(request, url) {
       return (["GET", "POST"].includes(request.method ?? "") && workspaceTree.test(url.pathname))
+        || (request.method === "GET" && removedTree.test(url.pathname))
+        || (request.method === "POST" && contextLinks.test(url.pathname))
         || (["GET", "POST"].includes(request.method ?? "") && noteTreeAction.test(url.pathname));
     },
     async handle(request, response, url) {
@@ -16,6 +20,12 @@ export function noteTreeRoutes(service: NoteTreeService, access: MemberAccessRes
       if (!member) { json(response, 401, { error: "unauthorized", message: "A valid Member session is required." }); return true; }
       try {
         const segments = url.pathname.split("/");
+        if (removedTree.test(url.pathname)) {
+          const result = await service.removed(member.accountId, decodeURIComponent(segments[3]!));
+          if (result.status === "found") json(response, 200, { branches: result.branches });
+          else json(response, 403, { error: result.status, message: "This Workspace is unavailable." });
+          return true;
+        }
         if (workspaceTree.test(url.pathname)) {
           const workspaceId = decodeURIComponent(segments[3]!);
           if (request.method === "GET") {
@@ -32,6 +42,14 @@ export function noteTreeRoutes(service: NoteTreeService, access: MemberAccessRes
         }
         const noteId = decodeURIComponent(segments[3]!);
         const action = segments[4]!;
+        if (contextLinks.test(url.pathname)) {
+          const result = await service.createContextLink(member.accountId, noteId, await readJson(request));
+          if (result.status === "created") json(response, 201, { link: result.link });
+          else if (result.status === "already_linked") json(response, 409, { error: result.status, message: "These Notes are already linked." });
+          else json(response, 404, { error: result.status, message: result.status === "target_not_found"
+            ? "The target Note is unavailable." : "This Note is unavailable." });
+          return true;
+        }
         if (action === "context") {
           const result = await service.context(member.accountId, noteId);
           if (result.status === "found") json(response, 200, result.context);

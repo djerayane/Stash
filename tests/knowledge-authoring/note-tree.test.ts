@@ -8,12 +8,12 @@ import { after, before, describe, test } from "node:test";
 import { createAuthenticationSecretCodec } from "../../src/authentication-secrets.js";
 import { EmbeddedInstanceStore } from "../../src/embedded-instance-store.js";
 import { NoteTreeService } from "../../src/knowledge-authoring/note-tree.js";
-import { NoteLinkService } from "../../src/note-links.js";
 import { NoteService } from "../../src/notes.js";
 import { WorkspaceProjectService } from "../../src/workspaces-projects.js";
 
 describe("Note Tree", () => {
   const ownerId = "10101010-1010-4010-8010-101010101010";
+  const guestId = "18181818-1818-4818-8818-181818181818";
   const organizationId = "20202020-2020-4020-8020-202020202020";
   let store: EmbeddedInstanceStore;
   let workspaceId: string;
@@ -22,6 +22,8 @@ describe("Note Tree", () => {
   let researchId = "";
   let questionsId = "";
   let evidenceId = "";
+  let launchProjectId = "";
+  let strategyProjectId = "";
 
   before(async () => {
     store = await EmbeddedInstanceStore.open(
@@ -37,6 +39,7 @@ describe("Note Tree", () => {
       passwordHash: "test-only",
       role: "Owner",
     });
+    await store.upgradeDatabase.query("INSERT INTO stash_accounts(id,name,email,password_hash) VALUES($1,'Grace Guest','grace@example.test','test-only')", [guestId]);
     const workspace = await new WorkspaceProjectService(store.database).createWorkspace(ownerId, {
       name: "Research",
       owner: { type: "organization", organizationId },
@@ -95,16 +98,39 @@ describe("Note Tree", () => {
     ]);
   });
 
+  test("concurrent inverse moves serialize on the Workspace and cannot commit a cycle", async () => {
+    const results = await Promise.all([
+      service.moveNoteBranch(roadmapId, { parentId: researchId }, ownerId),
+      service.moveNoteBranch(researchId, { parentId: roadmapId }, ownerId),
+    ]);
+    assert.equal(results.filter(({ status }) => status === "moved").length, 1);
+    assert.equal(results.filter(({ status }) => status === "cycle").length, 1);
+    const tree = await service.list(ownerId, workspaceId);
+    assert.equal(tree.status, "found");
+    if (tree.status !== "found") return;
+    const parentById = new Map(tree.nodes.map(({ id, parentId }) => [id, parentId]));
+    for (const start of [roadmapId, researchId]) { const seen = new Set<string>(); let cursor: string | undefined = start;
+      while (cursor) { assert.equal(seen.has(cursor), false); seen.add(cursor); cursor = parentById.get(cursor); } }
+    if (parentById.get(roadmapId)) assert.equal((await service.moveNoteBranch(roadmapId, {}, ownerId)).status, "moved");
+    if (parentById.get(researchId)) assert.equal((await service.moveNoteBranch(researchId, {}, ownerId)).status, "moved");
+  });
+
   test("move previews inherit Project membership while ordinary links change neither containment nor access", async () => {
     const projects = new WorkspaceProjectService(store.database);
     const project = await projects.createProject(ownerId, workspaceId, { name: "Launch", key: "LAUNCH" });
-    assert.equal(project.status, "created");
-    if (project.status !== "created") return;
+    const strategy = await projects.createProject(ownerId, workspaceId, { name: "Strategy", key: "STRATEGY" });
+    const review = await projects.createProject(ownerId, workspaceId, { name: "Review", key: "REVIEW" });
+    assert.equal(project.status, "created"); assert.equal(strategy.status, "created"); assert.equal(review.status, "created");
+    if (project.status !== "created" || strategy.status !== "created" || review.status !== "created") return;
+    launchProjectId = project.project.id; strategyProjectId = strategy.project.id;
     const organized = await new NoteService(store.database).triage(ownerId, workspaceId, roadmapId, {
       action: "organize",
       projectId: project.project.id,
     });
     assert.equal(organized.status, "updated");
+    assert.equal((await new NoteService(store.database).triage(ownerId, workspaceId, questionsId, {
+      action: "organize", projectId: review.project.id,
+    })).status, "updated");
 
     const preview = await service.preview(ownerId, evidenceId, { action: "move", parentId: roadmapId, beforeId: questionsId });
     assert.equal(preview.status, "found");
@@ -117,7 +143,7 @@ describe("Note Tree", () => {
     if (moved.status !== "moved") return;
     assert.deepEqual(moved.projectAccessChanges, preview.impact.projectAccessChanges);
 
-    const linked = await new NoteLinkService(store.database).create(ownerId, researchId, {
+    const linked = await service.createContextLink(ownerId, researchId, {
       targetNoteId: evidenceId,
       label: "Supporting evidence",
       relationshipType: "supports",
@@ -133,6 +159,29 @@ describe("Note Tree", () => {
     assert.deepEqual(researchContext.context.projectIds, []);
     assert.deepEqual(evidenceContext.context.projectIds, [project.project.id]);
     assert.equal((await service.list(ownerId, workspaceId)).status, "found");
+
+    const strategyRoot = await service.create(ownerId, workspaceId, { title: "Strategy home" });
+    assert.equal(strategyRoot.status, "created"); if (strategyRoot.status !== "created") return;
+    assert.equal((await new NoteService(store.database).triage(ownerId, workspaceId, strategyRoot.node.id, {
+      action: "organize", projectId: strategy.project.id,
+    })).status, "updated");
+    const inherited = await service.preview(ownerId, roadmapId, { action: "move", parentId: strategyRoot.node.id });
+    assert.equal(inherited.status, "found"); if (inherited.status !== "found") return;
+    assert.deepEqual(inherited.impact.projectAccessChanges, [roadmapId, evidenceId, questionsId].map((noteId) => ({
+      noteId, projectId: strategy.project.id, effect: "gained" as const,
+    })));
+    assert.equal((await service.moveNoteBranch(roadmapId, { parentId: strategyRoot.node.id }, ownerId)).status, "moved");
+
+    await store.upgradeDatabase.query("INSERT INTO stash_project_guests(project_id,account_id) VALUES($1,$2)", [project.project.id, guestId]);
+    assert.equal((await service.createContextLink(ownerId, evidenceId, {
+      targetNoteId: researchId, label: "Private research",
+    })).status, "created");
+    const guestContext = await service.context(guestId, evidenceId);
+    assert.equal(guestContext.status, "found"); if (guestContext.status !== "found") return;
+    assert.deepEqual(guestContext.context.breadcrumbs.map(({ id }) => id), [roadmapId, evidenceId]);
+    assert.deepEqual(guestContext.context.outgoingLinks, []);
+    assert.deepEqual(guestContext.context.backlinks, []);
+    assert.deepEqual(guestContext.context.projectIds, [project.project.id]);
   });
 
   test("archive and trash preview and recover the complete branch structure in portable state", async () => {
@@ -142,8 +191,12 @@ describe("Note Tree", () => {
     assert.equal(preview.impact.descendantCount, 2);
     assert.deepEqual(preview.impact.externalLinks, [
       { noteId: researchId, title: "Research", direction: "incoming" },
+      { noteId: researchId, title: "Research", direction: "outgoing" },
     ]);
     assert.equal(preview.impact.collectionCount, 0);
+    assert.equal(preview.impact.projectAccessChanges.length, 7);
+    assert.deepEqual(preview.impact.projectAccessChanges.filter(({ noteId }) => noteId === evidenceId),
+      [launchProjectId, strategyProjectId].sort().map((projectId) => ({ noteId: evidenceId, projectId, effect: "lost" as const })));
 
     const archived = await service.remove(ownerId, roadmapId, "archived");
     assert.deepEqual(archived.status, "updated");
@@ -151,6 +204,9 @@ describe("Note Tree", () => {
     assert.equal(hiddenAfterArchive.status, "found");
     if (hiddenAfterArchive.status !== "found") return;
     assert.equal(hiddenAfterArchive.nodes.some(({ id }) => [roadmapId, evidenceId, questionsId].includes(id)), false);
+    const removed = await service.removed(ownerId, workspaceId);
+    assert.equal(removed.status, "found");
+    if (removed.status === "found") assert.deepEqual(removed.branches.map(({ id, state }) => ({ id, state })), [{ id: roadmapId, state: "archived" }]);
     assert.deepEqual(await service.restore(ownerId, roadmapId), {
       status: "restored",
       restoredIds: [roadmapId, evidenceId, questionsId],
@@ -173,5 +229,16 @@ describe("Note Tree", () => {
     assert.equal(locations.get(evidenceId)?.parentId, roadmapId);
     assert.equal(locations.get(questionsId)?.parentId, roadmapId);
     assert.match(locations.get(evidenceId)?.position ?? "", /^\d+$/);
+  });
+
+  test("branch impact uses the focused inspector seam for future Collection contributions", async () => {
+    const inspected: string[][] = [];
+    const inspectedService = new NoteTreeService(store.database.noteTreeRepository(), { async inspect(_memberId, noteIds) {
+      inspected.push([...noteIds]); return { collectionCount: 3 };
+    } });
+    const preview = await inspectedService.preview(ownerId, roadmapId, { action: "archive" });
+    assert.equal(preview.status, "found"); if (preview.status !== "found") return;
+    assert.equal(preview.impact.collectionCount, 3);
+    assert.deepEqual(inspected, [[roadmapId, evidenceId, questionsId]]);
   });
 });

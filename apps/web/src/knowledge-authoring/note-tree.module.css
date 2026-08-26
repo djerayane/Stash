@@ -4,6 +4,7 @@
 .treeHeader { display: flex; align-items: center; justify-content: space-between; gap: var(--stash-space-2); padding: 0 var(--stash-space-2) var(--stash-space-3); }
 .treeHeader p, .drawer header p { margin: 0; color: var(--stash-color-accent-soft); font-size: .62rem; font-weight: 760; letter-spacing: .1em; text-transform: uppercase; }
 .treeHeader h1, .treeHeader h2 { margin: .1rem 0 0; color: var(--stash-color-sidebar-ink); font-size: .8rem; letter-spacing: -.01em; }
+.headerActions { display: flex; gap: .35rem; }
 .treePage .treeHeader h1 { font-size: clamp(1.8rem, 4vw, 3rem); font-weight: 520; letter-spacing: -.04em; }
 .treeHeader button, .itemActions button, .disclosure { min-width: 1.85rem; min-height: 1.85rem; border: 1px solid var(--stash-color-sidebar-border); border-radius: var(--stash-radius-sm); color: var(--stash-color-sidebar-ink); background: transparent; }
 .tree { overflow: auto; display: grid; gap: .15rem; padding: 0 var(--stash-space-1) var(--stash-space-4); }
@@ -22,6 +23,14 @@
 .quickCreate input, .inlineCreate input { min-width: 0; padding: .45rem; color: var(--stash-color-ink); background: var(--stash-color-canvas); border: 1px solid var(--stash-border-strong); }
 .quickCreate button, .inlineCreate button { min-height: 2rem; border: 0; color: var(--stash-color-accent-contrast); background: var(--stash-color-accent); font-weight: 700; }
 .feedback { padding: var(--stash-space-3); color: var(--stash-color-sidebar-muted); font-size: .72rem; line-height: 1.5; }
+.recovery { margin: auto var(--stash-space-2) var(--stash-space-3); padding: var(--stash-space-3); color: var(--stash-color-sidebar-ink); border: 1px solid var(--stash-color-sidebar-border); }
+.recovery h3, .recovery p { margin: 0; font-size: .72rem; }
+.recovery ul { display: grid; gap: .5rem; margin: .65rem 0 0; padding: 0; list-style: none; }
+.recovery li { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+.recovery li span { min-width: 0; display: grid; gap: .1rem; }
+.recovery strong { overflow: hidden; font-size: .72rem; text-overflow: ellipsis; white-space: nowrap; }
+.recovery small { color: var(--stash-color-sidebar-muted); font-size: .62rem; text-transform: capitalize; }
+.recovery button { min-height: 1.9rem; border: 1px solid var(--stash-color-sidebar-border); color: var(--stash-color-sidebar-ink); background: transparent; }
 .srStatus { min-height: 1px; margin: auto 0 0; overflow: hidden; color: var(--stash-color-sidebar-muted); font-size: .68rem; }
 .noteWorkspace { min-height: calc(100dvh - 4.5rem); display: grid; grid-template-rows: auto auto 1fr; grid-template-columns: minmax(0, 1fr); background: var(--stash-color-canvas); }
 .noteWorkspace.drawerIsOpen { grid-template-columns: minmax(0, 1fr) 20rem; }
@@ -53,7 +62,7 @@
 .drawerBody li span { color: var(--stash-color-muted); font-size: .68rem; }
 .linkForm { display: grid; gap: var(--stash-space-3); margin-bottom: var(--stash-space-5); padding-bottom: var(--stash-space-5); border-bottom: 1px solid var(--stash-border-subtle); }
 .linkForm label { display: grid; gap: .3rem; color: var(--stash-color-muted); font-size: .7rem; font-weight: 700; }
-.linkForm input { min-width: 0; padding: .55rem; border: 1px solid var(--stash-border-strong); color: var(--stash-color-ink); background: var(--stash-color-canvas); }
+.linkForm input, .linkForm select { min-width: 0; padding: .55rem; border: 1px solid var(--stash-border-strong); color: var(--stash-color-ink); background: var(--stash-color-canvas); }
 .linkForm button { min-height: 2.25rem; border: 0; color: var(--stash-color-accent-contrast); background: var(--stash-color-accent); font-weight: 720; }
 @media (max-width: 760px) {
   .treePanel:not(.treePage) { display: none; }

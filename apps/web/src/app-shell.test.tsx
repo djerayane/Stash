@@ -117,6 +117,10 @@ test("offers a recoverable error action", () => {
 test("restores the last active Note or primary view without accepting an unsafe route", () => {
   const storage = { getItem: vi.fn().mockReturnValue("/app/notes/note-17"), setItem: vi.fn() };
   expect(restoreLastActiveContext("workspace-1", storage)).toBe("/app/notes/note-17");
+  storage.getItem.mockReturnValue("/app/projects/project-1/boards/board-2");
+  expect(restoreLastActiveContext("workspace-1", storage)).toBe("/app/projects/project-1/boards/board-2");
+  storage.getItem.mockReturnValue("/app/notifications");
+  expect(restoreLastActiveContext("workspace-1", storage)).toBe("/app/notifications");
   storage.getItem.mockReturnValue("/app/settings/members");
   expect(restoreLastActiveContext("workspace-1", storage)).toBe("/app/notes");
   renderShell("/app");
@@ -128,7 +132,8 @@ test("exposes the implemented search, capture, and notification actions", async 
   vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ workspaces: [{ id: "workspace-1", name: "Engine Room", projects: [{ id: "project-1", name: "Launch", key: "LAUNCH" }] }] }));
   renderShell("/app/tasks");
   expect(screen.queryByRole("link", { name: "New task" })).not.toBeInTheDocument();
-  expect(await screen.findByRole("combobox", { name: "Workspace" })).toBeInTheDocument();
+  await screen.findByRole("heading", { name: "Tasks" });
+  expect(screen.queryByRole("combobox", { name: "Workspace" })).not.toBeInTheDocument();
   expect(screen.getByRole("searchbox", { name: "Search Workspace" })).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "Notifications" })).toHaveAttribute("href", "/app/notifications");
   expect(screen.getByRole("link", { name: "Capture" })).toHaveAttribute("href", "/app/inbox");

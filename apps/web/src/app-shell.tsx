@@ -51,7 +51,13 @@ interface ContextStorage { getItem(key: string): string | null; setItem(key: str
 const defaultContext = "/app/notes";
 export const lastActiveContextKey = (workspaceId: string) => `stash.last-active-context:${workspaceId}`;
 export function isRestorableContext(value: string): boolean {
-  return value === "/app/inbox" || value === "/app/notes" || value.startsWith("/app/notes/") || value === "/app/search" || value.startsWith("/app/search?") || value === "/app/tasks" || value.startsWith("/app/tasks?");
+  if (!value.startsWith("/app/") || value.includes("#") || value.includes("//")) return false;
+  const path = value.split("?", 1)[0]!;
+  return path === "/app/inbox" || path === "/app/notes" || path === "/app/search" || path === "/app/tasks"
+    || path === "/app/activity" || path === "/app/notifications"
+    || /^\/app\/notes\/[^/]+(?:\/history|\/discussions|\/blocks\/[^/]+\/discussions)?$/.test(path)
+    || /^\/app\/tasks\/[^/]+\/discussions$/.test(path)
+    || /^\/app\/projects\/[^/]+\/(?:boards(?:\/[^/]+)?|notifications|tasks\/[^/]+(?:\/development)?)$/.test(path);
 }
 export function restoreLastActiveContext(workspaceId: string, storage: ContextStorage = localStorage): string {
   try { const value = storage.getItem(lastActiveContextKey(workspaceId)); return value && isRestorableContext(value) ? value : defaultContext; }

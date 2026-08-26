@@ -1839,9 +1839,9 @@ export class PostgresDatabase implements
       const target = notes.rows.find((row) => row.id === link.targetNoteId && row.accessible && row.workspace_id === source.workspace_id);
       if (!target) return { status: "target_not_found" as const };
       const saved = { ...link, workspaceId: source.workspace_id };
-      const inserted = await client.query(`INSERT INTO stash_note_links(id,workspace_id,source_note_id,target_note_id,target_path,label,relationship_type,revision)
-        VALUES($1,$2,$3,$4,$5,$6,$7,1) ON CONFLICT(source_note_id,target_note_id) DO NOTHING RETURNING id`,
-      [saved.id, saved.workspaceId, saved.sourceNoteId, saved.targetNoteId, target.portable_path, saved.label, saved.relationshipType ?? null]);
+      const inserted = await client.query(`INSERT INTO stash_note_links(id,workspace_id,source_note_id,target_note_id,target_path,label,revision)
+        VALUES($1,$2,$3,$4,$5,$6,1) ON CONFLICT(source_note_id,target_note_id) DO NOTHING RETURNING id`,
+      [saved.id, saved.workspaceId, saved.sourceNoteId, saved.targetNoteId, target.portable_path, saved.label]);
       if (!inserted.rowCount) return { status: "already_linked" as const };
       const projection: PortableNoteLinkStateProjection = { schema: "stash.note-link.v2", ...saved };
       await this.#recordPortableProjection(client, "NoteLink", saved.id, projection.schema, projection);
@@ -3792,7 +3792,6 @@ export class PostgresDatabase implements
       ALTER TABLE stash_note_links ADD COLUMN IF NOT EXISTS target_path TEXT;
       ALTER TABLE stash_note_links ADD COLUMN IF NOT EXISTS candidate_note_ids UUID[] NOT NULL DEFAULT '{}';
       ALTER TABLE stash_note_links ADD COLUMN IF NOT EXISTS label TEXT NOT NULL DEFAULT 'Note';
-      ALTER TABLE stash_note_links ADD COLUMN IF NOT EXISTS relationship_type TEXT;
       ALTER TABLE stash_note_links ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0);
       UPDATE stash_note_links link SET target_path=note.portable_path FROM stash_notes note
         WHERE link.target_note_id=note.id AND link.target_path IS NULL;
@@ -4331,11 +4330,12 @@ export class PostgresDatabase implements
           attachment.relativePath,bundle.attachmentStorageKeys.get(attachment.id),attachment.source,accountFor(attachment.createdBy),attachment.createdAt]);
         await this.#recordPortableProjection(client,"Attachment",attachment.id,attachment.schema,attachment);
       }
-      for (const link of state.noteLinks) { await client.query(`INSERT INTO stash_note_links(id,workspace_id,source_note_id,target_note_id,target_path,candidate_note_ids,label,relationship_type,revision)
-        VALUES($1,$2,$3,$4,$5,$6::uuid[],$7,$8,$9)`,[link.id,state.workspace.id,link.sourceNoteId,link.targetNoteId ?? null,
+      for (const link of state.noteLinks) { await client.query(`INSERT INTO stash_note_links(id,workspace_id,source_note_id,target_note_id,target_path,candidate_note_ids,label,revision)
+        VALUES($1,$2,$3,$4,$5,$6::uuid[],$7,$8)`,[link.id,state.workspace.id,link.sourceNoteId,link.targetNoteId ?? null,
         "targetPath" in link ? link.targetPath : null,"candidateNoteIds" in link ? link.candidateNoteIds : [],"label" in link ? link.label : "Note",
-        "relationshipType" in link ? link.relationshipType : null,"revision" in link ? link.revision : 1]);
+        "revision" in link ? link.revision : 1]);
         await this.#recordPortableProjection(client,"NoteLink",link.id,link.schema,link); }
+      await this.#noteTreeRepository.applyImportedRelationships(client, state.noteLinks);
       for (const revision of state.noteHistory) await client.query(`INSERT INTO stash_note_history(note_id,workspace_id,revision,content,document,actor_account_id,cause,recorded_at)
         VALUES($1,$2,$3,$4,$5::jsonb,$6,$7,$8)`,[revision.noteId,state.workspace.id,revision.revision,revision.content,JSON.stringify(revision.document),
         accountFor(revision.actor),JSON.stringify(revision.cause),revision.recordedAt]);
@@ -5274,19 +5274,7 @@ export class PostgresDatabase implements
   }
 
   async #authorizeNote(client: PostgresQueryable, memberId: string, noteId: string): Promise<"edit" | "read" | "none"> {
-    const result = await client.query<{ can_edit: boolean; can_read: boolean }>(`SELECT
-      ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
-       (workspace.owner_type='organization' AND EXISTS(SELECT 1 FROM stash_organization_memberships membership
-         WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2))) AS can_edit,
-      ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
-       (workspace.owner_type='organization' AND EXISTS(SELECT 1 FROM stash_organization_memberships membership
-         WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2)) OR
-       EXISTS(WITH RECURSIVE ancestry AS (
-         SELECT note.id,note.parent_id,note.project_id UNION ALL
-         SELECT parent.id,parent.parent_id,parent.project_id FROM stash_notes parent JOIN ancestry ON ancestry.parent_id=parent.id
-       ) SELECT 1 FROM ancestry JOIN stash_project_guests guest ON guest.project_id=ancestry.project_id WHERE guest.account_id=$2)) AS can_read
-      FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id=note.workspace_id WHERE note.id=$1`, [noteId, memberId]);
-    return result.rows[0]?.can_edit ? "edit" : result.rows[0]?.can_read ? "read" : "none";
+    return this.#noteTreeRepository.authorizeNote(client, memberId, noteId);
   }
 
   async #seedNoteCollaboration(client: PostgresQueryable, noteId: string): Promise<any> {
