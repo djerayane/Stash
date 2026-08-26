@@ -70,18 +70,19 @@ class DiscussionFake implements DatabaseProbe, DiscussionRepository {
       const found = await this.findDiscussion(memberId, discussion.id);
       if (found.status === "found") discussions.push(found.discussion);
     }
-    return { status: "found" as const, discussions };
+    return { status: "found" as const, access: memberId === "ada" ? "edit" as const : "read" as const, discussions };
   }
   async listBlockDiscussions(memberId: string, sourceNoteId: string, sourceBlockKey: string) {
     if (sourceNoteId !== noteId || sourceBlockKey !== blockKey || !this.blockPresent) return { status: "not_found" as const };
     const listed = await this.listNoteDiscussions(memberId, sourceNoteId);
     if (listed.status !== "found") return listed;
-    return { status: "found" as const, discussions: listed.discussions.filter(({ target }) => target.kind === "block" && target.blockId === blockId) };
+    return { status: "found" as const, access: listed.access,
+      discussions: listed.discussions.filter(({ target }) => target.kind === "block" && target.blockId === blockId) };
   }
   async listTaskDiscussions(memberId: string, sourceTaskId: string) {
     if (this.revoked || ![taskId, secretTaskId].includes(sourceTaskId)
       || memberId !== "ada" && !(memberId === "grace" && sourceTaskId === taskId)) return { status: "not_found" as const };
-    return { status: "found" as const, discussions: this.discussions
+    return { status: "found" as const, access: memberId === "ada" ? "edit" as const : "read" as const, discussions: this.discussions
       .filter(({ target }) => target.kind === "task" && target.taskId === sourceTaskId)
       .map((discussion) => structuredClone(discussion)) };
   }

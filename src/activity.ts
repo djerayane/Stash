@@ -24,7 +24,7 @@ export interface ActivityRepository {
     { status: "found"; activities: ActivityRecord[] } | { status: "forbidden" }
   >;
   listNoteHistory(memberId: string, noteId: string): Promise<
-    { status: "found"; revisions: NoteHistoryRevision[] } | { status: "not_found" }
+    { status: "found"; access: "edit" | "read"; revisions: NoteHistoryRevision[] } | { status: "not_found" }
   >;
   restoreNote(memberId: string, noteId: string, targetRevision: number, expectedRevision: number,
     idempotencyKey: string): Promise<RestoreNoteOutcome>;

@@ -21,7 +21,7 @@ export function activityRoutes(service: ActivityService, memberAccess: MemberAcc
         const noteId = decodeURIComponent(parts[3]!);
         if (request.method === "GET") {
           const result = await service.listNoteHistory(access.accountId, noteId);
-          if (result.status === "found") json(response, 200, { revisions: result.revisions });
+          if (result.status === "found") json(response, 200, { access: result.access, revisions: result.revisions });
           else json(response, 404, { error: "note_not_found", message: "This Note history is unavailable." });
           return true;
         }

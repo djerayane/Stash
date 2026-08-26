@@ -935,24 +935,27 @@ export class PostgresDatabase implements
   async listNoteDiscussions(memberId: string, noteId: string) {
     return this.#kernel.withSession(async (client) => {
       await this.#ensureDiscussionSchema(client);
-      if (await this.#authorizeNote(client, memberId, noteId) === "none") return { status: "not_found" as const };
+      const access = await this.#authorizeNote(client, memberId, noteId);
+      if (access === "none") return { status: "not_found" as const };
       const ids = await client.query<{ id: string }>("SELECT id FROM stash_discussions WHERE note_id = $1 ORDER BY created_at, id", [noteId]);
       const discussions: DiscussionRecord[] = [];
       for (const { id } of ids.rows) {
         const discussion = await this.#readDiscussion(client, memberId, id, false);
         if (discussion) discussions.push(discussion);
       }
-      return { status: "found" as const, discussions };
+      return { status: "found" as const, access, discussions };
     });
   }
 
   async listTaskDiscussions(memberId: string, taskId: string) {
     return this.#kernel.withSession(async (client) => {
       await this.#ensureDiscussionSchema(client);
-      const access = await client.query(`SELECT 1 FROM stash_tasks task JOIN stash_workspaces workspace ON workspace.id = task.workspace_id
-        WHERE task.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR EXISTS (
+      const access = await client.query<{ can_write: boolean }>(`SELECT ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR EXISTS (
           SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id = workspace.organization_owner_id
-            AND membership.account_id = $2) OR EXISTS (
+            AND membership.account_id = $2)) AS can_write FROM stash_tasks task JOIN stash_workspaces workspace ON workspace.id = task.workspace_id
+        WHERE task.id = $1 AND (((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR EXISTS (
+          SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id = workspace.organization_owner_id
+            AND membership.account_id = $2)) OR EXISTS (
           SELECT 1 FROM stash_project_guests guest WHERE guest.project_id = task.project_id AND guest.account_id = $2))`, [taskId, memberId]);
       if (!access.rowCount) return { status: "not_found" as const };
       const ids = await client.query<{ id: string }>("SELECT id FROM stash_discussions WHERE task_id = $1 ORDER BY created_at, id", [taskId]);
@@ -961,14 +964,15 @@ export class PostgresDatabase implements
         const discussion = await this.#readDiscussion(client, memberId, id, false);
         if (discussion) discussions.push(discussion);
       }
-      return { status: "found" as const, discussions };
+      return { status: "found" as const, access: access.rows[0]!.can_write ? "edit" as const : "read" as const, discussions };
     });
   }
 
   async listBlockDiscussions(memberId: string, noteId: string, blockKey: string) {
     return this.#kernel.withSession(async (client) => {
       await this.#ensureDiscussionSchema(client);
-      if (await this.#authorizeNote(client, memberId, noteId) === "none") return { status: "not_found" as const };
+      const access = await this.#authorizeNote(client, memberId, noteId);
+      if (access === "none") return { status: "not_found" as const };
       const note = await client.query<any>("SELECT document FROM stash_notes WHERE id = $1", [noteId]);
       if (!note.rowCount) return { status: "not_found" as const };
       const blocks = Array.isArray(note.rows[0].document?.blocks) ? note.rows[0].document.blocks as Array<{ blockKey?: string; id?: string }> : [];
@@ -982,7 +986,7 @@ export class PostgresDatabase implements
         const discussion = await this.#readDiscussion(client, memberId, id, false);
         if (discussion?.target.kind === "block") discussions.push(discussion);
       }
-      return { status: "found" as const, discussions };
+      return { status: "found" as const, access, discussions };
     });
   }
 
@@ -2366,19 +2370,12 @@ export class PostgresDatabase implements
     return this.#kernel.withSession(async (client) => {
       await this.#ensureNoteHistorySchema(client);
       await this.#backfillLegacyNoteHistory(client);
+      const access = await this.#authorizeNote(client, memberId, noteId);
+      if (access === "none") return { status: "not_found" as const };
       const rows = await client.query<any>(`SELECT history.*, actor.name AS actor_name FROM stash_note_history history
-        JOIN stash_notes note ON note.id=history.note_id JOIN stash_workspaces workspace ON workspace.id=note.workspace_id
         JOIN stash_accounts actor ON actor.id=history.actor_account_id
-        WHERE history.note_id=$1 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
-          (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
-            WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2)) OR
-          (note.project_id IS NOT NULL AND EXISTS (SELECT 1 FROM stash_project_guests guest
-            WHERE guest.project_id=note.project_id AND guest.account_id=$2))) ORDER BY history.revision`, [noteId, memberId]);
-      if (!rows.rowCount) {
-        const visible = await this.findNoteForMember(memberId, noteId);
-        if (!visible) return { status: "not_found" as const };
-      }
-      return { status: "found" as const, revisions: rows.rows.map((row): NoteHistoryRevision => ({ noteId: row.note_id,
+        WHERE history.note_id=$1 ORDER BY history.revision`, [noteId]);
+      return { status: "found" as const, access, revisions: rows.rows.map((row): NoteHistoryRevision => ({ noteId: row.note_id,
         workspaceId: row.workspace_id, revision: Number(row.revision), content: row.content, document: row.document,
         recordedAt: new Date(row.recorded_at).toISOString(), actor: { localAccountId: row.actor_account_id, displayName: row.actor_name },
         cause: this.#parseActivityCause(row.cause) })) };
@@ -2389,12 +2386,11 @@ export class PostgresDatabase implements
     return this.#withTransaction(async (client) => {
       await this.#ensureNoteHistorySchema(client);
       await this.#backfillLegacyNoteHistory(client);
+      if (await this.#authorizeNote(client, memberId, noteId) !== "edit") return { status: "not_found" as const };
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [noteId, idempotencyKey]);
       const found = await client.query<any>(`SELECT note.*, creator.name AS creator_name FROM stash_notes note
-        JOIN stash_workspaces workspace ON workspace.id=note.workspace_id JOIN stash_accounts creator ON creator.id=note.created_by_account_id
-        WHERE note.id=$1 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
-          (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
-            WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2))) FOR UPDATE OF note`, [noteId, memberId]);
+        JOIN stash_accounts creator ON creator.id=note.created_by_account_id
+        WHERE note.id=$1 FOR UPDATE OF note`, [noteId]);
       const row = found.rows[0];
       if (!row) return { status: "not_found" as const };
       const receipt = await client.query<any>(`SELECT receipt.target_revision, receipt.activity_id, receipt.restore_result, activity.*, actor.name AS actor_name

@@ -43,7 +43,7 @@ export function NoteWorkspace({ noteId, token, children, fetcher = globalThis.fe
     <section aria-label="Note workspace controls" className={styles.workspaceBar}>
       {context.data ? <nav aria-label="Breadcrumb"><ol>{context.data.breadcrumbs.map((item, index) => <li key={item.id}>{index < context.data!.breadcrumbs.length - 1 ? <Link to={`/app/notes/${item.id}`}>{item.title}</Link> : <span aria-current="page">{item.title}</span>}</li>)}</ol></nav> : <span>{context.isError ? "Context unavailable" : "Opening Note…"}</span>}
       <div className={styles.workspaceActions}><Link to={`/app/notes/${noteId}/history`}>View history</Link>
-        {context.data?.access === "read" ? <span role="note">Read-only access · Project Guests can navigate context and history.</span> : null}
+        {context.data?.access === "read" ? <span role="note">Read-only access · Project Guests can navigate context and inspect history, but cannot change the Note.</span> : null}
         {context.data?.access === "edit" && (removedState ? <button aria-label="Restore Note branch" disabled={restore.isPending} type="button" onClick={() => restore.mutate()}>Restore branch</button> : <>
         <button aria-label="Archive Note branch" disabled={branchAction.isPending} type="button" onClick={() => branchAction.mutate("archive")}>Archive</button>
         <button aria-label="Move Note branch to trash" disabled={branchAction.isPending} type="button" onClick={() => branchAction.mutate("trash")}>Trash</button></>)}

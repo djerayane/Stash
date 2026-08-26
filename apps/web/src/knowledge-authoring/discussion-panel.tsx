@@ -50,7 +50,7 @@ function targetDetails(target: DiscussionTarget) {
   } as const;
 }
 
-export function DiscussionPanel({ target, token, canWrite = true, enabled = true, showWorkActions = false,
+export function DiscussionPanel({ target, token, canWrite, enabled = true, showWorkActions = false,
   fetcher = globalThis.fetch, classes = {} }: {
   target: DiscussionTarget;
   token: string;
@@ -69,7 +69,7 @@ export function DiscussionPanel({ target, token, canWrite = true, enabled = true
   const [taskTitle, setTaskTitle] = useState("");
   const feedbackRef = useRef<HTMLParagraphElement>(null);
   const queryErrorRef = useRef<HTMLDivElement>(null);
-  const query = useQuery({ queryKey: details.key, enabled, retry: false, queryFn: () => request(fetcher, token, details.path) as Promise<{ discussions: Discussion[] }> });
+  const query = useQuery({ queryKey: details.key, enabled, retry: false, queryFn: () => request(fetcher, token, details.path) as Promise<{ access: "edit" | "read"; discussions: Discussion[] }> });
   const refresh = () => client.invalidateQueries({ queryKey: details.key });
   const create = useMutation({ mutationFn: () => request(fetcher, token, "/api/discussions", { method: "POST",
     body: JSON.stringify({ target: details.body, message: body }) }),

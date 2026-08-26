@@ -80,7 +80,7 @@ describe("core React workflows", () => {
     const otherMessageId = "66666666-6666-4666-8666-666666666666";
     const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
-      if (path.endsWith("/api/notes/22222222-2222-4222-8222-222222222222/discussions")) return Response.json({ discussions: [{ id: discussionId, target: { kind: "note", noteId: "22222222-2222-4222-8222-222222222222" }, createdAt: "2026-08-23T00:00:00Z", messages: [{ id: messageId, content: "Preserve this decision", author: { displayName: "Ada" }, createdAt: "2026-08-23T00:00:00Z" }] }, { id: otherDiscussionId, target: { kind: "note", noteId: "22222222-2222-4222-8222-222222222222" }, createdAt: "2026-08-23T00:00:00Z", messages: [{ id: otherMessageId, content: "Unrelated thread", author: { displayName: "Grace" }, createdAt: "2026-08-23T00:00:00Z" }] }] });
+      if (path.endsWith("/api/notes/22222222-2222-4222-8222-222222222222/discussions")) return Response.json({ access: "edit", discussions: [{ id: discussionId, target: { kind: "note", noteId: "22222222-2222-4222-8222-222222222222" }, createdAt: "2026-08-23T00:00:00Z", messages: [{ id: messageId, content: "Preserve this decision", author: { displayName: "Ada" }, createdAt: "2026-08-23T00:00:00Z" }] }, { id: otherDiscussionId, target: { kind: "note", noteId: "22222222-2222-4222-8222-222222222222" }, createdAt: "2026-08-23T00:00:00Z", messages: [{ id: otherMessageId, content: "Unrelated thread", author: { displayName: "Grace" }, createdAt: "2026-08-23T00:00:00Z" }] }] });
       if (path.endsWith(`/api/discussions/${discussionId}/messages`)) return Response.json({ discussion: {} });
       if (path.endsWith(`/api/discussions/${discussionId}/resolution`)) return Response.json({ discussion: {} });
       if (path.endsWith(`/api/discussions/${discussionId}/work`)) return Response.json({ work: { kind: "note" } }, { status: 201 });
@@ -104,6 +104,22 @@ describe("core React workflows", () => {
     await waitFor(() => expect(fetcher).toHaveBeenCalledWith(expect.stringContaining(`/api/discussions/${discussionId}/resolution`), expect.objectContaining({ method: "PUT" })));
   });
 
+  it("keeps a standalone inherited Guest Discussion route read-only", async () => {
+    const fetcher = vi.fn(async () => Response.json({ access: "read", discussions: [{ id: "discussion-guest",
+      target: { kind: "note", noteId: "22222222-2222-4222-8222-222222222222" },
+      messages: [{ id: "message-guest", content: "Visible inherited context", author: { displayName: "Ada" } }] }] }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(<QueryClientProvider client={client}><MemoryRouter initialEntries={["/app/notes/22222222-2222-4222-8222-222222222222/discussions"]}>
+      <Routes><Route path="/app/notes/:targetId/discussions" element={<DiscussionsPage targetKind="note" token="guest" fetcher={fetcher as typeof fetch} />} /></Routes>
+    </MemoryRouter></QueryClientProvider>);
+    expect(await screen.findByText("Visible inherited context")).toBeVisible();
+    expect(screen.getByText(/only Workspace Members can contribute or resolve/i)).toBeVisible();
+    expect(screen.queryByRole("textbox", { name: "Start a Discussion" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Reply" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Resolve Discussion" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Create Note from selection" })).not.toBeInTheDocument();
+  });
+
   it("keeps a failed remote view recoverable and moves focus to the alert", async () => {
     let attempts = 0;
     const fetcher = vi.fn(async () => { attempts += 1; return attempts === 1 ? new Response(JSON.stringify({ message: "Notifications unavailable" }), { status: 503 }) : new Response(JSON.stringify({ notifications: [] }), { status: 200 }); });
@@ -125,8 +141,24 @@ describe("core React workflows", () => {
   });
 
   it("reviews and recovers a failed Note history restoration with authoritative revision input", async () => {
-    let restores = 0; const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => { if (init?.method === "POST") { restores += 1; return restores === 1 ? new Response(JSON.stringify({ message: "Restore temporarily unavailable" }), { status: 503 }) : Response.json({ note: { revision: 3 } }); } return Response.json({ revisions: [{ noteId: "note-1", revision: 2, content: "Earlier durable text", recordedAt: "2026-08-23T00:00:00Z", actor: { localAccountId: "member-1", displayName: "Ada" }, cause: { kind: "member" } }] }); });
+    let restores = 0; const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => { if (init?.method === "POST") { restores += 1; return restores === 1 ? new Response(JSON.stringify({ message: "Restore temporarily unavailable" }), { status: 503 }) : Response.json({ note: { revision: 3 } }); } return Response.json({ access: "edit", revisions: [{ noteId: "note-1", revision: 2, content: "Earlier durable text", recordedAt: "2026-08-23T00:00:00Z", actor: { localAccountId: "member-1", displayName: "Ada" }, cause: { kind: "member" } }] }); });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } }); render(<QueryClientProvider client={client}><MemoryRouter initialEntries={["/app/notes/note-1/history"]}><Routes><Route path="/app/notes/:noteId/history" element={<NoteHistoryPage token="member" fetcher={fetcher as typeof fetch} />} /></Routes></MemoryRouter></QueryClientProvider>);
     fireEvent.click(await screen.findByRole("button", { name: "Review revision" })); expect(screen.getByText("Earlier durable text")).toBeVisible(); fireEvent.click(screen.getByRole("button", { name: "Confirm restore" })); const alert = await screen.findByRole("alert"); await waitFor(() => expect(alert).toHaveFocus()); fireEvent.click(screen.getByRole("button", { name: "Try restore again" })); expect(await screen.findByRole("status")).toHaveTextContent("Revision 2 restored"); expect(JSON.parse(String(fetcher.mock.calls.find(([, init]) => init?.method === "POST")?.[1]?.body))).toMatchObject({ expectedRevision: 2 });
+  });
+
+  it("lets an inherited Guest inspect Note history without restore affordances", async () => {
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({ access: "read", revisions: [{ noteId: "note-1", revision: 2,
+      content: "Earlier durable text", recordedAt: "2026-08-23T00:00:00Z",
+      actor: { localAccountId: "member-1", displayName: "Ada" }, cause: { kind: "member" } }] }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(<QueryClientProvider client={client}><MemoryRouter initialEntries={["/app/notes/note-1/history"]}>
+      <Routes><Route path="/app/notes/:noteId/history" element={<NoteHistoryPage token="guest" fetcher={fetcher as typeof fetch} />} /></Routes>
+    </MemoryRouter></QueryClientProvider>);
+    expect(await screen.findByText(/read-only history/i)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Review revision" }));
+    expect(screen.getByRole("dialog", { name: "Revision 2" })).toHaveTextContent("Earlier durable text");
+    expect(screen.queryByRole("button", { name: "Confirm restore" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(fetcher.mock.calls.every(([, init]) => init?.method !== "POST")).toBe(true);
   });
 });

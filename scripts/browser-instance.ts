@@ -107,7 +107,12 @@ let browserHistory: NoteHistoryRevision[] = [1, 2].map((revision) => ({ noteId, 
   actor: browserActivity.actor, cause: { kind: "member", ...(revision === 2 ? { restorationOfRevision: 1 } : {}) } }));
 const browserActivityRepository: ActivityRepository = {
   async listWorkspaceActivity(memberId, workspaceId) { return memberId === browserMemberId && workspaceId === browserWorkspaceId ? { status: "found", activities: [browserActivity] } : { status: "forbidden" }; },
-  async listNoteHistory(memberId, requestedNoteId) { return memberId === browserMemberId && requestedNoteId === noteId ? { status: "found", revisions: browserHistory } : { status: "not_found" }; },
+  async listNoteHistory(memberId, requestedNoteId) {
+    if (memberId === browserMemberId && requestedNoteId === noteId) return { status: "found" as const, access: "edit" as const, revisions: browserHistory };
+    if (memberId === browserGuestId && requestedNoteId === secondNoteId) return { status: "found" as const, access: "read" as const,
+      revisions: browserHistory.map((revision) => ({ ...revision, noteId: requestedNoteId })) };
+    return { status: "not_found" as const };
+  },
   async restoreNote(memberId, requestedNoteId, targetRevision, expectedRevision) { if (memberId !== browserMemberId || requestedNoteId !== noteId) return { status: "not_found" }; const target = browserHistory.find(({ revision }) => revision === targetRevision); if (!target) return { status: "revision_not_found" }; if (expectedRevision !== browserHistory.at(-1)?.revision) return { status: "revision_conflict", currentRevision: browserHistory.at(-1)!.revision }; const revision = expectedRevision + 1; browserHistory = [...browserHistory, { ...target, revision, recordedAt: new Date().toISOString(), cause: { kind: "member", restorationOfRevision: targetRevision } }]; return { status: "restored", note: { revision, content: target.content, document: target.document }, activity: { ...browserActivity, id: crypto.randomUUID(), action: "note_restored", cause: { kind: "member", restorationOfRevision: targetRevision } } }; },
 };
 const browserNotificationRepository: NotificationRepository = {
@@ -338,13 +343,13 @@ const instance = await startInstance({
   boards: { async list() { return { status: "found", boards: [{ id: browserBoardId, name: "Delivery" }] }; }, async read() { return { status: "found", board: { id: browserBoardId, name: "Delivery" }, columns: [{ id: "ready", name: "Ready", archived: false, tasks: [{ id: task.id, key: task.key, title: task.title }] }, { id: "done", name: "Done", archived: false, tasks: [] }] }; }, async move(_memberId: string, _projectId: string, _boardId: string, _taskKey: string, value: { statusId: string }) { browserBoardStatus = value.statusId; return { status: "moved", task: { ...task, status: { id: value.statusId, name: value.statusId === "done" ? "Done" : "Ready" } } }; } } as any,
   discussions: { async listForNote(memberId: string, requestedNoteId: string) {
     if ([browserDurableMemberId, browserGuestId].includes(memberId)) return activeDurableDiscussionService.listForNote(memberId, requestedNoteId);
-    return { status: "found", discussions: browserDiscussions };
+    return { status: "found", access: "edit", discussions: browserDiscussions };
   }, async listForBlock(memberId: string, requestedNoteId: string, requestedBlockKey: string) {
     if ([browserDurableMemberId, browserGuestId].includes(memberId)) return activeDurableDiscussionService.listForBlock(memberId, requestedNoteId, requestedBlockKey);
-    return requestedBlockKey === "77777777-7777-4777-8777-777777777777" ? { status: "found", discussions: [browserBlockDiscussions[0]] } : { status: "not_found" };
+    return requestedBlockKey === "77777777-7777-4777-8777-777777777777" ? { status: "found", access: "edit", discussions: [browserBlockDiscussions[0]] } : { status: "not_found" };
   }, async listForTask(memberId: string, requestedTaskId: string) {
     if ([browserDurableMemberId, browserGuestId].includes(memberId)) return activeDurableDiscussionService.listForTask(memberId, requestedTaskId);
-    return { status: "found", discussions: browserDiscussions };
+    return { status: "found", access: "edit", discussions: browserDiscussions };
   }, async create(memberId: string, value: any) {
     if ([browserDurableMemberId, browserGuestId].includes(memberId)) return activeDurableDiscussionService.create(memberId, value);
     const discussion = { id: crypto.randomUUID(), workspaceId: browserWorkspaceId, target: value.target, createdAt: new Date().toISOString(), messages: [{ id: crypto.randomUUID(), content: value.message, author: { displayName: "Browser Member" }, createdAt: new Date().toISOString() }] }; browserDiscussions = [...browserDiscussions, discussion]; return { status: "created", discussion, projection: {} };

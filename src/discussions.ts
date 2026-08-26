@@ -107,9 +107,9 @@ export interface DiscussionRepository {
   findPortableMemberIdentity(memberId: string): Promise<PortableIdentity | undefined>;
   createDiscussion(memberId: string, draft: DiscussionDraft): Promise<CreateDiscussionOutcome>;
   findDiscussion(memberId: string, discussionId: string): Promise<FindDiscussionOutcome>;
-  listNoteDiscussions(memberId: string, noteId: string): Promise<{ status: "found"; discussions: DiscussionRecord[] } | { status: "not_found" }>;
-  listBlockDiscussions(memberId: string, noteId: string, blockKey: string): Promise<{ status: "found"; discussions: DiscussionRecord[] } | { status: "not_found" }>;
-  listTaskDiscussions(memberId: string, taskId: string): Promise<{ status: "found"; discussions: DiscussionRecord[] } | { status: "not_found" }>;
+  listNoteDiscussions(memberId: string, noteId: string): Promise<{ status: "found"; access: "edit" | "read"; discussions: DiscussionRecord[] } | { status: "not_found" }>;
+  listBlockDiscussions(memberId: string, noteId: string, blockKey: string): Promise<{ status: "found"; access: "edit" | "read"; discussions: DiscussionRecord[] } | { status: "not_found" }>;
+  listTaskDiscussions(memberId: string, taskId: string): Promise<{ status: "found"; access: "edit" | "read"; discussions: DiscussionRecord[] } | { status: "not_found" }>;
   addMessage(memberId: string, discussionId: string, message: DiscussionMessage): Promise<AddDiscussionMessageOutcome>;
   resolveDiscussion(memberId: string, discussionId: string, resolvedAt: string): Promise<ResolveDiscussionOutcome>;
   createWorkFromMessages(memberId: string, discussionId: string, draft: CreateDiscussionWorkDraft): Promise<DiscussionWorkOutcome>;

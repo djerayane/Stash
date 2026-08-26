@@ -25,7 +25,7 @@ export function discussionRoutes(service: DiscussionService, memberAccess: Membe
             ? await service.listForBlock(access.accountId, targetId, blockKey)
             : url.pathname.startsWith("/api/notes/") ? await service.listForNote(access.accountId, targetId)
             : await service.listForTask(access.accountId, targetId);
-          if (result.status === "found") json(response, 200, { discussions: result.discussions });
+          if (result.status === "found") json(response, 200, { access: result.access, discussions: result.discussions });
           else json(response, 404, { error: "target_not_found", message: "The Discussion target is unavailable." });
           return true;
         }
