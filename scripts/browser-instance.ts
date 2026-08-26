@@ -17,6 +17,9 @@ import type { ActivityRecord, NotificationDelivery } from "@stash/domain-types";
 import { AccountRegistrationService, type RegistrationRecord } from "../src/account-registration.js";
 import { PasswordAuthService, hashPassword, type AccountAuthenticationRecord, type SessionRecord } from "../src/password-auth.js";
 import { PortableWorkspaceExportService } from "../src/portable-workspace-export.js";
+import { createCapabilityRegistry } from "../src/capability-registry.js";
+import { NoteTreeService, type NoteTreeNode, type NoteTreeRepository } from "../src/knowledge-authoring/note-tree.js";
+import { noteTreeRoutes } from "../src/knowledge-authoring/note-tree-routes.js";
 
 const noteId = "99999999-9999-4999-8999-999999999999";
 const secondNoteId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -131,6 +134,83 @@ const browserAuthRepository = {
   },
 };
 const browserPasswordAuth = new PasswordAuthService(browserAuthRepository);
+const treeNodes: NoteTreeNode[] = [
+  { id: noteId, workspaceId: browserWorkspaceId, title: "Release collaboration plan", position: "1", childCount: 1 },
+  { id: secondNoteId, workspaceId: browserWorkspaceId, parentId: noteId, title: "Authoritative second Note", position: "1", childCount: 0 },
+];
+const removedTreeBranches = new Map<string, { state: "archived" | "trashed"; removedAt: string }>();
+const semanticTreeLinks: Array<{ id: string; sourceNoteId: string; targetNoteId: string; label: string; relationshipType?: string }> = [];
+const branchIds = (rootId: string) => { const ids = [rootId]; for (let index = 0; index < ids.length; index += 1)
+  ids.push(...treeNodes.filter(({ parentId }) => parentId === ids[index]).map(({ id }) => id)); return ids; };
+const browserNoteTreeRepository: NoteTreeRepository = {
+  async createTreeNote(memberId, workspaceId, input) {
+    if (memberId !== browserMemberId || workspaceId !== browserWorkspaceId) return { status: "workspace_forbidden" };
+    if (input.parentId && !treeNodes.some(({ id }) => id === input.parentId)) return { status: "parent_not_found" };
+    const siblings = treeNodes.filter(({ id, parentId }) => parentId === input.parentId && !removedTreeBranches.has(id));
+    const node: NoteTreeNode = { id: input.id, workspaceId, ...(input.parentId ? { parentId: input.parentId } : {}), title: input.title,
+      position: String(siblings.length + 1), childCount: 0 };
+    treeNodes.push(node); if (input.parentId) { const parent = treeNodes.find(({ id }) => id === input.parentId)!; parent.childCount += 1; }
+    const document = new Y.Doc(); document.getText("note").insert(0, input.title);
+    collaborations.set(input.id, { noteId: input.id, sequence: 0, update: Y.encodeStateAsUpdate(document), updatedAt: new Date().toISOString(),
+      updatedByMemberId: memberId, access: "edit" }); document.destroy();
+    return { status: "created", node };
+  },
+  async listNoteTree(memberId, workspaceId) {
+    if (memberId !== browserMemberId || workspaceId !== browserWorkspaceId) return { status: "workspace_forbidden" };
+    return { status: "found", nodes: treeNodes.filter(({ id }) => !removedTreeBranches.has(id)) };
+  },
+  async moveNoteTreeBranch(memberId, requestedNoteId, destination) {
+    const node = treeNodes.find(({ id }) => id === requestedNoteId); if (memberId !== browserMemberId || !node) return { status: "note_not_found" };
+    const movedIds = branchIds(requestedNoteId); if (destination.parentId && movedIds.includes(destination.parentId)) return { status: "cycle" };
+    const oldParent = node.parentId; if (oldParent) treeNodes.find(({ id }) => id === oldParent)!.childCount -= 1;
+    if (destination.parentId) { node.parentId = destination.parentId; treeNodes.find(({ id }) => id === destination.parentId)!.childCount += 1; } else delete node.parentId;
+    const siblings = treeNodes.filter(({ id, parentId }) => id !== requestedNoteId && parentId === node.parentId);
+    const at = destination.beforeId ? siblings.findIndex(({ id }) => id === destination.beforeId) : siblings.length;
+    const ordered = [...siblings.slice(0, at < 0 ? siblings.length : at), node, ...siblings.slice(at < 0 ? siblings.length : at)];
+    ordered.forEach((item, index) => { item.position = String(index + 1); });
+    const projectAccessChanges = destination.parentId === noteId ? movedIds.map((id) => ({ noteId: id, projectId, effect: "gained" as const })) : [];
+    return { status: "moved", movedIds, projectAccessChanges };
+  },
+  async readNoteTreeContext(memberId, requestedNoteId) {
+    const node = treeNodes.find(({ id }) => id === requestedNoteId); if (!node || removedTreeBranches.has(requestedNoteId)
+      || ![browserMemberId, "browser-guest"].includes(memberId) || memberId === "browser-guest" && node.parentId !== noteId && node.id !== noteId)
+      return { status: "note_not_found" };
+    const breadcrumbs: Array<{ id: string; title: string }> = []; let cursor: NoteTreeNode | undefined = node;
+    while (cursor) { breadcrumbs.unshift({ id: cursor.id, title: cursor.title }); cursor = cursor.parentId ? treeNodes.find(({ id }) => id === cursor!.parentId) : undefined; }
+    const visible = (id: string) => memberId === browserMemberId || id === noteId || treeNodes.find((item) => item.id === id)?.parentId === noteId;
+    const outgoingLinks = semanticTreeLinks.filter((link) => link.sourceNoteId === requestedNoteId && visible(link.targetNoteId)).map((link) => ({
+      id: link.id, noteId: link.targetNoteId, title: treeNodes.find(({ id }) => id === link.targetNoteId)!.title, label: link.label,
+      ...(link.relationshipType ? { relationshipType: link.relationshipType } : {}) }));
+    const backlinks = semanticTreeLinks.filter((link) => link.targetNoteId === requestedNoteId && visible(link.sourceNoteId)).map((link) => ({
+      id: link.id, noteId: link.sourceNoteId, title: treeNodes.find(({ id }) => id === link.sourceNoteId)!.title, label: link.label,
+      ...(link.relationshipType ? { relationshipType: link.relationshipType } : {}) }));
+    return { status: "found", context: { noteId: requestedNoteId, workspaceId: browserWorkspaceId, breadcrumbs, outgoingLinks, backlinks,
+      projectIds: [projectId], projects: [{ id: projectId, name: "Stash", key: "STASH" }] } };
+  },
+  async createContextLink(memberId, sourceNoteId, link) {
+    if (memberId !== browserMemberId || !treeNodes.some(({ id }) => id === sourceNoteId)) return { status: "source_not_found" };
+    const target = treeNodes.find(({ id }) => id === link.targetNoteId); if (!target) return { status: "target_not_found" };
+    if (semanticTreeLinks.some((item) => item.sourceNoteId === sourceNoteId && item.targetNoteId === link.targetNoteId)) return { status: "already_linked" };
+    semanticTreeLinks.push({ ...link, sourceNoteId }); return { status: "created", link: { id: link.id, noteId: link.targetNoteId, title: target.title,
+      label: link.label, ...(link.relationshipType ? { relationshipType: link.relationshipType } : {}) } };
+  },
+  async previewNoteBranch(memberId, requestedNoteId, action, destination) {
+    const node = treeNodes.find(({ id }) => id === requestedNoteId); if (memberId !== browserMemberId || !node) return { status: "note_not_found" };
+    const affectedNoteIds = branchIds(requestedNoteId); if (destination?.parentId && affectedNoteIds.includes(destination.parentId)) return { status: "cycle" };
+    return { status: "found", impact: { noteId: requestedNoteId, title: node.title, descendantCount: affectedNoteIds.length - 1,
+      affectedNoteIds, externalLinks: [], projectAccessChanges: action === "move" && destination?.parentId === noteId
+        ? affectedNoteIds.map((id) => ({ noteId: id, projectId, effect: "gained" as const })) : [] } };
+  },
+  async listRemovedNoteBranches(memberId, workspaceId) { if (memberId !== browserMemberId || workspaceId !== browserWorkspaceId) return { status: "workspace_forbidden" };
+    return { status: "found", branches: [...removedTreeBranches].filter(([id]) => !treeNodes.find(({ id: candidate }) => candidate === id)?.parentId
+      || !removedTreeBranches.has(treeNodes.find(({ id: candidate }) => candidate === id)!.parentId!)).map(([id, removed]) => { const node = treeNodes.find((item) => item.id === id)!;
+        return { id, workspaceId, title: node.title, ...removed }; }) }; },
+  async setNoteBranchState(memberId, requestedNoteId, state) { if (memberId !== browserMemberId || !treeNodes.some(({ id }) => id === requestedNoteId)) return { status: "note_not_found" };
+    const affectedIds = branchIds(requestedNoteId); const removedAt = new Date().toISOString(); for (const id of affectedIds) removedTreeBranches.set(id, { state, removedAt });
+    return { status: "updated", affectedIds }; },
+  async restoreNoteBranch(memberId, requestedNoteId) { if (memberId !== browserMemberId || !removedTreeBranches.has(requestedNoteId)) return { status: "note_not_found" };
+    const restoredIds = branchIds(requestedNoteId); for (const id of restoredIds) removedTreeBranches.delete(id); return { status: "restored", restoredIds, parentRestored: true }; },
+};
 let task: TaskPlanningReadModel = {
   schema: "stash.task.v1", id: "32323232-3232-4232-8232-323232323232", workspaceId: "browser-workspace", projectId,
   key: "STASH-32", title: "Restore release ownership", status: { id: "ready", name: "Ready", category: "unstarted" },
@@ -183,6 +263,14 @@ const taskRepository = {
   },
 };
 
+const browserMemberAccess = {
+  async authenticateBearer(authorization?: string) {
+    const token = authorization?.replace(/^Bearer /, "");
+    const accountId = token ? activeTokens.get(token) : undefined;
+    return accountId ? { accountId, sessionId: `session-${accountId}` } : browserPasswordAuth.authenticateBearer(authorization);
+  },
+};
+
 const instance = await startInstance({
   database: { async verifyConnection() {}, async close() {}, async resolveClientSessionPrincipal(accountId: string) {
     const registered = browserAccounts.get(accountId); const personalWorkspace = browserPersonalWorkspaces.get(accountId);
@@ -205,6 +293,9 @@ const instance = await startInstance({
   host: "127.0.0.1",
   port: Number.parseInt(process.env.STASH_BROWSER_PORT ?? "4173", 10),
   instanceAdminToken: "browser-acceptance-admin-token",
+  capabilities: createCapabilityRegistry([{ name: "knowledge-authoring", routes: () => [
+    noteTreeRoutes(new NoteTreeService(browserNoteTreeRepository), browserMemberAccess),
+  ] }]),
   passwordAuth: browserPasswordAuth,
   accountRegistration: new AccountRegistrationService(browserAuthRepository),
   accountRecovery: { async authenticationOptions() { return { challenge: "cHJvb2Y", rpId: "127.0.0.1", userVerification: "required", allowCredentials: [] }; }, async signInWithPasskey() { return { token: "browser-acceptance-member-token" }; }, async signInWithRecoveryCode() { return { token: "browser-acceptance-member-token" }; }, async requestEmailRecovery() { throw new EmailRecoveryUnavailable(); }, async signInWithEmailRecovery() { return { token: "browser-acceptance-member-token" }; } } as any,
@@ -217,13 +308,7 @@ const instance = await startInstance({
   } as any,
   oidcCallbackOrigin: "http://127.0.0.1:4173",
   allowInsecureOidcCallbackOriginForTest: true,
-  memberAccess: {
-    async authenticateBearer(authorization) {
-      const token = authorization?.replace(/^Bearer /, "");
-      const accountId = token ? activeTokens.get(token) : undefined;
-      return accountId ? { accountId, sessionId: `session-${accountId}` } : browserPasswordAuth.authenticateBearer(authorization);
-    },
-  },
+  memberAccess: browserMemberAccess,
   workspaceProjects: new WorkspaceProjectService({ async findPortableMemberIdentity() { return { localAccountId: browserMemberId, displayName: "Browser Member" }; }, async createWorkspace() { return { status: "organization_forbidden" }; }, async createProject() { return "workspace_forbidden"; }, async listAccessibleWorkspaces() { return [{ id: browserWorkspaceId, name: "Acceptance Workspace", projects: [{ id: projectId, name: "Stash", key: "STASH" }] }, { id: "77777777-7777-4777-8777-777777777777", name: "Shared Workspace", projects: [{ id: "66666666-6666-4666-8666-666666666665", name: "Shared roadmap", key: "SHARED" }] }]; } }),
   notes: { async listInbox(memberId: string, workspaceId: string) { return memberId === browserMemberId && workspaceId === browserWorkspaceId ? { status: "found", notes: inboxNotes } : { status: "workspace_forbidden" }; },
     async listNotes(memberId: string, workspaceId: string) { return memberId === browserMemberId && workspaceId === browserWorkspaceId ? { status: "found", notes: [{ id: secondNoteId, workspaceId, content: "Authoritative second Note", createdAt: new Date(0).toISOString() }, { id: noteId, workspaceId, content: "Release collaboration plan", tags: ["decision"], createdAt: new Date(0).toISOString() }] } : { status: "workspace_forbidden" }; },

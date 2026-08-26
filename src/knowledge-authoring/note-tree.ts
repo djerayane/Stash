@@ -24,6 +24,26 @@ export interface NoteBranchImpact {
   projectAccessChanges: NoteTreeAccessChange[];
 }
 
+export interface NoteBranchRepositoryImpact extends Omit<NoteBranchImpact, "collectionCount"> {
+  affectedNoteIds: string[];
+}
+
+export interface RemovedNoteBranch {
+  id: string;
+  workspaceId: string;
+  title: string;
+  state: "archived" | "trashed";
+  removedAt: string;
+}
+
+export interface NoteTreeImpactInspector {
+  inspect(memberId: string, noteIds: readonly string[]): Promise<{ collectionCount: number }>;
+}
+
+export const emptyNoteTreeImpactInspector: NoteTreeImpactInspector = {
+  async inspect() { return { collectionCount: 0 }; },
+};
+
 export interface NoteBreadcrumb {
   id: string;
   title: string;
@@ -39,10 +59,12 @@ export interface NoteContextLink {
 
 export interface NoteContext {
   noteId: string;
+  workspaceId: string;
   breadcrumbs: NoteBreadcrumb[];
   outgoingLinks: NoteContextLink[];
   backlinks: NoteContextLink[];
   projectIds: string[];
+  projects: Array<{ id: string; name: string; key: string }>;
 }
 
 export interface NoteTreeRepository {
@@ -66,12 +88,19 @@ export interface NoteTreeRepository {
   readNoteTreeContext(memberId: string, noteId: string): Promise<
     { status: "found"; context: NoteContext } | { status: "note_not_found" }
   >;
+  createContextLink(memberId: string, sourceNoteId: string,
+    link: { id: string; targetNoteId: string; label: string; relationshipType?: string }): Promise<
+      { status: "created"; link: NoteContextLink } | { status: "source_not_found" | "target_not_found" | "already_linked" }
+    >;
   previewNoteBranch(
     memberId: string,
     noteId: string,
     action: "archive" | "trash" | "move",
     destination?: { parentId?: string; beforeId?: string },
-  ): Promise<{ status: "found"; impact: NoteBranchImpact } | { status: "note_not_found" | "parent_not_found" | "before_not_found" | "cycle" }>;
+  ): Promise<{ status: "found"; impact: NoteBranchRepositoryImpact } | { status: "note_not_found" | "parent_not_found" | "before_not_found" | "cycle" }>;
+  listRemovedNoteBranches(memberId: string, workspaceId: string): Promise<
+    { status: "found"; branches: RemovedNoteBranch[] } | { status: "workspace_forbidden" }
+  >;
   setNoteBranchState(memberId: string, noteId: string, state: "archived" | "trashed"): Promise<
     { status: "updated"; affectedIds: string[] } | { status: "note_not_found" }
   >;
@@ -94,6 +123,18 @@ function title(value: unknown): string {
   return value.trim();
 }
 
+function linkLabel(value: unknown): string {
+  if (value === undefined) return "Note";
+  if (typeof value !== "string" || !value.trim() || value.length > 200 || /[\r\n\[\]]/.test(value)) throw new InvalidNoteTreeInput();
+  return value.trim();
+}
+
+function relationshipType(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !value.trim() || value.trim().length > 80 || /[\r\n]/.test(value)) throw new InvalidNoteTreeInput();
+  return value.trim();
+}
+
 function destination(value: unknown): { parentId?: string; beforeId?: string } {
   if (!object(value) || !optionalUuid(value.parentId) || !optionalUuid(value.beforeId)
     || !Object.keys(value).every((key) => key === "parentId" || key === "beforeId")) throw new InvalidNoteTreeInput();
@@ -101,7 +142,7 @@ function destination(value: unknown): { parentId?: string; beforeId?: string } {
 }
 
 export class NoteTreeService {
-  constructor(private readonly repository: NoteTreeRepository) {}
+  constructor(private readonly repository: NoteTreeRepository, private readonly impactInspector = emptyNoteTreeImpactInspector) {}
 
   async create(memberId: string, workspaceId: string, value: unknown) {
     if (!uuid.test(workspaceId) || !object(value) || !optionalUuid(value.parentId) || !optionalUuid(value.beforeId)
@@ -129,12 +170,30 @@ export class NoteTreeService {
     return this.repository.readNoteTreeContext(memberId, noteId);
   }
 
+  async createContextLink(memberId: string, noteId: string, value: unknown) {
+    if (!uuid.test(noteId) || !object(value) || typeof value.targetNoteId !== "string" || !uuid.test(value.targetNoteId)
+      || value.targetNoteId === noteId || !Object.keys(value).every((key) => ["targetNoteId", "label", "relationshipType"].includes(key)))
+      throw new InvalidNoteTreeInput();
+    const semanticType = relationshipType(value.relationshipType);
+    return this.repository.createContextLink(memberId, noteId, { id: randomUUID(), targetNoteId: value.targetNoteId,
+      label: linkLabel(value.label), ...(semanticType ? { relationshipType: semanticType } : {}) });
+  }
+
   async preview(memberId: string, noteId: string, value: unknown) {
     if (!uuid.test(noteId) || !object(value) || !["archive", "trash", "move"].includes(String(value.action))
       || !Object.keys(value).every((key) => ["action", "parentId", "beforeId"].includes(key))) throw new InvalidNoteTreeInput();
     const action = value.action as "archive" | "trash" | "move";
     const target = action === "move" ? destination({ parentId: value.parentId, beforeId: value.beforeId }) : undefined;
-    return this.repository.previewNoteBranch(memberId, noteId, action, target);
+    const result = await this.repository.previewNoteBranch(memberId, noteId, action, target);
+    if (result.status !== "found") return result;
+    const { affectedNoteIds, ...impact } = result.impact;
+    const inspected = await this.impactInspector.inspect(memberId, affectedNoteIds);
+    return { status: "found" as const, impact: { ...impact, collectionCount: inspected.collectionCount } };
+  }
+
+  async removed(memberId: string, workspaceId: string) {
+    if (!uuid.test(workspaceId)) throw new InvalidNoteTreeInput();
+    return this.repository.listRemovedNoteBranches(memberId, workspaceId);
   }
 
   async remove(memberId: string, noteId: string, state: "archived" | "trashed") {

@@ -58,12 +58,19 @@ describe("Note Tree HTTP", () => {
     assert.equal((await cycle.json() as any).error, "note_tree_cycle");
     const context = await request(`/api/notes/${child.id}/context`);
     assert.deepEqual((await context.json() as any).breadcrumbs.map(({ title }: any) => title), ["Field guide", "Observations"]);
+    const linked = await request(`/api/notes/${root.id}/context/links`, { method: "POST",
+      body: JSON.stringify({ targetNoteId: child.id, label: "Evidence", relationshipType: "supports" }) });
+    assert.equal(linked.status, 201);
+    assert.equal((await request(`/api/notes/${root.id}/context`).then((response) => response.json()) as any).outgoingLinks[0].relationshipType, "supports");
 
     const preview = await request(`/api/notes/${root.id}/branch-preview`, { method: "POST", body: JSON.stringify({ action: "trash" }) });
     assert.equal(preview.status, 200);
     assert.equal((await preview.json() as any).impact.descendantCount, 1);
     assert.equal((await request(`/api/notes/${root.id}/trash`, { method: "POST" })).status, 200);
     assert.equal((await request(`/api/notes/${child.id}/context`)).status, 404);
+    const removed = await request(`/api/workspaces/${workspaceId}/note-tree/removed`);
+    assert.equal(removed.status, 200);
+    assert.deepEqual((await removed.json() as any).branches.map(({ id, state }: any) => ({ id, state })), [{ id: root.id, state: "trashed" }]);
     const restored = await request(`/api/notes/${root.id}/restore`, { method: "POST" });
     assert.equal(restored.status, 200);
     assert.deepEqual((await restored.json() as any).restoredIds, [root.id, child.id]);
