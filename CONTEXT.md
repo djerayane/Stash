@@ -21,27 +21,39 @@ A named collection of permissions assigned to Members. Owner, Admin, and Member 
 _Avoid_: User type, access level
 
 **Note**:
-Authored content that captures an idea or project knowledge and may later become the source of actionable work.
+Authored, block-based content that captures and develops knowledge. A Note may contain child Notes in the Note Tree, link to Notes elsewhere in that tree, and become the source of actionable work.
 _Avoid_: Page
 
+**Note Tree**:
+The primary navigational hierarchy of Notes within a Workspace. A Note has at most one parent; links and later graph views reveal relationships across the tree without replacing it as the familiar way to orient and organize.
+_Avoid_: Folder tree, Project hierarchy
+
 **Block**:
-A persistently identifiable passage or element within a Note, such as a paragraph or checklist item. A Block may be linked to one or more Tasks while remaining visibly part of its Note.
+A persistently identifiable passage or element within a Note, such as a paragraph, checklist item, or interactive view. A Block may be linked to one or more Tasks while remaining visibly part of its Note.
 _Avoid_: Fragment, section
+
+**Note Link**:
+A directed relationship from one Note or Block to another Note. Links are untyped by default but may carry a Member-chosen relationship type; they never imply containment, Project membership, or access.
+_Avoid_: Note Tree edge, shared Note
 
 **Discussion**:
 A portable thread of comments attached to a Note, Task, or Block. Selected Discussion content may become a linked Note or Task, but a Discussion does not automatically become authored knowledge.
 _Avoid_: Note, chat
 
 **Task**:
-A discrete piece of actionable work whose development progress is visible in Stash. A Task may draw from any number of Notes, and a Note may contribute to any number of Tasks.
+A discrete piece of actionable work within a Workspace whose development progress may be visible in Stash. A Task may draw from any number of Notes and may be associated with zero, one, or several Projects without being owned by any of them.
 _Avoid_: Ticket, issue, card
 
+**Subtask**:
+A Task with one parent Task. It remains independently actionable and may have Project associations different from its parent.
+_Avoid_: Checklist item, Project-specific Task
+
 **Task Key**:
-A short, human-readable identifier unique within a Project that helps Members and development providers refer to a Task.
+A short, human-readable identifier assigned from a Project's own prefix and sequence when a Task is associated with it. One Task may have a different Task Key in each associated Project; Project nesting does not produce compound keys, and Projectless or Project-agnostic views identify the Task by title while stable identity remains internal.
 _Avoid_: Issue key, database ID
 
 **Task Key Alias**:
-A permanently reserved former Task Key that continues resolving to the same Task after it moves to another Project.
+A permanently reserved former Task Key that continues resolving to the same Task after its Project association is removed. Re-association with that Project restores the reserved key, which is never assigned to another Task.
 _Avoid_: Redirect, reused key
 
 **Dependency**:
@@ -53,7 +65,7 @@ Evidence about a Task's development activity, such as branch, commit, or pull-re
 _Avoid_: Status, event
 
 **Workflow**:
-The configurable set of statuses through which a Project's Tasks progress. Boards present views over Tasks and may manipulate Workflow status, but do not own or duplicate Tasks.
+The Workspace-owned configurable set of statuses through which Tasks progress. Projects customize Task views, filters, and grouping without defining a conflicting status for the same Task.
 _Avoid_: Board workflow, pipeline
 
 **Status Category**:
@@ -101,8 +113,24 @@ A restorable representation of an Instance that preserves Instance-specific stat
 _Avoid_: Export, Workspace archive
 
 **Project**:
-An optional organizational and access boundary within a Workspace that groups Tasks, Notes, Members, and any number of connected repositories. Every Task belongs to one Project; a Note may be project-specific or workspace-wide.
-_Avoid_: Folder, repository
+An optional execution context within a Workspace that relates Tasks, Notes, Members, and connected repositories around a goal or initiative. A Project has at most one parent and aggregates information from its child Projects, but does not own the Workspace's knowledge hierarchy.
+_Avoid_: Folder, repository, Task container
+
+**Collection**:
+A structured set of records defined and owned by one Note for knowledge that benefits from consistent typed properties without becoming Tasks. Collections support direct relations to other Collections and may be presented through multiple accessible View Blocks without copying records; removing the owning Note requires deliberate relocation or deletion of its Collections.
+_Avoid_: Task list, spreadsheet
+
+**Collection Property**:
+A typed field shared by the records in a Collection, initially supporting text, number, checkbox, date and time, single-select, multi-select, person, URL, Attachment, and direct relations to Collection records, Notes, Tasks, or Projects.
+_Avoid_: Column, Task field
+
+**View Block**:
+An interactive Block that presents canonical Tasks or Collection records as a board, table, list, calendar, or another supported view. A View Block stores presentation and filtering choices rather than owning or copying the items it displays.
+_Avoid_: Board object, embedded copy
+
+**Visualization Block**:
+An optional Block that presents a permission-filtered relationship or content query through a saved visual layout, such as a local graph, brain map, word cloud, or spatial canvas. Its query, geometry, and view-only edges are presentation state and do not alter canonical Notes or Note Links without an explicit action.
+_Avoid_: Note Tree, canonical graph
 
 **Repository Connection**:
 An Organization-owned authorization and configuration that lets Projects relate Tasks to repositories and receive development Signals. One Repository Connection may serve several Projects within its Organization but never crosses Organization boundaries.
