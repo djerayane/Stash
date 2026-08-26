@@ -26,6 +26,7 @@ import { EmptyCollectionImpactInspector, NoteTreeService, type NoteTreeRepositor
 import { noteTreeRoutes } from "../src/knowledge-authoring/note-tree-routes.js";
 import { EmbeddedInstanceStore } from "../src/embedded-instance-store.js";
 import { createAuthenticationSecretCodec } from "../src/authentication-secrets.js";
+import { DiscussionService } from "../src/discussions.js";
 import { json, type HttpRoute } from "../src/http-routing.js";
 
 const noteId = "99999999-9999-4999-8999-999999999999";
@@ -216,6 +217,7 @@ await browserTreeStore.upgradeDatabase.query("INSERT INTO stash_organization_mem
 await browserTreeStore.upgradeDatabase.query(`INSERT INTO stash_projects(id,workspace_id,name,project_key,created_by_account_id)
   VALUES($1,$2,'Stash','STASH',$3)`, [projectId, browserWorkspaceId, browserMemberId]);
 let activeNoteTreeRepository = browserTreeStore.database.noteTreeRepository();
+let activeDurableDiscussionService = new DiscussionService(browserTreeStore.database);
 const seededRoot = await activeNoteTreeRepository.createTreeNote(browserMemberId, browserWorkspaceId,
   { id: noteId, title: "Release collaboration plan" });
 if (seededRoot.status !== "created") throw new Error("browser_note_tree_root_seed_failed");
@@ -256,6 +258,7 @@ const reopenNoteTreeRoute: HttpRoute = {
     await browserTreeStore.close();
     browserTreeStore = await EmbeddedInstanceStore.open(browserTreeDirectory, browserTreeCodec);
     activeNoteTreeRepository = browserTreeStore.database.noteTreeRepository();
+    activeDurableDiscussionService = new DiscussionService(browserTreeStore.database);
     json(response, 200, { status: "reopened" });
     return true;
   },
@@ -333,7 +336,32 @@ const instance = await startInstance({
   },
   tasks: new TaskService(taskRepository, { async findPortableMemberIdentity(memberId: string) { return memberId === browserMemberId ? { localAccountId: memberId, displayName: "Browser Member" } : undefined; } }),
   boards: { async list() { return { status: "found", boards: [{ id: browserBoardId, name: "Delivery" }] }; }, async read() { return { status: "found", board: { id: browserBoardId, name: "Delivery" }, columns: [{ id: "ready", name: "Ready", archived: false, tasks: [{ id: task.id, key: task.key, title: task.title }] }, { id: "done", name: "Done", archived: false, tasks: [] }] }; }, async move(_memberId: string, _projectId: string, _boardId: string, _taskKey: string, value: { statusId: string }) { browserBoardStatus = value.statusId; return { status: "moved", task: { ...task, status: { id: value.statusId, name: value.statusId === "done" ? "Done" : "Ready" } } }; } } as any,
-  discussions: { async listForNote() { return { status: "found", discussions: browserDiscussions }; }, async listForBlock(_memberId: string, _noteId: string, requestedBlockKey: string) { return requestedBlockKey === "77777777-7777-4777-8777-777777777777" ? { status: "found", discussions: [browserBlockDiscussions[0]] } : { status: "not_found" }; }, async listForTask() { return { status: "found", discussions: browserDiscussions }; }, async create(_memberId: string, value: any) { const discussion = { id: crypto.randomUUID(), workspaceId: browserWorkspaceId, target: value.target, createdAt: new Date().toISOString(), messages: [{ id: crypto.randomUUID(), content: value.message, author: { displayName: "Browser Member" }, createdAt: new Date().toISOString() }] }; browserDiscussions = [...browserDiscussions, discussion]; return { status: "created", discussion, projection: {} }; }, async reply(_memberId: string, id: string, value: any) { const discussion = [...browserDiscussions, ...browserBlockDiscussions].find((item) => item.id === id); discussion.messages.push({ id: crypto.randomUUID(), content: value.content, author: { displayName: "Browser Member" }, createdAt: new Date().toISOString() }); return { status: "updated", discussion, projection: {} }; }, async resolve(_memberId: string, id: string) { const discussion = [...browserDiscussions, ...browserBlockDiscussions].find((item) => item.id === id); discussion.resolvedAt = new Date().toISOString(); return { status: "resolved", discussion, projection: {} }; }, async createWork() { return { status: "created", work: { kind: "note" }, activity: {}, projections: [] }; } } as any,
+  discussions: { async listForNote(memberId: string, requestedNoteId: string) {
+    if ([browserDurableMemberId, browserGuestId].includes(memberId)) return activeDurableDiscussionService.listForNote(memberId, requestedNoteId);
+    return { status: "found", discussions: browserDiscussions };
+  }, async listForBlock(memberId: string, requestedNoteId: string, requestedBlockKey: string) {
+    if ([browserDurableMemberId, browserGuestId].includes(memberId)) return activeDurableDiscussionService.listForBlock(memberId, requestedNoteId, requestedBlockKey);
+    return requestedBlockKey === "77777777-7777-4777-8777-777777777777" ? { status: "found", discussions: [browserBlockDiscussions[0]] } : { status: "not_found" };
+  }, async listForTask(memberId: string, requestedTaskId: string) {
+    if ([browserDurableMemberId, browserGuestId].includes(memberId)) return activeDurableDiscussionService.listForTask(memberId, requestedTaskId);
+    return { status: "found", discussions: browserDiscussions };
+  }, async create(memberId: string, value: any) {
+    if ([browserDurableMemberId, browserGuestId].includes(memberId)) return activeDurableDiscussionService.create(memberId, value);
+    const discussion = { id: crypto.randomUUID(), workspaceId: browserWorkspaceId, target: value.target, createdAt: new Date().toISOString(), messages: [{ id: crypto.randomUUID(), content: value.message, author: { displayName: "Browser Member" }, createdAt: new Date().toISOString() }] }; browserDiscussions = [...browserDiscussions, discussion]; return { status: "created", discussion, projection: {} };
+  }, async get(memberId: string, discussionId: string) {
+    if ([browserDurableMemberId, browserGuestId].includes(memberId)) return activeDurableDiscussionService.get(memberId, discussionId);
+    const discussion = [...browserDiscussions, ...browserBlockDiscussions].find((item) => item.id === discussionId);
+    return discussion ? { status: "found", discussion } : { status: "not_found" };
+  }, async reply(memberId: string, id: string, value: any) {
+    if ([browserDurableMemberId, browserGuestId].includes(memberId)) return activeDurableDiscussionService.reply(memberId, id, value);
+    const discussion = [...browserDiscussions, ...browserBlockDiscussions].find((item) => item.id === id); discussion.messages.push({ id: crypto.randomUUID(), content: value.content, author: { displayName: "Browser Member" }, createdAt: new Date().toISOString() }); return { status: "updated", discussion, projection: {} };
+  }, async resolve(memberId: string, id: string, value: any) {
+    if ([browserDurableMemberId, browserGuestId].includes(memberId)) return activeDurableDiscussionService.resolve(memberId, id, value);
+    const discussion = [...browserDiscussions, ...browserBlockDiscussions].find((item) => item.id === id); discussion.resolvedAt = new Date().toISOString(); return { status: "resolved", discussion, projection: {} };
+  }, async createWork(memberId: string, id: string, value: any) {
+    if ([browserDurableMemberId, browserGuestId].includes(memberId)) return activeDurableDiscussionService.createWork(memberId, id, value);
+    return { status: "created", work: { kind: "note" }, activity: {}, projections: [] };
+  } } as any,
   activities: new ActivityService(browserActivityRepository),
   notifications: new NotificationService(browserNotificationRepository),
   searches: new WorkspaceSearchService({ async searchWorkspace(memberId, workspaceId, query) {

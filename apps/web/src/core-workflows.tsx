@@ -6,6 +6,7 @@ import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "rea
 import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 import type { ActivityCause, ActivityRecord, NotificationDelivery } from "@stash/domain-types";
 
+import { DiscussionPanel } from "./knowledge-authoring/discussion-panel";
 import styles from "./core-workflows.module.css";
 
 type Fetcher = typeof fetch;
@@ -15,8 +16,6 @@ interface Template { readonly id: string; readonly name: string; readonly descri
 interface Task { readonly id: string; readonly key: string; readonly title: string; readonly status?: { readonly id: string; readonly name: string } }
 interface BoardColumn { readonly id: string; readonly name: string; readonly archived: boolean; readonly tasks: readonly Task[] }
 interface NoteHistoryRevision { readonly noteId: string; readonly revision: number; readonly content: string; readonly recordedAt: string; readonly actor: ActivityRecord["actor"]; readonly cause: ActivityCause }
-interface DiscussionMessage { readonly id: string; readonly content: string; readonly createdAt: string; readonly author: { readonly displayName?: string } }
-interface Discussion { readonly id: string; readonly resolvedAt?: string; readonly target: { readonly kind: "note" | "task" | "block"; readonly state?: string }; readonly messages: readonly DiscussionMessage[] }
 interface SearchResult { readonly id: string; readonly kind: string; readonly title: string; readonly excerpt?: string; readonly href?: string; readonly projectId?: string; readonly author?: string; readonly assignee?: string; readonly status?: string; readonly occurredAt?: string }
 interface SearchFacet { readonly value: string; readonly count: number }
 interface SearchResponse { readonly results: SearchResult[]; readonly total: number; readonly facets: { readonly kinds: SearchFacet[]; readonly projects: SearchFacet[]; readonly statuses: SearchFacet[] } }
@@ -79,19 +78,14 @@ export function BoardsPage({ token, fetcher = globalThis.fetch }: Omit<CoreProps
 }
 
 export function DiscussionsPage({ token, targetKind, fetcher = globalThis.fetch }: Omit<CoreProps, "workspaceId"> & { readonly targetKind: "note" | "task" | "block" }) {
-  const { targetId = "", blockKey } = useParams(); const client = useQueryClient(); const [body, setBody] = useState(""); const [replies, setReplies] = useState<Record<string, string>>({}); const [selected, setSelected] = useState<Record<string, Record<string, boolean>>>({}); const [projectId, setProjectId] = useState(""); const [taskTitle, setTaskTitle] = useState("");
-  const feedbackRef = useRef<HTMLParagraphElement>(null);
-  const targetType = targetKind === "task" ? "tasks" : "notes"; const key = ["discussions", targetKind, targetId, blockKey];
-  const discussionPath = targetKind === "block" ? `/api/notes/${encodeURIComponent(targetId)}/blocks/${encodeURIComponent(blockKey ?? "")}/discussions` : `/api/${targetType}/${encodeURIComponent(targetId)}/discussions`;
-  const query = useQuery({ queryKey: key, retry: false, queryFn: () => request(fetcher, token, discussionPath) as Promise<{ discussions: Discussion[] }> });
-  const refresh = () => client.invalidateQueries({ queryKey: key });
-  const create = useMutation({ mutationFn: () => request(fetcher, token, "/api/discussions", { method: "POST", body: JSON.stringify({ target: targetKind === "block" ? { kind: "block", noteId: targetId, blockKey } : targetKind === "note" ? { kind: "note", noteId: targetId } : { kind: "task", taskId: targetId }, message: body }) }), onSuccess: async () => { setBody(""); await refresh(); } });
-  const reply = useMutation({ mutationFn: ({ id, content }: { id: string; content: string }) => request(fetcher, token, `/api/discussions/${encodeURIComponent(id)}/messages`, { method: "POST", body: JSON.stringify({ content }) }), onSuccess: async (_value, variables) => { setReplies((current) => ({ ...current, [variables.id]: "" })); await refresh(); } });
-  const resolve = useMutation({ mutationFn: (id: string) => request(fetcher, token, `/api/discussions/${encodeURIComponent(id)}/resolution`, { method: "PUT", body: JSON.stringify({}) }), onSuccess: refresh });
-  const createWork = useMutation({ mutationFn: ({ discussionId, kind }: { discussionId: string; kind: "note" | "task" }) => { const messageIds = Object.entries(selected[discussionId] ?? {}).filter(([, checked]) => checked).map(([id]) => id); return request(fetcher, token, `/api/discussions/${encodeURIComponent(discussionId)}/work`, { method: "POST", body: JSON.stringify({ kind, messageIds, idempotencyKey: crypto.randomUUID(), ...(kind === "task" ? { projectId, title: taskTitle } : {}) }) }); }, onSuccess: (_value, { discussionId }) => { setSelected((current) => ({ ...current, [discussionId]: {} })); setProjectId(""); setTaskTitle(""); } });
-  const mutationError = create.error || reply.error || resolve.error || createWork.error;
-  useEffect(() => { if (mutationError || createWork.isSuccess) feedbackRef.current?.focus(); }, [mutationError, createWork.isSuccess]);
-  return <div className={styles.page}><Header title="Discussions" lede="Keep conversation portable and distinct from authored knowledge." /><form className={styles.reply} onSubmit={(event: FormEvent) => { event.preventDefault(); create.mutate(); }}><label>Start a Discussion<textarea value={body} onChange={(event) => setBody(event.target.value)} /></label><button className={styles.primary} disabled={!body.trim() || create.isPending}>Start Discussion</button></form>{mutationError ? <p ref={feedbackRef} role="alert" tabIndex={-1}>{mutationError.message}</p> : createWork.isSuccess ? <p aria-label="Discussion work result" ref={feedbackRef} role="status" tabIndex={-1}>Selected Discussion messages created a {createWork.variables.kind === "note" ? "Note" : "Task"}.</p> : null}{query.isPending ? <Loading /> : query.isError ? <Failure error={query.error} retry={() => void query.refetch()} /> : query.data.discussions.length ? <div className={styles.list}>{query.data.discussions.map((item) => <article key={item.id}><h2>{item.target.kind === "block" ? `Block Discussion · ${item.target.state || "attached"}` : "Discussion"}</h2><span role="status">{item.resolvedAt ? "Resolved" : "Open"}</span><ol aria-live="polite">{item.messages.map((message) => <li key={message.id}><label><input aria-label={`Select ${message.content}`} type="checkbox" checked={Boolean(selected[item.id]?.[message.id])} onChange={(event) => setSelected((current) => ({ ...current, [item.id]: { ...current[item.id], [message.id]: event.target.checked } }))} />{message.content}</label><small>{message.author.displayName || "Member"}</small></li>)}</ol>{item.resolvedAt ? null : <><form onSubmit={(event) => { event.preventDefault(); reply.mutate({ id: item.id, content: replies[item.id] || "" }); }}><label>Reply<textarea value={replies[item.id] || ""} onChange={(event) => setReplies((current) => ({ ...current, [item.id]: event.target.value }))} /></label><button disabled={!replies[item.id]?.trim()}>Reply</button></form><button type="button" onClick={() => resolve.mutate(item.id)}>Resolve Discussion</button></>}<div className={styles.actions}><button type="button" disabled={!item.messages.some((message) => selected[item.id]?.[message.id])} onClick={() => createWork.mutate({ discussionId: item.id, kind: "note" })}>Create Note from selection</button><label>Project ID<input value={projectId} onChange={(event) => setProjectId(event.target.value)} /></label><label>Task title<input value={taskTitle} onChange={(event) => setTaskTitle(event.target.value)} /></label><button type="button" disabled={!item.messages.some((message) => selected[item.id]?.[message.id]) || !projectId.trim() || !taskTitle.trim()} onClick={() => createWork.mutate({ discussionId: item.id, kind: "task" })}>Create Task from selection</button></div></article>)}</div> : <Empty title="No Discussion yet" body="Start one when a Note, Task, or Block needs focused conversation." />}</div>;
+  const { targetId = "", blockKey = "" } = useParams();
+  const target = targetKind === "note" ? { kind: "note" as const, noteId: targetId }
+    : targetKind === "task" ? { kind: "task" as const, taskId: targetId }
+    : { kind: "block" as const, noteId: targetId, blockKey };
+  return <div className={styles.page}><Header title="Discussions" lede="Keep conversation portable and distinct from authored knowledge." />
+    <DiscussionPanel classes={{ actions: styles.actions, empty: styles.empty, failure: styles.failure, list: styles.list,
+      loading: styles.loading, primary: styles.primary, reply: styles.reply }} fetcher={fetcher} showWorkActions target={target} token={token} />
+  </div>;
 }
 
 export function ActivityPage({ workspaceId, token, fetcher = globalThis.fetch }: CoreProps) {
