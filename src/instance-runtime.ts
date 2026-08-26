@@ -45,6 +45,12 @@ import { s3AttachmentStorageFromEnvironment } from "./s3-attachment-storage.js";
 import { TaskService } from "./tasks.js";
 import { WorkspaceProjectService } from "./workspaces-projects.js";
 import { WorkspaceSearchService } from "./workspace-search.js";
+import { createCapabilityRegistry } from "./capability-registry.js";
+import { developmentIntegrationCapability } from "./development-integration/index.js";
+import { identityAccessCapability } from "./identity-access/index.js";
+import { instanceOperationsCapability } from "./instance-operations/index.js";
+import { knowledgeAuthoringCapability } from "./knowledge-authoring/index.js";
+import { workPlanningCapability } from "./work-planning/index.js";
 
 function required(environment: NodeJS.ProcessEnv, name: string): string {
   const value = environment[name]?.trim();
@@ -104,20 +110,38 @@ export async function composeInstanceRuntime(environment: NodeJS.ProcessEnv): Pr
   const recoveryEmail = createRecoveryEmailSender({ ...(environment.SMTP_URL?.trim() ? { smtpUrl: environment.SMTP_URL.trim() } : {}),
     ...(environment.EMAIL_RECOVERY_FROM?.trim() ? { from: environment.EMAIL_RECOVERY_FROM.trim() } : {}), publicOrigin });
   const githubWebhookSecret = environment.GITHUB_WEBHOOK_SECRET?.trim();
+  const instanceAdminToken = required(environment, "INSTANCE_ADMIN_TOKEN");
+  const reportAuthenticationFailure = ({ operation, cause }: { operation: string; cause: unknown }) => {
+    const causeType = cause instanceof Error ? cause.name : "UnknownFailure";
+    const candidateCode = cause && typeof cause === "object" && "code" in cause ? String(cause.code) : "";
+    const causeCode = /^(?:[A-Z0-9]{5}|E[A-Z_]{2,31})$/.test(candidateCode) ? candidateCode : "unclassified";
+    console.warn(`Authentication operation unavailable (operation=${operation}, cause=${causeType}, code=${causeCode}).`);
+  };
+  const ownerBootstrap = new OwnerBootstrapService(database);
+  const accountRegistration = openRegistrationFromEnvironment(environment) ? new AccountRegistrationService(database) : undefined;
+  const notes = new NoteService(database);
+  const tasks = new TaskService(database, database);
+  const repositoryConnections = githubApp ? new RepositoryConnectionService(database, githubApp) : undefined;
+  const githubArtifacts = githubApp ? new GitHubArtifactService(database, githubApp) : undefined;
+  const githubSignals = githubWebhookSecret ? new GitHubSignalService(database, githubWebhookSecret, automations) : undefined;
+  const capabilities = createCapabilityRegistry([
+    identityAccessCapability({ passwordAuth, ...(accountRegistration ? { accountRegistration } : {}), reportAuthenticationFailure }),
+    knowledgeAuthoringCapability({ notes, memberAccess: passwordAuth }),
+    workPlanningCapability({ tasks, memberAccess: passwordAuth }),
+    developmentIntegrationCapability({ memberAccess: passwordAuth,
+      ...(repositoryConnections ? { repositoryConnections } : {}), ...(githubArtifacts ? { githubArtifacts } : {}),
+      ...(githubSignals ? { githubSignals } : {}) }),
+    instanceOperationsCapability({ instanceAdminToken, ownerBootstrap }),
+  ]);
   const instance = await startInstance({ database, host: environment.HOST ?? "0.0.0.0", port,
-    instanceAdminToken: required(environment, "INSTANCE_ADMIN_TOKEN"),
+    instanceAdminToken, capabilities,
     webClientRoot: environment.WEB_CLIENT_ROOT?.trim() || fileURLToPath(new URL("../apps/web/dist", import.meta.url)),
-    ownerBootstrap: new OwnerBootstrapService(database), passwordAuth,
-    ...(openRegistrationFromEnvironment(environment) ? { accountRegistration: new AccountRegistrationService(database) } : {}),
-    reportAuthenticationFailure: ({ operation, cause }) => { const causeType = cause instanceof Error ? cause.name : "UnknownFailure";
-      const candidateCode = cause && typeof cause === "object" && "code" in cause ? String(cause.code) : "";
-      const causeCode = /^(?:[A-Z0-9]{5}|E[A-Z_]{2,31})$/.test(candidateCode) ? candidateCode : "unclassified";
-      console.warn(`Authentication operation unavailable (operation=${operation}, cause=${causeType}, code=${causeCode}).`); },
+    ownerBootstrap, passwordAuth, ...(accountRegistration ? { accountRegistration } : {}), reportAuthenticationFailure,
     workspaceProjects: new WorkspaceProjectService(database), organizationRoles: new OrganizationRoleService(database), invitations: new InvitationService(database),
-    ...(githubApp ? { repositoryConnections: new RepositoryConnectionService(database, githubApp), githubArtifacts: new GitHubArtifactService(database, githubApp) } : {}),
-    ...(githubWebhookSecret ? { githubSignals: new GitHubSignalService(database, githubWebhookSecret, automations) } : {}), automations,
-    notes: new NoteService(database), noteCollaboration: new NoteCollaborationService(database), agentGrants: new AgentGrantService(database),
-    mcpEnabled: environment.MCP_ENABLED?.trim().toLowerCase() === "true", noteLinks: new NoteLinkService(database), tasks: new TaskService(database, database),
+    ...(repositoryConnections ? { repositoryConnections } : {}), ...(githubArtifacts ? { githubArtifacts } : {}),
+    ...(githubSignals ? { githubSignals } : {}), automations,
+    notes, noteCollaboration: new NoteCollaborationService(database), agentGrants: new AgentGrantService(database),
+    mcpEnabled: environment.MCP_ENABLED?.trim().toLowerCase() === "true", noteLinks: new NoteLinkService(database), tasks,
     projectWorkflows: new ProjectWorkflowService(database), boards: new BoardService(database), attachments: new AttachmentService(database, attachmentStorage),
     portableWorkspaceExports: new PortableWorkspaceExportService(database, attachmentStorage), portableWorkspaceImports: new PortableWorkspaceImportService(database, attachmentStorage),
     importedIdentityAdministration: database, mobileCaptures: new MobileCaptureService(database), discussions: new DiscussionService(database),
