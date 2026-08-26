@@ -6,8 +6,14 @@ import {
   routesFromCapabilities,
   type CapabilityModule,
 } from "../../src/capability-registry.js";
-import { json, type HttpRoute } from "../../src/http-routing.js";
+import { developmentIntegrationCapability } from "../../src/development-integration/index.js";
+import { createDiagnostics } from "../../src/diagnostics.js";
+import type { HttpRoute } from "../../src/http-routing.js";
+import { identityAccessCapability } from "../../src/identity-access/index.js";
 import { startInstance } from "../../src/instance.js";
+import { instanceOperationsCapability } from "../../src/instance-operations/index.js";
+import { knowledgeAuthoringCapability } from "../../src/knowledge-authoring/index.js";
+import { workPlanningCapability } from "../../src/work-planning/index.js";
 
 function route(label: string): HttpRoute & { readonly label: string } {
   return {
@@ -61,16 +67,43 @@ describe("capability registry", () => {
     );
   });
 
-  test("the running Instance dispatches production behavior contributed only through the registry", async () => {
+  test("the running Instance dispatches representative production behavior from all five capabilities", async () => {
+    const memberAccess = { authenticateBearer: async () => undefined };
+    const diagnostics = createDiagnostics({
+      instanceVersion: "capability-contract",
+      transport: { async submit() {} },
+    });
+    diagnostics.recordCrashReport({
+      id: "capability-contract-crash",
+      occurredAt: "2026-08-26T12:00:00.000Z",
+      component: "capability-registry",
+      errorCode: "contract_probe",
+    });
     const registry = createCapabilityRegistry([
-      capability("identity-access", [{
-        matches: (request, url) => request.method === "GET" && url.pathname === "/api/capability-contract",
-        handle: (_request, response) => {
-          json(response, 200, { capability: "identity-access" });
-          return true;
-        },
-      }]),
+      identityAccessCapability({
+        passwordAuth: memberAccess as never,
+        instanceAdminToken: "capability-contract-admin",
+      }),
+      knowledgeAuthoringCapability({ notes: {} as never, memberAccess }),
+      workPlanningCapability({ tasks: {} as never, memberAccess }),
+      developmentIntegrationCapability({
+        memberAccess,
+        repositoryConnections: {} as never,
+      }),
+      instanceOperationsCapability({
+        instanceAdminToken: "capability-contract-admin",
+        diagnostics,
+      }),
     ]);
+
+    const request = (method: string, pathname: string) => new Request(`http://stash.invalid${pathname}`, { method });
+    const owns = (moduleName: string, method: string, pathname: string) => registry.modules
+      .find(({ name }) => name === moduleName)!.routes()
+      .some((registered) => registered.matches(request(method, pathname) as never, new URL(`http://stash.invalid${pathname}`)));
+    assert.equal(owns("identity-access", "POST", "/api/instance/organizations/bootstrap"), true);
+    assert.equal(owns("instance-operations", "POST", "/api/instance/organizations/bootstrap"), false);
+    assert.equal(owns("instance-operations", "GET", "/api/diagnostics/schema"), true);
+
     const instance = await startInstance({
       database: { verifyConnection: async () => undefined, close: async () => undefined },
       host: "127.0.0.1",
@@ -80,9 +113,27 @@ describe("capability registry", () => {
     });
 
     try {
-      const response = await fetch(`${instance.url}/api/capability-contract`);
-      assert.equal(response.status, 200);
-      assert.deepEqual(await response.json(), { capability: "identity-access" });
+      const auth = await fetch(`${instance.url}/api/auth/registration`);
+      assert.equal(auth.status, 200);
+      assert.deepEqual(await auth.json(), { enabled: false });
+
+      for (const pathname of [
+        "/api/notes/capability-contract-note",
+        "/api/projects/capability-contract-project/tasks/STASH-167",
+        "/api/organizations/capability-contract-organization/repository-connections",
+      ]) {
+        const response = await fetch(`${instance.url}${pathname}`);
+        assert.equal(response.status, 401, pathname);
+      }
+
+      const schema = await fetch(`${instance.url}/api/diagnostics/schema`);
+      assert.equal(schema.status, 200);
+      assert.equal((await schema.json() as { id: string }).id, "stash.instance-diagnostics.v1");
+      const crash = await fetch(`${instance.url}/api/diagnostics/crash-reports/capability-contract-crash`, {
+        headers: { authorization: "Bearer capability-contract-admin" },
+      });
+      assert.equal(crash.status, 200);
+      assert.equal((await crash.json() as { instanceVersion: string }).instanceVersion, "capability-contract");
     } finally {
       await instance.close();
     }
