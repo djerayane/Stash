@@ -74,7 +74,8 @@ export function NoteTree({ workspaceId, token, activeNoteId, fetcher = globalThi
   const restore = useMutation({ mutationFn: (branch: RemovedNoteBranch) => request(fetcher, token,
     `/api/notes/${encodeURIComponent(branch.id)}/restore`, { method: "POST" }).then(() => branch),
   onSuccess: async (branch) => { setStatus(`${branch.title} restored.`); await Promise.all([
-    client.invalidateQueries({ queryKey }), client.invalidateQueries({ queryKey: removedKey })]); } });
+    client.invalidateQueries({ queryKey }), client.invalidateQueries({ queryKey: removedKey }),
+    client.invalidateQueries({ queryKey: ["note-context", branch.id] })]); } });
 
   const depth = (node: NoteTreeNode) => { let count = 0; let parentId = node.parentId; while (parentId) { count += 1; parentId = byId.get(parentId)?.parentId; } return count; };
   const siblingBefore = (node: NoteTreeNode) => {

@@ -5,6 +5,7 @@ const roadmapId = "99999999-9999-4999-8999-999999999999";
 const evidenceId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const memberSession = JSON.stringify({ token: "browser-acceptance-member-token" });
 const durableSession = JSON.stringify({ token: "browser-acceptance-durable-token" });
+const guestSession = JSON.stringify({ token: "browser-acceptance-guest-token" });
 
 async function authenticate(page: Page, session = memberSession) {
   await page.addInitScript((value) => localStorage.setItem("stash.member-session", value), session);
@@ -143,6 +144,44 @@ test("persists a real Note branch lifecycle through the acceptance Instance", as
   await page.getByRole("button", { name: "Show archived and trashed branches" }).click();
   await page.getByRole("button", { name: "Restore Browser field guide" }).click();
   await expect(guide).toBeVisible(); await expect(observations).toBeVisible();
+});
+
+test("lets an inherited Project Guest read child Discussions without mutation affordances", async ({ page }) => {
+  await authenticate(page, guestSession);
+  const created = await page.request.post("/api/discussions", {
+    headers: { authorization: "Bearer browser-acceptance-durable-token" },
+    data: { target: { kind: "note", noteId: evidenceId }, message: "Inherited Guest review context" },
+  });
+  expect(created.status()).toBe(201);
+  const discussionId = (await created.json()).discussion.id as string;
+  const guestList = await page.request.get(`/api/notes/${evidenceId}/discussions`, {
+    headers: { authorization: "Bearer browser-acceptance-guest-token" },
+  });
+  expect(guestList.status()).toBe(200);
+  expect(JSON.stringify(await guestList.json())).toContain("Inherited Guest review context");
+  expect((await page.request.post("/api/discussions", { headers: { authorization: "Bearer browser-acceptance-guest-token" },
+    data: { target: { kind: "note", noteId: evidenceId }, message: "Guest write" } })).status()).toBe(403);
+  expect((await page.request.post(`/api/discussions/${discussionId}/messages`, {
+    headers: { authorization: "Bearer browser-acceptance-guest-token" }, data: { content: "Guest reply" },
+  })).status()).toBe(403);
+  expect((await page.request.put(`/api/discussions/${discussionId}/resolution`, {
+    headers: { authorization: "Bearer browser-acceptance-guest-token" }, data: {},
+  })).status()).toBe(403);
+
+  await page.goto(`/app/notes/${evidenceId}`);
+  await expect(page.getByText(/Read-only access · Project Guests/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Archive Note branch" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Move Note branch to trash" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Open Note context" }).click();
+  const drawer = page.getByRole("complementary", { name: "Note context" });
+  await expect(drawer.getByText(/Note links are read-only/)).toBeVisible();
+  await expect(drawer.getByRole("button", { name: "Create Note link" })).toHaveCount(0);
+  await drawer.getByRole("tab", { name: "Discussions" }).click();
+  await expect(drawer.getByText("Inherited Guest review context")).toBeVisible();
+  await expect(drawer.getByText(/only Workspace Members can contribute or resolve/)).toBeVisible();
+  await expect(drawer.getByRole("textbox", { name: "Start a Discussion" })).toHaveCount(0);
+  await expect(drawer.getByRole("textbox", { name: "Reply" })).toHaveCount(0);
+  await expect(drawer.getByRole("button", { name: "Resolve Discussion" })).toHaveCount(0);
 });
 
 test("keeps the Note Tree usable at a narrow viewport with non-pointer creation and move controls", async ({ page }) => {

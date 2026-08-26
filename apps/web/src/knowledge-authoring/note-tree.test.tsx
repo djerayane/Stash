@@ -180,3 +180,54 @@ it("keeps contextual knowledge closed by default and restores focus after keyboa
   fireEvent.click(screen.getByRole("button", { name: "Restore Note branch" }));
   await waitFor(() => expect(requests).toContainEqual(expect.objectContaining({ path: `/api/notes/${evidenceId}/restore`, method: "POST" })));
 });
+
+it("keeps inherited Project Guests read-only while preserving Note context and Discussion reading", async () => {
+  const requests: Array<{ path: string; method: string }> = [];
+  const context = {
+    noteId: evidenceId,
+    workspaceId,
+    breadcrumbs: [{ id: roadmapId, title: "Roadmap" }, { id: evidenceId, title: "Evidence" }],
+    outgoingLinks: [],
+    backlinks: [],
+    projectIds: ["project-1"],
+    projects: [{ id: "project-1", name: "Launch", key: "LAUNCH" }],
+    state: "active" as const,
+    parent: { id: roadmapId, title: "Roadmap" },
+    revision: 3,
+    createdAt: "2026-08-25T10:00:00.000Z",
+    historyCount: 3,
+    access: "read" as const,
+    accessSource: "project" as const,
+  };
+  const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+    const path = String(input); const method = init?.method ?? "GET";
+    requests.push({ path, method });
+    if (path.endsWith(`/notes/${evidenceId}/discussions`)) return Response.json({ discussions: [{ id: "discussion-guest",
+      target: { kind: "note" }, messages: [{ id: "message-guest", content: "Owner review context",
+        createdAt: "2026-08-26T10:00:00.000Z", author: { displayName: "Ada" } }] }] });
+    return Response.json(context);
+  });
+  render(wrapper(<NoteWorkspace fetcher={fetcher} noteId={evidenceId} token="guest"><article>Read-only editor</article></NoteWorkspace>));
+
+  expect(await screen.findByRole("navigation", { name: "Breadcrumb" })).toHaveTextContent("RoadmapEvidence");
+  expect(screen.getByRole("link", { name: "View history" })).toBeInTheDocument();
+  expect(screen.getByText(/read-only access/i)).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Archive Note branch" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Move Note branch to trash" })).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Open Note context" }));
+  const drawer = screen.getByRole("complementary", { name: "Note context" });
+  expect(within(drawer).queryByRole("button", { name: "Create Note link" })).not.toBeInTheDocument();
+  expect(within(drawer).getByText(/links are read-only/i)).toBeVisible();
+  fireEvent.click(within(drawer).getByRole("tab", { name: "Projects" }));
+  expect(within(drawer).getByRole("link", { name: "Launch" })).toBeInTheDocument();
+  expect(within(drawer).getByText(/project associations are read-only/i)).toBeVisible();
+  fireEvent.click(within(drawer).getByRole("tab", { name: "Discussions" }));
+  expect(await within(drawer).findByText("Owner review context")).toBeVisible();
+  expect(within(drawer).getByText(/follow this discussion/i)).toBeVisible();
+  expect(within(drawer).queryByRole("textbox", { name: "Start a Discussion" })).not.toBeInTheDocument();
+  expect(within(drawer).queryByRole("textbox", { name: "Reply" })).not.toBeInTheDocument();
+  expect(within(drawer).queryByRole("button", { name: "Resolve Discussion" })).not.toBeInTheDocument();
+  expect(requests.every(({ method }) => method === "GET")).toBe(true);
+  expect(requests.some(({ path }) => path.endsWith("/note-tree"))).toBe(false);
+});
