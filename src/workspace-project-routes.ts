@@ -76,6 +76,11 @@ export function workspaceProjectRoutes(
             error: result.status,
             message: "Project keys must be unique within a Workspace.",
           });
+        } else if (result.status === "project_creation_forbidden") {
+          json(response, 403, {
+            error: result.status,
+            message: result.reason,
+          });
         } else {
           json(response, 403, {
             error: "workspace_forbidden",

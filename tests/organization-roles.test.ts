@@ -151,15 +151,15 @@ describe("managing built-in Organization Roles", () => {
             "organization.roles.manage",
             "organization.members.manage",
             "workspace.create",
-            "project.create",
+            "create_project",
           ],
         },
         {
           name: "Admin",
           immutable: true,
-          permissions: ["organization.members.manage", "workspace.create", "project.create"],
+          permissions: ["organization.members.manage", "workspace.create", "create_project"],
         },
-        { name: "Member", immutable: true, permissions: ["workspace.create", "project.create"] },
+        { name: "Member", immutable: true, permissions: ["workspace.create"] },
       ],
     });
 

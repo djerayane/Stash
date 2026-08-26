@@ -52,7 +52,8 @@ export interface PortableProjectProjection {
 }
 
 export interface WorkspaceProjectRepository {
-  listAccessibleWorkspaces?(memberId: string): Promise<Array<{ id: string; name: string; projects: Array<{ id: string; name: string; key: string }> }>>;
+  listAccessibleWorkspaces?(memberId: string): Promise<Array<{ id: string; name: string; ownerType?: "personal" | "organization"; projects: Array<{ id: string; name: string; key: string }> }>>;
+  canCreateProject(memberId: string, workspaceId: string): Promise<boolean>;
   findPortableMemberIdentity(memberId: string): Promise<PortableIdentity | undefined>;
   createWorkspace(
     record: WorkspaceRecord,
@@ -121,7 +122,25 @@ export class WorkspaceProjectService {
 
   async listAccessible(memberId: string) {
     if (!this.#repository.listAccessibleWorkspaces) throw new Error("workspace_discovery_unavailable");
-    return this.#repository.listAccessibleWorkspaces(memberId);
+    const workspaces = await this.#repository.listAccessibleWorkspaces(memberId);
+    return Promise.all(workspaces.map(async (workspace) => {
+      const allowed = await this.canCreateProject(memberId, workspace.id);
+      const { ownerType, ...discovery } = workspace;
+      return {
+        ...discovery,
+        projectCreation: allowed ? { allowed: true as const } : {
+          allowed: false as const,
+          reason: ownerType === "personal"
+            ? "Only the personal Workspace owner can create Projects here."
+            : "Your Organization Role does not include Project creation.",
+        },
+      };
+    }));
+  }
+
+  async canCreateProject(memberId: string, workspaceId: string): Promise<boolean> {
+    if (!isUuid(workspaceId)) throw new InvalidProjectInput();
+    return this.#repository.canCreateProject(memberId, workspaceId);
   }
 
   async createWorkspace(memberId: string, value: unknown): Promise<
@@ -155,9 +174,16 @@ export class WorkspaceProjectService {
       project: WorkspaceProjectRecord;
       projection: PortableProjectProjection;
     }
+    | { status: "project_creation_forbidden"; reason: string }
     | { status: "workspace_forbidden" | "workspace_not_found" | "key_conflict" }
   > {
     if (!isUuid(workspaceId) || !isProjectInput(value)) throw new InvalidProjectInput();
+    if (!(await this.canCreateProject(memberId, workspaceId))) {
+      const workspace = (await this.#repository.listAccessibleWorkspaces?.(memberId))?.find(({ id }) => id === workspaceId);
+      return { status: "project_creation_forbidden", reason: workspace?.ownerType === "personal"
+        ? "Only the personal Workspace owner can create Projects here."
+        : "Your Organization Role does not include Project creation." };
+    }
     const createdBy = await this.#repository.findPortableMemberIdentity(memberId);
     if (!createdBy) throw new Error("member_identity_unavailable");
     const project: WorkspaceProjectRecord = {
