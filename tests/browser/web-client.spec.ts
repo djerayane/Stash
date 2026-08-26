@@ -286,13 +286,19 @@ test("announces and focuses a session failure, then retries by keyboard without 
   await expect(alert).toContainText("The Instance could not be reached.");
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(accessibility.violations).toEqual([]);
-  const documentLoads = await page.evaluate(() => performance.getEntriesByType("navigation").length);
+  const documentIdentity = await page.evaluate(() => { const value = crypto.randomUUID();
+    Object.defineProperty(window, "__stashRetryDocumentIdentity", { value, configurable: true }); return value; });
+  const navigatedDocumentIdentities: Array<string | null> = [];
+  page.on("framenavigated", (frame) => { if (frame === page.mainFrame()) void frame.evaluate(() =>
+    (window as typeof window & { __stashRetryDocumentIdentity?: string }).__stashRetryDocumentIdentity ?? null)
+    .then((identity) => navigatedDocumentIdentities.push(identity)); });
   await page.getByRole("button", { name: "Try again" }).focus();
   await page.keyboard.press("Enter");
 
   await expect(page.getByRole("heading", { name: "Note Tree" }).last()).toBeVisible();
   expect(sessionAttempts).toBe(2);
-  expect(await page.evaluate(() => performance.getEntriesByType("navigation").length)).toBe(documentLoads);
+  await expect.poll(() => navigatedDocumentIdentities).toEqual([documentIdentity]);
+  expect(await page.evaluate(() => (window as typeof window & { __stashRetryDocumentIdentity?: string }).__stashRetryDocumentIdentity)).toBe(documentIdentity);
 });
 
 test("issues and revokes an Agent Grant and safely reviews its Proposal by keyboard", async ({ page }) => {

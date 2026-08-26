@@ -51,7 +51,7 @@ import { developmentIntegrationCapability } from "./development-integration/inde
 import { identityAccessCapability } from "./identity-access/index.js";
 import { instanceOperationsCapability } from "./instance-operations/index.js";
 import { knowledgeAuthoringCapability } from "./knowledge-authoring/index.js";
-import { NoteTreeService } from "./knowledge-authoring/note-tree.js";
+import { EmptyCollectionImpactInspector, NoteTreeService } from "./knowledge-authoring/note-tree.js";
 import { workPlanningCapability } from "./work-planning/index.js";
 
 function required(environment: NodeJS.ProcessEnv, name: string): string {
@@ -133,7 +133,8 @@ export async function composeInstanceRuntime(environment: NodeJS.ProcessEnv): Pr
   const capabilities = createCapabilityRegistry([
     identityAccessCapability({ passwordAuth, instanceAdminToken, ownerBootstrap,
       ...(accountRegistration ? { accountRegistration } : {}), reportAuthenticationFailure }),
-    knowledgeAuthoringCapability({ notes, noteTree: new NoteTreeService(database.noteTreeRepository()), memberAccess: passwordAuth }),
+    knowledgeAuthoringCapability({ notes, noteTree: new NoteTreeService(database.noteTreeRepository(),
+      new EmptyCollectionImpactInspector()), memberAccess: passwordAuth }),
     workPlanningCapability({ tasks, memberAccess: passwordAuth }),
     developmentIntegrationCapability({ memberAccess: passwordAuth,
       ...(repositoryConnections ? { repositoryConnections } : {}), ...(githubArtifacts ? { githubArtifacts } : {}),

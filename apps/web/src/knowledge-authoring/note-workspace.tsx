@@ -3,6 +3,7 @@ import { useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router";
 
 import { ContextDrawer, type NoteContextData } from "./context-drawer";
+import { branchImpactConfirmation, type BranchImpact } from "./branch-impact";
 import styles from "./note-tree.module.css";
 
 export function NoteWorkspace({ noteId, token, children, fetcher = globalThis.fetch }: {
@@ -21,11 +22,11 @@ export function NoteWorkspace({ noteId, token, children, fetcher = globalThis.fe
   const branchAction = useMutation({ mutationFn: async (action: "archive" | "trash") => {
     const previewResponse = await fetcher(`/api/notes/${encodeURIComponent(noteId)}/branch-preview`, { method: "POST",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ action }) });
-    const preview = await previewResponse.json() as { impact?: { descendantCount: number; collectionCount: number; externalLinks: unknown[]; projectAccessChanges: unknown[] }; message?: string };
+    const preview = await previewResponse.json() as { impact?: BranchImpact; message?: string };
     if (!previewResponse.ok || !preview.impact) throw new Error(preview.message || "The branch impact could not be calculated.");
     const impact = preview.impact;
     const verb = action === "archive" ? "Archive" : "Move to trash";
-    const confirmed = window.confirm(`${verb} this Note and ${impact.descendantCount} descendants? This branch affects ${impact.collectionCount} Collections, ${impact.externalLinks.length} external links, and ${impact.projectAccessChanges.length} Project access changes.`);
+    const confirmed = window.confirm(branchImpactConfirmation(`${verb} this Note and ${impact.descendantCount} descendants?`, impact));
     if (!confirmed) return { cancelled: true as const };
     const response = await fetcher(`/api/notes/${encodeURIComponent(noteId)}/${action}`, { method: "POST", headers: { authorization: `Bearer ${token}` } });
     const body = await response.json() as { message?: string };

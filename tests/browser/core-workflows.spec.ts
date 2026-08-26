@@ -169,9 +169,9 @@ test("@a11y keeps every migrated core route free of detectable accessibility vio
 
 test("signs in with a passkey and a recovery code through accessible React flows", async ({ page }) => {
   await page.addInitScript(() => Object.defineProperty(navigator, "credentials", { configurable: true, value: { get: async () => ({ toJSON: () => ({ id: "acceptance-passkey", rawId: "acceptance-passkey", type: "public-key", response: { clientDataJSON: "proof", authenticatorData: "proof", signature: "proof" } }) }) } }));
-  await page.goto("/sign-in"); await page.getByRole("button", { name: "Passkey" }).click(); await page.getByRole("textbox", { name: "Email" }).fill("member@stash.test"); await page.getByRole("button", { name: "Sign in" }).click(); await expect(page).toHaveURL(/\/app$/);
+  await page.goto("/sign-in"); await page.getByRole("button", { name: "Passkey" }).click(); await page.getByRole("textbox", { name: "Email" }).fill("member@stash.test"); await page.getByRole("button", { name: "Sign in" }).click(); await expect(page).toHaveURL(/\/app\/notes$/);
   await page.evaluate(() => localStorage.removeItem("stash.member-session")); await page.goto("/sign-in");
-  await page.getByRole("button", { name: "Recovery code" }).click(); await page.getByRole("textbox", { name: "Email" }).fill("member@stash.test"); await page.getByRole("textbox", { name: "Recovery code" }).fill("12345678-12345678"); await page.getByRole("button", { name: "Sign in" }).click(); await expect(page).toHaveURL(/\/app$/);
+  await page.getByRole("button", { name: "Recovery code" }).click(); await page.getByRole("textbox", { name: "Email" }).fill("member@stash.test"); await page.getByRole("textbox", { name: "Recovery code" }).fill("12345678-12345678"); await page.getByRole("button", { name: "Sign in" }).click(); await expect(page).toHaveURL(/\/app\/notes$/);
 });
 
 test("@a11y exposes email recovery and OpenID Connect errors without losing input", async ({ page }) => {

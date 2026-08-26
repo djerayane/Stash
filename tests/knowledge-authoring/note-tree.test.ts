@@ -7,7 +7,7 @@ import { after, before, describe, test } from "node:test";
 
 import { createAuthenticationSecretCodec } from "../../src/authentication-secrets.js";
 import { EmbeddedInstanceStore } from "../../src/embedded-instance-store.js";
-import { NoteTreeService } from "../../src/knowledge-authoring/note-tree.js";
+import { EmptyCollectionImpactInspector, NoteTreeService } from "../../src/knowledge-authoring/note-tree.js";
 import { NoteService } from "../../src/notes.js";
 import { WorkspaceProjectService } from "../../src/workspaces-projects.js";
 
@@ -47,7 +47,7 @@ describe("Note Tree", () => {
     assert.equal(workspace.status, "created");
     if (workspace.status !== "created") throw new Error("workspace setup failed");
     workspaceId = workspace.workspace.id;
-    service = new NoteTreeService(store.database.noteTreeRepository());
+    service = new NoteTreeService(store.database.noteTreeRepository(), new EmptyCollectionImpactInspector());
   });
 
   after(async () => store.close());
@@ -136,7 +136,7 @@ describe("Note Tree", () => {
     assert.equal(preview.status, "found");
     if (preview.status !== "found") return;
     assert.deepEqual(preview.impact.projectAccessChanges, [
-      { noteId: evidenceId, projectId: project.project.id, effect: "gained" },
+      { noteId: evidenceId, noteTitle: "Evidence", projectId: project.project.id, projectName: "Launch", effect: "gained" },
     ]);
     const moved = await service.moveNoteBranch(evidenceId, { parentId: roadmapId, beforeId: questionsId }, ownerId);
     assert.equal(moved.status, "moved");
@@ -158,6 +158,13 @@ describe("Note Tree", () => {
     assert.equal(evidenceContext.context.backlinks[0]?.noteId, researchId);
     assert.deepEqual(researchContext.context.projectIds, []);
     assert.deepEqual(evidenceContext.context.projectIds, [project.project.id]);
+    assert.equal(evidenceContext.context.state, "active");
+    assert.deepEqual(evidenceContext.context.parent, { id: roadmapId, title: "Roadmap" });
+    assert.equal(evidenceContext.context.access, "edit");
+    assert.equal(evidenceContext.context.accessSource, "workspace");
+    assert.equal(evidenceContext.context.revision, 1);
+    assert.match(evidenceContext.context.createdAt, /^\d{4}-\d{2}-\d{2}T/);
+    assert.equal(evidenceContext.context.historyCount >= 1, true);
     assert.equal((await service.list(ownerId, workspaceId)).status, "found");
 
     const strategyRoot = await service.create(ownerId, workspaceId, { title: "Strategy home" });
@@ -167,9 +174,11 @@ describe("Note Tree", () => {
     })).status, "updated");
     const inherited = await service.preview(ownerId, roadmapId, { action: "move", parentId: strategyRoot.node.id });
     assert.equal(inherited.status, "found"); if (inherited.status !== "found") return;
-    assert.deepEqual(inherited.impact.projectAccessChanges, [roadmapId, evidenceId, questionsId].map((noteId) => ({
-      noteId, projectId: strategy.project.id, effect: "gained" as const,
-    })));
+    assert.deepEqual(inherited.impact.projectAccessChanges, [
+      { noteId: roadmapId, noteTitle: "Roadmap" },
+      { noteId: evidenceId, noteTitle: "Evidence" },
+      { noteId: questionsId, noteTitle: "Questions" },
+    ].map((note) => ({ ...note, projectId: strategy.project.id, projectName: "Strategy", effect: "gained" as const })));
     assert.equal((await service.moveNoteBranch(roadmapId, { parentId: strategyRoot.node.id }, ownerId)).status, "moved");
 
     await store.upgradeDatabase.query("INSERT INTO stash_project_guests(project_id,account_id) VALUES($1,$2)", [project.project.id, guestId]);
@@ -182,6 +191,8 @@ describe("Note Tree", () => {
     assert.deepEqual(guestContext.context.outgoingLinks, []);
     assert.deepEqual(guestContext.context.backlinks, []);
     assert.deepEqual(guestContext.context.projectIds, [project.project.id]);
+    assert.equal(guestContext.context.access, "read");
+    assert.equal(guestContext.context.accessSource, "project");
   });
 
   test("archive and trash preview and recover the complete branch structure in portable state", async () => {
@@ -189,6 +200,10 @@ describe("Note Tree", () => {
     assert.equal(preview.status, "found");
     if (preview.status !== "found") return;
     assert.equal(preview.impact.descendantCount, 2);
+    assert.deepEqual(preview.impact.descendants, [
+      { noteId: evidenceId, title: "Evidence" },
+      { noteId: questionsId, title: "Questions" },
+    ]);
     assert.deepEqual(preview.impact.externalLinks, [
       { noteId: researchId, title: "Research", direction: "incoming" },
       { noteId: researchId, title: "Research", direction: "outgoing" },
@@ -196,7 +211,9 @@ describe("Note Tree", () => {
     assert.equal(preview.impact.collectionCount, 0);
     assert.equal(preview.impact.projectAccessChanges.length, 7);
     assert.deepEqual(preview.impact.projectAccessChanges.filter(({ noteId }) => noteId === evidenceId),
-      [launchProjectId, strategyProjectId].sort().map((projectId) => ({ noteId: evidenceId, projectId, effect: "lost" as const })));
+      [{ noteId: evidenceId, noteTitle: "Evidence", projectId: launchProjectId, projectName: "Launch", effect: "lost" as const },
+        { noteId: evidenceId, noteTitle: "Evidence", projectId: strategyProjectId, projectName: "Strategy", effect: "lost" as const }]
+        .sort((left, right) => left.projectId.localeCompare(right.projectId)));
 
     const archived = await service.remove(ownerId, roadmapId, "archived");
     assert.deepEqual(archived.status, "updated");

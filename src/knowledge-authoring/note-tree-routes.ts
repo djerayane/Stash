@@ -10,12 +10,21 @@ const contextLinks = /^\/api\/notes\/[^/]+\/context\/links$/;
 export function noteTreeRoutes(service: NoteTreeService, access: MemberAccessResolver): HttpRoute {
   return {
     matches(request, url) {
-      return (["GET", "POST"].includes(request.method ?? "") && workspaceTree.test(url.pathname))
-        || (request.method === "GET" && removedTree.test(url.pathname))
-        || (request.method === "POST" && contextLinks.test(url.pathname))
-        || (["GET", "POST"].includes(request.method ?? "") && noteTreeAction.test(url.pathname));
+      return workspaceTree.test(url.pathname)
+        || removedTree.test(url.pathname)
+        || contextLinks.test(url.pathname)
+        || noteTreeAction.test(url.pathname);
     },
     async handle(request, response, url) {
+      const preflightAction = noteTreeAction.test(url.pathname) ? url.pathname.split("/")[4] : undefined;
+      const allowedMethods = workspaceTree.test(url.pathname) ? ["GET", "POST"]
+        : removedTree.test(url.pathname) || preflightAction === "context" ? ["GET"]
+          : ["POST"];
+      if (!allowedMethods.includes(request.method ?? "")) {
+        response.setHeader("allow", allowedMethods.join(", "));
+        json(response, 405, { error: "method_not_allowed", message: `Use ${allowedMethods.join(" or ")} for this Note Tree operation.` });
+        return true;
+      }
       const member = await access.authenticateBearer(request.headers.authorization);
       if (!member) { json(response, 401, { error: "unauthorized", message: "A valid Member session is required." }); return true; }
       try {

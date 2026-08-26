@@ -11,7 +11,9 @@ export interface NoteTreeNode {
 
 export interface NoteTreeAccessChange {
   noteId: string;
+  noteTitle: string;
   projectId: string;
+  projectName: string;
   effect: "gained" | "lost";
 }
 
@@ -19,6 +21,7 @@ export interface NoteBranchImpact {
   noteId: string;
   title: string;
   descendantCount: number;
+  descendants: Array<{ noteId: string; title: string }>;
   collectionCount: number;
   externalLinks: Array<{ noteId: string; title: string; direction: "incoming" | "outgoing" }>;
   projectAccessChanges: NoteTreeAccessChange[];
@@ -40,9 +43,13 @@ export interface NoteTreeImpactInspector {
   inspect(memberId: string, noteIds: readonly string[]): Promise<{ collectionCount: number }>;
 }
 
-export const emptyNoteTreeImpactInspector: NoteTreeImpactInspector = {
-  async inspect() { return { collectionCount: 0 }; },
-};
+/**
+ * Production contribution until Collections become a knowledge-authoring capability in #171.
+ * Replace this explicit contribution there; zero is current product reality, not a domain default.
+ */
+export class EmptyCollectionImpactInspector implements NoteTreeImpactInspector {
+  async inspect(): Promise<{ collectionCount: number }> { return { collectionCount: 0 }; }
+}
 
 export interface NoteBreadcrumb {
   id: string;
@@ -60,6 +67,13 @@ export interface NoteContextLink {
 export interface NoteContext {
   noteId: string;
   workspaceId: string;
+  state: "active";
+  parent?: NoteBreadcrumb;
+  revision: number;
+  createdAt: string;
+  historyCount: number;
+  access: "edit" | "read";
+  accessSource: "workspace" | "project";
   breadcrumbs: NoteBreadcrumb[];
   outgoingLinks: NoteContextLink[];
   backlinks: NoteContextLink[];
@@ -142,7 +156,7 @@ function destination(value: unknown): { parentId?: string; beforeId?: string } {
 }
 
 export class NoteTreeService {
-  constructor(private readonly repository: NoteTreeRepository, private readonly impactInspector = emptyNoteTreeImpactInspector) {}
+  constructor(private readonly repository: NoteTreeRepository, private readonly impactInspector: NoteTreeImpactInspector) {}
 
   async create(memberId: string, workspaceId: string, value: unknown) {
     if (!uuid.test(workspaceId) || !object(value) || !optionalUuid(value.parentId) || !optionalUuid(value.beforeId)

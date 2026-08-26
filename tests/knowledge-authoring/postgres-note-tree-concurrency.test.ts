@@ -4,7 +4,7 @@ import { after, describe, test } from "node:test";
 import { Pool } from "pg";
 
 import { createAuthenticationSecretCodec } from "../../src/authentication-secrets.js";
-import { NoteTreeService } from "../../src/knowledge-authoring/note-tree.js";
+import { EmptyCollectionImpactInspector, NoteTreeService } from "../../src/knowledge-authoring/note-tree.js";
 import { PostgresDatabase } from "../../src/postgres-database.js";
 import { WorkspaceProjectService } from "../../src/workspaces-projects.js";
 
@@ -24,7 +24,7 @@ describe("PostgreSQL Note Tree concurrency", { skip: databaseUrl ? false : "STAS
     const workspace = await new WorkspaceProjectService(database).createWorkspace(ownerId,
       { name: "Tree", owner: { type: "organization", organizationId } });
     assert.equal(workspace.status, "created"); if (workspace.status !== "created") return;
-    const service = new NoteTreeService(database.noteTreeRepository());
+    const service = new NoteTreeService(database.noteTreeRepository(), new EmptyCollectionImpactInspector());
     const first = await service.create(ownerId, workspace.workspace.id, { title: "First" });
     const second = await service.create(ownerId, workspace.workspace.id, { title: "Second" });
     assert.equal(first.status, "created"); assert.equal(second.status, "created");
