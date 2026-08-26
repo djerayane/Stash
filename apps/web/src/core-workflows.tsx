@@ -82,9 +82,18 @@ export function DiscussionsPage({ token, targetKind, fetcher = globalThis.fetch 
   const target = targetKind === "note" ? { kind: "note" as const, noteId: targetId }
     : targetKind === "task" ? { kind: "task" as const, taskId: targetId }
     : { kind: "block" as const, noteId: targetId, blockKey };
+  const targetType = targetKind === "task" ? "tasks" : "notes";
+  const discussionPath = targetKind === "block" ? `/api/notes/${encodeURIComponent(targetId)}/blocks/${encodeURIComponent(blockKey)}/discussions`
+    : `/api/${targetType}/${encodeURIComponent(targetId)}/discussions`;
+  const key = ["discussions", targetKind, targetId, ...(targetKind === "block" ? [blockKey] : [])];
+  const access = useQuery({ queryKey: key, retry: false, queryFn: () => request(fetcher, token, discussionPath) as Promise<{
+    access: "edit" | "read"; discussions: unknown[];
+  }> });
   return <div className={styles.page}><Header title="Discussions" lede="Keep conversation portable and distinct from authored knowledge." />
-    <DiscussionPanel classes={{ actions: styles.actions, empty: styles.empty, failure: styles.failure, list: styles.list,
+    {access.isPending ? <Loading /> : access.isError ? <Failure error={access.error} retry={() => void access.refetch()} /> : <DiscussionPanel canWrite={access.data.access === "edit"}
+      classes={{ actions: styles.actions, empty: styles.empty, failure: styles.failure, list: styles.list,
       loading: styles.loading, primary: styles.primary, reply: styles.reply }} fetcher={fetcher} showWorkActions target={target} token={token} />
+    }
   </div>;
 }
 
@@ -103,12 +112,21 @@ export function NotificationsPage({ token, fetcher = globalThis.fetch }: Omit<Co
 export function NoteHistoryPage({ token, fetcher = globalThis.fetch }: Omit<CoreProps, "workspaceId">) {
   const { noteId = "" } = useParams(); const client = useQueryClient(); const [selected, setSelected] = useState<NoteHistoryRevision>(); const [status, setStatus] = useState(""); const statusRef = useRef<HTMLParagraphElement>(null); const restoreErrorRef = useRef<HTMLParagraphElement>(null);
   const key = ["note-history", noteId];
-  const query = useQuery({ queryKey: key, retry: false, queryFn: () => request(fetcher, token, `/api/notes/${encodeURIComponent(noteId)}/history`) as Promise<{ revisions: NoteHistoryRevision[] }> });
+  const query = useQuery({ queryKey: key, retry: false, queryFn: () => request(fetcher, token, `/api/notes/${encodeURIComponent(noteId)}/history`) as Promise<{
+    access: "edit" | "read"; revisions: NoteHistoryRevision[];
+  }> });
+  const canRestore = query.data?.access === "edit";
   const latest = query.data?.revisions.reduce((value, revision) => Math.max(value, revision.revision), 0) ?? 0;
   const restore = useMutation({ mutationFn: (revision: NoteHistoryRevision) => request(fetcher, token, `/api/notes/${encodeURIComponent(noteId)}/history/${revision.revision}/restore`, { method: "POST", body: JSON.stringify({ expectedRevision: latest, idempotencyKey: crypto.randomUUID() }) }), onSuccess: async (_value, revision) => { setSelected(undefined); setStatus(`Revision ${revision.revision} restored.`); await client.invalidateQueries({ queryKey: key }); requestAnimationFrame(() => statusRef.current?.focus()); } });
   useEffect(() => { if (restore.isError) restoreErrorRef.current?.focus(); }, [restore.isError]);
-  return <div className={styles.page}><Header title="Note history" lede="Inspect earlier authored states and deliberately restore one without losing the audit trail." action={<Link to={`/app/notes/${encodeURIComponent(noteId)}`}>Back to Note</Link>} />{status ? <p ref={statusRef} tabIndex={-1} role="status">{status}</p> : null}{query.isPending ? <Loading /> : query.isError ? <Failure error={query.error} retry={() => void query.refetch()} /> : query.data.revisions.length ? <ol className={styles.timeline}>{query.data.revisions.map((revision) => <li key={revision.revision}><span aria-hidden="true" /><div><strong>Revision {revision.revision}</strong><p>{revision.actor.displayName} · {new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(revision.recordedAt))}</p><p>{causeLabel(revision.cause)}</p><button type="button" onClick={() => { restore.reset(); setSelected(revision); }}>Review revision</button></div></li>)}</ol> : <Empty title="No earlier revisions" body="Committed changes to this Note will appear here." />}
-    <Dialog.Root open={Boolean(selected)} onOpenChange={(open) => { if (!open && !restore.isPending) setSelected(undefined); }}><Dialog.Portal><Dialog.Overlay className={styles.overlay} /><Dialog.Content className={styles.dialog}><Dialog.Title>Restore revision {selected?.revision}</Dialog.Title><Dialog.Description>Review this saved content. Restoring creates a new revision and preserves the current history.</Dialog.Description><pre>{selected?.content}</pre>{restore.isError ? <p ref={restoreErrorRef} tabIndex={-1} role="alert">{restore.error.message}</p> : null}<div className={styles.actions}><Dialog.Close asChild><button disabled={restore.isPending} type="button">Cancel</button></Dialog.Close><button className={styles.primary} disabled={restore.isPending} type="button" onClick={() => selected && restore.mutate(selected)}>{restore.isPending ? "Restoring…" : restore.isError ? "Try restore again" : "Confirm restore"}</button></div></Dialog.Content></Dialog.Portal></Dialog.Root>
+  return <div className={styles.page}><Header title="Note history" lede={query.data?.access === "read"
+    ? "Inspect earlier authored states without changing the Note."
+    : "Inspect earlier authored states and deliberately restore one without losing the audit trail."} action={<Link to={`/app/notes/${encodeURIComponent(noteId)}`}>Back to Note</Link>} />
+    {query.data?.access === "read" ? <p role="note"><strong>Read-only history.</strong> You can inspect revision content, but only Workspace Members can restore it.</p> : null}
+    {status ? <p ref={statusRef} tabIndex={-1} role="status">{status}</p> : null}{query.isPending ? <Loading /> : query.isError ? <Failure error={query.error} retry={() => void query.refetch()} /> : query.data.revisions.length ? <ol className={styles.timeline}>{query.data.revisions.map((revision) => <li key={revision.revision}><span aria-hidden="true" /><div><strong>Revision {revision.revision}</strong><p>{revision.actor.displayName} · {new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(revision.recordedAt))}</p><p>{causeLabel(revision.cause)}</p><button type="button" onClick={() => { restore.reset(); setSelected(revision); }}>Review revision</button></div></li>)}</ol> : <Empty title="No earlier revisions" body="Committed changes to this Note will appear here." />}
+    <Dialog.Root open={Boolean(selected)} onOpenChange={(open) => { if (!open && !restore.isPending) setSelected(undefined); }}><Dialog.Portal><Dialog.Overlay className={styles.overlay} /><Dialog.Content className={styles.dialog}><Dialog.Title>{canRestore ? "Restore revision" : "Revision"} {selected?.revision}</Dialog.Title><Dialog.Description>{canRestore
+      ? "Review this saved content. Restoring creates a new revision and preserves the current history."
+      : "Review this saved content. Read-only access does not allow restoring it."}</Dialog.Description><pre>{selected?.content}</pre>{restore.isError ? <p ref={restoreErrorRef} tabIndex={-1} role="alert">{restore.error.message}</p> : null}<div className={styles.actions}><Dialog.Close asChild><button disabled={restore.isPending} type="button">{canRestore ? "Cancel" : "Close"}</button></Dialog.Close>{canRestore ? <button className={styles.primary} disabled={restore.isPending} type="button" onClick={() => selected && restore.mutate(selected)}>{restore.isPending ? "Restoring…" : restore.isError ? "Try restore again" : "Confirm restore"}</button> : null}</div></Dialog.Content></Dialog.Portal></Dialog.Root>
   </div>;
 }
 

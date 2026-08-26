@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 
 import { createAuthenticationSecretCodec } from "../../src/authentication-secrets.js";
+import { ActivityService } from "../../src/activity.js";
 import { createCapabilityRegistry } from "../../src/capability-registry.js";
 import { EmbeddedInstanceStore } from "../../src/embedded-instance-store.js";
 import { DiscussionService } from "../../src/discussions.js";
@@ -40,7 +41,7 @@ describe("Note Tree HTTP", () => {
         : header === "Bearer guest" ? { accountId: guestId, sessionId: "guest-session" } : undefined;
     } };
     instance = await startInstance({ database: store.database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin",
-      discussions: new DiscussionService(store.database), memberAccess: access,
+      activities: new ActivityService(store.database), discussions: new DiscussionService(store.database), memberAccess: access,
       capabilities: createCapabilityRegistry([{ name: "knowledge-authoring", routes: () => [noteTreeRoutes(new NoteTreeService(
         store.database.noteTreeRepository(), new EmptyCollectionImpactInspector()), access)] }]) });
   });
@@ -134,7 +135,9 @@ describe("Note Tree HTTP", () => {
 
     const listed = await guestRequest(`/api/notes/${child.id}/discussions`);
     assert.equal(listed.status, 200);
-    assert.deepEqual((await listed.json() as any).discussions.map(({ id, messages }: any) => ({ id, content: messages[0].content })),
+    const listedBody = await listed.json() as any;
+    assert.equal(listedBody.access, "read");
+    assert.deepEqual(listedBody.discussions.map(({ id, messages }: any) => ({ id, content: messages[0].content })),
       [{ id: discussion.id, content: "Visible review context" }]);
     const context = await guestRequest(`/api/notes/${child.id}/context`);
     assert.equal(context.status, 200);
@@ -145,5 +148,13 @@ describe("Note Tree HTTP", () => {
     assert.equal((await guestRequest(`/api/discussions/${discussion.id}/messages`, { method: "POST",
       body: JSON.stringify({ content: "Guest reply" }) })).status, 403);
     assert.equal((await guestRequest(`/api/discussions/${discussion.id}/resolution`, { method: "PUT", body: "{}" })).status, 403);
+
+    const history = await guestRequest(`/api/notes/${child.id}/history`);
+    assert.equal(history.status, 200);
+    const historyBody = await history.json() as any;
+    assert.equal(historyBody.access, "read");
+    assert.equal(historyBody.revisions.length >= 1, true);
+    assert.equal((await guestRequest(`/api/notes/${child.id}/history/1/restore`, { method: "POST",
+      body: JSON.stringify({ expectedRevision: 1, idempotencyKey: "32323232-3232-4232-8232-323232323232" }) })).status, 404);
   });
 });

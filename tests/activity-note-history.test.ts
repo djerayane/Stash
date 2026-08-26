@@ -47,7 +47,7 @@ class ProtocolCompatibleActivityDatabase implements DatabaseProbe, ActivityRepos
   }
   async listNoteHistory(memberId: string, requestedNoteId: string) {
     if (memberId !== "ada" || requestedNoteId !== noteId) return { status: "not_found" as const };
-    return { status: "found" as const, revisions: this.revisions };
+    return { status: "found" as const, access: "edit" as const, revisions: this.revisions };
   }
   async restoreNote(memberId: string, requestedNoteId: string, targetRevision: number, expectedRevision: number, idempotencyKey: string) {
     if (this.fail) throw new Error("storage unavailable");

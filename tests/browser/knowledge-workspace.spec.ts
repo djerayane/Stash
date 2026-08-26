@@ -182,6 +182,22 @@ test("lets an inherited Project Guest read child Discussions without mutation af
   await expect(drawer.getByRole("textbox", { name: "Start a Discussion" })).toHaveCount(0);
   await expect(drawer.getByRole("textbox", { name: "Reply" })).toHaveCount(0);
   await expect(drawer.getByRole("button", { name: "Resolve Discussion" })).toHaveCount(0);
+
+  await page.goto(`/app/notes/${evidenceId}/discussions`);
+  await expect(page.getByText("Inherited Guest review context")).toBeVisible();
+  await expect(page.getByText(/only Workspace Members can contribute or resolve/)).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "Start a Discussion" })).toHaveCount(0);
+  await expect(page.getByRole("textbox", { name: "Reply" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Resolve Discussion" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Create Note from selection" })).toHaveCount(0);
+
+  await page.goto(`/app/notes/${evidenceId}/history`);
+  await expect(page.getByText(/Read-only history/)).toBeVisible();
+  await page.getByRole("button", { name: "Review revision" }).first().click();
+  const historyDialog = page.getByRole("dialog", { name: /Revision 1/ });
+  await expect(historyDialog).toContainText("Original release plan");
+  await expect(historyDialog.getByRole("button", { name: "Confirm restore" })).toHaveCount(0);
+  await historyDialog.getByRole("button", { name: "Close" }).click();
 });
 
 test("keeps the Note Tree usable at a narrow viewport with non-pointer creation and move controls", async ({ page }) => {
