@@ -74,6 +74,7 @@ import { instanceUpgradeRoute } from "./instance-upgrade-routes.js";
 import type { InstanceUpgradeService } from "./instance-upgrade.js";
 import { accountRegistrationRoute, type AuthenticationFailureReporter } from "./account-registration-routes.js";
 import type { AccountRegistrationService } from "./account-registration.js";
+import { routesFromCapabilities, type CapabilityRegistry } from "./capability-registry.js";
 
 export interface DatabaseProbe {
   verifyConnection(): Promise<void>;
@@ -100,6 +101,7 @@ export interface RunningInstance {
 
 export interface InstanceOptions {
   database: DatabaseProbe;
+  capabilities?: CapabilityRegistry;
   host: string;
   port: number;
   instanceAdminToken: string;
@@ -262,6 +264,7 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
       : []),
   ];
   const routes = [
+    ...routesFromCapabilities(options.capabilities ?? { modules: [] }),
     ...(options.githubSignals ? [githubWebhookRoute(options.githubSignals)] : []),
     ...(options.agentGrants ? [mcpRoute(options.agentGrants, options.mcpEnabled === true,
       { ...(options.notes ? { notes: options.notes } : {}), ...(options.tasks ? { tasks: options.tasks } : {}) })] : []),

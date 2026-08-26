@@ -1,5 +1,5 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { Pool, type PoolClient } from "pg";
+import type { PoolClient } from "pg";
 
 import type { DatabaseProbe } from "./instance.js";
 import { noteOperationDigest, type NoteConflictResolution, type NoteEditBatch, type NoteEditConflict, type NoteRecord, type NoteRepository, type NoteTriageChange, type NoteTriageResult, type PortableNoteLinkProjection, type PortableNoteProjection, type PortableTaskProjection, type TaskCreation } from "./notes.js";
@@ -47,25 +47,15 @@ import { InvalidCollaborationUpdate, type CollaborationSnapshot, type NoteCollab
 import type { WorkspaceSearchFacet, WorkspaceSearchKind, WorkspaceSearchQuery, WorkspaceSearchRepository, WorkspaceSearchResult } from "./workspace-search.js";
 import { proseMirrorToRichText, richTextToProseMirror } from "@stash/rich-text";
 import type { AgentGrant, AgentGrantOption, AgentProposal, StoredAgentGrant } from "./agent-grants.js";
+import {
+  PostgresKernel,
+  type PostgresKernelOptions,
+  type PostgresQueryable,
+} from "./instance-operations/storage/postgres-kernel.js";
 
-export interface IdlePostgresClientFailure {
-  operation: "idle_client";
-  cause: string;
-  code: string;
-}
+export type { IdlePostgresClientFailure } from "./instance-operations/storage/postgres-kernel.js";
 
-export interface PostgresDatabaseOptions {
-  pool?: Pool;
-  reportIdleClientFailure?: (diagnostic: IdlePostgresClientFailure) => void;
-}
-
-function safeIdleClientFailure(cause: unknown): IdlePostgresClientFailure {
-  const candidateCause = cause instanceof Error ? cause.name : "UnknownFailure";
-  const safeCause = /^[A-Za-z][A-Za-z0-9]{0,31}$/.test(candidateCause) ? candidateCause : "UnknownFailure";
-  const candidateCode = cause && typeof cause === "object" && "code" in cause ? String(cause.code) : "";
-  const code = /^(?:[A-Z0-9]{5}|E[A-Z_]{2,31})$/.test(candidateCode) ? candidateCode : "unclassified";
-  return { operation: "idle_client", cause: safeCause, code };
-}
+export interface PostgresDatabaseOptions extends PostgresKernelOptions {}
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
@@ -247,31 +237,22 @@ export class PostgresDatabase implements
   NoteCollaborationRepository
   , WorkspaceSearchRepository
 {
-  readonly #pool: Pool;
+  readonly #kernel: PostgresKernel;
   readonly #authenticationSecrets: AuthenticationSecretCodec;
 
   constructor(connectionString: string, authenticationSecrets: AuthenticationSecretCodec, options: PostgresDatabaseOptions = {}) {
-    this.#pool = options.pool ?? new Pool({ connectionString, connectionTimeoutMillis: 2_000 });
-    // pg emits idle-client failures on Pool rather than through the request that
-    // originally created the client. Handle that lifecycle event without
-    // forwarding pg's error or Client objects, which can contain protocol data.
-    const report = options.reportIdleClientFailure ?? ((diagnostic: IdlePostgresClientFailure) => {
-      console.warn(`PostgreSQL idle client unavailable (operation=${diagnostic.operation}, cause=${diagnostic.cause}, code=${diagnostic.code}).`);
-    });
-    this.#pool.on("error", (cause) => report(safeIdleClientFailure(cause)));
+    this.#kernel = new PostgresKernel(connectionString, options);
     this.#authenticationSecrets = authenticationSecrets;
   }
 
   async verifyConnection(): Promise<void> {
-    await this.#pool.query("SELECT 1");
+    await this.#kernel.query("SELECT 1");
     await this.#verifyAuthenticationKey();
   }
 
   /** Prepare every storage capability for contract validation or an empty semantic migration target. */
   async prepareInstanceStore(transactionClient?: PoolClient): Promise<void> {
-    const client = transactionClient ?? await this.#pool.connect();
-    try {
-      if (!transactionClient) await client.query("BEGIN");
+    const prepare = async (client: PoolClient) => {
       await this.#ensureBootstrapSchema(client); await this.#ensureWorkspaceProjectSchema(client);
       await this.#ensureAuthSchema(client); await this.#ensureOidcSchema(client); await this.#ensureRecoverySchema(client);
       await this.#ensureRepositoryConnectionSchema(client); await this.#ensureGitHubSignalSchema(client); await this.#ensureNotificationSchema(client);
@@ -281,57 +262,27 @@ export class PostgresDatabase implements
       await this.#ensureDiscussionSchema(client); await this.#ensureInvitationSchema(client); await this.#ensurePortableProjectionSchema(client);
       await this.#ensureNoteHistorySchema(client); await this.#ensureMemberDepartureSchema(client); await this.#ensureWorkspaceImportSchema(client);
       await this.#ensureCollaborationSchema(client);
-      if (!transactionClient) await client.query("COMMIT");
-    } catch (error) {
-      if (!transactionClient) await client.query("ROLLBACK").catch(() => undefined);
-      throw error;
-    } finally { if (!transactionClient) client.release(); }
+    };
+    if (transactionClient) await prepare(transactionClient);
+    else await this.#kernel.transaction(prepare);
   }
 
   async prepareEmptyMigrationDestination(targetVersion: string, beforeCommit?: () => Promise<void>): Promise<void> {
-    const client = await this.#pool.connect();
-    try {
-      await client.query("BEGIN");
-      const existing = await client.query<{ object_name: string }>(`SELECT object_name FROM (
-        SELECT c.relname AS object_name FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-          WHERE n.nspname=current_schema() AND c.relkind IN ('r','p','v','m','S','f','c','i','I')
-        UNION ALL SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=current_schema()
-        UNION ALL SELECT t.typname FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace
-          WHERE n.nspname=current_schema() AND t.typrelid=0
-        UNION ALL SELECT coll.collname FROM pg_collation coll JOIN pg_namespace n ON n.oid=coll.collnamespace WHERE n.nspname=current_schema()
-        UNION ALL SELECT o.oprname FROM pg_operator o JOIN pg_namespace n ON n.oid=o.oprnamespace WHERE n.nspname=current_schema()
-        UNION ALL SELECT f.opfname FROM pg_opfamily f JOIN pg_namespace n ON n.oid=f.opfnamespace WHERE n.nspname=current_schema()
-        UNION ALL SELECT c.opcname FROM pg_opclass c JOIN pg_namespace n ON n.oid=c.opcnamespace WHERE n.nspname=current_schema()
-        UNION ALL SELECT c.conname FROM pg_conversion c JOIN pg_namespace n ON n.oid=c.connamespace WHERE n.nspname=current_schema()
-        UNION ALL SELECT c.cfgname FROM pg_ts_config c JOIN pg_namespace n ON n.oid=c.cfgnamespace WHERE n.nspname=current_schema()
-        UNION ALL SELECT d.dictname FROM pg_ts_dict d JOIN pg_namespace n ON n.oid=d.dictnamespace WHERE n.nspname=current_schema()
-        UNION ALL SELECT p.prsname FROM pg_ts_parser p JOIN pg_namespace n ON n.oid=p.prsnamespace WHERE n.nspname=current_schema()
-        UNION ALL SELECT t.tmplname FROM pg_ts_template t JOIN pg_namespace n ON n.oid=t.tmplnamespace WHERE n.nspname=current_schema()
-        UNION ALL SELECT s.stxname FROM pg_statistic_ext s JOIN pg_namespace n ON n.oid=s.stxnamespace WHERE n.nspname=current_schema()
-        UNION ALL SELECT e.extname FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE n.nspname=current_schema()
-        UNION ALL SELECT co.conname FROM pg_constraint co JOIN pg_namespace n ON n.oid=co.connamespace WHERE n.nspname=current_schema()
-        UNION ALL SELECT 'default privileges' FROM pg_default_acl d WHERE d.defaclnamespace=current_schema()::regnamespace
-      ) objects ORDER BY object_name LIMIT 1`);
-      if (existing.rowCount) throw new Error("Migration destination PostgreSQL schema must be empty before preparation; pre-existing user objects were found");
+    await this.#kernel.prepareEmptySchemaVersion(targetVersion, async (client) => {
       await this.#verifyAuthenticationKey(client);
       await this.prepareInstanceStore(client);
-      await client.query("CREATE TABLE stash_instance_format (singleton BOOLEAN PRIMARY KEY CHECK (singleton), version TEXT NOT NULL)");
-      await client.query("INSERT INTO stash_instance_format (singleton, version) VALUES (TRUE, $1)", [targetVersion]);
-      await beforeCommit?.();
-      await client.query("COMMIT");
-    } catch (error) { await client.query("ROLLBACK").catch(() => undefined); throw error; }
-    finally { client.release(); }
+    }, beforeCommit);
   }
 
   async createFirstOrganizationOwner(record: BootstrapRecord): Promise<boolean> {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       const workspaceId = record.workspaceId ?? randomUUID();
       const workspaceName = record.workspaceName ?? `${record.organizationName} Workspace`;
       const createdAt = record.createdAt ?? new Date().toISOString();
       await this.#ensureWorkspaceProjectSchema(client);
       await client.query("BEGIN");
-      await client.query("SELECT pg_advisory_xact_lock(2080289093)");
+      await this.#kernel.advisoryTransactionLock(client, 2_080_289_093);
       const existing = await client.query("SELECT 1 FROM stash_instance_bootstrap WHERE singleton = TRUE");
       if (existing.rowCount) {
         await client.query("ROLLBACK");
@@ -400,7 +351,7 @@ export class PostgresDatabase implements
   }
 
   async findPortableMemberIdentity(memberId: string): Promise<PortableIdentity | undefined> {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureBootstrapSchema(client);
       const result = await client.query<{ id: string; name: string }>(
@@ -418,7 +369,7 @@ export class PostgresDatabase implements
 
   async findMemberLocalizationPreferences(memberId: string): Promise<MemberLocalizationPreferences | undefined> {
     await this.#ensureMemberLocalizationSchema();
-    const result = await this.#pool.query<MemberLocalizationRow>(
+    const result = await this.#kernel.query<MemberLocalizationRow>(
       `SELECT locale, time_zone, date_format, week_starts_on, updated_at
        FROM stash_member_localization_preferences WHERE account_id = $1`,
       [memberId],
@@ -435,7 +386,7 @@ export class PostgresDatabase implements
 
   async saveMemberLocalizationPreferences(memberId: string, preferences: MemberLocalizationPreferences): Promise<void> {
     await this.#ensureMemberLocalizationSchema();
-    await this.#pool.query(
+    await this.#kernel.query(
       `INSERT INTO stash_member_localization_preferences
          (account_id, locale, time_zone, date_format, week_starts_on, updated_at)
        VALUES ($1, $2, $3, $4, $5, $6)
@@ -511,7 +462,7 @@ export class PostgresDatabase implements
   }
 
   async listAccessibleWorkspaces(memberId: string) {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureWorkspaceProjectSchema(client);
       const result = await client.query<{ workspace_id: string; workspace_name: string; project_id: string | null; project_name: string | null; project_key: string | null }>(`
@@ -686,7 +637,7 @@ export class PostgresDatabase implements
   }
 
   async listMobileCaptureOptions(memberId: string, workspaceId: string) {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureNoteSchema(client);
       await this.#ensureInvitationSchema(client);
@@ -705,7 +656,7 @@ export class PostgresDatabase implements
   }
 
   async listInboxNotes(memberId: string, workspaceId: string) {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureNoteSchema(client);
       const access = await client.query(`SELECT 1 FROM stash_workspaces workspace WHERE workspace.id = $1 AND (
@@ -725,7 +676,7 @@ export class PostgresDatabase implements
   }
 
   async listNotesByTag(memberId: string, workspaceId: string, tag: string) {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureNoteSchema(client);
       const access = await client.query(`SELECT 1 FROM stash_workspaces workspace WHERE workspace.id = $1 AND (
@@ -753,7 +704,7 @@ export class PostgresDatabase implements
   }
 
   async listNotes(memberId: string, workspaceId: string) {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureNoteSchema(client);
       const access = await client.query(`SELECT 1 FROM stash_workspaces workspace WHERE workspace.id = $1 AND (
@@ -780,7 +731,7 @@ export class PostgresDatabase implements
   }
 
   async findAttachmentReceipt(memberId: string, workspaceId: string, operationKey: string) {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureAttachmentSchema(client);
       const result = await client.query<any>(`SELECT receipt.payload_digest, receipt.projection, attachment.*
@@ -824,7 +775,7 @@ export class PostgresDatabase implements
   }
 
   async canCreateAttachment(memberId: string, workspaceId: string): Promise<boolean> {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureWorkspaceProjectSchema(client);
       const access = await client.query(`SELECT 1 FROM stash_workspaces workspace WHERE workspace.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR EXISTS (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2))`, [workspaceId, memberId]);
@@ -833,7 +784,7 @@ export class PostgresDatabase implements
   }
 
   async findAttachmentForMember(memberId: string, attachmentId: string): Promise<AttachmentRecord | undefined> {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureAttachmentSchema(client);
       const result = await client.query<AttachmentRow>(`SELECT attachment.* FROM stash_attachments attachment JOIN stash_workspaces workspace ON workspace.id = attachment.workspace_id WHERE attachment.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR EXISTS (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2))`, [attachmentId, memberId]);
@@ -990,7 +941,7 @@ export class PostgresDatabase implements
   }
 
   async findDiscussion(memberId: string, discussionId: string) {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureDiscussionSchema(client);
       const discussion = await this.#readDiscussion(client, memberId, discussionId, false);
@@ -999,7 +950,7 @@ export class PostgresDatabase implements
   }
 
   async listNoteDiscussions(memberId: string, noteId: string) {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureDiscussionSchema(client);
       const access = await client.query(`SELECT 1 FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id = note.workspace_id
@@ -1019,7 +970,7 @@ export class PostgresDatabase implements
   }
 
   async listTaskDiscussions(memberId: string, taskId: string) {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureDiscussionSchema(client);
       const access = await client.query(`SELECT 1 FROM stash_tasks task JOIN stash_workspaces workspace ON workspace.id = task.workspace_id
@@ -1039,7 +990,7 @@ export class PostgresDatabase implements
   }
 
   async listBlockDiscussions(memberId: string, noteId: string, blockKey: string) {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureDiscussionSchema(client);
       const note = await client.query<any>(`SELECT note.document FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id = note.workspace_id
@@ -1174,7 +1125,7 @@ export class PostgresDatabase implements
   }
 
   async listLinkedTasks(memberId: string, noteId: string) {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureNoteSchema(client);
       const result = await client.query<any>(`SELECT task.id, task.task_key, task.title, status.id AS status_id,
@@ -1262,7 +1213,7 @@ export class PostgresDatabase implements
   }
 
   async listTaskSourceBlocks(memberId: string, taskId: string) {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureNoteSchema(client);
       const result = await client.query<any>(`SELECT source.note_id, source.block_id, note.document
@@ -1283,7 +1234,7 @@ export class PostgresDatabase implements
   }
 
   async findTaskByKey(memberId: string, projectId: string, taskKey: string) {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureNoteSchema(client);
       await this.#ensureInvitationSchema(client);
@@ -1381,7 +1332,7 @@ export class PostgresDatabase implements
   }
 
   async listBoards(memberId: string, projectId: string) {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureBoardSchema(client); await this.#ensureInvitationSchema(client);
       if (await this.#findProjectWorkflowAccess(client, memberId, projectId) === "not_found") return { status: "not_found" as const };
@@ -1402,7 +1353,7 @@ export class PostgresDatabase implements
   }
 
   async readBoard(memberId: string, projectId: string, boardId: string) {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureBoardSchema(client); await this.#ensureInvitationSchema(client);
       if (await this.#findProjectWorkflowAccess(client, memberId, projectId) === "not_found") return { status: "not_found" as const };
@@ -1620,7 +1571,7 @@ export class PostgresDatabase implements
   }
 
   async listStructuredTaskConflicts(memberId: string, projectId: string, taskKey: string) {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureNoteSchema(client); await this.#ensureInvitationSchema(client);
       const writable = await client.query(`SELECT 1 FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
@@ -1853,8 +1804,8 @@ export class PostgresDatabase implements
 
   async findNoteForMember(memberId: string, noteId: string): Promise<NoteRecord | undefined> {
     await this.#ensureNoteSchemaForPool();
-    if (await this.#authorizeNote(this.#pool, memberId, noteId) === "none") return undefined;
-    const result = await this.#pool.query<{
+    if (await this.#authorizeNote(this.#kernel, memberId, noteId) === "none") return undefined;
+    const result = await this.#kernel.query<{
       id: string; workspace_id: string; project_id: string | null; content: string; document: NoteRecord["document"];
       revision: number; tags: string[]; reminder_at: Date | null; created_by_account_id: string; created_at: Date;
     }>("SELECT * FROM stash_notes WHERE id=$1", [noteId]);
@@ -1946,7 +1897,7 @@ export class PostgresDatabase implements
   }
 
   async listNoteLinks(memberId: string, sourceNoteId: string) {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureNoteSchema(client);
       const source = await client.query<any>(`SELECT note.workspace_id,note.portable_path,note.location_revision,
@@ -2084,7 +2035,7 @@ export class PostgresDatabase implements
 
   async listNoteEditConflicts(memberId: string, noteId: string) {
     await this.#ensureNoteSchemaForPool();
-    const result = await this.#pool.query<{
+    const result = await this.#kernel.query<{
       id: string; note_id: string; base_revision: number; document: NoteRecord["document"]; markdown: string;
       operations: NoteEditBatch["operations"] | null; created_at: Date; resolved_at: Date | null; resolution: NoteConflictResolution | null;
       kind: "concurrent_edit" | "invalid_operation_id"; current_revision: number; creator_name: string;
@@ -2191,7 +2142,7 @@ export class PostgresDatabase implements
 
   async saveNotification(delivery: NotificationDelivery) {
     await this.#ensureNotificationSchema();
-    const result = await this.#pool.query<any>(`INSERT INTO stash_notifications
+    const result = await this.#kernel.query<any>(`INSERT INTO stash_notifications
       (id,member_id,workspace_id,project_id,trigger,summary,activity,created_at,delivery)
       SELECT $1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9 FROM stash_projects project
       JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
@@ -2207,7 +2158,7 @@ export class PostgresDatabase implements
       delivery.summary, JSON.stringify(delivery.activity), delivery.createdAt, delivery.delivery, delivery.activity.actor.localAccountId]);
     let row = result.rows[0];
     if (!row) {
-      const existing = await this.#pool.query<any>(`SELECT * FROM stash_notifications
+      const existing = await this.#kernel.query<any>(`SELECT * FROM stash_notifications
         WHERE member_id=$1 AND activity_id=$2 AND trigger=$3`, [delivery.memberId, delivery.activity.id, delivery.trigger]);
       row = existing.rows[0];
     }
@@ -2217,7 +2168,7 @@ export class PostgresDatabase implements
 
   async listNotifications(memberId: string) {
     await this.#ensureNotificationSchema();
-    const result = await this.#pool.query<any>(`SELECT notification.* FROM stash_notifications notification
+    const result = await this.#kernel.query<any>(`SELECT notification.* FROM stash_notifications notification
       JOIN stash_workspaces workspace ON workspace.id=notification.workspace_id
       WHERE notification.member_id=$1 AND (
         (workspace.owner_type='personal' AND workspace.personal_owner_id=$1) OR
@@ -2229,7 +2180,7 @@ export class PostgresDatabase implements
 
   async markNotificationRead(memberId: string, id: string, readAt: string) {
     await this.#ensureNotificationSchema();
-    const result = await this.#pool.query<any>(`UPDATE stash_notifications notification SET read_at=$3
+    const result = await this.#kernel.query<any>(`UPDATE stash_notifications notification SET read_at=$3
       FROM stash_workspaces workspace
       WHERE notification.id=$1 AND notification.member_id=$2 AND workspace.id=notification.workspace_id AND (
         (workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
@@ -2240,7 +2191,7 @@ export class PostgresDatabase implements
 
   async getNotificationPreferences(memberId: string, projectId: string) {
     await this.#ensureNotificationSchema();
-    const visibility = await this.#pool.query<any>(`SELECT settings.* FROM stash_projects project
+    const visibility = await this.#kernel.query<any>(`SELECT settings.* FROM stash_projects project
       JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
       LEFT JOIN stash_notification_preferences settings ON settings.project_id=project.id AND settings.member_id=$1
       WHERE project.id=$2 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$1) OR
@@ -2254,7 +2205,7 @@ export class PostgresDatabase implements
 
   async saveNotificationPreferences(memberId: string, projectId: string, preferences: NotificationPreferences) {
     await this.#ensureNotificationSchema();
-    const result = await this.#pool.query<any>(`INSERT INTO stash_notification_preferences
+    const result = await this.#kernel.query<any>(`INSERT INTO stash_notification_preferences
       (member_id,project_id,activity,digest,quiet_start,quiet_end,quiet_time_zone)
       SELECT $1,$2,$3,$4,$5,$6,$7 FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
       WHERE project.id=$2 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$1) OR
@@ -2269,7 +2220,7 @@ export class PostgresDatabase implements
 
   async getProjectFollow(memberId: string, projectId: string) {
     await this.#ensureNotificationSchema();
-    const result = await this.#pool.query<{ followed: boolean }>(`SELECT EXISTS (
+    const result = await this.#kernel.query<{ followed: boolean }>(`SELECT EXISTS (
       SELECT 1 FROM stash_project_follows follow WHERE follow.member_id=$1 AND follow.project_id=project.id
     ) AS followed FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
       WHERE project.id=$2 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$1) OR
@@ -2280,20 +2231,20 @@ export class PostgresDatabase implements
 
   async saveProjectFollow(memberId: string, projectId: string, followed: boolean) {
     await this.#ensureNotificationSchema();
-    const visible = await this.#pool.query(`SELECT 1 FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
+    const visible = await this.#kernel.query(`SELECT 1 FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
       WHERE project.id=$2 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$1) OR
         (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
           WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$1)))`, [memberId, projectId]);
     if (!visible.rowCount) return undefined;
-    if (followed) await this.#pool.query(`INSERT INTO stash_project_follows(member_id,project_id,followed_at)
+    if (followed) await this.#kernel.query(`INSERT INTO stash_project_follows(member_id,project_id,followed_at)
       VALUES($1,$2,CURRENT_TIMESTAMP) ON CONFLICT(member_id,project_id) DO NOTHING`, [memberId, projectId]);
-    else await this.#pool.query("DELETE FROM stash_project_follows WHERE member_id=$1 AND project_id=$2", [memberId, projectId]);
+    else await this.#kernel.query("DELETE FROM stash_project_follows WHERE member_id=$1 AND project_id=$2", [memberId, projectId]);
     return followed;
   }
 
   async listProjectNotificationAudience(projectId: string, actorId: string) {
     await this.#ensureNotificationSchema();
-    const result = await this.#pool.query<{ member_id: string; followed: boolean }>(`SELECT account.id AS member_id,
+    const result = await this.#kernel.query<{ member_id: string; followed: boolean }>(`SELECT account.id AS member_id,
       (follow.member_id IS NOT NULL) AS followed FROM stash_projects project
       JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
       JOIN stash_accounts account ON (workspace.owner_type='personal' AND account.id=workspace.personal_owner_id) OR
@@ -2306,7 +2257,7 @@ export class PostgresDatabase implements
 
   async claimDigestNotifications(memberId: string, cadence: "daily" | "weekly", since: string, until: string, claimedAt: string) {
     await this.#ensureNotificationSchema();
-    const result = await this.#pool.query<any>(`UPDATE stash_notifications notification SET digested_at=$5
+    const result = await this.#kernel.query<any>(`UPDATE stash_notifications notification SET digested_at=$5
       FROM stash_notification_preferences preference, stash_projects project, stash_workspaces workspace
       WHERE notification.member_id=$1 AND notification.read_at IS NULL AND notification.digested_at IS NULL
         AND notification.created_at >= $3 AND notification.created_at <= $4
@@ -2327,7 +2278,7 @@ export class PostgresDatabase implements
   }
 
   async searchWorkspace(memberId: string, workspaceId: string, query: WorkspaceSearchQuery) {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureDiscussionSchema(client);
       await this.#ensureAttachmentSchema(client);
@@ -2428,7 +2379,7 @@ export class PostgresDatabase implements
   }
 
   async listWorkspaceActivity(memberId: string, workspaceId: string) {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureNoteHistorySchema(client);
       await this.#backfillLegacyNoteHistory(client);
@@ -2448,7 +2399,7 @@ export class PostgresDatabase implements
   }
 
   async listNoteHistory(memberId: string, noteId: string) {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureNoteHistorySchema(client);
       await this.#backfillLegacyNoteHistory(client);
@@ -2517,11 +2468,11 @@ export class PostgresDatabase implements
     });
   }
   async close(): Promise<void> {
-    await this.#pool.end();
+    await this.#kernel.close();
   }
 
   async resolveClientSessionPrincipal(accountId: string) {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureInvitationSchema(client);
       const result = await client.query<{ account_id: string; account_name: string; account_email: string; workspace_id: string; workspace_name: string; organization_id: string | null }>(`
@@ -2569,7 +2520,7 @@ export class PostgresDatabase implements
 
   async findAccountByEmail(email: string): Promise<AccountAuthenticationRecord | undefined> {
     await this.#ensureAuthSchema();
-    const result = await this.#pool.query<AccountRow>(
+    const result = await this.#kernel.query<AccountRow>(
       "SELECT id, name, email, password_hash FROM stash_accounts WHERE email = $1", [email],
     );
     return result.rows[0] ? this.#accountRecord(result.rows[0]) : undefined;
@@ -2577,7 +2528,7 @@ export class PostgresDatabase implements
 
   async findAccountById(id: string): Promise<AccountAuthenticationRecord | undefined> {
     await this.#ensureAuthSchema();
-    const result = await this.#pool.query<AccountRow>(
+    const result = await this.#kernel.query<AccountRow>(
       "SELECT id, name, email, password_hash FROM stash_accounts WHERE id = $1", [id],
     );
     return result.rows[0] ? this.#accountRecord(result.rows[0]) : undefined;
@@ -2585,7 +2536,7 @@ export class PostgresDatabase implements
 
   async createSession(session: SessionRecord): Promise<void> {
     await this.#ensureAuthSchema();
-    await this.#pool.query(
+    await this.#kernel.query(
       "INSERT INTO stash_sessions (id, account_id, token_lookup, token_hash, created_at, last_seen_at, user_agent) VALUES ($1, $2, $3, $4, $5, $6, $7)",
       [
         session.id,
@@ -2601,7 +2552,7 @@ export class PostgresDatabase implements
 
   async findOidcIdentity(key: OidcIdentityKey): Promise<OidcIdentityRecord | undefined> {
     await this.#ensureOidcSchema();
-    const result = await this.#pool.query<OidcIdentityRow>(`
+    const result = await this.#kernel.query<OidcIdentityRow>(`
       SELECT a.id, a.name, a.email, i.subject_secret
       FROM stash_oidc_identities i
       JOIN stash_accounts a ON a.id = i.account_id
@@ -2615,7 +2566,7 @@ export class PostgresDatabase implements
 
   async findOidcConfiguration(organizationId: string): Promise<OidcOrganizationConfiguration | undefined> {
     await this.#ensureOidcSchema();
-    const result = await this.#pool.query<OidcConfigurationRow>(
+    const result = await this.#kernel.query<OidcConfigurationRow>(
       "SELECT organization_id, issuer, client_id, client_secret FROM stash_oidc_configurations WHERE organization_id = $1",
       [organizationId],
     );
@@ -2629,7 +2580,7 @@ export class PostgresDatabase implements
   }
 
   async organizationRole(organizationId: string, accountId: string): Promise<BuiltInOrganizationRole | undefined> {
-    const result = await this.#pool.query<{ role: BuiltInOrganizationRole }>(
+    const result = await this.#kernel.query<{ role: BuiltInOrganizationRole }>(
       "SELECT role FROM stash_organization_memberships WHERE organization_id = $1 AND account_id = $2",
       [organizationId, accountId],
     );
@@ -2638,7 +2589,7 @@ export class PostgresDatabase implements
 
   async findRepositoryConnectionById(organizationId: string, connectionId: string): Promise<RepositoryConnectionRecord | undefined> {
     await this.#ensureRepositoryConnectionSchema();
-    const result = await this.#pool.query<RepositoryConnectionRow>(
+    const result = await this.#kernel.query<RepositoryConnectionRow>(
       `${repositoryConnectionSelect} WHERE organization_id = $1 AND connection.id = $2`,
       [organizationId, connectionId],
     );
@@ -2660,7 +2611,7 @@ export class PostgresDatabase implements
 
   async listRepositoryConnections(organizationId: string): Promise<RepositoryConnectionRecord[]> {
     await this.#ensureRepositoryConnectionSchema();
-    const result = await this.#pool.query<RepositoryConnectionRow>(
+    const result = await this.#kernel.query<RepositoryConnectionRow>(
       `${repositoryConnectionSelect} WHERE organization_id = $1 ORDER BY repository_url, id`,
       [organizationId],
     );
@@ -2695,7 +2646,7 @@ export class PostgresDatabase implements
 
   async resolveConnection(memberId: string, projectId: string, connectionId: string) {
     await this.#ensureRepositoryConnectionSchema();
-    const result = await this.#pool.query<RepositoryConnectionRow>(`${repositoryConnectionSelect}
+    const result = await this.#kernel.query<RepositoryConnectionRow>(`${repositoryConnectionSelect}
       JOIN stash_repository_connection_projects selected ON selected.connection_id = connection.id AND selected.project_id = $2
       JOIN stash_projects project ON project.id = selected.project_id
       JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
@@ -2707,7 +2658,7 @@ export class PostgresDatabase implements
 
   async listConnections(memberId: string, projectId: string) {
     await this.#ensureRepositoryConnectionSchema();
-    const result = await this.#pool.query<{ id: string; repository_url: string }>(`SELECT connection.id, connection.repository_url
+    const result = await this.#kernel.query<{ id: string; repository_url: string }>(`SELECT connection.id, connection.repository_url
       FROM stash_repository_connections connection
       JOIN stash_repository_connection_projects selected ON selected.connection_id = connection.id AND selected.project_id = $1
       JOIN stash_projects project ON project.id = selected.project_id
@@ -2719,7 +2670,7 @@ export class PostgresDatabase implements
   }
 
   async canLinkArtifact(memberId: string, projectId: string, taskKey: string) {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureInvitationSchema(client);
       const result = await client.query(`SELECT 1 FROM stash_tasks task
@@ -2758,7 +2709,7 @@ export class PostgresDatabase implements
   async matchingTasks(installationId: number, repositoryId: string, keys: string[]) {
     await this.#ensureGitHubSignalSchema();
     if (!keys.length) return [];
-    const result = await this.#pool.query<{ task_id: string; project_id: string; organization_id: string; task_key: string; title: string; matched_key: string }>(`
+    const result = await this.#kernel.query<{ task_id: string; project_id: string; organization_id: string; task_key: string; title: string; matched_key: string }>(`
       SELECT DISTINCT task.id AS task_id, task.project_id, connection.organization_id, task.task_key, task.title, matched.matched_key
       FROM stash_repository_connections connection
       JOIN stash_repository_connection_projects link ON link.connection_id = connection.id
@@ -2795,7 +2746,7 @@ export class PostgresDatabase implements
     await this.#ensureGitHubSignalSchema();
     const visible = await this.findTaskByKey(memberId, projectId, taskKey);
     if (visible.status !== "found") return undefined;
-    const result = await this.#pool.query<any>(`SELECT signal.*, suggestion.id AS suggestion_id, suggestion.task_id,
+    const result = await this.#kernel.query<any>(`SELECT signal.*, suggestion.id AS suggestion_id, suggestion.task_id,
       suggestion.project_id, suggestion.organization_id, suggestion.task_key, suggestion.task_title, suggestion.matched_key, suggestion.status
       FROM stash_github_signal_suggestions suggestion JOIN stash_github_signals signal ON signal.id = suggestion.signal_id
       WHERE suggestion.task_id = $1 ORDER BY signal.occurred_at DESC, suggestion.id`, [visible.task.id]);
@@ -3181,7 +3132,7 @@ export class PostgresDatabase implements
   }
 
   async readProject(accountId: string, projectId: string): Promise<ProjectAccessSummary | undefined> {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureInvitationSchema(client);
       const result = await client.query<{ id: string; organization_id: string; name: string; project_key: string; creator_id: string; creator_name: string }>(
@@ -3200,7 +3151,7 @@ export class PostgresDatabase implements
   }
 
   async canWriteProject(accountId: string, projectId: string): Promise<boolean> {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureInvitationSchema(client);
       const result = await client.query(
@@ -3269,7 +3220,7 @@ export class PostgresDatabase implements
 
   async saveOidcConfiguration(configuration: OidcOrganizationConfiguration): Promise<void> {
     await this.#ensureOidcSchema();
-    await this.#pool.query(`
+    await this.#kernel.query(`
       INSERT INTO stash_oidc_configurations (organization_id, issuer, client_id, client_secret)
       VALUES ($1, $2, $3, $4)
       ON CONFLICT (organization_id) DO UPDATE SET issuer = EXCLUDED.issuer, client_id = EXCLUDED.client_id, client_secret = EXCLUDED.client_secret
@@ -3278,7 +3229,7 @@ export class PostgresDatabase implements
 
   async linkOidcIdentity(key: OidcIdentityKey, accountId: string): Promise<boolean> {
     await this.#ensureOidcSchema();
-    const result = await this.#pool.query(`
+    const result = await this.#kernel.query(`
       INSERT INTO stash_oidc_identities (organization_id, issuer, subject_lookup, subject_secret, account_id)
       SELECT $1, $3, $4, $5, account_id FROM stash_organization_memberships
       WHERE organization_id = $1 AND account_id = $2
@@ -3290,7 +3241,7 @@ export class PostgresDatabase implements
 
   async findSessionByTokenHash(hash: string): Promise<SessionRecord | undefined> {
     await this.#ensureAuthSchema();
-    const result = await this.#pool.query<SessionRow>(
+    const result = await this.#kernel.query<SessionRow>(
       "SELECT * FROM stash_sessions WHERE token_lookup = $1", [this.#authenticationSecrets.blindIndex(hash)],
     );
     return result.rows[0] ? this.#sessionRecord(result.rows[0]) : undefined;
@@ -3298,21 +3249,21 @@ export class PostgresDatabase implements
 
   async listSessions(accountId: string): Promise<SessionRecord[]> {
     await this.#ensureAuthSchema();
-    const result = await this.#pool.query<SessionRow>(
+    const result = await this.#kernel.query<SessionRow>(
       "SELECT * FROM stash_sessions WHERE account_id = $1 ORDER BY created_at", [accountId],
     );
     return result.rows.map((row) => this.#sessionRecord(row));
   }
 
   async deleteSession(accountId: string, sessionId: string): Promise<boolean> {
-    const result = await this.#pool.query("DELETE FROM stash_sessions WHERE account_id = $1 AND id = $2", [accountId, sessionId]);
+    const result = await this.#kernel.query("DELETE FROM stash_sessions WHERE account_id = $1 AND id = $2", [accountId, sessionId]);
     return result.rowCount === 1;
   }
 
   async changePasswordAndDeleteOtherSessions(
     accountId: string, currentSessionId: string, passwordHash: string,
   ): Promise<void> {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await client.query("BEGIN");
       await client.query(
@@ -3331,7 +3282,7 @@ export class PostgresDatabase implements
 
   async savePasskey(record: PasskeyRecord): Promise<void> {
     await this.#ensureRecoverySchema();
-    await this.#pool.query(
+    await this.#kernel.query(
       "INSERT INTO stash_passkeys (credential_id, account_id, public_key, signature_counter, transports, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
       [record.credentialId, record.accountId, this.#authenticationSecrets.encrypt(record.publicKey), record.counter, record.transports ?? null, record.createdAt],
     );
@@ -3339,7 +3290,7 @@ export class PostgresDatabase implements
 
   async findPasskey(credentialId: string): Promise<PasskeyRecord | undefined> {
     await this.#ensureRecoverySchema();
-    const result = await this.#pool.query<{ credential_id: string; account_id: string; public_key: string; signature_counter: number; transports: string[] | null; created_at: Date | string }>(
+    const result = await this.#kernel.query<{ credential_id: string; account_id: string; public_key: string; signature_counter: number; transports: string[] | null; created_at: Date | string }>(
       "SELECT credential_id, account_id, public_key, signature_counter, transports, created_at FROM stash_passkeys WHERE credential_id = $1", [credentialId],
     );
     const row = result.rows[0];
@@ -3384,7 +3335,7 @@ export class PostgresDatabase implements
 
   async findEmailRecoveryAccount(lookup: string, now: string): Promise<string | undefined> {
     await this.#ensureRecoverySchema();
-    const result = await this.#pool.query<{ account_id: string }>("SELECT account_id FROM stash_email_recoveries WHERE token_lookup = $1 AND expires_at > $2", [this.#authenticationSecrets.blindIndex(lookup), now]);
+    const result = await this.#kernel.query<{ account_id: string }>("SELECT account_id FROM stash_email_recoveries WHERE token_lookup = $1 AND expires_at > $2", [this.#authenticationSecrets.blindIndex(lookup), now]);
     return result.rows[0]?.account_id;
   }
 
@@ -3412,7 +3363,7 @@ export class PostgresDatabase implements
     });
   }
   async renewEmailRecoveryDelivery(claim: EmailRecoveryDeliveryClaim, leaseUntil: string): Promise<boolean> {
-    const result = await this.#pool.query("UPDATE stash_email_recovery_delivery_jobs SET lease_until = $4 WHERE id = $1 AND claim_owner = $2 AND claim_version = $3", [claim.jobId, claim.owner, claim.version, leaseUntil]);
+    const result = await this.#kernel.query("UPDATE stash_email_recovery_delivery_jobs SET lease_until = $4 WHERE id = $1 AND claim_owner = $2 AND claim_version = $3", [claim.jobId, claim.owner, claim.version, leaseUntil]);
     return result.rowCount === 1;
   }
   async completeEmailRecoveryDelivery(claim: EmailRecoveryDeliveryClaim, activation?: EmailRecoveryRecord): Promise<boolean> {
@@ -3424,7 +3375,7 @@ export class PostgresDatabase implements
     });
   }
   async retryEmailRecoveryDelivery(claim: EmailRecoveryDeliveryClaim, reason: string): Promise<boolean> {
-    const result = await this.#pool.query("UPDATE stash_email_recovery_delivery_jobs SET attempts = attempts + 1, last_error = $4, available_at = NOW() + INTERVAL '1 minute', claim_owner = NULL, lease_until = NULL WHERE id = $1 AND claim_owner = $2 AND claim_version = $3", [claim.jobId, claim.owner, claim.version, reason.slice(0, 500)]);
+    const result = await this.#kernel.query("UPDATE stash_email_recovery_delivery_jobs SET attempts = attempts + 1, last_error = $4, available_at = NOW() + INTERVAL '1 minute', claim_owner = NULL, lease_until = NULL WHERE id = $1 AND claim_owner = $2 AND claim_version = $3", [claim.jobId, claim.owner, claim.version, reason.slice(0, 500)]);
     return result.rowCount === 1;
   }
 
@@ -3436,21 +3387,10 @@ export class PostgresDatabase implements
   }
 
   async #transaction<T>(work: (client: PoolClient) => Promise<{ commit: boolean; value: T }>): Promise<T> {
-    const client = await this.#pool.connect();
-    try {
-      await client.query("BEGIN");
-      const result = await work(client);
-      await client.query(result.commit ? "COMMIT" : "ROLLBACK");
-      return result.value;
-    } catch (error) {
-      await client.query("ROLLBACK").catch(() => undefined);
-      throw error;
-    } finally {
-      client.release();
-    }
+    return this.#kernel.controlledTransaction(work);
   }
 
-  async #ensureAuthSchema(client: PoolClient | Pool = this.#pool): Promise<void> {
+  async #ensureAuthSchema(client: PostgresQueryable = this.#kernel): Promise<void> {
     await client.query(`
       CREATE TABLE IF NOT EXISTS stash_sessions (
         id UUID PRIMARY KEY,
@@ -3464,7 +3404,7 @@ export class PostgresDatabase implements
     `);
   }
 
-  async #ensureOidcSchema(client: PoolClient | Pool = this.#pool): Promise<void> {
+  async #ensureOidcSchema(client: PostgresQueryable = this.#kernel): Promise<void> {
     await client.query(`
       CREATE TABLE IF NOT EXISTS stash_oidc_configurations (
         organization_id UUID PRIMARY KEY REFERENCES stash_organizations(id) ON DELETE CASCADE,
@@ -3490,7 +3430,7 @@ export class PostgresDatabase implements
     );
   }
 
-  async #ensureRecoverySchema(client: PoolClient | Pool = this.#pool): Promise<void> {
+  async #ensureRecoverySchema(client: PostgresQueryable = this.#kernel): Promise<void> {
     await this.#ensureAuthSchema(client);
     await client.query(`
       CREATE TABLE IF NOT EXISTS stash_passkeys (
@@ -3527,34 +3467,30 @@ export class PostgresDatabase implements
     `);
   }
   async #verifyAuthenticationKey(transactionClient?: PoolClient): Promise<void> {
-    const client = transactionClient ?? await this.#pool.connect();
-    try {
-      await client.query(`
+    const prepareTable = (client: PostgresQueryable) => client.query(`
         CREATE TABLE IF NOT EXISTS stash_authentication_key_check (
           singleton BOOLEAN PRIMARY KEY CHECK (singleton),
           encrypted_check TEXT NOT NULL
         )
       `);
-      if (!transactionClient) await client.query("BEGIN");
-      await client.query("SELECT pg_advisory_xact_lock($1)", [authenticationKeyCheckLockId]);
+    const verify = async (client: PoolClient) => {
+      await this.#kernel.advisoryTransactionLock(client, authenticationKeyCheckLockId);
       const result = await client.query<{ encrypted_check: string }>(
         "SELECT encrypted_check FROM stash_authentication_key_check WHERE singleton = TRUE",
       );
       const existing = result.rows[0];
-      if (existing) {
-        verifyAuthenticationKeyCheck(this.#authenticationSecrets, existing.encrypted_check);
-      } else {
-        await client.query(
-          "INSERT INTO stash_authentication_key_check (singleton, encrypted_check) VALUES (TRUE, $1)",
-          [createAuthenticationKeyCheck(this.#authenticationSecrets)],
-        );
-      }
-      if (!transactionClient) await client.query("COMMIT");
-    } catch (error) {
-      if (!transactionClient) await client.query("ROLLBACK").catch(() => undefined);
-      throw error;
-    } finally {
-      if (!transactionClient) client.release();
+      if (existing) verifyAuthenticationKeyCheck(this.#authenticationSecrets, existing.encrypted_check);
+      else await client.query(
+        "INSERT INTO stash_authentication_key_check (singleton, encrypted_check) VALUES (TRUE, $1)",
+        [createAuthenticationKeyCheck(this.#authenticationSecrets)],
+      );
+    };
+    if (transactionClient) {
+      await prepareTable(transactionClient);
+      await verify(transactionClient);
+    } else {
+      await prepareTable(this.#kernel);
+      await this.#kernel.transaction(verify);
     }
   }
 
@@ -3603,7 +3539,7 @@ export class PostgresDatabase implements
   }
 
   async #ensureRepositoryConnectionSchema(transactionClient?: PoolClient): Promise<void> {
-    const client = transactionClient ?? await this.#pool.connect();
+    const client = transactionClient ?? await this.#kernel.connect();
     try {
       await this.#ensureWorkspaceProjectSchema(client);
       await client.query(`
@@ -3626,7 +3562,8 @@ export class PostgresDatabase implements
           PRIMARY KEY (connection_id, project_id)
         )
       `);
-      await client.query(transactionClient ? "SELECT pg_advisory_xact_lock(1094218495)" : "SELECT pg_advisory_lock(1094218495)");
+      if (transactionClient) await this.#kernel.advisoryTransactionLock(client, 1_094_218_495);
+      else await this.#kernel.advisorySessionLock(client, 1_094_218_495);
       if (!transactionClient) await client.query("BEGIN");
       try {
         await this.#ensureRepositoryConnectionStateColumns(client);
@@ -3688,14 +3625,14 @@ export class PostgresDatabase implements
       }
     } finally {
       if (!transactionClient) {
-        await client.query("SELECT pg_advisory_unlock(1094218495)").catch(() => undefined);
+        await this.#kernel.releaseAdvisorySessionLock(client, 1_094_218_495).catch(() => undefined);
         client.release();
       }
     }
   }
 
   async #ensureGitHubSignalSchema(transactionClient?: PoolClient): Promise<void> {
-    const client = transactionClient ?? await this.#pool.connect();
+    const client = transactionClient ?? await this.#kernel.connect();
     try {
       if (!transactionClient) await client.query("BEGIN");
       await this.#ensureRepositoryConnectionSchema(client);
@@ -3803,7 +3740,7 @@ export class PostgresDatabase implements
   }
 
   async #ensureNotificationSchema(transactionClient?: PoolClient): Promise<void> {
-    const client = transactionClient ?? await this.#pool.connect();
+    const client = transactionClient ?? await this.#kernel.connect();
     try {
       await this.#ensureWorkspaceProjectSchema(client);
       await client.query(`CREATE TABLE IF NOT EXISTS stash_notification_preferences (
@@ -4107,7 +4044,7 @@ export class PostgresDatabase implements
   }
 
   async #ensureNoteSchemaForPool(): Promise<void> {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try { await this.#ensureNoteSchema(client); } finally { client.release(); }
   }
 
@@ -4204,7 +4141,7 @@ export class PostgresDatabase implements
   }
 
   async #ensureMemberLocalizationSchema(transactionClient?: PoolClient): Promise<void> {
-    const client = transactionClient ?? await this.#pool.connect();
+    const client = transactionClient ?? await this.#kernel.connect();
     try {
       await this.#ensureBootstrapSchema(client);
       await client.query(`
@@ -4250,7 +4187,7 @@ export class PostgresDatabase implements
         PRIMARY KEY (project_id, account_id)
       );
     `);
-    await client.query("SELECT pg_advisory_xact_lock(1465271063)");
+    await this.#kernel.advisoryTransactionLock(client, 1_465_271_063);
     await client.query(`
       ALTER TABLE stash_invitations ADD COLUMN IF NOT EXISTS token_lookup TEXT;
       ALTER TABLE stash_invitations ADD COLUMN IF NOT EXISTS token_secret TEXT;
@@ -4266,7 +4203,7 @@ export class PostgresDatabase implements
   }
 
   async #ensurePortableProjectionSchema(client: PoolClient): Promise<void> {
-    await client.query("SELECT pg_advisory_xact_lock(1094218495)");
+    await this.#kernel.advisoryTransactionLock(client, 1_094_218_495);
     await client.query(`
         CREATE TABLE IF NOT EXISTS stash_portable_projection_outbox (
           object_kind TEXT NOT NULL CONSTRAINT stash_portable_projection_outbox_object_kind_check CHECK (object_kind IN (${portableProjectionObjectKindSql})),
@@ -4343,7 +4280,7 @@ export class PostgresDatabase implements
   }
 
   async findWorkspaceImport(importId: string) {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureWorkspaceImportSchema(client);
       const found = await client.query<{ archive_sha256: string; report: PortableWorkspaceImportReport }>(
@@ -4545,7 +4482,7 @@ export class PostgresDatabase implements
   }
 
   async listPendingImportedIdentities(memberId: string) {
-    const client=await this.#pool.connect();
+    const client=await this.#kernel.connect();
     try {
       await this.#ensureWorkspaceImportSchema(client); await this.#ensureWorkspaceProjectSchema(client);
       const result=await client.query<{import_id:string;workspace_id:string;workspace_name:string;organization_id:string|null;report:PortableWorkspaceImportReport}>(`
@@ -4563,7 +4500,7 @@ export class PostgresDatabase implements
   }
 
   async mapImportedIdentityAsMember(memberId:string,input:{importId:string;sourceAccountId:string;localAccountId:string;idempotencyKey:string}) {
-    const client=await this.#pool.connect();
+    const client=await this.#kernel.connect();
     try {
       await this.#ensureWorkspaceImportSchema(client); await this.#ensureWorkspaceProjectSchema(client);
       const allowed=await client.query(`SELECT 1 FROM stash_workspace_imports imported JOIN stash_workspaces workspace ON workspace.id=imported.workspace_id
@@ -4583,7 +4520,7 @@ export class PostgresDatabase implements
     | { status: "workspace_forbidden" | "workspace_not_found" }
   > {
     // Schema preparation is deliberately outside the read-only snapshot transaction.
-    const setup = await this.#pool.connect();
+    const setup = await this.#kernel.connect();
     try {
       await this.#ensureNoteSchema(setup);
       await this.#ensureNoteHistorySchema(setup);
@@ -4593,7 +4530,7 @@ export class PostgresDatabase implements
       await this.#ensureBoardSchema(setup);
     } finally { setup.release(); }
 
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
       const access = await client.query<{ member: boolean; guest_project_ids: string[]; workspace_projection: PortableWorkspaceProjection | null }>(
@@ -4730,7 +4667,7 @@ export class PostgresDatabase implements
   }
 
   async #withTransaction<Result>(operation: (client: PoolClient) => Promise<Result>): Promise<Result> {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await client.query("BEGIN");
       const result = await operation(client);
@@ -4847,7 +4784,7 @@ export class PostgresDatabase implements
   }
 
   async createAgentGrant(actorId: string, grant: StoredAgentGrant): Promise<"created" | "forbidden"> {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureMemberDepartureSchema(client);
       const allowed = await client.query(`SELECT 1 FROM stash_organization_memberships membership
@@ -4865,7 +4802,7 @@ export class PostgresDatabase implements
   }
 
   async listAgentGrants(actorId: string, organizationId: string): Promise<AgentGrant[] | undefined> {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureMemberDepartureSchema(client);
       const membership = await client.query("SELECT 1 FROM stash_organization_memberships WHERE organization_id=$1 AND account_id=$2", [organizationId, actorId]);
@@ -4877,7 +4814,7 @@ export class PostgresDatabase implements
   }
 
   async revokeAgentGrant(actorId: string, organizationId: string, grantId: string): Promise<"revoked" | "not_found" | "forbidden"> {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureMemberDepartureSchema(client);
       const result = await client.query(`UPDATE stash_agent_grants SET revoked_at=CURRENT_TIMESTAMP
@@ -4889,7 +4826,7 @@ export class PostgresDatabase implements
   }
 
   async findActiveAgentGrant(tokenLookup: string): Promise<StoredAgentGrant | undefined> {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureMemberDepartureSchema(client);
       const result = await client.query<any>(`SELECT id,organization_id,project_id,sponsoring_member_id,name,capabilities,expires_at,created_at,revoked_at,token_lookup,token_hash
@@ -4900,7 +4837,7 @@ export class PostgresDatabase implements
   }
 
   async agentGrantOptions(actorId: string): Promise<AgentGrantOption[]> {
-    const client = await this.#pool.connect();
+    const client = await this.#kernel.connect();
     try {
       await this.#ensureMemberDepartureSchema(client);
       const result = await client.query<{ organization_id: string; organization_name: string; project_id: string | null; project_name: string | null }>(`
@@ -4959,7 +4896,7 @@ export class PostgresDatabase implements
   }
 
   async listAgentProposals(actorId: string, organizationId: string): Promise<AgentProposal[] | undefined> {
-    const client = await this.#pool.connect(); try { await this.#ensureMemberDepartureSchema(client);
+    const client = await this.#kernel.connect(); try { await this.#ensureMemberDepartureSchema(client);
     const membership = await client.query("SELECT 1 FROM stash_organization_memberships WHERE organization_id=$1 AND account_id=$2", [organizationId, actorId]);
     if (!membership.rowCount) return undefined;
     const result = await client.query<any>(`SELECT proposal.*,grant.organization_id,grant.project_id,grant.name agent_name
@@ -4970,7 +4907,7 @@ export class PostgresDatabase implements
   }
 
   async findAgentProposal(actorId: string, organizationId: string, proposalId: string): Promise<AgentProposal | "forbidden" | undefined> {
-    const client = await this.#pool.connect(); try { await this.#ensureMemberDepartureSchema(client);
+    const client = await this.#kernel.connect(); try { await this.#ensureMemberDepartureSchema(client);
       const membership = await client.query("SELECT 1 FROM stash_organization_memberships WHERE organization_id=$1 AND account_id=$2", [organizationId, actorId]);
       if (!membership.rowCount) return "forbidden";
       const result = await client.query<any>(`SELECT proposal.*,grant.organization_id,grant.project_id,grant.name agent_name FROM stash_agent_proposals proposal
@@ -5009,12 +4946,12 @@ export class PostgresDatabase implements
   }
 
   async releaseAgentProposal(actorId: string, proposalId: string, operationId: string): Promise<void> {
-    await this.#pool.query("UPDATE stash_agent_proposals SET status=CASE WHEN conflict IS NULL THEN 'pending' ELSE 'conflict' END,operation_id=NULL WHERE id=$1 AND sponsoring_member_id=$2 AND operation_id=$3 AND status='applying'", [proposalId, actorId, operationId]);
+    await this.#kernel.query("UPDATE stash_agent_proposals SET status=CASE WHEN conflict IS NULL THEN 'pending' ELSE 'conflict' END,operation_id=NULL WHERE id=$1 AND sponsoring_member_id=$2 AND operation_id=$3 AND status='applying'", [proposalId, actorId, operationId]);
   }
 
   async agentGrantTargetAllowed(grant: AgentGrant, target: { workspaceId?: string; projectId?: string }): Promise<boolean> {
     if (!target.workspaceId && !target.projectId) return false;
-    const result = await this.#pool.query(`SELECT 1 FROM stash_workspaces workspace LEFT JOIN stash_projects project ON project.workspace_id=workspace.id
+    const result = await this.#kernel.query(`SELECT 1 FROM stash_workspaces workspace LEFT JOIN stash_projects project ON project.workspace_id=workspace.id
       WHERE workspace.organization_owner_id=$1 AND ($2::uuid IS NULL OR workspace.id=$2) AND ($3::uuid IS NULL OR project.id=$3)
         AND ($4::uuid IS NULL OR project.id=$4) LIMIT 1`, [grant.organizationId, target.workspaceId ?? null, target.projectId ?? null, grant.projectId ?? null]);
     return Boolean(result.rowCount);
@@ -5403,7 +5340,7 @@ export class PostgresDatabase implements
     });
   }
 
-  async #authorizeNote(client: Pool | PoolClient, memberId: string, noteId: string): Promise<"edit" | "read" | "none"> {
+  async #authorizeNote(client: PostgresQueryable, memberId: string, noteId: string): Promise<"edit" | "read" | "none"> {
     const result = await client.query<{ can_edit: boolean; can_read: boolean }>(`SELECT
       ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
        (workspace.owner_type='organization' AND EXISTS(SELECT 1 FROM stash_organization_memberships membership

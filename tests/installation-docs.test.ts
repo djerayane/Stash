@@ -96,8 +96,9 @@ describe("installation documentation contract", () => {
   });
 
   it("initializes and stops the keyed PostgreSQL destination before standalone migration", async () => {
-    const [guide, migration, command, database, upgrade] = await Promise.all([read("docs/installation.md"), read("src/embedded-instance-migration.ts"),
-      read("src/migrate-embedded-command.ts"), read("src/postgres-database.ts"), read("src/postgres-instance-upgrade.ts")]);
+    const [guide, migration, command, database, kernel, upgrade] = await Promise.all([read("docs/installation.md"), read("src/embedded-instance-migration.ts"),
+      read("src/migrate-embedded-command.ts"), read("src/postgres-database.ts"), read("src/instance-operations/storage/postgres-kernel.ts"),
+      read("src/postgres-instance-upgrade.ts")]);
     assert.match(migration, /stash_authentication_key_check/);
     assert.match(migration, /stash_instance_format/);
     assert.match(migration, /must be prepared with its configured master key before migration/);
@@ -107,9 +108,9 @@ describe("installation documentation contract", () => {
     assert.match(command, /prepareEmptyMigrationDestination/);
     for (const catalog of ["pg_class", "pg_proc", "pg_type", "pg_collation", "pg_operator", "pg_opfamily", "pg_opclass", "pg_conversion",
       "pg_ts_config", "pg_ts_dict", "pg_ts_parser", "pg_ts_template", "pg_statistic_ext", "pg_extension", "pg_constraint", "pg_default_acl"]) {
-      assert.match(database, new RegExp(catalog));
+      assert.match(kernel, new RegExp(catalog));
     }
-    assert.match(database, /schema must be empty before preparation/);
+    assert.match(kernel, /schema must be empty before preparation/);
     for (const fragment of [
       "STASH_DESTINATION_KEY_FILE=",
       "./stash migrate prepare-destination", "ghcr.io/djerayane/stash:<version>",
