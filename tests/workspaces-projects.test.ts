@@ -44,7 +44,13 @@ class ProtocolCompatibleDatabase implements DatabaseProbe, WorkspaceProjectRepos
   }
 
   async listAccessibleWorkspaces(memberId: string) {
-    return [...this.workspaces.values()].filter((workspace) => workspace.owner.type === "personal" ? workspace.owner.id === memberId : this.organizationMembers.get(workspace.owner.id)?.has(memberId)).map((workspace) => ({ id: workspace.id, name: workspace.name, projects: [...this.projects.values()].filter((project) => project.workspaceId === workspace.id).map((project) => ({ id: project.id, name: project.name, key: project.key })) }));
+    return [...this.workspaces.values()].filter((workspace) => workspace.owner.type === "personal" ? workspace.owner.id === memberId : this.organizationMembers.get(workspace.owner.id)?.has(memberId)).map((workspace) => ({ id: workspace.id, name: workspace.name, ownerType: workspace.owner.type, projects: [...this.projects.values()].filter((project) => project.workspaceId === workspace.id).map((project) => ({ id: project.id, name: project.name, key: project.key })) }));
+  }
+
+  async canCreateProject(memberId: string, workspaceId: string) {
+    const workspace = this.workspaces.get(workspaceId);
+    return workspace?.owner.type === "personal" ? workspace.owner.id === memberId
+      : workspace?.owner.type === "organization" && memberId === "ada";
   }
 
   async createWorkspace(
@@ -163,7 +169,7 @@ describe("creating Workspaces and Projects", () => {
     await createProject(baseUrl, workspace.id, "member-ada", { name: "Launch", key: "LAUNCH" });
     const response = await fetch(`${baseUrl}/api/workspaces`, { headers: { authorization: "Bearer member-ada" } });
     assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), { workspaces: [{ id: workspace.id, name: "Engine Room", projects: [{ id: [...database.projects.keys()][0], name: "Launch", key: "LAUNCH" }] }] });
+    assert.deepEqual(await response.json(), { workspaces: [{ id: workspace.id, name: "Engine Room", projects: [{ id: [...database.projects.keys()][0], name: "Launch", key: "LAUNCH" }], projectCreation: { allowed: true } }] });
   });
 
   it("lets a Member create a personal Workspace owned only by that Member", async () => {
@@ -199,12 +205,12 @@ describe("creating Workspaces and Projects", () => {
     });
     assert.equal(denied.status, 403);
     assert.deepEqual(await denied.json(), {
-      error: "workspace_forbidden",
-      message: "This Member cannot create Projects in that Workspace.",
+      error: "project_creation_forbidden",
+      message: "Your Organization Role does not include Project creation.",
     });
   });
 
-  it("lets an Organization Member create an Organization Workspace and Project", async () => {
+  it("lets an authorized Organization Member create an Organization Workspace and Project", async () => {
     const { baseUrl, database } = await run();
     const workspaceResponse = await createWorkspace(baseUrl, "member-ada", {
       name: "Acme Product",
@@ -271,8 +277,8 @@ describe("creating Workspaces and Projects", () => {
     );
     assert.equal(crossOrganization.status, 403);
     assert.deepEqual(await crossOrganization.json(), {
-      error: "workspace_forbidden",
-      message: "This Member cannot create Projects in that Workspace.",
+      error: "project_creation_forbidden",
+      message: "Your Organization Role does not include Project creation.",
     });
 
     const authorizationWorkBeforeDeniedRequests = database.organizationAuthorizationAttempts.length;

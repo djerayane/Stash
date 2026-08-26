@@ -39,6 +39,7 @@ class PublicApiFake implements DatabaseProbe, WorkspaceProjectRepository {
   async createProject(_memberId: string, _record: WorkspaceProjectRecord, _projection: PortableProjectProjection) {
     return "workspace_not_found" as const;
   }
+  async canCreateProject() { return true; }
 }
 
 const organizationId = "11111111-1111-4111-8111-111111111111";

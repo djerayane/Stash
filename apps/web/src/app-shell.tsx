@@ -16,6 +16,9 @@ import { ActivityPage, BoardsPage, DiscussionsPage, InboxPage, NoteHistoryPage, 
 import { AgentGrantsPage } from "./agent-grants";
 import { NoteTree } from "./knowledge-authoring/note-tree";
 import { NoteWorkspace } from "./knowledge-authoring/note-workspace";
+import { SetupPage } from "./identity-access/setup-page";
+import type { InstanceSetupState } from "./identity-access/setup-state";
+import { ProjectBrowser } from "./work-planning/project-browser";
 
 export type SessionState =
   | { readonly status: "loading" }
@@ -23,7 +26,10 @@ export type SessionState =
   | { readonly status: "error"; readonly message: string; readonly retry?: () => void }
   | { readonly status: "authenticated"; readonly token?: string; readonly member: { readonly id: string; readonly name: string; readonly email: string }; readonly workspace: { readonly id?: string; readonly name: string }; readonly capabilities: readonly string[]; readonly organizationAdministrations?: readonly OrganizationAdministration[]; readonly activeOrganizationId?: string };
 
-interface AppShellProps { readonly session?: SessionState }
+interface AppShellProps {
+  readonly session?: SessionState;
+  readonly setup?: InstanceSetupState;
+}
 
 export function resolveReturnTo(search: string): string {
   const candidate = new URLSearchParams(search).get("returnTo");
@@ -44,6 +50,7 @@ const navigation = [
   { to: "/app/inbox", label: "Inbox", icon: "inbox" },
   { to: "/app/notes", label: "Note Tree", icon: "note" },
   { to: "/app/search", label: "Search", icon: "search" },
+  { to: "/app/projects", label: "Projects", icon: "projects" },
   { to: "/app/tasks", label: "Tasks", icon: "task" },
 ] as const;
 
@@ -53,7 +60,7 @@ export const lastActiveContextKey = (workspaceId: string) => `stash.last-active-
 export function isRestorableContext(value: string): boolean {
   if (!value.startsWith("/app/") || value.includes("#") || value.includes("//")) return false;
   const path = value.split("?", 1)[0]!;
-  return path === "/app/inbox" || path === "/app/notes" || path === "/app/search" || path === "/app/tasks"
+  return path === "/app/inbox" || path === "/app/notes" || path === "/app/search" || path === "/app/projects" || path === "/app/tasks"
     || path === "/app/activity" || path === "/app/notifications"
     || /^\/app\/notes\/[^/]+(?:\/history|\/discussions|\/blocks\/[^/]+\/discussions)?$/.test(path)
     || /^\/app\/tasks\/[^/]+\/discussions$/.test(path)
@@ -78,6 +85,7 @@ function Icon({ name }: { readonly name: string }) {
     home: <><path d="m3 10 9-7 9 7" /><path d="M5 9v11h14V9M9 20v-7h6v7" /></>,
     note: <><path d="M6 3h9l3 3v15H6z" /><path d="M14 3v5h5M9 12h6M9 16h6" /></>,
     task: <><rect x="4" y="4" width="16" height="16" rx="2" /><path d="m8 12 2.5 2.5L16 9" /></>,
+    projects: <><path d="M4 6h6l2 2h8v11H4z"/><path d="M4 10h16"/></>,
     pulse: <path d="M3 12h4l2-6 4 12 2-6h6" />,
     members: <><circle cx="9" cy="8" r="3" /><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 4a3 3 0 0 1 0 6M17 14a5 5 0 0 1 4 5" /></>,
     import: <><circle cx="12" cy="12" r="8" /><path d="M8 12h8M12 8v8" /></>,
@@ -268,6 +276,7 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
           <Route path="/app/notes/new" element={<Navigate replace to="/app/notes" />} />
           <Route path="/app/notes/:noteId/history" element={<NoteHistoryPage token={session.token ?? ""} />} />
           <Route path="/app/tasks" element={<ProjectGatewayPage workspaceId={activeWorkspace.id ?? ""} token={session.token ?? ""} />} />
+          <Route path="/app/projects" element={<ProjectBrowser token={session.token ?? ""} onOpenProject={(projectId) => navigate(`/app/projects/${encodeURIComponent(projectId)}/boards`)} />} />
           <Route path="/app/projects/:projectId/boards" element={<BoardsPage token={session.token ?? ""} />} />
           <Route path="/app/projects/:projectId/boards/:boardId" element={<BoardsPage token={session.token ?? ""} />} />
           <Route path="/app/notes/:targetId/discussions" element={<DiscussionsPage targetKind="note" token={session.token ?? ""} />} />
@@ -292,11 +301,14 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
   </div>;
 }
 
-export function AppShell({ session = { status: "loading" } }: AppShellProps) {
+export function AppShell({ session = { status: "loading" }, setup = { status: "ready", state: "complete" } }: AppShellProps) {
   const location = useLocation();
   if (location.pathname === "/auth/oidc/callback") return <OidcCallback />;
   if (session.status === "loading" || session.status === "error") return <StateScreen state={session} />;
   if (session.status === "anonymous") {
+    if (setup.status === "loading") return <StateScreen state={setup} />;
+    if (setup.status === "error") return <StateScreen state={setup} />;
+    if (setup.state !== "complete") return <SetupPage state={setup.state} />;
     if (location.pathname === "/sign-in") return <SignIn returnTo={resolveReturnTo(location.search)} />;
     if (location.pathname === "/sign-up") return <SignUp returnTo={resolveReturnTo(location.search)} />;
     return <Navigate replace to={`/sign-in?returnTo=${encodeURIComponent(`${location.pathname}${location.search}`)}`} />;

@@ -4,7 +4,13 @@ export type OrganizationPermission =
   | "organization.roles.manage"
   | "organization.members.manage"
   | "workspace.create"
-  | "project.create";
+  | "create_project";
+
+export const builtInProjectCreationPermissions = {
+  Owner: ["create_project"],
+  Admin: ["create_project"],
+  Member: [],
+} as const;
 
 const builtInRoleDefinitions: ReadonlyArray<{
   name: BuiltInOrganizationRole;
@@ -18,18 +24,18 @@ const builtInRoleDefinitions: ReadonlyArray<{
       "organization.roles.manage",
       "organization.members.manage",
       "workspace.create",
-      "project.create",
+      "create_project",
     ],
   },
   {
     name: "Admin",
     immutable: true,
-    permissions: ["organization.members.manage", "workspace.create", "project.create"],
+    permissions: ["organization.members.manage", "workspace.create", "create_project"],
   },
   {
     name: "Member",
     immutable: true,
-    permissions: ["workspace.create", "project.create"],
+    permissions: ["workspace.create"],
   },
 ];
 

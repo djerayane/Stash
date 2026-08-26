@@ -53,6 +53,15 @@ test("protects deep links and retains the intended destination", async () => {
   expect(screen.getByRole("heading", { name: "Tasks" })).toBeInTheDocument();
 });
 
+test("routes an empty Instance into browser-guided setup before sign-in", () => {
+  const client = new QueryClient();
+  render(<QueryClientProvider client={client}><MemoryRouter initialEntries={["/sign-in"]}>
+    <AppShell session={{ status: "anonymous" }} setup={{ status: "ready", state: "code-required" }} />
+  </MemoryRouter></QueryClientProvider>);
+  expect(screen.getByRole("heading", { name: "Make Stash yours." })).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "Sign in to Stash" })).not.toBeInTheDocument();
+});
+
 test("renders authenticated navigation and deep-linkable route content", async () => {
   renderShell("/app/tasks");
   expect(await screen.findByRole("heading", { name: "Tasks" })).toBeInTheDocument();
@@ -60,6 +69,7 @@ test("renders authenticated navigation and deep-linkable route content", async (
   expect(screen.getByRole("link", { name: "Tasks" })).toHaveAttribute("aria-current", "page");
   expect(screen.getByRole("link", { name: "Note Tree" })).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "Search" })).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Projects" })).toHaveAttribute("href", "/app/projects");
   expect(screen.queryByText("Engine Room")).not.toBeInTheDocument();
   expect(screen.getByText("AL")).toBeInTheDocument();
 });

@@ -49,6 +49,7 @@ import { WorkspaceSearchService } from "./workspace-search.js";
 import { createCapabilityRegistry } from "./capability-registry.js";
 import { developmentIntegrationCapability } from "./development-integration/index.js";
 import { identityAccessCapability } from "./identity-access/index.js";
+import { InstanceSetupService } from "./identity-access/instance-setup.js";
 import { instanceOperationsCapability } from "./instance-operations/index.js";
 import { knowledgeAuthoringCapability } from "./knowledge-authoring/index.js";
 import { EmptyCollectionImpactInspector, NoteTreeService } from "./knowledge-authoring/note-tree.js";
@@ -84,6 +85,7 @@ export async function composeInstanceRuntime(environment: NodeJS.ProcessEnv): Pr
   if (redisUrl) redis = startRedisAcceleration(redisUrl, ({ operation, key, cause }) => console.warn(`Redis acceleration degraded (${operation} ${key}): ${cause.message}`));
   const port = Number.parseInt(environment.PORT ?? "3000", 10);
   if (!Number.isInteger(port) || port < 0 || port > 65_535) throw new Error("PORT must be an integer between 0 and 65535");
+  const host = environment.HOST ?? "0.0.0.0";
   const publicOrigin = required(environment, "PUBLIC_ORIGIN");
   const passwordAuth = new PasswordAuthService(database);
   const notifications = new NotificationService(database);
@@ -119,7 +121,10 @@ export async function composeInstanceRuntime(environment: NodeJS.ProcessEnv): Pr
     const causeCode = /^(?:[A-Z0-9]{5}|E[A-Z_]{2,31})$/.test(candidateCode) ? candidateCode : "unclassified";
     console.warn(`Authentication operation unavailable (operation=${operation}, cause=${causeType}, code=${causeCode}).`);
   };
-  const ownerBootstrap = new OwnerBootstrapService(database);
+  const instanceSetup = new InstanceSetupService(database, {
+    boundHost: host,
+    output(message) { console.warn(message); },
+  });
   const diagnostics = createDiagnostics({
     instanceVersion: "0.1.0",
     transport: { async submit() { throw new Error("No diagnostic transport is configured"); } },
@@ -127,25 +132,26 @@ export async function composeInstanceRuntime(environment: NodeJS.ProcessEnv): Pr
   const accountRegistration = openRegistrationFromEnvironment(environment) ? new AccountRegistrationService(database) : undefined;
   const notes = new NoteService(database);
   const tasks = new TaskService(database, database);
+  const workspaceProjects = new WorkspaceProjectService(database);
   const repositoryConnections = githubApp ? new RepositoryConnectionService(database, githubApp) : undefined;
   const githubArtifacts = githubApp ? new GitHubArtifactService(database, githubApp) : undefined;
   const githubSignals = githubWebhookSecret ? new GitHubSignalService(database, githubWebhookSecret, automations) : undefined;
   const capabilities = createCapabilityRegistry([
-    identityAccessCapability({ passwordAuth, instanceAdminToken, ownerBootstrap,
+    identityAccessCapability({ passwordAuth, instanceAdminToken, instanceSetup,
       ...(accountRegistration ? { accountRegistration } : {}), reportAuthenticationFailure }),
     knowledgeAuthoringCapability({ notes, noteTree: new NoteTreeService(database.noteTreeRepository(),
       new EmptyCollectionImpactInspector()), memberAccess: passwordAuth }),
-    workPlanningCapability({ tasks, memberAccess: passwordAuth }),
+    workPlanningCapability({ tasks, workspaceProjects, memberAccess: passwordAuth }),
     developmentIntegrationCapability({ memberAccess: passwordAuth,
       ...(repositoryConnections ? { repositoryConnections } : {}), ...(githubArtifacts ? { githubArtifacts } : {}),
       ...(githubSignals ? { githubSignals } : {}) }),
     instanceOperationsCapability({ instanceAdminToken, diagnostics }),
   ]);
-  const instance = await startInstance({ database, host: environment.HOST ?? "0.0.0.0", port,
+  const instance = await startInstance({ database, host, port,
     instanceAdminToken, capabilities, diagnostics,
     webClientRoot: environment.WEB_CLIENT_ROOT?.trim() || fileURLToPath(new URL("../apps/web/dist", import.meta.url)),
-    ownerBootstrap, passwordAuth, ...(accountRegistration ? { accountRegistration } : {}), reportAuthenticationFailure,
-    workspaceProjects: new WorkspaceProjectService(database), organizationRoles: new OrganizationRoleService(database), invitations: new InvitationService(database),
+    passwordAuth, ...(accountRegistration ? { accountRegistration } : {}), reportAuthenticationFailure,
+    organizationRoles: new OrganizationRoleService(database), invitations: new InvitationService(database),
     ...(repositoryConnections ? { repositoryConnections } : {}), ...(githubArtifacts ? { githubArtifacts } : {}),
     ...(githubSignals ? { githubSignals } : {}), automations,
     notes, noteCollaboration: new NoteCollaborationService(database), agentGrants: new AgentGrantService(database),

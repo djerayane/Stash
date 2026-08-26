@@ -16,6 +16,36 @@ async function installMemberSession(page: Page) {
   await page.addInitScript((session) => localStorage.setItem("stash.member-session", session), memberSession);
 }
 
+test("@a11y completes protected first-run setup by keyboard and opens the starter Note", async ({ page }) => {
+  const setupRequests: unknown[] = [];
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.route("**/api/instance/setup-state", (route) => route.fulfill({ json: { state: "code-required" } }));
+  await page.route("**/api/instance/setup", async (route) => {
+    setupRequests.push(await route.request().postDataJSON());
+    await route.fulfill({ status: 201, json: { token: "browser-acceptance-member-token",
+      workspaceId: "88888888-8888-4888-8888-888888888888", starterNoteId: "99999999-9999-4999-8999-999999999999" } });
+  });
+  await page.goto("/sign-in");
+
+  await expect(page.getByRole("heading", { name: "Make Stash yours." })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "Setup code" })).toHaveCount(0);
+  await page.getByRole("textbox", { name: "Name" }).fill("Ada Lovelace");
+  await page.getByRole("textbox", { name: "Email" }).fill("ada@example.test");
+  await page.getByRole("button", { name: "Continue" }).press("Enter");
+  await expect(page.getByRole("textbox", { name: "Workspace name" })).toBeFocused();
+  await page.getByRole("textbox", { name: "Workspace name" }).fill("Ada's Workspace");
+  await page.getByLabel("Password").fill("correct horse battery staple");
+  await page.getByRole("textbox", { name: "Setup code" }).fill("STASH-ONE");
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  await page.getByRole("button", { name: "Create my Workspace" }).press("Enter");
+
+  await expect(page).toHaveURL(/\/app\/notes\/99999999-9999-4999-8999-999999999999$/);
+  expect(setupRequests).toEqual([{ name: "Ada Lovelace", email: "ada@example.test",
+    password: "correct horse battery staple", workspaceName: "Ada's Workspace", setupCode: "STASH-ONE" }]);
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("stash.member-session")))
+    .toBe(JSON.stringify({ token: "browser-acceptance-member-token" }));
+});
+
 test("restores an anonymous deep link after authentication", async ({ page }) => {
   await page.goto("/app/tasks?assigned=me");
   await expect(page.getByRole("heading", { name: "Sign in to Stash" })).toBeVisible();
@@ -163,6 +193,25 @@ test("discovers Projects without raw identifiers and navigates implemented shell
   await page.goto("/app/missing");
   await page.getByRole("link", { name: "Go home" }).click();
   await expect(page).toHaveURL(/\/app\/inbox$/);
+});
+
+test("@a11y creates an allowed Project and explains a denied Workspace by keyboard", async ({ page }) => {
+  await installMemberSession(page);
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("/app/projects");
+
+  const create = page.getByRole("button", { name: "Create a Project in Acceptance Workspace" });
+  await expect(create).toBeVisible();
+  await expect(page.getByRole("button", { name: "Create a Project in Shared Workspace" })).toBeDisabled();
+  await expect(page.getByText("Your Organization Role does not include Project creation.")).toBeVisible();
+  await create.focus(); await page.keyboard.press("Enter");
+  const dialog = page.getByRole("dialog", { name: "Create a Project" });
+  await expect(dialog.getByRole("textbox", { name: "Project name" })).toBeFocused();
+  await dialog.getByRole("textbox", { name: "Project name" }).fill("First launch");
+  await dialog.getByRole("textbox", { name: "Project key" }).fill("launch");
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  await dialog.getByRole("button", { name: "Create Project" }).press("Enter");
+  await expect(page).toHaveURL(/\/app\/projects\/[0-9a-f-]{36}\/boards$/);
 });
 
 test("uses the responsive bottom navigation at a true narrow viewport", async ({ page }) => {

@@ -6,10 +6,13 @@ import { requireInstanceAdministrator } from "../http-routing.js";
 import type { OwnerBootstrapService } from "../owner-bootstrap.js";
 import { passwordAuthRoute } from "../password-auth-routes.js";
 import type { PasswordAuthService } from "../password-auth.js";
+import { instanceSetupRoutes } from "./instance-setup-routes.js";
+import type { InstanceSetupService } from "./instance-setup.js";
 
 export function identityAccessCapability(options: {
   passwordAuth: PasswordAuthService;
-  instanceAdminToken: string;
+  instanceAdminToken?: string;
+  instanceSetup?: InstanceSetupService;
   ownerBootstrap?: OwnerBootstrapService;
   accountRegistration?: AccountRegistrationService;
   reportAuthenticationFailure?: AuthenticationFailureReporter;
@@ -17,9 +20,10 @@ export function identityAccessCapability(options: {
   return {
     name: "identity-access",
     routes: () => [
+      ...(options.instanceSetup ? [instanceSetupRoutes(options.instanceSetup)] : []),
       accountRegistrationRoute(options.accountRegistration, options.reportAuthenticationFailure),
       passwordAuthRoute(options.passwordAuth, options.reportAuthenticationFailure),
-      requireInstanceAdministrator(options.instanceAdminToken, ownerBootstrapRoute(options.ownerBootstrap)),
+      ...(options.instanceAdminToken ? [requireInstanceAdministrator(options.instanceAdminToken, ownerBootstrapRoute(options.ownerBootstrap))] : []),
     ],
   };
 }

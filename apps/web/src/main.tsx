@@ -7,13 +7,14 @@ import { useSessionState } from "./web-session";
 import { InstanceBackupAdministration } from "./instance-backup-administration";
 import { InstanceUpgradeAdministration } from "./instance-upgrade-administration";
 import { InstanceDiagnosticsAdministration } from "./instance-diagnostics";
+import { useInstanceSetupState } from "./identity-access/setup-state";
 import "@stash/tokens/tokens.css";
 import "./global.css";
 
 const queryClient = new QueryClient();
 
 function MemberApplication() {
-  return <AppShell session={useSessionState()} />;
+  return <AppShell session={useSessionState()} setup={useInstanceSetupState()} />;
 }
 
 const router = createBrowserRouter([

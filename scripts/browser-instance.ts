@@ -22,6 +22,8 @@ import { AccountRegistrationService, type RegistrationRecord } from "../src/acco
 import { PasswordAuthService, hashPassword, type AccountAuthenticationRecord, type SessionRecord } from "../src/password-auth.js";
 import { PortableWorkspaceExportService } from "../src/portable-workspace-export.js";
 import { createCapabilityRegistry } from "../src/capability-registry.js";
+import { instanceSetupRoutes } from "../src/identity-access/instance-setup-routes.js";
+import { InstanceSetupService } from "../src/identity-access/instance-setup.js";
 import { EmptyCollectionImpactInspector, NoteTreeService, type NoteTreeRepository } from "../src/knowledge-authoring/note-tree.js";
 import { noteTreeRoutes } from "../src/knowledge-authoring/note-tree-routes.js";
 import { EmbeddedInstanceStore } from "../src/embedded-instance-store.js";
@@ -90,6 +92,7 @@ const collaborationRepository = {
 
 const projectId = "22222222-2222-4222-8222-222222222222";
 const browserMemberId = "11111111-1111-4111-8111-111111111111";
+let browserProjects = [{ id: projectId, workspaceId: browserWorkspaceId, name: "Stash", key: "STASH", createdByMemberId: browserMemberId }];
 const browserGuestId = "10101010-1010-4010-8010-101010101010";
 const browserDurableMemberId = "20202020-2020-4020-8020-202020202020";
 const browserBoardId = "abababab-abab-4bab-8bab-abababababa1";
@@ -291,7 +294,9 @@ const instance = await startInstance({
   host: "127.0.0.1",
   port: Number.parseInt(process.env.STASH_BROWSER_PORT ?? "4173", 10),
   instanceAdminToken: "browser-acceptance-admin-token",
-  capabilities: createCapabilityRegistry([{ name: "knowledge-authoring", routes: () => [
+  capabilities: createCapabilityRegistry([{ name: "identity-access", routes: () => [instanceSetupRoutes(new InstanceSetupService({
+    async setupComplete() { return true; }, async createFirstPersonalInstance() { return false; },
+  }, { boundHost: "127.0.0.1", output() {} }))] }, { name: "knowledge-authoring", routes: () => [
     noteTreeRoutes(new NoteTreeService(browserNoteTreeRepository, new EmptyCollectionImpactInspector()), browserMemberAccess),
     reopenNoteTreeRoute,
   ] }]),
@@ -308,7 +313,7 @@ const instance = await startInstance({
   oidcCallbackOrigin: "http://127.0.0.1:4173",
   allowInsecureOidcCallbackOriginForTest: true,
   memberAccess: browserMemberAccess,
-  workspaceProjects: new WorkspaceProjectService({ async findPortableMemberIdentity() { return { localAccountId: browserMemberId, displayName: "Browser Member" }; }, async createWorkspace() { return { status: "organization_forbidden" }; }, async createProject() { return "workspace_forbidden"; }, async listAccessibleWorkspaces() { return [{ id: browserWorkspaceId, name: "Acceptance Workspace", projects: [{ id: projectId, name: "Stash", key: "STASH" }] }, { id: "77777777-7777-4777-8777-777777777777", name: "Shared Workspace", projects: [{ id: "66666666-6666-4666-8666-666666666665", name: "Shared roadmap", key: "SHARED" }] }]; } }),
+  workspaceProjects: new WorkspaceProjectService({ async findPortableMemberIdentity() { return { localAccountId: browserMemberId, displayName: "Browser Member" }; }, async canCreateProject(memberId, workspaceId) { return memberId === browserMemberId && workspaceId === browserWorkspaceId; }, async createWorkspace() { return { status: "organization_forbidden" }; }, async createProject(memberId, record) { if (memberId !== browserMemberId || record.workspaceId !== browserWorkspaceId) return "workspace_forbidden"; browserProjects = [...browserProjects, record]; return "created"; }, async listAccessibleWorkspaces() { return [{ id: browserWorkspaceId, name: "Acceptance Workspace", ownerType: "organization" as const, projects: browserProjects }, { id: "77777777-7777-4777-8777-777777777777", name: "Shared Workspace", ownerType: "organization" as const, projects: [{ id: "66666666-6666-4666-8666-666666666665", workspaceId: "77777777-7777-4777-8777-777777777777", createdByMemberId: browserMemberId, name: "Shared roadmap", key: "SHARED" }] }]; } }),
   notes: { async listInbox(memberId: string, workspaceId: string) { return memberId === browserMemberId && workspaceId === browserWorkspaceId ? { status: "found", notes: inboxNotes } : { status: "workspace_forbidden" }; },
     async listNotes(memberId: string, workspaceId: string) { return memberId === browserMemberId && workspaceId === browserWorkspaceId ? { status: "found", notes: [{ id: secondNoteId, workspaceId, content: "Authoritative second Note", createdAt: new Date(0).toISOString() }, { id: noteId, workspaceId, content: "Release collaboration plan", tags: ["decision"], createdAt: new Date(0).toISOString() }] } : { status: "workspace_forbidden" }; },
     async listTemplates() { return { status: "found", templates: [{ id: "abababab-abab-4bab-8bab-abababababa5", name: "Decision", description: "Record context and outcome." }] }; },

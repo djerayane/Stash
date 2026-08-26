@@ -47,6 +47,7 @@ import { proseMirrorToRichText, richTextToProseMirror } from "@stash/rich-text";
 import type { AgentGrant, AgentGrantOption, AgentProposal, StoredAgentGrant } from "./agent-grants.js";
 import type { NoteTreeRepository } from "./knowledge-authoring/note-tree.js";
 import { PostgresNoteTreeRepository } from "./knowledge-authoring/postgres-note-tree-repository.js";
+import type { FirstPersonalInstanceSetup, InstanceSetupRepository } from "./identity-access/instance-setup.js";
 import {
   PostgresKernel,
   type PostgresKernelOptions,
@@ -94,6 +95,20 @@ const repositoryConnectionSelect = `SELECT connection.id, connection.organizatio
   connection.ownership, connection.state,
   ARRAY(SELECT project_id FROM stash_repository_connection_projects link WHERE link.connection_id = connection.id ORDER BY project_id) AS project_ids
   FROM stash_repository_connections connection`;
+const projectCreationPermission = (workspace: string, memberParameter = "$2") => `((${workspace}.owner_type = 'personal'
+  AND ${workspace}.personal_owner_id = ${memberParameter}) OR (${workspace}.owner_type = 'organization' AND EXISTS (
+    SELECT 1 FROM stash_organization_memberships membership
+    WHERE membership.organization_id = ${workspace}.organization_owner_id
+      AND membership.account_id = ${memberParameter}
+      AND membership.role IN ('Owner', 'Admin')
+  )) OR (${workspace}.owner_type = 'organization' AND EXISTS (
+    SELECT 1 FROM stash_organization_custom_role_assignments assignment
+    JOIN stash_organization_custom_roles role ON role.id = assignment.role_id
+    JOIN stash_organization_custom_role_permissions permission ON permission.role_id = role.id
+    WHERE role.organization_id = ${workspace}.organization_owner_id
+      AND assignment.account_id = ${memberParameter}
+      AND permission.permission = 'create_project'
+  )))`;
 const taskPlanningSelect = `SELECT task.*, status.name AS status_name, status.category AS status_category,
   creator.name AS created_by_name,
   ARRAY(SELECT source.note_id FROM stash_task_note_sources source WHERE source.task_id = task.id ORDER BY source.note_id) AS source_note_ids,
@@ -207,6 +222,7 @@ export function validatedRichTextFromCollaborativeDocument(document: Y.Doc): imp
 
 export class PostgresDatabase implements
   DatabaseProbe,
+  InstanceSetupRepository,
   OwnerBootstrapRepository,
   PasswordAuthRepository,
   AccountRegistrationRepository,
@@ -315,6 +331,110 @@ export class PostgresDatabase implements
           owner: { type: "organization", identity: { localOrganizationId: record.organizationId, displayName: record.organizationName } },
           createdBy: { localAccountId: record.ownerId, displayName: record.ownerName },
         });
+        await client.query("INSERT INTO stash_instance_bootstrap (singleton) VALUES (TRUE)");
+        return { commit: true, value: true };
+      },
+    );
+  }
+
+  async setupComplete(): Promise<boolean> {
+    return this.#kernel.withSession(async (client) => {
+      await this.#ensureBootstrapSchema(client);
+      return Boolean((await client.query("SELECT 1 FROM stash_instance_bootstrap WHERE singleton = TRUE")).rowCount);
+    });
+  }
+
+  async createFirstPersonalInstance(setup: FirstPersonalInstanceSetup): Promise<boolean> {
+    return this.#kernel.preparedControlledTransaction(
+      async (client) => {
+        await this.#ensureAuthSchema(client);
+        await this.#noteTreeRepository.prepare(client);
+        await client.query(`
+          ALTER TABLE stash_tasks ALTER COLUMN project_id DROP NOT NULL;
+          ALTER TABLE stash_tasks ALTER COLUMN task_key DROP NOT NULL;
+          ALTER TABLE stash_tasks ALTER COLUMN workflow_status_id DROP NOT NULL;
+          CREATE TABLE IF NOT EXISTS stash_starter_tutorials (
+            workspace_id UUID PRIMARY KEY REFERENCES stash_workspaces(id) ON DELETE CASCADE,
+            root_note_id UUID NOT NULL REFERENCES stash_notes(id),
+            contribution JSONB NOT NULL,
+            CHECK (contribution->>'schema' = 'stash.starter-tutorial.v1')
+          );
+        `);
+      },
+      async (client) => {
+        await this.#kernel.advisoryTransactionLock(client, 2_080_289_093);
+        if ((await client.query("SELECT 1 FROM stash_instance_bootstrap WHERE singleton = TRUE")).rowCount) {
+          return { commit: false, value: false };
+        }
+        await client.query("INSERT INTO stash_accounts (id, name, email, password_hash) VALUES ($1, $2, $3, $4)", [
+          setup.account.id,
+          setup.account.name,
+          setup.account.email,
+          this.#authenticationSecrets.encrypt(setup.account.passwordHash),
+        ]);
+        await client.query(
+          `INSERT INTO stash_workspaces
+            (id, name, owner_type, personal_owner_id, organization_owner_id, created_by_account_id, created_at)
+           VALUES ($1, $2, 'personal', $3, NULL, $3, $4)`,
+          [setup.workspace.id, setup.workspace.name, setup.account.id, setup.createdAt],
+        );
+        const actor = { localAccountId: setup.account.id, displayName: setup.account.name };
+        await this.#recordPortableProjection(client, "Workspace", setup.workspace.id, "stash.workspace.v1", {
+          schema: "stash.workspace.v1",
+          id: setup.workspace.id,
+          name: setup.workspace.name,
+          owner: { type: "personal", identity: actor },
+          createdBy: actor,
+        });
+        for (const [index, note] of setup.starter.notes.entries()) {
+          const document = paragraphDocument(note.content, randomUUID());
+          await client.query(
+            `INSERT INTO stash_notes
+              (id, workspace_id, project_id, content, document, revision, tags, created_by_account_id, created_at,
+               title, parent_id, tree_position)
+             VALUES ($1, $2, NULL, $3, $4::jsonb, 1, '[]'::jsonb, $5, $6, $7, $8, $9)`,
+            [note.id, setup.workspace.id, note.content, JSON.stringify(document), setup.account.id, setup.createdAt,
+              note.title, note.parentId ?? null, index + 1],
+          );
+          await this.#recordPortableProjection(client, "Note", note.id, "stash.note.v1", {
+            schema: "stash.note.v1", id: note.id, workspaceId: setup.workspace.id, content: note.content,
+            tags: [], createdAt: setup.createdAt, createdBy: actor,
+          });
+          const parent = note.parentId ? { parentId: note.parentId } : {};
+          await this.#recordPortableProjection(client, "NoteLocation", note.id, "stash.note-location.v1", {
+            schema: "stash.note-location.v1", noteId: note.id, workspaceId: setup.workspace.id,
+            path: `notes/${note.id}.md`, aliases: [], revision: 1, position: String(index + 1), ...parent,
+          });
+        }
+        for (const link of setup.starter.links) {
+          await client.query(
+            `INSERT INTO stash_note_links
+              (id, workspace_id, source_note_id, target_note_id, target_path, candidate_note_ids, label, revision)
+             VALUES ($1, $2, $3, $4, $5, '{}', $6, 1)`,
+            [link.id, setup.workspace.id, link.sourceNoteId, link.targetNoteId,
+              `notes/${link.targetNoteId}.md`, link.label],
+          );
+          await this.#recordPortableProjection(client, "NoteLink", link.id, "stash.note-link.v2", {
+            schema: "stash.note-link.v2", id: link.id, workspaceId: setup.workspace.id,
+            sourceNoteId: link.sourceNoteId, targetNoteId: link.targetNoteId,
+            targetPath: `notes/${link.targetNoteId}.md`, candidateNoteIds: [], label: link.label, revision: 1,
+          });
+        }
+        for (const task of setup.starter.tasks) {
+          await client.query(
+            `INSERT INTO stash_tasks
+              (id, workspace_id, project_id, task_key, workflow_status_id, title, created_by_account_id, created_at,
+               linked_note_ids)
+             VALUES ($1, $2, NULL, NULL, NULL, $3, $4, $5, $6::jsonb)`,
+            [task.id, setup.workspace.id, task.title, setup.account.id, setup.createdAt,
+              JSON.stringify([setup.starter.contribution.taskView.noteId])],
+          );
+        }
+        await client.query(
+          "INSERT INTO stash_starter_tutorials (workspace_id, root_note_id, contribution) VALUES ($1, $2, $3::jsonb)",
+          [setup.workspace.id, setup.starter.contribution.rootNoteId, JSON.stringify(setup.starter.contribution)],
+        );
+        await this.#insertSession(client, setup.session);
         await client.query("INSERT INTO stash_instance_bootstrap (singleton) VALUES (TRUE)");
         return { commit: true, value: true };
       },
@@ -459,8 +579,8 @@ export class PostgresDatabase implements
   async listAccessibleWorkspaces(memberId: string) {
     return this.#kernel.withSession(async (client) => {
       await this.#ensureWorkspaceProjectSchema(client);
-      const result = await client.query<{ workspace_id: string; workspace_name: string; project_id: string | null; project_name: string | null; project_key: string | null }>(`
-        SELECT workspace.id AS workspace_id, workspace.name AS workspace_name,
+      const result = await client.query<{ workspace_id: string; workspace_name: string; owner_type: "personal" | "organization"; project_id: string | null; project_name: string | null; project_key: string | null }>(`
+        SELECT workspace.id AS workspace_id, workspace.name AS workspace_name, workspace.owner_type,
           project.id AS project_id, project.name AS project_name, project.project_key
         FROM stash_workspaces workspace
         LEFT JOIN stash_projects project ON project.workspace_id=workspace.id AND (
@@ -471,9 +591,20 @@ export class PostgresDatabase implements
           OR (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$1))
           OR EXISTS (SELECT 1 FROM stash_projects visible JOIN stash_project_guests guest ON guest.project_id=visible.id WHERE visible.workspace_id=workspace.id AND guest.account_id=$1)
         ORDER BY workspace.name, project.name`, [memberId]);
-      const workspaces = new Map<string, { id: string; name: string; projects: Array<{ id: string; name: string; key: string }> }>();
-      for (const row of result.rows) { const workspace = workspaces.get(row.workspace_id) ?? { id: row.workspace_id, name: row.workspace_name, projects: [] }; if (row.project_id) workspace.projects.push({ id: row.project_id, name: row.project_name!, key: row.project_key! }); workspaces.set(row.workspace_id, workspace); }
+      const workspaces = new Map<string, { id: string; name: string; ownerType: "personal" | "organization"; projects: Array<{ id: string; name: string; key: string }> }>();
+      for (const row of result.rows) { const workspace = workspaces.get(row.workspace_id) ?? { id: row.workspace_id, name: row.workspace_name, ownerType: row.owner_type, projects: [] }; if (row.project_id) workspace.projects.push({ id: row.project_id, name: row.project_name!, key: row.project_key! }); workspaces.set(row.workspace_id, workspace); }
       return [...workspaces.values()];
+    });
+  }
+
+  async canCreateProject(memberId: string, workspaceId: string): Promise<boolean> {
+    return this.#kernel.withSession(async (client) => {
+      await this.#ensureWorkspaceProjectSchema(client);
+      const result = await client.query<{ allowed: boolean }>(
+        `SELECT ${projectCreationPermission("workspace")} AS allowed FROM stash_workspaces workspace WHERE workspace.id = $1`,
+        [workspaceId, memberId],
+      );
+      return result.rows[0]?.allowed === true;
     });
   }
 
@@ -485,15 +616,8 @@ export class PostgresDatabase implements
     return this.#withTransaction(async (client) => {
       await this.#ensureNoteSchema(client);
       const access = await client.query<{ allowed: boolean }>(
-        `SELECT (
-           (owner_type = 'personal' AND personal_owner_id = $2)
-           OR (owner_type = 'organization' AND EXISTS (
-             SELECT 1 FROM stash_organization_memberships membership
-             WHERE membership.organization_id = stash_workspaces.organization_owner_id
-               AND membership.account_id = $2
-           ))
-         ) AS allowed
-         FROM stash_workspaces WHERE id = $1`,
+        `SELECT ${projectCreationPermission("workspace")} AS allowed
+         FROM stash_workspaces workspace WHERE workspace.id = $1`,
         [record.workspaceId, memberId],
       );
       if (!access.rowCount) return "workspace_not_found";
@@ -3671,6 +3795,22 @@ export class PostgresDatabase implements
         project_id UUID NOT NULL REFERENCES stash_projects(id),
         account_id UUID NOT NULL REFERENCES stash_accounts(id),
         PRIMARY KEY (project_id, account_id)
+      );
+      CREATE TABLE IF NOT EXISTS stash_organization_custom_roles (
+        id UUID PRIMARY KEY,
+        organization_id UUID NOT NULL REFERENCES stash_organizations(id) ON DELETE CASCADE,
+        name TEXT NOT NULL CHECK (char_length(name) BETWEEN 1 AND 100),
+        UNIQUE (organization_id, name)
+      );
+      CREATE TABLE IF NOT EXISTS stash_organization_custom_role_permissions (
+        role_id UUID NOT NULL REFERENCES stash_organization_custom_roles(id) ON DELETE CASCADE,
+        permission TEXT NOT NULL CHECK (permission IN ('create_project')),
+        PRIMARY KEY (role_id, permission)
+      );
+      CREATE TABLE IF NOT EXISTS stash_organization_custom_role_assignments (
+        role_id UUID NOT NULL REFERENCES stash_organization_custom_roles(id) ON DELETE CASCADE,
+        account_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
+        PRIMARY KEY (role_id, account_id)
       );
       ALTER TABLE stash_projects ADD COLUMN IF NOT EXISTS next_task_number INTEGER NOT NULL DEFAULT 1 CHECK (next_task_number > 0);
       ALTER TABLE stash_projects ADD COLUMN IF NOT EXISTS workflow_revision INTEGER NOT NULL DEFAULT 0 CHECK (workflow_revision >= 0);
