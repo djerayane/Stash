@@ -278,7 +278,8 @@ export async function migrateEmbeddedInstance(options: {
       tableDigests[table.name] = expectedDigest;
     }
     const copiedRows = tables.reduce((count, table) => count + table.rows.length, 0);
-    const destinationRows = (await Promise.all(tables.map(async (table) => Number((await client.query(`SELECT count(*) count FROM ${quote(table.name)}`)).rows[0]?.count)))).reduce((sum, count) => sum + count, 0);
+    let destinationRows = 0;
+    for (const table of tables) destinationRows += Number((await client.query(`SELECT count(*) count FROM ${quote(table.name)}`)).rows[0]?.count);
     if (destinationRows !== copiedRows) throw new Error("Migration post-copy semantic row-count validation failed");
     const committingJournal = JSON.stringify({ staged: stagedAttachments, state: "committing", tables: tables.length, rows: copiedRows,
       attachments: sourceAttachments.length, attachmentFiles: sourceAttachments, configurationStaged: stagedConfiguration,

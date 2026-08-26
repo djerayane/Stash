@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, test } from "node:test";
 import { spawnSync } from "node:child_process";
-import { Pool } from "pg";
+import { Client, Pool } from "pg";
 
 import { AttachmentService, LocalAttachmentStorage } from "../src/attachments.js";
 import { migrateEmbeddedInstance, readMigrationKeys } from "../src/embedded-instance-migration.js";
@@ -231,6 +231,34 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
       const migrated = new (await import("../src/postgres-database.js")).PostgresDatabase(scoped, createAuthenticationSecretCodec(sourceKey));
       try { await migrated.verifyConnection(); assert.equal((await migrated.findAccountByEmail("grace@example.test"))?.passwordHash, "preserved-hash"); }
       finally { await migrated.close(); }
+    } finally { await source.close(); await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined); await admin.end(); }
+  });
+
+  test("serializes every query issued through a migration transaction client", async () => {
+    const sourceKey = key();
+    const source = await EmbeddedInstanceStore.open(await mkdtemp(join(tmpdir(), "stash-migration-serial-source-")), createAuthenticationSecretCodec(sourceKey));
+    const admin = new Pool({ connectionString: postgresUrl! }); const schema = `embedded_serial_${randomUUID().replaceAll("-", "")}`;
+    const root = await mkdtemp(join(tmpdir(), "stash-migration-serial-destination-"));
+    try {
+      await source.database.verifyConnection(); await source.database.prepareInstanceStore();
+      await source.database.createFirstOrganizationOwner({ organizationId: randomUUID(), organizationName: "Serial", ownerId: randomUUID(), ownerName: "Owner",
+        ownerEmail: "serial@example.test", passwordHash: "serial-hash", role: "Owner" });
+      await admin.query(`CREATE SCHEMA ${schema}`); const scoped = new URL(postgresUrl!); scoped.searchParams.set("options", `-csearch_path=${schema}`);
+      const destination = new (await import("../src/postgres-database.js")).PostgresDatabase(scoped.toString(), createAuthenticationSecretCodec(sourceKey));
+      await destination.verifyConnection(); await destination.prepareInstanceStore(); await destination.close();
+
+      const originalQuery = Client.prototype.query; const active = new WeakMap<Client, number>(); let overlapped = false;
+      Client.prototype.query = async function (this: Client, ...args: Parameters<typeof originalQuery>) {
+        const count = (active.get(this) ?? 0) + 1; active.set(this, count); if (count > 1) overlapped = true;
+        try { await new Promise<void>((resolve) => setImmediate(resolve)); return await originalQuery.apply(this, args); }
+        finally { active.set(this, count - 1); }
+      } as typeof originalQuery;
+      try {
+        await migrateEmbeddedInstance({ source, destinationDatabaseUrl: scoped.toString(), destinationAttachmentRoot: join(root, "attachments"),
+          destinationConfigurationRoot: join(root, "configuration"), destinationDatabaseAvailableBytes: BigInt(Number.MAX_SAFE_INTEGER),
+          keys: { source: sourceKey, destination: sourceKey, mode: "preserve" } });
+      } finally { Client.prototype.query = originalQuery; }
+      assert.equal(overlapped, false, "migration issued overlapping queries through one PostgreSQL client");
     } finally { await source.close(); await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined); await admin.end(); }
   });
 
