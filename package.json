@@ -23,6 +23,8 @@
     "test:browser": "pnpm run build:web && playwright test --grep-invert @a11y",
     "pretest:a11y": "pnpm run build:shared",
     "test:a11y": "pnpm run build:web && playwright test --grep @a11y",
+    "test:stable-release": "node --import tsx --test tests/stable-release-journey.test.ts",
+    "benchmark:stable-release": "node --import tsx scripts/benchmark-stable-release.ts",
     "test:server": "node --import tsx --test tests/**/*.test.ts",
     "smoke": "node --import tsx scripts/smoke.ts",
     "backup": "node --import tsx src/backup-command.ts",
