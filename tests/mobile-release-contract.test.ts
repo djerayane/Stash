@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { parseMobileReleaseTag } from "../scripts/mobile-release-version.mjs";
-import { inspectIosSigningCapability, probeIosSigningCapability } from "../scripts/ios-signing-capability.mjs";
+import { inspectIosSigningCapability, probeIosSigningCapability, resolveEasProjectId } from "../scripts/ios-signing-capability.mjs";
 import { hashNativeTree } from "../scripts/hash-mobile-native-tree.mjs";
 
 const root = new URL("../", import.meta.url);
@@ -54,6 +54,24 @@ describe("mobile release contract", () => {
     } finally {
       delete process.env.EAS_PROJECT_ID;
     }
+  });
+
+  it("uses the committed EAS identity when the signing probe has no runtime variable", () => {
+    const committed = "6441a17d-b6df-4442-909e-aa01813993f4";
+    assert.equal(resolveEasProjectId(undefined, committed), committed);
+    assert.equal(resolveEasProjectId("", committed), committed);
+    assert.equal(resolveEasProjectId(committed, committed), committed);
+    assert.throws(
+      () => resolveEasProjectId("123e4567-e89b-42d3-a456-426614174000", committed),
+      /must equal the committed @imnibis\/stash-capture project UUID/
+    );
+  });
+
+  it("wires the signing probe to the committed app identity rather than an empty fallback", async () => {
+    const probe = await read("scripts/probe-ios-signing.mjs");
+    assert.match(probe, /require\("\.\.\/apps\/mobile\/app\.json"\)\.expo\.extra\.eas\.projectId/);
+    assert.match(probe, /resolveEasProjectId\(process\.env\.EAS_PROJECT_ID, committedProjectId\)/);
+    assert.doesNotMatch(probe, /EAS_PROJECT_ID \?\? ""/);
   });
 
   it("keeps PR validation secret-free and mobile publishers behind the complete gate", async () => {

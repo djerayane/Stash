@@ -1,3 +1,11 @@
+export function resolveEasProjectId(configuredProjectId, committedProjectId) {
+  const configured = configuredProjectId?.trim();
+  if (configured && configured !== committedProjectId) {
+    throw new Error("EAS_PROJECT_ID must equal the committed @imnibis/stash-capture project UUID");
+  }
+  return committedProjectId;
+}
+
 export function inspectIosSigningCapability(response, now = new Date()) {
   if (!response || typeof response !== "object" || response.errors?.length) {
     throw new Error("Expo API rejected the iOS signing-capability query");
