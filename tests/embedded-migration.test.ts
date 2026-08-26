@@ -18,6 +18,7 @@ import { paragraphDocument } from "../src/rich-text.js";
 import { PortableWorkspaceExportService } from "../src/portable-workspace-export.js";
 import { PortableWorkspaceImportService } from "../src/portable-workspace-import.js";
 import { PostgresInstanceUpgradeTarget } from "../src/postgres-instance-upgrade.js";
+import { PostgresDatabase } from "../src/postgres-database.js";
 
 const key = () => randomBytes(32).toString("base64");
 const recoveryCodeLookup = (code: string) => createHash("sha256").update(`stash:recovery-code:v1\0${code}`).digest("base64");
@@ -80,10 +81,114 @@ describe("embedded-to-PostgreSQL migration key preflight", () => {
     const secret = key(); const result = spawnSync(process.execPath, ["--import", "tsx", "src/migrate-embedded-command.ts", "--source-key", secret], { cwd: process.cwd(), encoding: "utf8" });
     assert.notEqual(result.status, 0); assert.match(result.stderr, /protected key files/i); assert.doesNotMatch(result.stderr, new RegExp(secret.replace(/[+/=]/g, "\\$&")));
   });
+
+  test("fails closed on invalid destination-preparation key modes before database effects", async () => {
+    const root = await mkdtemp(join(tmpdir(), "stash-prepare-key-modes-")); const source = join(root, "source.key"); const destination = join(root, "destination.key");
+    await writeFile(source, key(), { mode: 0o600 }); await writeFile(destination, key(), { mode: 0o600 });
+    const run = (arguments_: string[]) => spawnSync(process.execPath, ["--import", "tsx", "src/migrate-embedded-command.ts", "prepare-destination", ...arguments_],
+      { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, DESTINATION_DATABASE_URL: "" } });
+    const preserveExtra = run(["--mode", "preserve", "--source-key-file", source, "--destination-key-file", destination]);
+    assert.notEqual(preserveExtra.status, 0); assert.match(preserveExtra.stderr, /Preserve migration does not accept a destination key file/);
+    const rotateMissing = run(["--mode", "rotate", "--source-key-file", source]);
+    assert.notEqual(rotateMissing.status, 0); assert.match(rotateMissing.stderr, /Rotate migration requires a destination key file/);
+    const validProtectedInput = run(["--mode", "preserve", "--source-key-file", source]);
+    assert.notEqual(validProtectedInput.status, 0); assert.match(validProtectedInput.stderr, /DESTINATION_DATABASE_URL must be configured/);
+    assert.doesNotMatch(`${preserveExtra.stderr}${rotateMissing.stderr}${validProtectedInput.stderr}`, new RegExp((await readFile(source, "utf8")).trim().replace(/[+/=]/g, "\\$&")));
+  });
+
+  test("rolls back every destination object on injected preparation failure and permits a clean retry", async () => {
+    const statements: string[] = []; let failPortableProjection = true; const client = {
+      async query(sql: string) {
+        statements.push(sql.trim());
+        if (sql.includes("SELECT object_name FROM")) return { rows: [], rowCount: 0 };
+        if (sql.includes("SELECT encrypted_check FROM stash_authentication_key_check")) return { rows: [], rowCount: 0 };
+        if (failPortableProjection && sql.includes("CREATE TABLE IF NOT EXISTS stash_portable_projection_outbox")) {
+          failPortableProjection = false; throw new Error("injected portable projection failure");
+        }
+        return { rows: [], rowCount: 0 };
+      },
+      release() { statements.push("RELEASE"); },
+    };
+    const pool = { on() {}, async connect() { return client; }, async end() {} };
+    const database = new PostgresDatabase("postgresql://unused", createAuthenticationSecretCodec(key()), { pool: pool as any });
+    await assert.rejects(database.prepareEmptyMigrationDestination("0.1.0"), /injected portable projection failure/);
+    assert.equal(statements.filter((sql) => sql === "BEGIN").length, 1);
+    assert.equal(statements.filter((sql) => sql === "ROLLBACK").length, 1);
+    assert.equal(statements.filter((sql) => sql === "COMMIT").length, 0);
+    await database.prepareEmptyMigrationDestination("0.1.0");
+    assert.equal(statements.filter((sql) => sql === "BEGIN").length, 2);
+    assert.equal(statements.filter((sql) => sql === "COMMIT").length, 1);
+    assert.ok(statements.some((sql) => sql.includes("pg_class")));
+    assert.ok(statements.some((sql) => sql.includes("pg_proc")));
+    assert.ok(statements.some((sql) => sql.includes("pg_type")));
+    assert.ok(statements.some((sql) => /'f'.*'c'.*'i'.*'I'/.test(sql)), "foreign tables, composite types, and indexes must be rejected");
+    for (const catalog of ["pg_collation", "pg_operator", "pg_opfamily", "pg_opclass", "pg_conversion", "pg_ts_config", "pg_ts_dict",
+      "pg_ts_parser", "pg_ts_template", "pg_statistic_ext", "pg_extension", "pg_constraint", "pg_default_acl"]) {
+      assert.ok(statements.some((sql) => sql.includes(catalog)), `${catalog} objects must be rejected`);
+    }
+    const portableLock = "SELECT pg_advisory_xact_lock(1094218495)";
+    assert.ok(statements.filter((sql) => sql === portableLock).length >= 2, "each attempt must acquire a transaction-owned schema lock");
+    assert.equal(statements.filter((sql) => sql.includes("pg_advisory_unlock")).length, 0);
+    assert.ok(statements.indexOf(portableLock) < statements.indexOf("ROLLBACK"), "the failed locked block must roll back its transaction-owned lock");
+  });
+
+  test("normal Instance-store preparation owns the transaction containing its schema locks", async () => {
+    const statements: string[] = []; const client = {
+      async query(sql: string) { statements.push(sql.trim()); return { rows: [], rowCount: 0 }; },
+      release() { statements.push("RELEASE"); },
+    };
+    const pool = { on() {}, async connect() { return client; }, async end() {} };
+    const database = new PostgresDatabase("postgresql://unused", createAuthenticationSecretCodec(key()), { pool: pool as any });
+    await database.prepareInstanceStore();
+    assert.equal(statements[0], "BEGIN");
+    assert.equal(statements.at(-2), "COMMIT"); assert.equal(statements.at(-1), "RELEASE");
+    for (const lock of ["SELECT pg_advisory_xact_lock(1094218495)", "SELECT pg_advisory_xact_lock(1465271063)"]) {
+      const lockedAt = statements.indexOf(lock); assert.ok(lockedAt > 0 && lockedAt < statements.indexOf("COMMIT"), `${lock} must be transaction-scoped`);
+    }
+    assert.equal(statements.filter((sql) => sql === "BEGIN").length, 1);
+    assert.equal(statements.filter((sql) => sql === "COMMIT").length, 1);
+    assert.equal(statements.filter((sql) => sql.includes("pg_advisory_unlock")).length, 0);
+  });
 });
 
 const postgresUrl = process.env.STASH_TEST_DATABASE_URL;
 describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? false : "STASH_TEST_DATABASE_URL is not configured" }, () => {
+  test("prepares an empty destination schema, format, and authentication key boundary from a protected file", async () => {
+    const admin = new Pool({ connectionString: postgresUrl! }); const schema = `embedded_prepare_${randomUUID().replaceAll("-", "")}`;
+    const root = await mkdtemp(join(tmpdir(), "stash-prepare-destination-")); const sourceKeyFile = join(root, "source.key"); await writeFile(sourceKeyFile, key(), { mode: 0o600 });
+    try {
+      await admin.query(`CREATE SCHEMA ${schema}`); const separator = postgresUrl!.includes("?") ? "&" : "?";
+      const scoped = `${postgresUrl}${separator}options=-csearch_path%3D${schema}`;
+      const result = spawnSync(process.execPath, ["--import", "tsx", "src/migrate-embedded-command.ts", "prepare-destination", "--mode", "preserve", "--source-key-file", sourceKeyFile],
+        { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, DESTINATION_DATABASE_URL: scoped } });
+      assert.equal(result.status, 0, result.stderr); assert.match(result.stdout, /"status":"prepared"/);
+      assert.equal((await admin.query(`SELECT count(*) count FROM ${schema}.stash_authentication_key_check`)).rows[0]?.count, "1");
+      assert.equal((await admin.query(`SELECT version FROM ${schema}.stash_instance_format WHERE singleton=TRUE`)).rows[0]?.version, "0.1.0");
+      assert.equal((await admin.query(`SELECT count(*) count FROM ${schema}.stash_accounts`)).rows[0]?.count, "0");
+    } finally { await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined); await admin.end(); }
+  });
+
+  test("refuses to prepare a nonempty destination schema", async () => {
+    const admin = new Pool({ connectionString: postgresUrl! });
+    const root = await mkdtemp(join(tmpdir(), "stash-prepare-nonempty-")); const sourceKeyFile = join(root, "source.key"); await writeFile(sourceKeyFile, key(), { mode: 0o600 });
+    try {
+      for (const create of ["CREATE TABLE OBJECT (id INTEGER)", "CREATE VIEW OBJECT AS SELECT 1 id", "CREATE MATERIALIZED VIEW OBJECT AS SELECT 1 id",
+        "CREATE SEQUENCE OBJECT", "CREATE FUNCTION OBJECT() RETURNS integer LANGUAGE SQL AS 'SELECT 1'", "CREATE TYPE OBJECT AS ENUM ('one')",
+        "CREATE TYPE OBJECT AS (value integer)", "CREATE COLLATION OBJECT (LOCALE = 'C')", "CREATE OPERATOR FAMILY OBJECT USING btree",
+        "CREATE TEXT SEARCH CONFIGURATION OBJECT (COPY = pg_catalog.simple)", "CREATE TEXT SEARCH DICTIONARY OBJECT (TEMPLATE = pg_catalog.simple)"]) {
+        const schema = `embedded_prepare_nonempty_${randomUUID().replaceAll("-", "")}`; await admin.query(`CREATE SCHEMA ${schema}`);
+        try {
+          await admin.query(create.replace("OBJECT", `${schema}.unrelated`)); const separator = postgresUrl!.includes("?") ? "&" : "?";
+          const scoped = `${postgresUrl}${separator}options=-csearch_path%3D${schema}`;
+          const result = spawnSync(process.execPath, ["--import", "tsx", "src/migrate-embedded-command.ts", "prepare-destination", "--mode", "preserve", "--source-key-file", sourceKeyFile],
+            { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, DESTINATION_DATABASE_URL: scoped } });
+          assert.notEqual(result.status, 0, create); assert.match(result.stderr, /schema must be empty before preparation/);
+          assert.equal((await admin.query(`SELECT to_regclass('${schema}.stash_authentication_key_check') table_name`)).rows[0]?.table_name, null);
+        } finally { await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); }
+      }
+    } finally { await admin.end(); }
+  });
+
   test("rejects an unconfigured destination instead of defining its master-key identity from migration input", async () => {
     const sourceKey = key(); const source = await EmbeddedInstanceStore.open(await mkdtemp(join(tmpdir(), "stash-migration-unconfigured-")), createAuthenticationSecretCodec(sourceKey));
     const admin = new Pool({ connectionString: postgresUrl! }); const schema = `embedded_unconfigured_${randomUUID().replaceAll("-", "")}`;

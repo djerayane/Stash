@@ -268,21 +268,59 @@ export class PostgresDatabase implements
   }
 
   /** Prepare every storage capability for contract validation or an empty semantic migration target. */
-  async prepareInstanceStore(): Promise<void> {
-    const foundation = await this.#pool.connect();
-    try { await this.#ensureBootstrapSchema(foundation); await this.#ensureWorkspaceProjectSchema(foundation); }
-    finally { foundation.release(); }
-    await this.#ensureAuthSchema(); await this.#ensureOidcSchema(); await this.#ensureRecoverySchema();
-    await this.#ensureRepositoryConnectionSchema(); await this.#ensureGitHubSignalSchema(); await this.#ensureNotificationSchema();
-    await this.#ensureMemberLocalizationSchema(); await this.#ensureNoteSchemaForPool();
-    const client = await this.#pool.connect();
+  async prepareInstanceStore(transactionClient?: PoolClient): Promise<void> {
+    const client = transactionClient ?? await this.#pool.connect();
     try {
+      if (!transactionClient) await client.query("BEGIN");
+      await this.#ensureBootstrapSchema(client); await this.#ensureWorkspaceProjectSchema(client);
+      await this.#ensureAuthSchema(client); await this.#ensureOidcSchema(client); await this.#ensureRecoverySchema(client);
+      await this.#ensureRepositoryConnectionSchema(client); await this.#ensureGitHubSignalSchema(client); await this.#ensureNotificationSchema(client);
+      await this.#ensureMemberLocalizationSchema(client);
       await this.#ensureAutomationSchema(client, true);
       await this.#ensureNoteSchema(client); await this.#ensureBoardSchema(client); await this.#ensureAttachmentSchema(client);
       await this.#ensureDiscussionSchema(client); await this.#ensureInvitationSchema(client); await this.#ensurePortableProjectionSchema(client);
       await this.#ensureNoteHistorySchema(client); await this.#ensureMemberDepartureSchema(client); await this.#ensureWorkspaceImportSchema(client);
       await this.#ensureCollaborationSchema(client);
-    } finally { client.release(); }
+      if (!transactionClient) await client.query("COMMIT");
+    } catch (error) {
+      if (!transactionClient) await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally { if (!transactionClient) client.release(); }
+  }
+
+  async prepareEmptyMigrationDestination(targetVersion: string, beforeCommit?: () => Promise<void>): Promise<void> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query("BEGIN");
+      const existing = await client.query<{ object_name: string }>(`SELECT object_name FROM (
+        SELECT c.relname AS object_name FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+          WHERE n.nspname=current_schema() AND c.relkind IN ('r','p','v','m','S','f','c','i','I')
+        UNION ALL SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=current_schema()
+        UNION ALL SELECT t.typname FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace
+          WHERE n.nspname=current_schema() AND t.typrelid=0
+        UNION ALL SELECT coll.collname FROM pg_collation coll JOIN pg_namespace n ON n.oid=coll.collnamespace WHERE n.nspname=current_schema()
+        UNION ALL SELECT o.oprname FROM pg_operator o JOIN pg_namespace n ON n.oid=o.oprnamespace WHERE n.nspname=current_schema()
+        UNION ALL SELECT f.opfname FROM pg_opfamily f JOIN pg_namespace n ON n.oid=f.opfnamespace WHERE n.nspname=current_schema()
+        UNION ALL SELECT c.opcname FROM pg_opclass c JOIN pg_namespace n ON n.oid=c.opcnamespace WHERE n.nspname=current_schema()
+        UNION ALL SELECT c.conname FROM pg_conversion c JOIN pg_namespace n ON n.oid=c.connamespace WHERE n.nspname=current_schema()
+        UNION ALL SELECT c.cfgname FROM pg_ts_config c JOIN pg_namespace n ON n.oid=c.cfgnamespace WHERE n.nspname=current_schema()
+        UNION ALL SELECT d.dictname FROM pg_ts_dict d JOIN pg_namespace n ON n.oid=d.dictnamespace WHERE n.nspname=current_schema()
+        UNION ALL SELECT p.prsname FROM pg_ts_parser p JOIN pg_namespace n ON n.oid=p.prsnamespace WHERE n.nspname=current_schema()
+        UNION ALL SELECT t.tmplname FROM pg_ts_template t JOIN pg_namespace n ON n.oid=t.tmplnamespace WHERE n.nspname=current_schema()
+        UNION ALL SELECT s.stxname FROM pg_statistic_ext s JOIN pg_namespace n ON n.oid=s.stxnamespace WHERE n.nspname=current_schema()
+        UNION ALL SELECT e.extname FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE n.nspname=current_schema()
+        UNION ALL SELECT co.conname FROM pg_constraint co JOIN pg_namespace n ON n.oid=co.connamespace WHERE n.nspname=current_schema()
+        UNION ALL SELECT 'default privileges' FROM pg_default_acl d WHERE d.defaclnamespace=current_schema()::regnamespace
+      ) objects ORDER BY object_name LIMIT 1`);
+      if (existing.rowCount) throw new Error("Migration destination PostgreSQL schema must be empty before preparation; pre-existing user objects were found");
+      await this.#verifyAuthenticationKey(client);
+      await this.prepareInstanceStore(client);
+      await client.query("CREATE TABLE stash_instance_format (singleton BOOLEAN PRIMARY KEY CHECK (singleton), version TEXT NOT NULL)");
+      await client.query("INSERT INTO stash_instance_format (singleton, version) VALUES (TRUE, $1)", [targetVersion]);
+      await beforeCommit?.();
+      await client.query("COMMIT");
+    } catch (error) { await client.query("ROLLBACK").catch(() => undefined); throw error; }
+    finally { client.release(); }
   }
 
   async createFirstOrganizationOwner(record: BootstrapRecord): Promise<boolean> {
@@ -3426,8 +3464,8 @@ export class PostgresDatabase implements
     `);
   }
 
-  async #ensureOidcSchema(): Promise<void> {
-    await this.#pool.query(`
+  async #ensureOidcSchema(client: PoolClient | Pool = this.#pool): Promise<void> {
+    await client.query(`
       CREATE TABLE IF NOT EXISTS stash_oidc_configurations (
         organization_id UUID PRIMARY KEY REFERENCES stash_organizations(id) ON DELETE CASCADE,
         issuer TEXT NOT NULL,
@@ -3452,9 +3490,9 @@ export class PostgresDatabase implements
     );
   }
 
-  async #ensureRecoverySchema(): Promise<void> {
-    await this.#ensureAuthSchema();
-    await this.#pool.query(`
+  async #ensureRecoverySchema(client: PoolClient | Pool = this.#pool): Promise<void> {
+    await this.#ensureAuthSchema(client);
+    await client.query(`
       CREATE TABLE IF NOT EXISTS stash_passkeys (
         credential_id TEXT PRIMARY KEY,
         account_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
@@ -3488,8 +3526,8 @@ export class PostgresDatabase implements
       );
     `);
   }
-  async #verifyAuthenticationKey(): Promise<void> {
-    const client = await this.#pool.connect();
+  async #verifyAuthenticationKey(transactionClient?: PoolClient): Promise<void> {
+    const client = transactionClient ?? await this.#pool.connect();
     try {
       await client.query(`
         CREATE TABLE IF NOT EXISTS stash_authentication_key_check (
@@ -3497,7 +3535,7 @@ export class PostgresDatabase implements
           encrypted_check TEXT NOT NULL
         )
       `);
-      await client.query("BEGIN");
+      if (!transactionClient) await client.query("BEGIN");
       await client.query("SELECT pg_advisory_xact_lock($1)", [authenticationKeyCheckLockId]);
       const result = await client.query<{ encrypted_check: string }>(
         "SELECT encrypted_check FROM stash_authentication_key_check WHERE singleton = TRUE",
@@ -3511,12 +3549,12 @@ export class PostgresDatabase implements
           [createAuthenticationKeyCheck(this.#authenticationSecrets)],
         );
       }
-      await client.query("COMMIT");
+      if (!transactionClient) await client.query("COMMIT");
     } catch (error) {
-      await client.query("ROLLBACK").catch(() => undefined);
+      if (!transactionClient) await client.query("ROLLBACK").catch(() => undefined);
       throw error;
     } finally {
-      client.release();
+      if (!transactionClient) client.release();
     }
   }
 
@@ -3564,8 +3602,8 @@ export class PostgresDatabase implements
     `);
   }
 
-  async #ensureRepositoryConnectionSchema(): Promise<void> {
-    const client = await this.#pool.connect();
+  async #ensureRepositoryConnectionSchema(transactionClient?: PoolClient): Promise<void> {
+    const client = transactionClient ?? await this.#pool.connect();
     try {
       await this.#ensureWorkspaceProjectSchema(client);
       await client.query(`
@@ -3588,8 +3626,8 @@ export class PostgresDatabase implements
           PRIMARY KEY (connection_id, project_id)
         )
       `);
-      await client.query("SELECT pg_advisory_lock(1094218495)");
-      await client.query("BEGIN");
+      await client.query(transactionClient ? "SELECT pg_advisory_xact_lock(1094218495)" : "SELECT pg_advisory_lock(1094218495)");
+      if (!transactionClient) await client.query("BEGIN");
       try {
         await this.#ensureRepositoryConnectionStateColumns(client);
         await client.query(`
@@ -3643,21 +3681,26 @@ export class PostgresDatabase implements
           ON CONFLICT (object_kind, object_id, revision) DO NOTHING
         `);
         await client.query("ALTER TABLE stash_repository_connections DROP COLUMN IF EXISTS protected_credential");
-        await client.query("COMMIT");
+        if (!transactionClient) await client.query("COMMIT");
       } catch (error) {
-        await client.query("ROLLBACK").catch(() => undefined);
+        if (!transactionClient) await client.query("ROLLBACK").catch(() => undefined);
         throw error;
       }
     } finally {
-      await client.query("SELECT pg_advisory_unlock(1094218495)").catch(() => undefined);
-      client.release();
+      if (!transactionClient) {
+        await client.query("SELECT pg_advisory_unlock(1094218495)").catch(() => undefined);
+        client.release();
+      }
     }
   }
 
-  async #ensureGitHubSignalSchema(): Promise<void> {
-    await this.#ensureRepositoryConnectionSchema();
-    await this.#ensureNoteSchemaForPool();
-    await this.#pool.query(`
+  async #ensureGitHubSignalSchema(transactionClient?: PoolClient): Promise<void> {
+    const client = transactionClient ?? await this.#pool.connect();
+    try {
+      if (!transactionClient) await client.query("BEGIN");
+      await this.#ensureRepositoryConnectionSchema(client);
+      await this.#ensureNoteSchema(client);
+      await client.query(`
       CREATE TABLE IF NOT EXISTS stash_github_signals (
         id UUID PRIMARY KEY,
         delivery_id TEXT NOT NULL UNIQUE,
@@ -3686,11 +3729,14 @@ export class PostgresDatabase implements
       CREATE INDEX IF NOT EXISTS stash_github_signal_suggestions_task_idx ON stash_github_signal_suggestions(task_id);
       ALTER TABLE stash_github_signals ADD COLUMN IF NOT EXISTS automation_trigger TEXT CHECK (automation_trigger IN ('branch_created','pull_request_completed'));
     `);
+      if (!transactionClient) await client.query("COMMIT");
+    } catch (error) { if (!transactionClient) await client.query("ROLLBACK").catch(() => undefined); throw error; }
+    finally { if (!transactionClient) client.release(); }
   }
 
   async #ensureAutomationSchema(client: PoolClient, dependenciesPrepared = false): Promise<void> {
     await this.#ensureNoteSchema(client);
-    if (!dependenciesPrepared) await this.#ensureGitHubSignalSchema();
+    if (!dependenciesPrepared) await this.#ensureGitHubSignalSchema(client);
     await client.query(`
       CREATE TABLE IF NOT EXISTS stash_automation_recipes (
         id UUID PRIMARY KEY, project_id UUID NOT NULL REFERENCES stash_projects(id) ON DELETE CASCADE,
@@ -4157,8 +4203,8 @@ export class PostgresDatabase implements
       ...(discussion.resolvedAt ? { resolvedAt: discussion.resolvedAt } : {}) };
   }
 
-  async #ensureMemberLocalizationSchema(): Promise<void> {
-    const client = await this.#pool.connect();
+  async #ensureMemberLocalizationSchema(transactionClient?: PoolClient): Promise<void> {
+    const client = transactionClient ?? await this.#pool.connect();
     try {
       await this.#ensureBootstrapSchema(client);
       await client.query(`
@@ -4172,7 +4218,7 @@ export class PostgresDatabase implements
         )
       `);
     } finally {
-      client.release();
+      if (!transactionClient) client.release();
     }
   }
 
@@ -4220,9 +4266,8 @@ export class PostgresDatabase implements
   }
 
   async #ensurePortableProjectionSchema(client: PoolClient): Promise<void> {
-    await client.query("SELECT pg_advisory_lock(1094218495)");
-      try {
-        await client.query(`
+    await client.query("SELECT pg_advisory_xact_lock(1094218495)");
+    await client.query(`
         CREATE TABLE IF NOT EXISTS stash_portable_projection_outbox (
           object_kind TEXT NOT NULL CONSTRAINT stash_portable_projection_outbox_object_kind_check CHECK (object_kind IN (${portableProjectionObjectKindSql})),
           object_id UUID NOT NULL,
@@ -4247,10 +4292,7 @@ export class PostgresDatabase implements
           END IF;
         END
         $portable_projection$;
-      `);
-    } finally {
-      await client.query("SELECT pg_advisory_unlock(1094218495)").catch(() => undefined);
-    }
+    `);
   }
 
   async #recordPortableProjection(
