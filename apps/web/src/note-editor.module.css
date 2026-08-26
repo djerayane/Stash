@@ -1,4 +1,6 @@
 .layout { display: grid; grid-template-columns: minmax(0, 1fr) 18rem; gap: var(--stash-space-6); width: min(100%, 86rem); margin: 0 auto; padding: var(--stash-space-6); }
+.layout.contextHidden { grid-template-columns: minmax(0, 1fr); width: min(100%, 76rem); }
+.visuallyHidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .document { min-width: 0; border: 1px solid var(--stash-border-subtle); background: var(--stash-color-surface); }
 .header { padding: clamp(1.5rem, 4vw, 3.5rem); border-bottom: 1px solid var(--stash-border-subtle); }
 .kicker { color: var(--stash-color-accent); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
@@ -21,6 +23,12 @@
 .editor :global(.tiptap pre) { overflow: auto; padding: 1rem; color: var(--stash-color-surface); background: var(--stash-color-ink); }
 .editor :global([data-callout]) { padding: var(--stash-space-4); border-left: 3px solid var(--stash-color-accent); background: var(--stash-color-canvas); }
 .editor :global([data-workspace-attachment]) { display: inline-flex; padding: var(--stash-space-2) var(--stash-space-3); border: 1px solid var(--stash-border-subtle); color: var(--stash-color-accent); font-weight: 700; }
+.linkedTasks { margin: 0 clamp(1.5rem, 4vw, 4rem) clamp(1.5rem, 4vw, 3rem); border-top: 1px solid var(--stash-border-subtle); padding-top: var(--stash-space-4); }
+.linkedTasks h2 { margin: 0 0 var(--stash-space-3); font-size: 1rem; letter-spacing: .02em; }
+.linkedTasks ul { display: grid; gap: var(--stash-space-2); margin: 0; padding: 0; list-style: none; }
+.linkedTasks li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--stash-space-2); }
+.linkedTasks a { color: var(--stash-color-ink); font-weight: 700; }
+.linkedTasks span { color: var(--stash-color-muted); font-size: .9rem; }
 .markdownPanel { min-height: 34rem; padding: clamp(1.5rem, 4vw, 4rem); }
 .markdownPanel label { display: block; font-size: 1.35rem; font-weight: 760; letter-spacing: -.02em; }
 .markdownPanel > p:not(.error) { max-width: 48rem; color: var(--stash-color-muted); }

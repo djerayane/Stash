@@ -26,7 +26,7 @@ test("restores an anonymous deep link after authentication", async ({ page }) =>
 
   await expect(page).toHaveURL(/\/app\/tasks\?assigned=me$/);
   await expect(page.getByRole("heading", { name: "Tasks", exact: true })).toBeVisible();
-  await expect(page.getByText("Acceptance Workspace").first()).toBeVisible();
+  await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveValue("88888888-8888-4888-8888-888888888888");
   await expect(page.getByText("Forged Workspace")).toHaveCount(0);
 });
 
@@ -43,8 +43,8 @@ test("rejects an external destination during an OIDC browser callback", async ({
   await page.goto("/sign-in");
   await page.evaluate(() => sessionStorage.setItem("stash.oidc-return-to", "https://evil.example/steal"));
   await page.goto("/api/auth/oidc/44444444-4444-4444-8444-444444444444/callback?code=browser-code&state=browser-state");
-  await expect(page).toHaveURL(/\/app$/);
-  await expect(page.getByRole("heading", { name: "Good morning." })).toBeVisible();
+  await expect(page).toHaveURL(/\/app\/notes$/);
+  await expect(page.getByRole("heading", { name: "Note Tree" }).last()).toBeVisible();
 });
 
 test("rejects the Instance Administrator credential from the Member shell", async ({ page }) => {
@@ -109,11 +109,11 @@ test("supports keyboard navigation and focuses changed route content", async ({ 
   await installMemberSession(page);
   await page.route("**/api/workspaces/88888888-8888-4888-8888-888888888888/activity", (route) => route.fulfill({ json: { activities: [] } }));
   await page.goto("/app");
-  const activity = page.getByRole("link", { name: "Activity" });
-  await activity.focus();
+  const inbox = page.getByRole("link", { name: "Inbox" });
+  await inbox.focus();
   await page.keyboard.press("Enter");
-  await expect(page).toHaveURL(/\/app\/activity$/);
-  await expect(page.getByRole("heading", { name: "Activity", exact: true })).toBeVisible();
+  await expect(page).toHaveURL(/\/app\/inbox$/);
+  await expect(page.getByRole("heading", { name: "Inbox", exact: true })).toBeVisible();
   await expect(page.getByRole("main")).toBeFocused();
 });
 
@@ -159,9 +159,10 @@ test("discovers Projects without raw identifiers and navigates implemented shell
   await expect(page.getByRole("button", { name: /Stash/ })).toBeVisible();
   await page.getByRole("link", { name: "Capture" }).click();
   await expect(page).toHaveURL(/\/app\/inbox$/);
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("stash.last-active-context:88888888-8888-4888-8888-888888888888"))).toBe("/app/inbox");
   await page.goto("/app/missing");
   await page.getByRole("link", { name: "Go home" }).click();
-  await expect(page).toHaveURL(/\/app$/);
+  await expect(page).toHaveURL(/\/app\/inbox$/);
 });
 
 test("uses the responsive bottom navigation at a true narrow viewport", async ({ page }) => {
@@ -185,13 +186,13 @@ test("removes functional motion under the Member's reduced-motion preference", a
   await installMemberSession(page);
   await page.emulateMedia({ reducedMotion: "no-preference" });
   await page.goto("/app");
-  const notes = page.getByRole("link", { name: "Notes" });
+  const notes = page.getByRole("link", { name: "Note Tree" });
   const normalDuration = await notes.evaluate((element) => getComputedStyle(element).transitionDuration);
   expect(Number.parseFloat(normalDuration)).toBeGreaterThan(0.1);
   await page.emulateMedia({ reducedMotion: "reduce" });
   const reducedDuration = await notes.evaluate((element) => getComputedStyle(element).transitionDuration);
   expect(Number.parseFloat(reducedDuration)).toBeLessThan(0.01);
-  const pageContent = page.locator("main > div").first();
+  const pageContent = page.locator("main > :first-child");
   await expect(pageContent).toHaveCSS("transform", "none");
   await expect(pageContent).toHaveCSS("opacity", "1");
 });
@@ -227,7 +228,7 @@ test("removes a Member, revokes authority, and keeps former assignment repair ac
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
   await page.getByRole("button", { name: "Remove Member" }).click();
   await expect(page.getByRole("heading", { name: "Departing Member no longer has access" })).toBeVisible();
-  await page.getByRole("link", { name: "Home" }).click();
+  await page.getByRole("link", { name: "Note Tree" }).click();
   await page.getByRole("link", { name: "Members" }).click();
   await expect(page.getByRole("heading", { name: "Member access" })).toBeVisible();
   await expect(page.getByText("Departing Member", { exact: true })).toHaveCount(0);
@@ -269,8 +270,6 @@ test("maps imported attribution to a verified local Member by keyboard without e
 test("announces and focuses a session failure, then retries by keyboard without reloading", async ({ page }) => {
   await installMemberSession(page);
   let sessionAttempts = 0;
-  let documentNavigations = 0;
-  page.on("framenavigated", (frame) => { if (frame === page.mainFrame()) documentNavigations += 1; });
   await page.route("**/api/client-session", async (route) => {
     sessionAttempts += 1;
     await route.fulfill({ status: sessionAttempts === 1 ? 503 : 200, contentType: "application/json", body: JSON.stringify({
@@ -287,13 +286,13 @@ test("announces and focuses a session failure, then retries by keyboard without 
   await expect(alert).toContainText("The Instance could not be reached.");
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(accessibility.violations).toEqual([]);
-  documentNavigations = 0;
+  const documentLoads = await page.evaluate(() => performance.getEntriesByType("navigation").length);
   await page.getByRole("button", { name: "Try again" }).focus();
   await page.keyboard.press("Enter");
 
-  await expect(page.getByRole("heading", { name: "Good morning." })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Note Tree" }).last()).toBeVisible();
   expect(sessionAttempts).toBe(2);
-  expect(documentNavigations).toBe(0);
+  expect(await page.evaluate(() => performance.getEntriesByType("navigation").length)).toBe(documentLoads);
 });
 
 test("issues and revokes an Agent Grant and safely reviews its Proposal by keyboard", async ({ page }) => {

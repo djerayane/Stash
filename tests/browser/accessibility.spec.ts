@@ -14,7 +14,7 @@ test("the primary shell has no automatically detectable accessibility violations
   })));
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto("/app");
-  await expect(page.getByRole("heading", { name: "Good morning." })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Note Tree" }).last()).toBeVisible();
   const results = await new AxeBuilder({ page }).analyze();
   expect(results.violations).toEqual([]);
 });

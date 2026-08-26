@@ -1,7 +1,7 @@
 .shell { min-height: 100dvh; color: var(--stash-color-ink); background: var(--stash-color-canvas); display: grid; grid-template-columns: 16rem minmax(0, 1fr); }
 .skipLink { position: fixed; z-index: 20; top: var(--stash-space-3); left: var(--stash-space-3); transform: translateY(-180%); padding: var(--stash-space-3) var(--stash-space-4); color: var(--stash-color-accent-contrast); background: var(--stash-color-accent); border-radius: var(--stash-radius-sm); }
 .skipLink:focus { transform: translateY(0); }
-.sidebar { min-height: 100dvh; position: sticky; top: 0; display: flex; flex-direction: column; padding: var(--stash-space-6) var(--stash-space-4); color: var(--stash-color-sidebar-ink); background: var(--stash-color-sidebar); border-right: 1px solid var(--stash-color-sidebar-border); }
+.sidebar { height: 100dvh; position: sticky; top: 0; display: flex; flex-direction: column; overflow: hidden; padding: var(--stash-space-6) var(--stash-space-4); color: var(--stash-color-sidebar-ink); background: var(--stash-color-sidebar); border-right: 1px solid var(--stash-color-sidebar-border); }
 .brand, .signInBrand { display: flex; align-items: center; gap: var(--stash-space-3); color: inherit; font-size: 1.05rem; font-weight: 720; letter-spacing: -0.025em; text-decoration: none; }
 .brandMark { display: grid; width: 2rem; height: 2rem; place-items: center; color: var(--stash-color-accent-contrast); background: var(--stash-color-accent); border-radius: 42% 58% 51% 49%; font-family: Georgia, serif; font-style: italic; }
 .workspaceIdentity { display: flex; align-items: center; gap: var(--stash-space-3); margin: var(--stash-space-8) 0 var(--stash-space-6); padding: var(--stash-space-3); border-top: 1px solid var(--stash-color-sidebar-border); border-bottom: 1px solid var(--stash-color-sidebar-border); }
@@ -9,7 +9,7 @@
 .workspaceIdentity strong, .sidebarFooter strong { overflow: hidden; font-size: .8rem; text-overflow: ellipsis; white-space: nowrap; }
 .workspaceIdentity small, .sidebarFooter small { overflow: hidden; color: var(--stash-color-sidebar-muted); font-size: .68rem; text-overflow: ellipsis; white-space: nowrap; }
 .workspaceMonogram, .avatar { display: grid; flex: 0 0 auto; width: 2rem; height: 2rem; place-items: center; border: 1px solid var(--stash-color-sidebar-border); border-radius: var(--stash-radius-sm); color: var(--stash-color-sidebar-muted); font-size: .66rem; font-weight: 750; }
-.navigationRoot { flex: 1; }
+.navigationRoot { flex: 0 0 auto; margin-top: var(--stash-space-6); }
 .navigation { display: grid; gap: var(--stash-space-1); margin: 0; padding: 0; list-style: none; }
 .navLink { display: flex; align-items: center; gap: var(--stash-space-3); padding: .7rem var(--stash-space-3); border-radius: var(--stash-radius-sm); color: var(--stash-color-sidebar-muted); font-size: .84rem; font-weight: 590; text-decoration: none; transition: background-color 160ms ease, color 160ms ease, transform 160ms ease; }
 .navLink:hover { color: var(--stash-color-sidebar-ink); background: var(--stash-color-sidebar-hover); transform: translateX(2px); }
@@ -67,7 +67,8 @@
 @keyframes rotate { to { transform: rotate(360deg); } }
 @media (max-width: 760px) {
   .shell { grid-template-columns: 1fr; padding-bottom: 4.5rem; }
-  .sidebar { min-height: auto; position: fixed; z-index: 15; inset: auto 0 0; display: block; padding: .45rem .5rem max(.45rem, env(safe-area-inset-bottom)); border: 0; border-top: 1px solid var(--stash-color-sidebar-border); }
+  .sidebar { height: auto; position: fixed; z-index: 15; inset: auto 0 0; display: block; padding: .45rem .5rem max(.45rem, env(safe-area-inset-bottom)); border: 0; border-top: 1px solid var(--stash-color-sidebar-border); }
+  .navigationRoot { margin-top: 0; }
   .brand, .workspaceIdentity, .sidebarFooter { display: none; }
   .navigation { grid-template-columns: repeat(auto-fit, minmax(3.5rem, 1fr)); }
   .navLink { flex-direction: column; gap: .25rem; padding: .45rem .25rem; font-size: .64rem; }
