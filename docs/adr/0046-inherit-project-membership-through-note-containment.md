@@ -1,0 +1,3 @@
+# Inherit Project membership through Note containment
+
+Associating a parent Note with a Project also associates every descendant in that Note Tree branch, because presenting a parent as Project knowledge while hiding its contained children would make the hierarchy misleading and incomplete. Moving a Note out of such a branch removes inherited associations from it and its descendants but preserves their explicit associations, after previewing the resulting membership and access changes. Ordinary links never propagate Project membership or access: a linked Note remains governed by its own location and associations, preventing a cross-reference from silently sharing an unrelated branch.
