@@ -8,6 +8,7 @@ import type { BuiltInOrganizationRole, CustomOrganizationRole, OrganizationRoleR
 import type { InvitationRecord, InvitationRepository } from "../invitations.js";
 import type { AccountRecoveryRepository, ClaimedEmailRecoveryDelivery, EmailRecoveryDeliveryClaim,
   EmailRecoveryDeliveryJob, EmailRecoveryRecord, PasskeyRecord, RecoveryCodeRecord } from "../account-recovery.js";
+import type { AgentGrant, AgentGrantOption, StoredAgentGrant } from "../agent-grants.js";
 import type { MemberLocalizationPreferences, MemberLocalizationRepository } from "../member-localization.js";
 import type { PortableIdentity, PortableProjectProjection, PortableWorkspaceProjection, WorkspaceProjectRecord,
   WorkspaceProjectRepository, WorkspaceRecord } from "../workspaces-projects.js";
@@ -342,6 +343,61 @@ export class PostgresIdentityAccessRepositories implements PasswordAuthRepositor
       available_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),attempts INTEGER NOT NULL DEFAULT 0,last_error TEXT,claim_owner UUID,
       claim_version BIGINT NOT NULL DEFAULT 0,lease_until TIMESTAMPTZ);`);}
 
+  async createAgentGrant(actorId:string,grant:StoredAgentGrant):Promise<"created"|"forbidden">{return this.kernel.withSession(async(client)=>{
+    await this.prepareAgentAuthority(client);const allowed=await client.query(`SELECT 1 FROM stash_organization_memberships membership
+      WHERE membership.organization_id=$1 AND membership.account_id=$2 AND ($3::uuid IS NULL OR EXISTS(SELECT 1 FROM stash_projects project
+      WHERE project.id=$3 AND EXISTS(SELECT 1 FROM stash_workspaces workspace WHERE workspace.id=project.workspace_id AND workspace.organization_owner_id=$1)))`,
+    [grant.organizationId,actorId,grant.projectId??null]);if(!allowed.rowCount)return "forbidden";
+    await client.query(`INSERT INTO stash_agent_grants(id,organization_id,project_id,sponsoring_member_id,capabilities,expires_at,confirmation_policy,
+      revoked_at,name,token_lookup,token_hash,created_at) VALUES($1,$2,$3,$4,$5::jsonb,$6,$7::jsonb,NULL,$8,$9,$10,$11)`,
+    [grant.id,grant.organizationId,grant.projectId??null,actorId,JSON.stringify(grant.scopes),grant.expiresAt,JSON.stringify({modes:grant.scopes}),
+      grant.name,grant.tokenLookup,grant.tokenHash,grant.createdAt]);return "created";});}
+  async listAgentGrants(actorId:string,organizationId:string):Promise<AgentGrant[]|undefined>{return this.kernel.withSession(async(client)=>{
+    await this.prepareAgentAuthority(client);if(!(await client.query("SELECT 1 FROM stash_organization_memberships WHERE organization_id=$1 AND account_id=$2",
+      [organizationId,actorId])).rowCount)return undefined;return (await client.query<any>(`SELECT id,organization_id,project_id,sponsoring_member_id,name,
+      capabilities,expires_at,created_at,revoked_at FROM stash_agent_grants WHERE organization_id=$1 AND sponsoring_member_id=$2 ORDER BY created_at DESC,id`,
+    [organizationId,actorId])).rows.map(agentGrantFromRow);});}
+  async revokeAgentGrant(actorId:string,organizationId:string,grantId:string):Promise<"revoked"|"not_found"|"forbidden">{return this.kernel.withSession(async(client)=>{
+    await this.prepareAgentAuthority(client);const result=await client.query(`UPDATE stash_agent_grants SET revoked_at=CURRENT_TIMESTAMP
+      WHERE id=$1 AND organization_id=$2 AND sponsoring_member_id=$3 AND revoked_at IS NULL RETURNING id`,[grantId,organizationId,actorId]);
+    if(result.rowCount)return "revoked";const existing=await client.query<{sponsoring_member_id:string}>(
+      "SELECT sponsoring_member_id FROM stash_agent_grants WHERE id=$1 AND organization_id=$2",[grantId,organizationId]);
+    return !existing.rowCount?"not_found":existing.rows[0]!.sponsoring_member_id===actorId?"revoked":"forbidden";});}
+  async findActiveAgentGrant(tokenLookup:string):Promise<StoredAgentGrant|undefined>{return this.kernel.withSession(async(client)=>{
+    await this.prepareAgentAuthority(client);const row=(await client.query<any>(`SELECT id,organization_id,project_id,sponsoring_member_id,name,capabilities,
+      expires_at,created_at,revoked_at,token_lookup,token_hash FROM stash_agent_grants WHERE token_lookup=$1 AND revoked_at IS NULL AND expires_at>CURRENT_TIMESTAMP`,
+    [tokenLookup])).rows[0];return row?.token_hash?{...agentGrantFromRow(row),tokenLookup:row.token_lookup,tokenHash:row.token_hash}:undefined;});}
+  async agentGrantOptions(actorId:string):Promise<AgentGrantOption[]>{return this.kernel.withSession(async(client)=>{await this.prepareAgentAuthority(client);
+    const rows=(await client.query<{organization_id:string;organization_name:string;project_id:string|null;project_name:string|null}>(`SELECT organization.id organization_id,
+      organization.name organization_name,project.id project_id,project.name project_name FROM stash_organization_memberships membership
+      JOIN stash_organizations organization ON organization.id=membership.organization_id LEFT JOIN stash_workspaces workspace ON workspace.organization_owner_id=organization.id
+      LEFT JOIN stash_projects project ON project.workspace_id=workspace.id WHERE membership.account_id=$1 ORDER BY organization.name,organization.id,project.name,project.id`,[actorId])).rows;
+    return [...new Set(rows.map((row)=>row.organization_id))].map((organizationId)=>{const selected=rows.filter((row)=>row.organization_id===organizationId);
+      return {organizationId,organizationName:selected[0]!.organization_name,projects:selected.flatMap((row)=>row.project_id?[{id:row.project_id,name:row.project_name!}]:[])};});});}
+  async agentGrantTargetAllowed(grant:AgentGrant,target:{workspaceId?:string;projectId?:string}):Promise<boolean>{if(!target.workspaceId&&!target.projectId)return false;
+    return Boolean((await this.kernel.query(`SELECT 1 FROM stash_workspaces workspace LEFT JOIN stash_projects project ON project.workspace_id=workspace.id
+      WHERE workspace.organization_owner_id=$1 AND ($2::uuid IS NULL OR workspace.id=$2) AND ($3::uuid IS NULL OR project.id=$3)
+      AND ($4::uuid IS NULL OR project.id=$4) LIMIT 1`,[grant.organizationId,target.workspaceId??null,target.projectId??null,grant.projectId??null])).rowCount);}
+  async prepareAgentAuthority(client:PostgresQueryable=this.kernel):Promise<void>{await this.dependencies.prepareRegistration(client);await client.query(`CREATE TABLE IF NOT EXISTS stash_agent_grants(
+    id UUID PRIMARY KEY,organization_id UUID NOT NULL REFERENCES stash_organizations(id),project_id UUID REFERENCES stash_projects(id),
+    sponsoring_member_id UUID NOT NULL REFERENCES stash_accounts(id),capabilities JSONB NOT NULL CHECK(jsonb_typeof(capabilities)='array'),expires_at TIMESTAMPTZ NOT NULL,
+    confirmation_policy JSONB NOT NULL CHECK(jsonb_typeof(confirmation_policy)='object'),revoked_at TIMESTAMPTZ,name TEXT NOT NULL DEFAULT 'Agent',token_lookup TEXT UNIQUE,
+    token_hash TEXT,created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP);
+    ALTER TABLE stash_agent_grants ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT 'Agent';ALTER TABLE stash_agent_grants ADD COLUMN IF NOT EXISTS token_lookup TEXT UNIQUE;
+    ALTER TABLE stash_agent_grants ADD COLUMN IF NOT EXISTS token_hash TEXT;ALTER TABLE stash_agent_grants ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP;
+    CREATE TABLE IF NOT EXISTS stash_agent_proposals(id UUID PRIMARY KEY,grant_id UUID NOT NULL REFERENCES stash_agent_grants(id),sponsoring_member_id UUID NOT NULL REFERENCES stash_accounts(id),
+      capability TEXT NOT NULL,input JSONB NOT NULL,status TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL);
+    ALTER TABLE stash_agent_proposals DROP CONSTRAINT IF EXISTS stash_agent_proposals_status_check;ALTER TABLE stash_agent_proposals ADD COLUMN IF NOT EXISTS base_revision INTEGER;
+    ALTER TABLE stash_agent_proposals ADD COLUMN IF NOT EXISTS operation_id UUID;ALTER TABLE stash_agent_proposals ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ;
+    ALTER TABLE stash_agent_proposals ADD COLUMN IF NOT EXISTS reviewed_by_account_id UUID REFERENCES stash_accounts(id);ALTER TABLE stash_agent_proposals ADD COLUMN IF NOT EXISTS result JSONB;
+    ALTER TABLE stash_agent_proposals ADD COLUMN IF NOT EXISTS conflict JSONB;UPDATE stash_agent_proposals SET status='applied' WHERE status='accepted';
+    ALTER TABLE stash_agent_proposals ADD CONSTRAINT stash_agent_proposals_status_check CHECK(status IN ('pending','applying','applied','rejected','conflict'));
+    CREATE TABLE IF NOT EXISTS stash_personal_access_tokens(id UUID PRIMARY KEY,organization_id UUID NOT NULL REFERENCES stash_organizations(id) ON DELETE CASCADE,
+      account_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,token_lookup TEXT NOT NULL UNIQUE,token_hash TEXT NOT NULL,expires_at TIMESTAMPTZ NOT NULL,revoked_at TIMESTAMPTZ);
+    CREATE TABLE IF NOT EXISTS stash_operator_audit(id UUID PRIMARY KEY,action TEXT NOT NULL,actor_account_id UUID NOT NULL REFERENCES stash_accounts(id),
+      organization_id UUID NOT NULL REFERENCES stash_organizations(id),target_account_id UUID NOT NULL REFERENCES stash_accounts(id),occurred_at TIMESTAMPTZ NOT NULL,
+      before_state JSONB NOT NULL,after_state JSONB NOT NULL);`);}
+
   async prepareWorkspaceProjects(client:PostgresQueryable):Promise<void>{await this.dependencies.prepareRegistration(client);}
   async prepareLocalization(client:PostgresQueryable):Promise<void>{await this.prepareWorkspaceProjects(client);await client.query(`CREATE TABLE IF NOT EXISTS stash_member_localization_preferences
     (account_id UUID PRIMARY KEY REFERENCES stash_accounts(id) ON DELETE CASCADE,locale TEXT NOT NULL,time_zone TEXT NOT NULL,date_format TEXT NOT NULL CHECK(date_format IN ('short','medium','long')),
@@ -365,3 +421,7 @@ export class PostgresIdentityAccessRepositories implements PasswordAuthRepositor
       ...(row.user_agent ? { userAgent: row.user_agent } : {}) };
   }
 }
+
+function agentGrantFromRow(row:any):AgentGrant{return {id:row.id,organizationId:row.organization_id,sponsoringMemberId:row.sponsoring_member_id,
+  name:row.name,...(row.project_id?{projectId:row.project_id}:{}),scopes:row.capabilities,expiresAt:new Date(row.expires_at).toISOString(),
+  createdAt:new Date(row.created_at).toISOString(),...(row.revoked_at?{revokedAt:new Date(row.revoked_at).toISOString()}: {})};}
