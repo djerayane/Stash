@@ -314,6 +314,10 @@ export class PostgresDatabase implements DatabaseProbe {
     this.#portableProjectionContributors = [this.#visualizationBlockRepository];
     this.#knowledgeAuthoringAdapter = new PostgresKnowledgeAuthoringRepositories(this.#kernel, {
       prepare: (client) => this.#ensureNoteSchema(client),
+      prepareInvitations: (client) => this.#ensureInvitationSchema(client),
+      prepareAttachments: (client) => this.#ensureAttachmentSchema(client),
+      prepareWorkspaceProjects: (client) => this.#ensureWorkspaceProjectSchema(client),
+      recordProjection: (client, kind, id, schema, projection) => this.#recordPortableProjection(client, kind, id, schema, projection),
       recordCreatedNote: async (client, memberId, note, projection, cause) => {
         await this.#recordInitialNoteLocation(client, note.id, note.workspaceId);
         await this.#recordPortableProjection(client, "Note", note.id, "stash.note.v1", projection);
@@ -421,7 +425,9 @@ export class PostgresDatabase implements DatabaseProbe {
     return {
       findPortableMemberIdentity: this.findPortableMemberIdentity.bind(this),
       createNote: this.#knowledgeAuthoringAdapter.createNote.bind(this.#knowledgeAuthoringAdapter),
-      listInboxNotes: this.listInboxNotes.bind(this), listNotes: this.listNotes.bind(this), listNotesByTag: this.listNotesByTag.bind(this),
+      listInboxNotes: this.#knowledgeAuthoringAdapter.listInboxNotes.bind(this.#knowledgeAuthoringAdapter),
+      listNotes: this.#knowledgeAuthoringAdapter.listNotes.bind(this.#knowledgeAuthoringAdapter),
+      listNotesByTag: this.#knowledgeAuthoringAdapter.listNotesByTag.bind(this.#knowledgeAuthoringAdapter),
       triageNote: this.triageNote.bind(this), findNoteForMember: this.findNoteForMember.bind(this),
       applyNoteOperations: this.applyNoteOperations.bind(this), listNoteEditConflicts: this.listNoteEditConflicts.bind(this),
       resolveNoteEditConflict: this.resolveNoteEditConflict.bind(this),
@@ -432,14 +438,17 @@ export class PostgresDatabase implements DatabaseProbe {
       listNoteDiscussions: this.listNoteDiscussions.bind(this), listTaskDiscussions: this.listTaskDiscussions.bind(this),
       listBlockDiscussions: this.listBlockDiscussions.bind(this), addMessage: this.addMessage.bind(this),
       resolveDiscussion: this.resolveDiscussion.bind(this), createWorkFromMessages: this.createWorkFromMessages.bind(this),
-      searchWorkspace: this.searchWorkspace.bind(this), findAttachmentReceipt: this.findAttachmentReceipt.bind(this),
-      createAttachment: this.createAttachment.bind(this), canCreateAttachment: this.canCreateAttachment.bind(this),
-      findAttachmentForMember: this.findAttachmentForMember.bind(this), listWorkspaceActivity: this.listWorkspaceActivity.bind(this),
+      searchWorkspace: this.searchWorkspace.bind(this),
+      findAttachmentReceipt: this.#knowledgeAuthoringAdapter.findAttachmentReceipt.bind(this.#knowledgeAuthoringAdapter),
+      createAttachment: this.#knowledgeAuthoringAdapter.createAttachment.bind(this.#knowledgeAuthoringAdapter),
+      canCreateAttachment: this.#knowledgeAuthoringAdapter.canCreateAttachment.bind(this.#knowledgeAuthoringAdapter),
+      findAttachmentForMember: this.#knowledgeAuthoringAdapter.findAttachmentForMember.bind(this.#knowledgeAuthoringAdapter),
+      listWorkspaceActivity: this.listWorkspaceActivity.bind(this),
       listNoteHistory: this.listNoteHistory.bind(this), restoreNote: this.restoreNote.bind(this),
       readExportSnapshot: this.readExportSnapshot.bind(this), findWorkspaceImport: this.findWorkspaceImport.bind(this),
       importWorkspace: this.importWorkspace.bind(this), mapImportedIdentity: this.mapImportedIdentity.bind(this),
-      createMobileCapture: this.createMobileCapture.bind(this),
-      listMobileCaptureOptions: this.listMobileCaptureOptions.bind(this),
+      createMobileCapture: this.#knowledgeAuthoringAdapter.createMobileCapture.bind(this.#knowledgeAuthoringAdapter),
+      listMobileCaptureOptions: this.#knowledgeAuthoringAdapter.listMobileCaptureOptions.bind(this.#knowledgeAuthoringAdapter),
     };
   }
 
