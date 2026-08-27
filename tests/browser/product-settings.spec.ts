@@ -4,6 +4,12 @@ import { readFile } from "node:fs/promises";
 
 async function authenticate(page: Page, token = "browser-acceptance-member-token") { await page.addInitScript((value) => localStorage.setItem("stash.member-session", JSON.stringify({ token: value })), token); }
 
+const builtInRoles = [
+  { name: "Owner", immutable: true, permissions: ["organization.roles.manage", "organization.members.manage", "workspace.create", "create_project"] },
+  { name: "Admin", immutable: true, permissions: ["organization.members.manage", "workspace.create", "create_project"] },
+  { name: "Member", immutable: true, permissions: ["workspace.create"] },
+];
+
 test("@a11y saves Member localization and recovers from a failed update", async ({ page }) => {
   await authenticate(page); let attempts = 0;
   await page.route("**/api/member/localization", async (route) => {
@@ -82,7 +88,7 @@ test("confirms recovery-code replacement and Role authority changes before mutat
   await page.goto("/app/settings"); await page.getByRole("tab", { name: "Recovery" }).click(); await page.getByRole("button", { name: "Generate recovery codes" }).click();
   const recovery = page.getByRole("dialog", { name: "Replace every recovery code?" }); await expect(recovery).toBeVisible(); await expect(recovery.getByRole("button", { name: "Keep existing codes" })).toBeFocused(); expect(recoveryPosts).toBe(0); expect((await new AxeBuilder({ page }).include("[role=dialog]").analyze()).violations).toEqual([]);
   await recovery.getByRole("button", { name: "Invalidate and generate" }).click(); await expect(recovery.getByRole("alert")).toContainText("not changed"); await recovery.getByRole("button", { name: "Invalidate and generate" }).click(); await expect(page.getByText("new-code")).toBeVisible();
-  await page.route("**/api/organizations/*/roles", async (route) => { if (route.request().method() === "PUT") { rolePuts += 1; return rolePuts === 1 ? route.fulfill({ status: 403, json: { message: "The final Owner cannot be changed." } }) : route.fulfill({ json: {} }); } return route.fulfill({ json: { roles: [{ name: "Owner" }, { name: "Admin" }, { name: "Member" }] } }); });
+  await page.route("**/api/organizations/*/roles", async (route) => { if (route.request().method() === "PUT") { rolePuts += 1; return rolePuts === 1 ? route.fulfill({ status: 403, json: { message: "The final Owner cannot be changed." } }) : route.fulfill({ json: {} }); } return route.fulfill({ json: { roles: builtInRoles } }); });
   await page.route("**/api/organizations/*/members/*/role", (route) => { rolePuts += 1; return rolePuts === 1 ? route.fulfill({ status: 403, json: { message: "The final Owner cannot be changed." } }) : route.fulfill({ json: {} }); });
   await page.route("**/api/agent-grant-options", (route) => route.fulfill({ json: { organizations: [] } })); await page.route("**/api/organizations/*/repository-connections", (route) => route.fulfill({ json: { repositoryConnections: [] } }));
   await page.goto("/app/settings/organization"); await page.getByRole("combobox", { name: "Role for Browser Member" }).selectOption("Admin"); const role = page.getByRole("dialog", { name: /Change Browser Member/ }); await expect(role.getByRole("button", { name: "Keep current Role" })).toBeFocused(); expect(rolePuts).toBe(0);
@@ -91,7 +97,7 @@ test("confirms recovery-code replacement and Role authority changes before mutat
 
 test("@a11y administrators discover every Organization control surface", async ({ page }) => {
   await authenticate(page);
-  await page.route("**/api/organizations/*/roles", (route) => route.fulfill({ json: { roles: [{ name: "Owner" }, { name: "Admin" }, { name: "Member" }] } }));
+  await page.route("**/api/organizations/*/roles", (route) => route.fulfill({ json: { roles: builtInRoles } }));
   await page.route("**/api/agent-grant-options", (route) => route.fulfill({ json: { organizations: [{ organizationId: "11111111-1111-4111-8111-111111111111", projects: [] }] } }));
   await page.route("**/api/organizations/*/repository-connections", (route) => route.fulfill({ json: { repositoryConnections: [] } }));
   await page.emulateMedia({ reducedMotion: "reduce" }); await page.goto("/app/settings/organization");

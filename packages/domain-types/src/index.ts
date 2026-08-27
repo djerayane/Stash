@@ -188,7 +188,9 @@ export type MobileSyncResult =
 
 export interface MemberLocalizationSettings { locale: string; timeZone: string; dateFormat: "short" | "medium" | "long"; weekStartsOn: "sunday" | "monday" | "saturday"; updatedAt?: string }
 export interface OrganizationRepositoryConnection { id: string; repositoryUrl: string; projectIds: string[]; ownership: "organization" | "personal"; state: "active" | "degraded" }
-export interface OrganizationRoleSummary { name: string; description?: string }
+export type OrganizationRoleSummary =
+  | { name: "Owner" | "Admin" | "Member"; immutable: true; permissions: string[] }
+  | { id: string; name: string; immutable: false; permissions: Array<"create_project">; memberIds: string[] };
 export interface RecoveryCodeResponse { codes: string[] }
 export interface OrganizationInvitationResponse { token: string }
 export interface InstanceDiagnosticSettings { diagnosticSubmissions: boolean; crashReportSubmissions: boolean; updateChecks: boolean }

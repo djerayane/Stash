@@ -7,6 +7,9 @@ import type { PostgresKernel, PostgresQueryable } from "../instance-operations/s
 import type { NoteTreeAccessChange, NoteTreeNode, NoteTreeRepository } from "./note-tree.js";
 
 type PrepareNotes = (client: PostgresQueryable) => Promise<void>;
+export interface NoteTreeBranchLifecycle {
+  trashed(client: PostgresQueryable, rootNoteId: string): Promise<void>;
+}
 
 const workspaceMember = (workspace: "workspace" | "stash_workspaces", member = "$2") =>
   `((${workspace}.owner_type='personal' AND ${workspace}.personal_owner_id=${member}) OR
@@ -20,7 +23,8 @@ const inheritedProjectGuest = (note: "note", member = "$2") => `EXISTS(WITH RECU
 
 /** Capability-owned Note Tree persistence over the shared PostgreSQL kernel. */
 export class PostgresNoteTreeRepository implements NoteTreeRepository {
-  constructor(private readonly kernel: PostgresKernel, private readonly prepareNotes: PrepareNotes) {}
+  constructor(private readonly kernel: PostgresKernel, private readonly prepareNotes: PrepareNotes,
+    private readonly lifecycle?: NoteTreeBranchLifecycle) {}
 
   async prepare(client: PostgresQueryable): Promise<void> {
     await this.prepareNotes(client);
@@ -295,6 +299,7 @@ export class PostgresNoteTreeRepository implements NoteTreeRepository {
       ), updated AS (UPDATE stash_notes SET ${column}=CURRENT_TIMESTAMP,location_revision=location_revision+1
         WHERE id IN (SELECT id FROM branch) RETURNING *) SELECT updated.* FROM updated JOIN branch USING(id) ORDER BY branch.ordering,updated.id`, [noteId]);
       for (const row of rows.rows) await this.#recordLocation(client, row);
+      if (state === "trashed") await this.lifecycle?.trashed(client, noteId);
       return { status: "updated" as const, affectedIds: rows.rows.map(({ id }: any) => id) };
     });
   }

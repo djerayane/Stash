@@ -50,10 +50,12 @@ import { createCapabilityRegistry } from "./capability-registry.js";
 import { developmentIntegrationCapability } from "./development-integration/index.js";
 import { identityAccessCapability } from "./identity-access/index.js";
 import { InstanceSetupService } from "./identity-access/instance-setup.js";
+import { StarterTutorialService } from "./identity-access/starter-tutorial.js";
 import { instanceOperationsCapability } from "./instance-operations/index.js";
 import { knowledgeAuthoringCapability } from "./knowledge-authoring/index.js";
-import { EmptyCollectionImpactInspector, NoteTreeService } from "./knowledge-authoring/note-tree.js";
+import { NoteTreeService } from "./knowledge-authoring/note-tree.js";
 import { workPlanningCapability } from "./work-planning/index.js";
+import { ProjectlessTaskService } from "./work-planning/projectless-tasks.js";
 
 function required(environment: NodeJS.ProcessEnv, name: string): string {
   const value = environment[name]?.trim();
@@ -121,7 +123,7 @@ export async function composeInstanceRuntime(environment: NodeJS.ProcessEnv): Pr
     const causeCode = /^(?:[A-Z0-9]{5}|E[A-Z_]{2,31})$/.test(candidateCode) ? candidateCode : "unclassified";
     console.warn(`Authentication operation unavailable (operation=${operation}, cause=${causeType}, code=${causeCode}).`);
   };
-  const instanceSetup = new InstanceSetupService(database, {
+  const instanceSetup = new InstanceSetupService(database.instanceSetupRepository(), {
     boundHost: host,
     output(message) { console.warn(message); },
   });
@@ -133,15 +135,17 @@ export async function composeInstanceRuntime(environment: NodeJS.ProcessEnv): Pr
   const notes = new NoteService(database);
   const tasks = new TaskService(database, database);
   const workspaceProjects = new WorkspaceProjectService(database);
+  const starterTutorials = new StarterTutorialService(database.instanceSetupRepository());
+  const projectlessTasks = new ProjectlessTaskService(database.projectlessTaskRepository());
   const repositoryConnections = githubApp ? new RepositoryConnectionService(database, githubApp) : undefined;
   const githubArtifacts = githubApp ? new GitHubArtifactService(database, githubApp) : undefined;
   const githubSignals = githubWebhookSecret ? new GitHubSignalService(database, githubWebhookSecret, automations) : undefined;
   const capabilities = createCapabilityRegistry([
-    identityAccessCapability({ passwordAuth, instanceAdminToken, instanceSetup,
+    identityAccessCapability({ passwordAuth, instanceAdminToken, instanceSetup, starterTutorials, memberAccess: passwordAuth,
       ...(accountRegistration ? { accountRegistration } : {}), reportAuthenticationFailure }),
     knowledgeAuthoringCapability({ notes, noteTree: new NoteTreeService(database.noteTreeRepository(),
-      new EmptyCollectionImpactInspector()), memberAccess: passwordAuth }),
-    workPlanningCapability({ tasks, workspaceProjects, memberAccess: passwordAuth }),
+      database.instanceSetupRepository()), memberAccess: passwordAuth }),
+    workPlanningCapability({ tasks, workspaceProjects, projectlessTasks, memberAccess: passwordAuth }),
     developmentIntegrationCapability({ memberAccess: passwordAuth,
       ...(repositoryConnections ? { repositoryConnections } : {}), ...(githubArtifacts ? { githubArtifacts } : {}),
       ...(githubSignals ? { githubSignals } : {}) }),

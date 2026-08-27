@@ -6,6 +6,14 @@ export type OrganizationPermission =
   | "workspace.create"
   | "create_project";
 
+export interface CustomOrganizationRole {
+  id: string;
+  name: string;
+  immutable: false;
+  permissions: Array<Extract<OrganizationPermission, "create_project">>;
+  memberIds: string[];
+}
+
 export const builtInProjectCreationPermissions = {
   Owner: ["create_project"],
   Admin: ["create_project"],
@@ -67,6 +75,12 @@ export interface OrganizationRoleRepository {
     accountId: string,
   ): Promise<{ status: "removed"; departure: MemberDeparture }
     | Extract<MembershipMutationResult, "member_not_found" | "final_owner"> | "forbidden">;
+  listCustomRoles(organizationId: string): Promise<CustomOrganizationRole[]>;
+  createCustomRole(organizationId: string, actorId: string, role: CustomOrganizationRole): Promise<"created" | "forbidden" | "name_conflict">;
+  updateCustomRole(organizationId: string, actorId: string, roleId: string,
+    input: { name: string; permissions: CustomOrganizationRole["permissions"] }): Promise<"updated" | "forbidden" | "role_not_found" | "name_conflict">;
+  assignCustomRole(organizationId: string, actorId: string, roleId: string, memberId: string): Promise<"updated" | "forbidden" | "role_not_found" | "member_not_found">;
+  revokeCustomRole(organizationId: string, actorId: string, roleId: string, memberId: string): Promise<"updated" | "forbidden" | "role_not_found" | "member_not_found">;
 }
 
 export class InvalidOrganizationRoleInput extends Error {}
@@ -83,8 +97,32 @@ export class OrganizationRoleService {
     return await this.#repository.organizationRole(organizationId, actorId) === "Owner";
   }
 
-  listBuiltInRoles() {
-    return builtInRoleDefinitions;
+  async listRoles(organizationId: string) {
+    if (!isUuid(organizationId)) throw new InvalidOrganizationRoleInput();
+    return [...builtInRoleDefinitions, ...await this.#repository.listCustomRoles(organizationId)];
+  }
+
+  async createCustom(organizationId: string, actorId: string, value: unknown) {
+    const input = customRoleInput(value);
+    if (!isUuid(organizationId) || !input) throw new InvalidOrganizationRoleInput();
+    const role: CustomOrganizationRole = { id: randomUUID(), immutable: false, memberIds: [], ...input };
+    return { result: await this.#repository.createCustomRole(organizationId, actorId, role), role };
+  }
+
+  updateCustom(organizationId: string, actorId: string, roleId: string, value: unknown) {
+    const input = customRoleInput(value);
+    if (!isUuid(organizationId) || !isUuid(roleId) || !input) throw new InvalidOrganizationRoleInput();
+    return this.#repository.updateCustomRole(organizationId, actorId, roleId, input);
+  }
+
+  assignCustom(organizationId: string, actorId: string, roleId: string, memberId: string) {
+    if (![organizationId, roleId, memberId].every(isUuid)) throw new InvalidOrganizationRoleInput();
+    return this.#repository.assignCustomRole(organizationId, actorId, roleId, memberId);
+  }
+
+  revokeCustom(organizationId: string, actorId: string, roleId: string, memberId: string) {
+    if (![organizationId, roleId, memberId].every(isUuid)) throw new InvalidOrganizationRoleInput();
+    return this.#repository.revokeCustomRole(organizationId, actorId, roleId, memberId);
   }
 
   async assign(
@@ -112,6 +150,16 @@ function isRoleInput(value: unknown): value is { role: BuiltInOrganizationRole }
     && builtInOrganizationRoles.includes(value.role as BuiltInOrganizationRole);
 }
 
+function customRoleInput(value: unknown): { name: string; permissions: Array<"create_project"> } | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  if (!Object.keys(input).every((key) => key === "name" || key === "permissions")
+    || typeof input.name !== "string" || !input.name.trim() || input.name.trim().length > 100 || /[\r\n]/.test(input.name)
+    || !Array.isArray(input.permissions) || !input.permissions.every((permission) => permission === "create_project")
+    || new Set(input.permissions).size !== input.permissions.length) return undefined;
+  return { name: input.name.trim(), permissions: input.permissions as Array<"create_project"> };
+}
+
 function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
@@ -119,3 +167,4 @@ function isUuid(value: string): boolean {
 function validMemberId(value: string): boolean {
   return isUuid(value);
 }
+import { randomUUID } from "node:crypto";

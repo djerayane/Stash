@@ -8,6 +8,7 @@ import {
 import type { MemberAccessResolver } from "./workspaces-projects.js";
 
 const rolesPath = /^\/api\/organizations\/([^/]+)\/roles(?:\/([^/]+))?$/;
+const customMemberPath = /^\/api\/organizations\/([^/]+)\/roles\/([^/]+)\/members\/([^/]+)$/;
 const memberPath = /^\/api\/organizations\/([^/]+)\/members\/([^/]+)(?:\/role)?$/;
 
 export function organizationRoleRoutes(
@@ -15,17 +16,27 @@ export function organizationRoleRoutes(
   memberAccess: MemberAccessResolver,
 ): HttpRoute {
   return {
-    matches: (_request, url) => rolesPath.test(url.pathname) || memberPath.test(url.pathname),
+    matches: (_request, url) => rolesPath.test(url.pathname) || memberPath.test(url.pathname) || customMemberPath.test(url.pathname),
     async handle(request, response, url) {
       const rolesMatch = url.pathname.match(rolesPath);
       const memberMatch = url.pathname.match(memberPath);
+      const customMemberMatch = url.pathname.match(customMemberPath);
       let organizationId: string;
       let memberId: string | undefined;
       let roleName: BuiltInOrganizationRole | undefined;
+      let customRoleId: string | undefined;
       try {
-        organizationId = decodeUuid((rolesMatch ?? memberMatch)![1]!);
-        memberId = memberMatch ? decodeUuid(memberMatch[2]!) : undefined;
-        roleName = rolesMatch?.[2] ? decodeBuiltInRole(rolesMatch[2]) : undefined;
+        organizationId = decodeUuid((rolesMatch ?? memberMatch ?? customMemberMatch)![1]!);
+        if (customMemberMatch) {
+          customRoleId = decodeUuid(customMemberMatch[2]!);
+          memberId = decodeUuid(customMemberMatch[3]!);
+        }
+        if (memberMatch) memberId = decodeUuid(memberMatch[2]!);
+        if (rolesMatch?.[2]) {
+          const decodedRole = decodeURIComponent(rolesMatch[2]);
+          if (builtInOrganizationRoles.includes(decodedRole as BuiltInOrganizationRole)) roleName = decodedRole as BuiltInOrganizationRole;
+          else decodeUuid(rolesMatch[2]);
+        }
       } catch {
         invalidInput(response);
         return true;
@@ -38,13 +49,31 @@ export function organizationRoleRoutes(
       }
 
       try {
+        if (customMemberMatch) {
+          const result = request.method === "PUT"
+            ? await service.assignCustom(organizationId, access.accountId, customRoleId!, memberId!)
+            : request.method === "DELETE"
+              ? await service.revokeCustom(organizationId, access.accountId, customRoleId!, memberId!)
+              : undefined;
+          if (!result) json(response, 405, { error: "method_not_allowed", message: "This Role assignment operation is not supported." });
+          else respondCustomResult(response, result, { organizationId, roleId: customRoleId!, memberId: memberId! });
+          return true;
+        }
         if (rolesMatch) {
           if (!await service.authorizeOwner(organizationId, access.accountId)) {
             forbidden(response);
             return true;
           }
           if (request.method === "GET" && !rolesMatch[2]) {
-            json(response, 200, { roles: service.listBuiltInRoles() });
+            json(response, 200, { roles: await service.listRoles(organizationId) });
+          } else if (request.method === "POST" && !rolesMatch[2]) {
+            const created = await service.createCustom(organizationId, access.accountId, await readJson(request));
+            if (created.result === "created") json(response, 201, { role: created.role });
+            else respondCustomResult(response, created.result);
+          } else if (request.method === "PUT" && rolesMatch[2] && !roleName) {
+            const result = await service.updateCustom(organizationId, access.accountId, decodeUuid(rolesMatch[2]), await readJson(request));
+            if (result === "updated") json(response, 200, { updated: true });
+            else respondCustomResult(response, result);
           } else if ((request.method === "PUT" || request.method === "DELETE") && roleName) {
             json(response, 409, {
               error: "built_in_role_immutable",
@@ -113,15 +142,23 @@ function forbidden(response: Parameters<typeof json>[0], membershipOperation = f
     error: "organization_forbidden",
     message: membershipOperation
       ? "Organization Owner or Admin permission is required to manage Members."
-      : "Only an Organization Owner can manage built-in Roles.",
+      : "Only an Organization Owner can manage Roles.",
   });
 }
 
 function invalidInput(response: Parameters<typeof json>[0]): void {
   json(response, 422, {
     error: "invalid_input",
-    message: "Organization, Member, and built-in Role values must be valid.",
+    message: "Organization, Member, and Role values must be valid.",
   });
+}
+
+function respondCustomResult(response: Parameters<typeof json>[0], result: string, body: object = {}): void {
+  if (result === "updated") json(response, 200, { ...body, updated: true });
+  else if (result === "forbidden") forbidden(response);
+  else if (result === "role_not_found") json(response, 404, { error: result, message: "That custom Role does not exist." });
+  else if (result === "member_not_found") json(response, 404, { error: result, message: "That Member does not belong to this Organization." });
+  else if (result === "name_conflict") json(response, 409, { error: result, message: "A Role with that name already exists." });
 }
 
 function decodeUuid(value: string): string {
@@ -130,12 +167,4 @@ function decodeUuid(value: string): string {
     throw new InvalidOrganizationRoleInput();
   }
   return decoded;
-}
-
-function decodeBuiltInRole(value: string): BuiltInOrganizationRole {
-  const decoded = decodeURIComponent(value);
-  if (!builtInOrganizationRoles.includes(decoded as BuiltInOrganizationRole)) {
-    throw new InvalidOrganizationRoleInput();
-  }
-  return decoded as BuiltInOrganizationRole;
 }

@@ -1,7 +1,8 @@
 import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 
-test.beforeEach(async ({ page }) => {
+test.beforeEach(async ({ page }, testInfo) => {
+  if (testInfo.title.includes("protected first-run setup") || testInfo.title.includes("real custom Role admin flow")) return;
   await page.route("**/api/projects/*/repository-connections", (route) => route.fulfill({ json: { repositoryConnections: [] } }));
   await page.route("**/api/projects/*/tasks/*/development-artifacts", (route) => route.fulfill({ json: { artifacts: [] } }));
 });
@@ -17,15 +18,10 @@ async function installMemberSession(page: Page) {
 }
 
 test("@a11y completes protected first-run setup by keyboard and opens the starter Note", async ({ page }) => {
-  const setupRequests: unknown[] = [];
+  await expect.poll(async () => fetch("http://127.0.0.1:4174/health/ready").then(({ status }) => status).catch(() => 0),
+    { timeout: 20_000 }).toBe(200);
   await page.emulateMedia({ reducedMotion: "reduce" });
-  await page.route("**/api/instance/setup-state", (route) => route.fulfill({ json: { state: "code-required" } }));
-  await page.route("**/api/instance/setup", async (route) => {
-    setupRequests.push(await route.request().postDataJSON());
-    await route.fulfill({ status: 201, json: { token: "browser-acceptance-member-token",
-      workspaceId: "88888888-8888-4888-8888-888888888888", starterNoteId: "99999999-9999-4999-8999-999999999999" } });
-  });
-  await page.goto("/sign-in");
+  await page.goto("http://127.0.0.1:4174/sign-in");
 
   await expect(page.getByRole("heading", { name: "Make Stash yours." })).toBeVisible();
   await expect(page.getByRole("textbox", { name: "Setup code" })).toHaveCount(0);
@@ -39,11 +35,80 @@ test("@a11y completes protected first-run setup by keyboard and opens the starte
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
   await page.getByRole("button", { name: "Create my Workspace" }).press("Enter");
 
-  await expect(page).toHaveURL(/\/app\/notes\/99999999-9999-4999-8999-999999999999$/);
-  expect(setupRequests).toEqual([{ name: "Ada Lovelace", email: "ada@example.test",
-    password: "correct horse battery staple", workspaceName: "Ada's Workspace", setupCode: "STASH-ONE" }]);
+  await expect(page).toHaveURL(/\/app\/notes\/[0-9a-f-]{36}$/);
+  const starterNoteId = page.url().split("/").at(-1)!;
   await expect.poll(() => page.evaluate(() => localStorage.getItem("stash.member-session")))
-    .toBe(JSON.stringify({ token: "browser-acceptance-member-token" }));
+    .toMatch(/"token":"[^"]+"/);
+  await expect(page.getByRole("heading", { name: "Try the pieces together" })).toBeVisible();
+  await expect(page.getByRole("link", { name: /Connect your thinking/ })).toBeVisible();
+  await expect(page.getByRole("link", { name: /Continue planning/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Task View · First moves" })).toBeVisible();
+  await expect(page.getByText("Shape your first idea").last()).toBeVisible();
+  await expect(page.getByText("Ready")).toHaveCount(2);
+  await page.getByRole("textbox", { name: "Collection name" }).fill("Questions worth keeping");
+  await page.getByRole("button", { name: "Rename Collection" }).press("Enter");
+  await expect(page.getByRole("textbox", { name: "Collection name" })).toHaveValue("Questions worth keeping");
+
+  await page.goto("http://127.0.0.1:4174/app/projects");
+  await page.getByRole("button", { name: "Create a Project in Ada's Workspace" }).press("Enter");
+  await page.getByRole("textbox", { name: "Project name" }).fill("Launch");
+  await page.getByRole("textbox", { name: "Project key" }).fill("LAUNCH");
+  await page.getByRole("button", { name: "Create Project" }).press("Enter");
+  await expect(page).toHaveURL(/\/app\/projects\/[0-9a-f-]{36}\/boards$/);
+
+  await page.goto(`http://127.0.0.1:4174/app/notes/${starterNoteId}`);
+  page.once("dialog", (dialog) => void dialog.accept());
+  await page.getByRole("button", { name: "Move Note branch to trash" }).press("Enter");
+  await expect(page.getByText("This Note branch is trashed.")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Try the pieces together" })).toHaveCount(0);
+  const cleanup = await page.evaluate(async ({ starterNoteId }) => {
+    const token = JSON.parse(localStorage.getItem("stash.member-session")!).token;
+    const tutorial = await fetch(`/api/notes/${starterNoteId}/starter-tutorial`, { headers: { authorization: `Bearer ${token}` } });
+    const session = await (await fetch("/api/client-session", { headers: { authorization: `Bearer ${token}` } })).json();
+    const tasks = await (await fetch(`/api/workspaces/${session.workspace.id}/tasks?scope=projectless`, { headers: { authorization: `Bearer ${token}` } })).json();
+    return { tutorialStatus: tutorial.status, tasks };
+  }, { starterNoteId });
+  expect(cleanup).toEqual({ tutorialStatus: 404, tasks: { tasks: [] } });
+});
+
+test("uses the real custom Role admin flow to grant Project creation and explains denial before it", async ({ page }) => {
+  const origin = "http://127.0.0.1:4175";
+  await expect.poll(async () => fetch(`${origin}/health/ready`).then(({ status }) => status).catch(() => 0),
+    { timeout: 20_000 }).toBe(200);
+  const signIn = async (email: string, password: string) => {
+    await page.goto(`${origin}/sign-in`);
+    await page.getByRole("textbox", { name: "Email" }).fill(email);
+    await page.getByLabel("Password").fill(password);
+    await page.getByRole("button", { name: "Sign in" }).press("Enter");
+    await expect(page).toHaveURL(/\/app\//);
+  };
+  await signIn("role-member@stash.test", "member correct horse battery");
+  await page.goto(`${origin}/app/projects`);
+  await expect(page.getByRole("button", { name: "Create a Project in Organization Workspace" })).toBeDisabled();
+  await expect(page.getByText("Your Organization Role does not include Project creation.")).toBeVisible();
+
+  await page.evaluate(() => localStorage.clear());
+  await signIn("role-owner@stash.test", "owner correct horse battery");
+  await page.goto(`${origin}/app/settings/organization`);
+  await expect(page.getByRole("heading", { name: "Custom Roles" })).toBeVisible();
+  await page.getByRole("textbox", { name: "Role name" }).fill("Project lead");
+  await page.getByRole("checkbox", { name: "Can create Projects" }).check();
+  await page.getByRole("button", { name: "Create custom Role" }).press("Enter");
+  const role = page.getByRole("textbox", { name: "Role name" }).nth(1).locator("xpath=ancestor::article[1]");
+  await expect(role).toBeVisible();
+  await role.getByRole("combobox", { name: "Add Organization Member" }).selectOption({ label: "Role Member" });
+  await role.getByRole("button", { name: "Grant Role" }).press("Enter");
+  await expect(role.getByText("Role Member")).toBeVisible();
+
+  await page.evaluate(() => localStorage.clear());
+  await signIn("role-member@stash.test", "member correct horse battery");
+  await page.goto(`${origin}/app/projects`);
+  const create = page.getByRole("button", { name: "Create a Project in Organization Workspace" });
+  await expect(create).toBeEnabled(); await create.press("Enter");
+  await page.getByRole("textbox", { name: "Project name" }).fill("Member Launch");
+  await page.getByRole("textbox", { name: "Project key" }).fill("MEMBER");
+  await page.getByRole("button", { name: "Create Project" }).press("Enter");
+  await expect(page).toHaveURL(/\/app\/projects\/[0-9a-f-]{36}\/boards$/);
 });
 
 test("restores an anonymous deep link after authentication", async ({ page }) => {

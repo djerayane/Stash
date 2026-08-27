@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -42,12 +42,39 @@ describe("remaining product settings", () => {
   it("exposes Organization-only roles, invitations, connections, and OIDC controls", async () => {
     vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true, addEventListener() {}, removeEventListener() {} })));
     const requests: Array<{ path: string; init?: RequestInit }> = [];
+    let customMemberIds: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (path: string, init?: RequestInit) => { requests.push({ path, init });
       if (path === "/api/agent-grant-options") return Response.json({ organizations: [{ organizationId: "org-1", organizationName: "Acme", projects: [{ id: "project-1", name: "Launch" }] }] });
-      if (path.endsWith("/roles")) return Response.json({ roles: [{ name: "Owner" }, { name: "Admin" }, { name: "Member" }] });
+      if (path.endsWith("/roles") && !init?.method) return Response.json({ roles: [
+        { name: "Owner", immutable: true, permissions: ["create_project"] },
+        { name: "Admin", immutable: true, permissions: ["create_project"] },
+        { name: "Member", immutable: true, permissions: [] },
+        { id: "role-1", name: "Project lead", immutable: false, permissions: ["create_project"], memberIds: customMemberIds },
+      ] });
+      if (path.endsWith("/roles/role-1/members/member-1")) {
+        customMemberIds = init?.method === "DELETE" ? [] : ["member-1"];
+        return Response.json({ updated: true });
+      }
+      if (path.includes("/roles")) return Response.json({ updated: true });
       return Response.json({ repositoryConnections: [{ id: "connection-1", repositoryUrl: "https://github.com/acme/stash", projectIds: [], ownership: "organization", state: "active" }] }); }));
     view(<OrganizationSettingsPage token="admin-token" activeOrganizationId="org-1" administrations={[{ organizationId: "org-1", organizationName: "Acme", members: [{ id: "member-1", name: "Ada", email: "ada@example.com", role: "Owner" }] }]} />);
     expect(await screen.findByRole("heading", { name: "Roles and Members" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Custom Roles" })).toBeVisible();
+    fireEvent.change(screen.getAllByRole("textbox", { name: "Role name" })[0]!, { target: { value: "Delivery lead" } });
+    fireEvent.click(screen.getAllByRole("checkbox", { name: "Can create Projects" })[0]!);
+    fireEvent.click(screen.getByRole("button", { name: "Create custom Role" }));
+    await waitFor(() => expect(requests.some(({ path, init }) => path.endsWith("/roles") && init?.method === "POST"
+      && String(init.body).includes('"create_project"'))).toBe(true));
+    const customRole = screen.getAllByRole("textbox", { name: "Role name" })[1]!.closest("article")!;
+    fireEvent.change(within(customRole).getByRole("textbox", { name: "Role name" }), { target: { value: "Project captain" } });
+    fireEvent.click(within(customRole).getByRole("button", { name: "Save Role" }));
+    await waitFor(() => expect(requests.some(({ path, init }) => path.endsWith("/roles/role-1") && init?.method === "PUT"
+      && String(init.body).includes("Project captain"))).toBe(true));
+    fireEvent.change(within(customRole).getByRole("combobox", { name: "Add Organization Member" }), { target: { value: "member-1" } });
+    fireEvent.click(within(customRole).getByRole("button", { name: "Grant Role" }));
+    await waitFor(() => expect(within(customRole).getByRole("button", { name: "Revoke" })).toBeVisible());
+    fireEvent.click(within(customRole).getByRole("button", { name: "Revoke" }));
+    await waitFor(() => expect(requests.some(({ path, init }) => path.endsWith("/roles/role-1/members/member-1") && init?.method === "DELETE")).toBe(true));
     expect(screen.getByRole("heading", { name: "Invite access" })).toBeVisible(); expect(screen.getByRole("heading", { name: "GitHub Repository Connections" })).toBeVisible(); expect(screen.getByRole("heading", { name: "OpenID Connect" })).toBeVisible();
     fireEvent.change(await screen.findByRole("combobox", { name: "Project for https://github.com/acme/stash" }), { target: { value: "project-1" } });
     fireEvent.click(screen.getByRole("button", { name: "Attach" }));

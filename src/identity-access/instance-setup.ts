@@ -15,6 +15,7 @@ export interface StarterNoteSetup {
 export interface StarterTaskSetup {
   id: string;
   title: string;
+  workspaceWorkflowStatusId: string;
 }
 
 /**
@@ -24,13 +25,17 @@ export interface StarterTaskSetup {
 export interface StarterTutorialContribution {
   schema: "stash.starter-tutorial.v1";
   rootNoteId: string;
-  collection: { id: string; ownerNoteId: string; name: string };
+  collection: {
+    id: string; ownerNoteId: string; name: string;
+    properties: Array<{ id: string; name: string; type: "text" }>;
+    records: Array<{ id: string; values: Record<string, string> }>;
+  };
   taskView: {
     id: string;
     noteId: string;
-    source: { kind: "tasks"; workspaceId: string };
+    name: string;
+    source: { kind: "tasks"; workspaceId: string; project: "none" };
     presentation: "list";
-    taskIds: string[];
   };
 }
 
@@ -42,6 +47,7 @@ export interface FirstPersonalInstanceSetup {
     notes: StarterNoteSetup[];
     links: Array<{ id: string; sourceNoteId: string; targetNoteId: string; label: string }>;
     tasks: StarterTaskSetup[];
+    workspaceWorkflowStatus: { id: string; name: "Ready"; category: "unstarted"; position: 1 };
     contribution: StarterTutorialContribution;
   };
   createdAt: string;
@@ -169,10 +175,12 @@ export class InstanceSetupService {
       const rootNoteId = randomUUID();
       const organizeNoteId = randomUUID();
       const planNoteId = randomUUID();
+      const workspaceWorkflowStatus = { id: randomUUID(), name: "Ready" as const, category: "unstarted" as const, position: 1 as const };
       const tasks = [
-        { id: randomUUID(), title: "Shape your first idea" },
-        { id: randomUUID(), title: "Turn one Note into action" },
+        { id: randomUUID(), title: "Shape your first idea", workspaceWorkflowStatusId: workspaceWorkflowStatus.id },
+        { id: randomUUID(), title: "Turn one Note into action", workspaceWorkflowStatusId: workspaceWorkflowStatus.id },
       ];
+      const collectionPropertyId = randomUUID();
       const record: FirstPersonalInstanceSetup = {
         account,
         workspace,
@@ -186,12 +194,15 @@ export class InstanceSetupService {
           ],
           links: [{ id: randomUUID(), sourceNoteId: organizeNoteId, targetNoteId: planNoteId, label: "Continue planning" }],
           tasks,
+          workspaceWorkflowStatus,
           contribution: {
             schema: "stash.starter-tutorial.v1",
             rootNoteId,
-            collection: { id: randomUUID(), ownerNoteId: organizeNoteId, name: "Ideas to explore" },
-            taskView: { id: randomUUID(), noteId: planNoteId, source: { kind: "tasks", workspaceId: workspace.id },
-              presentation: "list", taskIds: tasks.map(({ id }) => id) },
+            collection: { id: randomUUID(), ownerNoteId: organizeNoteId, name: "Ideas to explore",
+              properties: [{ id: collectionPropertyId, name: "Idea", type: "text" }],
+              records: [{ id: randomUUID(), values: { [collectionPropertyId]: "Shape your first idea" } }] },
+            taskView: { id: randomUUID(), noteId: planNoteId, source: { kind: "tasks", workspaceId: workspace.id, project: "none" },
+              name: "First moves", presentation: "list" },
           },
         },
       };
