@@ -33,7 +33,7 @@ describe("PostgreSQL permission-safe Workspace search", { skip: !databaseUrl }, 
     const restrictedProject = await workspaces.createProject(owner.ownerId, workspace.workspace.id, { name: "Restricted", key: "RESTRICTED" });
     assert.equal(visibleProject.status, "created"); assert.equal(restrictedProject.status, "created");
     if (visibleProject.status !== "created" || restrictedProject.status !== "created") return;
-    const notes = new NoteService(database);
+    const notes = new NoteService(database.knowledgeAuthoringRepositories());
     assert.equal((await notes.capture(owner.ownerId, workspace.workspace.id, { projectId: visibleProject.project.id, content: "launch visible" })).status, "created");
     assert.equal((await notes.capture(owner.ownerId, workspace.workspace.id, { projectId: restrictedProject.project.id, content: "launch restricted-secret" })).status, "created");
     const search = new WorkspaceSearchService(database);

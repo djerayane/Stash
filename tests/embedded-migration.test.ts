@@ -265,7 +265,7 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
       await source.database.createWorkspace({ id: workspaceId, name: "Migrated Workspace", owner: { type: "organization", id: organizationId }, createdByMemberId: ownerId },
         { localAccountId: ownerId, displayName: "Ada" });
       const document = paragraphDocument("Migrated history", randomUUID());
-      await source.database.createNote(ownerId, { id: noteId, workspaceId, content: "Migrated history", document, revision: 1,
+      await source.database.knowledgeAuthoringRepositories().createNote(ownerId, { id: noteId, workspaceId, content: "Migrated history", document, revision: 1,
         tags: ["migration"], createdByMemberId: ownerId, createdAt: "2026-08-24T09:30:00.000Z" }, { schema: "stash.note.v1", id: noteId,
         workspaceId, content: "Migrated history", tags: ["migration"], createdAt: "2026-08-24T09:30:00.000Z", createdBy: { localAccountId: ownerId, displayName: "Ada" } });
       const attachmentBytes = Buffer.from([0, 1, 2, 253, 254, 255]);

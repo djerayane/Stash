@@ -62,9 +62,9 @@ function contract(adapter: ContractAdapter): void {
         const document = paragraphDocument("Parity note", randomUUID());
         const projection = { schema: "stash.note.v1" as const, id: noteId, workspaceId, content: "Parity note", tags: ["parity"],
           createdAt, createdBy: { localAccountId: ownerId, displayName: "Owner" } };
-        assert.equal(await database.createNote(ownerId, { id: noteId, workspaceId, content: "Parity note", document, revision: 1,
+        assert.equal(await database.knowledgeAuthoringRepositories().createNote(ownerId, { id: noteId, workspaceId, content: "Parity note", document, revision: 1,
           tags: ["parity"], createdByMemberId: ownerId, createdAt }, projection), "created");
-        assert.equal(await database.createNote(outsiderId, { id: randomUUID(), workspaceId, content: "Denied", document, revision: 1,
+        assert.equal(await database.knowledgeAuthoringRepositories().createNote(outsiderId, { id: randomUUID(), workspaceId, content: "Denied", document, revision: 1,
           tags: [], createdByMemberId: outsiderId, createdAt }, { ...projection, id: randomUUID(), content: "Denied",
           createdBy: { localAccountId: outsiderId, displayName: "Outsider" } }), "workspace_forbidden");
         assert.equal((await database.listAccessibleWorkspaces(ownerId)).some((workspace: { id: string }) => workspace.id === workspaceId), true);
@@ -125,7 +125,7 @@ function contract(adapter: ContractAdapter): void {
         await harness.database.createWorkspace({ id: workspaceId, name: "Backup Workspace", owner: { type: "organization", id: organizationId },
           createdByMemberId: ownerId }, { localAccountId: ownerId, displayName: "Backup Owner" });
         const document = paragraphDocument("Restored parity note", randomUUID());
-        await harness.database.createNote(ownerId, { id: noteId, workspaceId, content: "Restored parity note", document, revision: 1,
+        await harness.database.knowledgeAuthoringRepositories().createNote(ownerId, { id: noteId, workspaceId, content: "Restored parity note", document, revision: 1,
           tags: ["restored"], createdByMemberId: ownerId, createdAt }, { schema: "stash.note.v1", id: noteId, workspaceId,
           content: "Restored parity note", tags: ["restored"], createdAt, createdBy: { localAccountId: ownerId, displayName: "Backup Owner" } });
         const collaboration = new Y.Doc(); collaboration.getText("parity").insert(0, "restored collaboration");
@@ -137,7 +137,7 @@ function contract(adapter: ContractAdapter): void {
         assert.equal(attachment.status, "created"); if (attachment.status !== "created") return;
         const backupPath = join(harness.backupRoot, "contract");
         await harness.backup.create(backupPath);
-        const postBackupNoteId = randomUUID(); await harness.database.createNote(ownerId, { id: postBackupNoteId, workspaceId, content: "Post-backup mutation", document, revision: 1,
+        const postBackupNoteId = randomUUID(); await harness.database.knowledgeAuthoringRepositories().createNote(ownerId, { id: postBackupNoteId, workspaceId, content: "Post-backup mutation", document, revision: 1,
           tags: [], createdByMemberId: ownerId, createdAt }, { schema: "stash.note.v1", id: postBackupNoteId, workspaceId,
           content: "Post-backup mutation", tags: [], createdAt, createdBy: { localAccountId: ownerId, displayName: "Backup Owner" } });
         assert.equal((await harness.backup.verify(backupPath)).status, "verified");

@@ -33,7 +33,7 @@ describe("PostgreSQL Discussion mention notifications", { skip: databaseUrl ? fa
       assert.equal(workspace.status, "created"); if (workspace.status !== "created") return;
       const project = await workspaces.createProject(ownerId, workspace.workspace.id, { name: "Delivery", key: "DEL" });
       assert.equal(project.status, "created"); if (project.status !== "created") return;
-      const notes = new NoteService(database); const discussions = new DiscussionService(database);
+      const notes = new NoteService(database.knowledgeAuthoringRepositories()); const discussions = new DiscussionService(database.knowledgeAuthoringRepositories());
       for (const input of [{ content: "Project note", projectId: project.project.id }, { content: "Workspace note" }]) {
         const note = await notes.capture(ownerId, workspace.workspace.id, input); assert.equal(note.status, "created");
         if (note.status !== "created") continue;

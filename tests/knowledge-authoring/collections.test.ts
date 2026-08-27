@@ -242,7 +242,7 @@ describe("Collection contracts", () => {
       const visible = await notes.create(ownerId, workspace.workspace.id, { title: "Visible" });
       const hidden = await notes.create(ownerId, workspace.workspace.id, { title: "Private roadmap" });
       assert.equal(visible.status, "created"); assert.equal(hidden.status, "created"); if (visible.status !== "created" || hidden.status !== "created") return;
-      assert.equal((await new NoteService(store.database).triage(ownerId, workspace.workspace.id, visible.node.id,
+      assert.equal((await new NoteService(store.database.knowledgeAuthoringRepositories()).triage(ownerId, workspace.workspace.id, visible.node.id,
         { action: "organize", projectId: project.project.id })).status, "updated");
       await store.upgradeDatabase.query("INSERT INTO stash_project_guests(project_id,account_id) VALUES($1,$2)", [project.project.id, guestId]);
       const relationPropertyId = "15151515-1515-4515-8515-151515151515"; const collectionId = "16161616-1616-4616-8616-161616161616";

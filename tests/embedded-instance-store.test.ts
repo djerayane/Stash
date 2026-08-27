@@ -71,7 +71,7 @@ describe("embedded Instance store", () => {
     assert.equal((await database.createWorkspace({ id: workspaceId, name: "Planning", owner: { type: "organization", id: organizationId },
       createdByMemberId: ownerId }, { localAccountId: ownerId, displayName: "Ada" })).status, "created");
     const document = paragraphDocument("Embedded release plan", "10000000-0000-4000-8000-000000000005");
-    assert.equal(await database.createNote(ownerId, { id: noteId, workspaceId, content: "Embedded release plan", document, revision: 1,
+    assert.equal(await database.knowledgeAuthoringRepositories().createNote(ownerId, { id: noteId, workspaceId, content: "Embedded release plan", document, revision: 1,
       tags: ["release"], createdByMemberId: ownerId, createdAt: "2026-08-24T10:00:00.000Z" },
     { schema: "stash.note.v1", id: noteId, workspaceId, content: "Embedded release plan", tags: ["release"],
       createdAt: "2026-08-24T10:00:00.000Z", createdBy: { localAccountId: ownerId, displayName: "Ada" } }), "created");

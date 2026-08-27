@@ -31,7 +31,7 @@ describe("PostgreSQL followed Project notifications", { skip: databaseUrl ? fals
       assert.equal(await database.saveProjectFollow(recipientId, project.project.id, true), true);
       assert.equal(await database.saveProjectFollow(followerId, project.project.id, true), true);
       await database.saveNotificationPreferences(recipientId, project.project.id, { activity: "followed", digest: "off" });
-      const created = await new NoteService(database).capture(ownerId, workspace.workspace.id, { projectId: project.project.id, content: "Canonical change" });
+      const created = await new NoteService(database.knowledgeAuthoringRepositories()).capture(ownerId, workspace.workspace.id, { projectId: project.project.id, content: "Canonical change" });
       assert.equal(created.status, "created"); const inbox = await database.listNotifications(recipientId);
       assert.equal(inbox.length, 1); assert.equal(inbox[0]?.trigger, "followed_change"); assert.equal(inbox[0]?.activity.object.kind, "Note");
       assert.equal(inbox[0]?.activity.actor.localAccountId, ownerId);

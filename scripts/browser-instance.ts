@@ -465,7 +465,7 @@ let firstRunInstance: Awaited<ReturnType<typeof startInstance>>;
 async function startFirstRunInstance() {
   const database = firstRunStore.database;
   const auth = new PasswordAuthService(database);
-  const notes = new NoteService(database);
+  const notes = new NoteService(database.knowledgeAuthoringRepositories());
   const tasks = new TaskService(database, database);
   const projects = new WorkspaceProjectService(database);
   const attachments = new LocalAttachmentStorage(firstRunStore.paths.attachments);

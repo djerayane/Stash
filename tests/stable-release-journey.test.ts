@@ -47,7 +47,7 @@ describe("first stable release journey through a running Instance", () => {
     const connections = new RepositoryConnectionService(store.database.developmentIntegrationRepositories(), githubApp);
     const instance = await startInstance({ database: store.database, host: "127.0.0.1", port: 0, instanceAdminToken: "operator",
       memberAccess: { async authenticateBearer(value) { return value === bearer ? { accountId: ownerId, sessionId: "release-session" } : undefined; } },
-      workspaceProjects: new WorkspaceProjectService(store.database), notes: new NoteService(store.database),
+      workspaceProjects: new WorkspaceProjectService(store.database), notes: new NoteService(store.database.knowledgeAuthoringRepositories()),
       mobileCaptures: new MobileCaptureService(store.database), tasks: new TaskService(store.database, store.database),
       projectWorkflows: new ProjectWorkflowService(store.database), boards: new BoardService(store.database),
       repositoryConnections: connections, githubSignals: new GitHubSignalService(store.database.developmentIntegrationRepositories(), webhookSecret, automations),
@@ -116,7 +116,7 @@ describe("first stable release journey through a running Instance", () => {
     const destinationAttachments = new LocalAttachmentStorage(destination.paths.attachments);
     const importedInstance = await startInstance({ database: destination.database, host: "127.0.0.1", port: 0, instanceAdminToken: "operator",
       memberAccess: { async authenticateBearer(value) { return value === bearer ? { accountId: ownerId, sessionId: "import-session" } : undefined; } },
-      notes: new NoteService(destination.database), tasks: new TaskService(destination.database, destination.database),
+      notes: new NoteService(destination.database.knowledgeAuthoringRepositories()), tasks: new TaskService(destination.database, destination.database),
       portableWorkspaceImports: new PortableWorkspaceImportService(destination.database, destinationAttachments),
       portableWorkspaceExports: new PortableWorkspaceExportService(destination.database, destinationAttachments) });
     cleanups.push(async () => { await importedInstance.close(); await destination.close(); await rm(destinationRoot, { recursive: true, force: true }); });

@@ -30,7 +30,7 @@ describe("PostgreSQL Note collaboration", { skip: databaseUrl ? false : "STASH_T
     assert.equal(workspace.status, "created"); if (workspace.status !== "created") return;
     const project = await workspaces.createProject(owner.ownerId, workspace.workspace.id, { name: "Notes", key: "NOTE" });
     assert.equal(project.status, "created"); if (project.status !== "created") return;
-    const captured = await new NoteService(database).capture(owner.ownerId, workspace.workspace.id, { content: "Original", projectId: project.project.id });
+    const captured = await new NoteService(database.knowledgeAuthoringRepositories()).capture(owner.ownerId, workspace.workspace.id, { content: "Original", projectId: project.project.id });
     assert.equal(captured.status, "created"); if (captured.status !== "created") return;
     const editorId = randomUUID(); const readerId = randomUUID(); probe = new Pool({ connectionString: scopedDatabaseUrl });
     await probe.query("INSERT INTO stash_accounts(id,name,email,password_hash) VALUES($1,'Editor',$2,'unused'),($3,'Reader',$4,'unused')",

@@ -58,6 +58,7 @@ import { PostgresRelationshipQueryRepository } from "./knowledge-authoring/postg
 import type { RelationshipQueryRepository } from "./knowledge-authoring/relationship-query.js";
 import { PostgresVisualizationBlockRepository } from "./knowledge-authoring/postgres-visualization-block-repository.js";
 import type { VisualizationBlockRepository } from "./knowledge-authoring/visualization-block.js";
+import { PostgresKnowledgeAuthoringRepositories } from "./knowledge-authoring/postgres-knowledge-authoring-repositories.js";
 import { effectiveNoteReadSql, workspaceMemberSql } from "./knowledge-authoring/postgres-note-access.js";
 import type { PostgresPortableProjectionContributor } from "./instance-operations/storage/portable-projection-contributor.js";
 import { PostgresProjectlessTaskRepository } from "./work-planning/postgres-projectless-task-repository.js";
@@ -263,7 +264,7 @@ export class PostgresDatabase implements DatabaseProbe {
   readonly #portableProjectionContributors: readonly PostgresPortableProjectionContributor[];
   readonly #authenticationSecrets: AuthenticationSecretCodec;
   readonly #identityAccessAdapter = this as IdentityAccessPostgresRepositories;
-  readonly #knowledgeAuthoringAdapter = this as KnowledgeAuthoringPostgresRepositories;
+  readonly #knowledgeAuthoringAdapter: PostgresKnowledgeAuthoringRepositories;
   readonly #workPlanningAdapter: PostgresWorkPlanningRepositories;
   readonly #developmentIntegrationAdapter: PostgresDevelopmentIntegrationRepositories;
 
@@ -299,6 +300,16 @@ export class PostgresDatabase implements DatabaseProbe {
     this.#visualizationBlockRepository = new PostgresVisualizationBlockRepository(this.#kernel,
       (client) => this.#noteTreeRepository.prepare(client));
     this.#portableProjectionContributors = [this.#visualizationBlockRepository];
+    this.#knowledgeAuthoringAdapter = new PostgresKnowledgeAuthoringRepositories(this.#kernel, {
+      prepare: (client) => this.#ensureNoteSchema(client),
+      recordCreatedNote: async (client, memberId, note, projection, cause) => {
+        await this.#recordInitialNoteLocation(client, note.id, note.workspaceId);
+        await this.#recordPortableProjection(client, "Note", note.id, "stash.note.v1", projection);
+        await this.#recordNoteRevisionAndActivity(client, memberId, undefined, note, "note_created", cause);
+      },
+      recordAgentAudit: (client, memberId, note, cause) =>
+        this.#recordAgentExecutionAudit(client, memberId, note.workspaceId, "agent_note_created", note.id, cause),
+    });
     this.#workPlanningAdapter = new PostgresWorkPlanningRepositories(this.#kernel, {
       prepare: async (client) => { await this.#ensureNoteSchema(client); await this.#ensureInvitationSchema(client); },
       recordProjection: (client, task) => this.#recordPortableProjection(client, "Task", task.id, task.schema, task),
@@ -364,7 +375,29 @@ export class PostgresDatabase implements DatabaseProbe {
   }
 
   knowledgeAuthoringRepositories(): KnowledgeAuthoringPostgresRepositories {
-    return this.#knowledgeAuthoringAdapter;
+    return {
+      findPortableMemberIdentity: this.findPortableMemberIdentity.bind(this),
+      createNote: this.#knowledgeAuthoringAdapter.createNote.bind(this.#knowledgeAuthoringAdapter),
+      listInboxNotes: this.listInboxNotes.bind(this), listNotes: this.listNotes.bind(this), listNotesByTag: this.listNotesByTag.bind(this),
+      triageNote: this.triageNote.bind(this), findNoteForMember: this.findNoteForMember.bind(this),
+      applyNoteOperations: this.applyNoteOperations.bind(this), listNoteEditConflicts: this.listNoteEditConflicts.bind(this),
+      resolveNoteEditConflict: this.resolveNoteEditConflict.bind(this),
+      loadNoteCollaboration: this.loadNoteCollaboration.bind(this), appendNoteCollaboration: this.appendNoteCollaboration.bind(this),
+      createNoteLink: this.createNoteLink.bind(this), createImportedNoteLink: this.createImportedNoteLink.bind(this),
+      listNoteLinks: this.listNoteLinks.bind(this), repairNoteLink: this.repairNoteLink.bind(this), moveNote: this.moveNote.bind(this),
+      createDiscussion: this.createDiscussion.bind(this), findDiscussion: this.findDiscussion.bind(this),
+      listNoteDiscussions: this.listNoteDiscussions.bind(this), listTaskDiscussions: this.listTaskDiscussions.bind(this),
+      listBlockDiscussions: this.listBlockDiscussions.bind(this), addMessage: this.addMessage.bind(this),
+      resolveDiscussion: this.resolveDiscussion.bind(this), createWorkFromMessages: this.createWorkFromMessages.bind(this),
+      searchWorkspace: this.searchWorkspace.bind(this), findAttachmentReceipt: this.findAttachmentReceipt.bind(this),
+      createAttachment: this.createAttachment.bind(this), canCreateAttachment: this.canCreateAttachment.bind(this),
+      findAttachmentForMember: this.findAttachmentForMember.bind(this), listWorkspaceActivity: this.listWorkspaceActivity.bind(this),
+      listNoteHistory: this.listNoteHistory.bind(this), restoreNote: this.restoreNote.bind(this),
+      readExportSnapshot: this.readExportSnapshot.bind(this), findWorkspaceImport: this.findWorkspaceImport.bind(this),
+      importWorkspace: this.importWorkspace.bind(this), mapImportedIdentity: this.mapImportedIdentity.bind(this),
+      createMobileCapture: this.createMobileCapture.bind(this),
+      listMobileCaptureOptions: this.listMobileCaptureOptions.bind(this),
+    };
   }
 
   workPlanningRepositories(): WorkPlanningPostgresRepositories {
@@ -666,73 +699,6 @@ export class PostgresDatabase implements DatabaseProbe {
         projection,
       );
       await this.#ensureDefaultWorkflow(client, record.id);
-      return "created";
-    });
-  }
-
-  async createNote(
-    memberId: string,
-    note: NoteRecord,
-    projection: PortableNoteProjection,
-    cause: ActivityCause = { kind: "member" },
-    operation?: { id: string; digest: string },
-  ): Promise<"created" | "workspace_forbidden" | "project_forbidden" | { status: "duplicate"; note: NoteRecord }> {
-    return this.#withTransaction(async (client) => {
-      await this.#ensureNoteSchema(client);
-      if (operation) await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [memberId, operation.id]);
-      const access = await client.query<{ allowed: boolean }>(
-        `SELECT (
-           (owner_type = 'personal' AND personal_owner_id = $2)
-           OR (owner_type = 'organization' AND EXISTS (
-             SELECT 1 FROM stash_organization_memberships membership
-             WHERE membership.organization_id = stash_workspaces.organization_owner_id
-               AND membership.account_id = $2
-           ))
-         ) AS allowed
-         FROM stash_workspaces WHERE id = $1`,
-        [note.workspaceId, memberId],
-      );
-      if (!access.rows[0]?.allowed) return "workspace_forbidden";
-      if (operation) {
-        const receipt = await client.query<any>(`SELECT receipt.payload_digest,note.* FROM stash_note_capture_operation_receipts receipt
-          JOIN stash_notes note ON note.id=receipt.note_id WHERE receipt.account_id=$1 AND receipt.operation_id=$2 AND receipt.workspace_id=$3`,
-        [memberId, operation.id, note.workspaceId]);
-        if (receipt.rows[0]) {
-          if (receipt.rows[0].payload_digest !== operation.digest) throw new Error("note_capture_operation_conflict");
-          return { status: "duplicate" as const, note: this.#noteFromRow(receipt.rows[0]) };
-        }
-      }
-      if (note.projectId) {
-        const project = await client.query(
-          "SELECT 1 FROM stash_projects WHERE id = $1 AND workspace_id = $2",
-          [note.projectId, note.workspaceId],
-        );
-        if (!project.rowCount) return "project_forbidden";
-      }
-      await client.query(
-        `INSERT INTO stash_notes
-          (id, workspace_id, project_id, content, document, revision, tags, reminder_at, created_by_account_id, created_at)
-         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::jsonb, $8, $9, $10)`,
-        [
-          note.id,
-          note.workspaceId,
-          note.projectId ?? null,
-          note.content,
-          JSON.stringify(note.document),
-          note.revision,
-          JSON.stringify(note.tags),
-          note.reminder?.at ?? null,
-          note.createdByMemberId,
-          note.createdAt,
-        ],
-      );
-      await this.#recordInitialNoteLocation(client, note.id, note.workspaceId);
-      await this.#recordPortableProjection(client, "Note", note.id, "stash.note.v1", projection);
-      await this.#recordNoteRevisionAndActivity(client, memberId, undefined, note, "note_created", cause);
-      if (cause.kind === "agent") await this.#recordAgentExecutionAudit(client, memberId, note.workspaceId, "agent_note_created", note.id, cause);
-      if (operation) await client.query(`INSERT INTO stash_note_capture_operation_receipts
-        (account_id,operation_id,workspace_id,payload_digest,note_id) VALUES ($1,$2,$3,$4,$5)`,
-      [memberId, operation.id, note.workspaceId, operation.digest, note.id]);
       return "created";
     });
   }
