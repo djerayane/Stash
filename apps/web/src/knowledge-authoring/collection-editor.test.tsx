@@ -26,11 +26,57 @@ describe("Collection workspace", () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<QueryClientProvider client={client}><CollectionWorkspace noteId={collection.ownerNoteId} token="member" fetcher={fetcher} /></QueryClientProvider>);
 
+    expect(await screen.findByRole("heading", { name: "Collections and views" })).toBeVisible();
+    expect(screen.queryByText("Structured knowledge")).not.toBeInTheDocument();
+
     fireEvent.click(await screen.findByRole("button", { name: "New Collection" }));
     fireEvent.change(screen.getByRole("textbox", { name: "Collection title" }), { target: { value: "Reading list" } });
     fireEvent.click(screen.getByRole("button", { name: "Create Collection" }));
     await waitFor(() => expect(requests.some(({ init }) => init?.method === "POST"
       && JSON.parse(String(init.body)).workspaceId === collection.workspaceId)).toBe(true));
+  });
+
+  it("embeds an accessible Collection owned by another Note", async () => {
+    const requests: Array<{ path: string; init?: RequestInit }> = [];
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input); requests.push({ path, init });
+      if (!init?.method) return Response.json({ workspaceId: collection.workspaceId, collections: [], availableCollections: [collection], views: [] });
+      return Response.json({ status: "created" }, { status: 201 });
+    }) as typeof fetch;
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={client}><CollectionWorkspace noteId="99999999-9999-4999-8999-999999999999" token="member" fetcher={fetcher} /></QueryClientProvider>);
+
+    fireEvent.change(await screen.findByRole("combobox", { name: "Source Collection" }), { target: { value: collection.id } });
+    fireEvent.click(screen.getByRole("button", { name: "Add View Block" }));
+    await waitFor(() => expect(requests.some(({ init }) => init?.method === "POST"
+      && JSON.parse(String(init.body)).definition.source.collectionId === collection.id)).toBe(true));
+  });
+
+  it("requires exact impact selection and deliberate confirmation before permanent deletion", async () => {
+    const requests: Array<{ path: string; init?: RequestInit }> = [];
+    const impact = { noteId: collection.ownerNoteId, collections: [{ id: collection.id, title: collection.title, recordCount: 1 }],
+      relations: [{ collectionId: collection.id, recordId: collection.records[0]!.id, propertyId: titleId, referenceCount: 2 }],
+      viewBlocks: [{ id: view.id, title: view.title, ownerNoteId: view.ownerNoteId }], token: "exact-impact" };
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input); requests.push({ path, init });
+      if (path.endsWith("/impact")) return Response.json({ impact });
+      if (path.endsWith("/delete")) return Response.json({ status: "deleted", collectionIds: [collection.id] });
+      return Response.json({ workspaceId: collection.workspaceId, collections: [collection], availableCollections: [collection], views: [] });
+    }) as typeof fetch;
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={client}><CollectionWorkspace noteId={collection.ownerNoteId} token="member" fetcher={fetcher} /></QueryClientProvider>);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Review removal impact" }));
+    expect(await screen.findByText("2 direct relation references will be removed.")).toBeVisible();
+    expect(screen.getByText("1 View Block will be removed.")).toBeVisible();
+    const remove = screen.getByRole("button", { name: "Permanently delete selected Collections" });
+    expect(remove).toBeDisabled();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Delete Research and its 1 record" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "I understand this permanently deletes the selected records, relations, and View Blocks" }));
+    fireEvent.click(remove);
+    await waitFor(() => expect(requests.some(({ path, init }) => path.endsWith("/delete") && init?.method === "POST"
+      && JSON.parse(String(init.body)).impactToken === "exact-impact"
+      && JSON.parse(String(init.body)).collectionIds[0] === collection.id)).toBe(true));
   });
 
   it("offers accessible table, board, list, and calendar lenses with a non-drag board move", async () => {

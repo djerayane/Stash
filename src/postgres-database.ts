@@ -52,6 +52,7 @@ import { PostgresInstanceSetupRepository } from "./identity-access/postgres-inst
 import { PostgresOrganizationRoleRepository } from "./identity-access/postgres-organization-role-repository.js";
 import type { CollectionRepository, TutorialContributionRepository } from "./knowledge-authoring/collections.js";
 import { PostgresTutorialContributionRepository } from "./knowledge-authoring/postgres-tutorial-contribution-repository.js";
+import { PostgresCollectionRepository } from "./knowledge-authoring/postgres-collection-repository.js";
 import { PostgresRelationshipQueryRepository } from "./knowledge-authoring/postgres-relationship-query-repository.js";
 import type { RelationshipQueryRepository } from "./knowledge-authoring/relationship-query.js";
 import { PostgresVisualizationBlockRepository } from "./knowledge-authoring/postgres-visualization-block-repository.js";
@@ -257,6 +258,7 @@ export class PostgresDatabase implements
   readonly #noteTreeRepository: PostgresNoteTreeRepository;
   readonly #instanceSetupRepository: PostgresInstanceSetupRepository;
   readonly #tutorialContributionRepository: PostgresTutorialContributionRepository;
+  readonly #collectionRepository: PostgresCollectionRepository;
   readonly #projectlessTaskRepository: PostgresProjectlessTaskRepository;
   readonly #organizationRoleRepository: PostgresOrganizationRoleRepository;
   readonly #projectPermissionRepository: PostgresProjectPermissionRepository;
@@ -272,6 +274,8 @@ export class PostgresDatabase implements
       beforeStateChange: (client, noteIds, state) => this.#tutorialContributionRepository.beforeStateChange(client, noteIds, state),
     });
     this.#tutorialContributionRepository = new PostgresTutorialContributionRepository(this.#kernel,
+      (client) => this.#noteTreeRepository.prepare(client));
+    this.#collectionRepository = new PostgresCollectionRepository(this.#kernel,
       (client) => this.#noteTreeRepository.prepare(client));
     this.#instanceSetupRepository = new PostgresInstanceSetupRepository(this.#kernel, authenticationSecrets, async (client) => {
       await this.#ensureBootstrapSchema(client);
@@ -314,7 +318,7 @@ export class PostgresDatabase implements
   }
 
   collectionRepository(): CollectionRepository {
-    return this.#tutorialContributionRepository;
+    return this.#collectionRepository;
   }
 
   projectlessTaskRepository(): ProjectlessTaskRepository {

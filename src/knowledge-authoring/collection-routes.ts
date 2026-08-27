@@ -28,7 +28,8 @@ export function collectionRoutes(service: CollectionService, access: MemberAcces
                   : await service.create(member.accountId, noteId, await readJson(request));
           if (result.status === "created") json(response, 201, { collection: result.collection });
           else if (result.status === "found") json(response, 200, "impact" in result ? { impact: result.impact }
-            : { workspaceId: result.workspaceId, collections: result.collections, views: result.views });
+            : { workspaceId: result.workspaceId, collections: result.collections,
+              availableCollections: result.availableCollections, views: result.views });
           else if (result.status === "relocated" || result.status === "deleted") json(response, 200, result);
           else if (result.status === "impact_changed" || result.status === "collection_conflict") json(response, 409,
             { error: result.status, message: "The Collection impact changed. Review it again before continuing." });

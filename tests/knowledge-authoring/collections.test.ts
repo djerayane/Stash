@@ -111,6 +111,9 @@ describe("Collection contracts", () => {
           values: { [base.id]: [{ id: noteResult.node.id, fallback: "Research" }] } }] });
       const service = new CollectionService(store.database.collectionRepository());
 
+      assert.notEqual(store.database.collectionRepository(), store.database.tutorialContributionRepository(),
+        "canonical Collection persistence must use a focused adapter, not the tutorial contribution adapter");
+
       assert.equal((await service.create(ownerId, noteResult.node.id, collection)).status, "created");
       assert.deepEqual(await service.read(ownerId, collection.id), { status: "found", collection });
       assert.equal((await service.rename(ownerId, collection.id, { title: "Renamed map" })).status, "updated");

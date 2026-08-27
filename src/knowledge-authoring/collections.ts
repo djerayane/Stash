@@ -29,7 +29,8 @@ export interface CollectionRepository {
   updateCanonicalViewBlock(memberId: string, viewId: string, definition: ViewDefinition): Promise<
     { status: "updated" } | { status: "view_not_found" | "source_unavailable" }>;
   listCollectionsForNote(memberId: string, noteId: string): Promise<
-    { status: "found"; workspaceId: string; collections: readonly CanonicalCollection[]; views: readonly CanonicalViewBlock[] } | { status: "note_not_found" }>;
+    { status: "found"; workspaceId: string; collections: readonly CanonicalCollection[]; availableCollections: readonly CanonicalCollection[];
+      views: readonly CanonicalViewBlock[] } | { status: "note_not_found" }>;
   previewCollectionRemoval(memberId: string, noteId: string): Promise<{ status: "found"; impact: CollectionImpact } | { status: "note_not_found" }>;
   relocateCollections(memberId: string, noteId: string, destinationNoteId: string, collectionIds: readonly string[]): Promise<
     { status: "relocated"; collectionIds: readonly string[] } | { status: "note_not_found" | "destination_not_found" | "collection_not_found" }>;
