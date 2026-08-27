@@ -36,7 +36,7 @@ describe("PostgreSQL structured Task collaboration", { skip: !databaseUrl }, () 
     if (destination.status !== "created") return;
     const note = await new NoteService(database.knowledgeAuthoringRepositories()).capture(owner.ownerId, workspace.workspace.id, { content: "Plan release" }); assert.equal(note.status, "created");
     if (note.status !== "created") return;
-    const tasks = new TaskService(database, database); const blockKey = note.note.document.blocks[0]!.blockKey!;
+    const tasks = new TaskService(database.workPlanningRepositories(), database); const blockKey = note.note.document.blocks[0]!.blockKey!;
     const created = await tasks.createFromBlock(owner.ownerId, note.note.id, blockKey, { projectId: project.project.id, title: "Plan release" });
     assert.equal(created.status, "created"); if (created.status !== "created") return;
     const otherNote = await new NoteService(database.knowledgeAuthoringRepositories()).capture(owner.ownerId, workspace.workspace.id, { content: "Publish release" }); assert.equal(otherNote.status, "created");

@@ -208,7 +208,7 @@ describe("fresh Instance setup", () => {
         knowledgeAuthoringCapability({ notes: new NoteService(store.database.knowledgeAuthoringRepositories()),
           noteTree: new NoteTreeService(store.database.noteTreeRepository(), store.database.tutorialContributionRepository()),
           starterTutorials: new TutorialContributionService(store.database.tutorialContributionRepository()), memberAccess: passwordAuth }),
-        workPlanningCapability({ tasks: new TaskService(store.database, store.database), memberAccess: passwordAuth,
+        workPlanningCapability({ tasks: new TaskService(store.database.workPlanningRepositories(), store.database.identityAccessRepositories()), memberAccess: passwordAuth,
           projectlessTasks: new ProjectlessTaskService(store.database.projectlessTaskRepository()) }),
       ]),
     });
