@@ -178,6 +178,28 @@ describe("Portable Workspace import", () => {
     assert.deepEqual(repository.committed?.state.noteLocations[1], source.noteLocations[1]);
     assert.deepEqual(repository.committed?.state.noteLinks[0], source.noteLinks[0]);
   });
+  it("round-trips saved Visualization Block query, layout, filters, and view-only edges", async () => {
+    const childId = "99999999-9999-4999-8999-999999999999";
+    const blockId = "77777777-7777-4777-8777-777777777777";
+    const visualization = { schema: "stash.visualization.v1", id: blockId, workspaceId, ownerNoteId: noteId, revision: 2,
+      kind: "local-graph", query: { rootId: noteId, depth: 2, limit: 30, direction: "both", relationTypes: ["supports"], includeHierarchy: true },
+      filters: { relationTypes: ["supports"], direction: "outgoing" }, layout: { renderer: "focused", positions: { [noteId]: { x: 12, y: 18 } } },
+      viewEdges: [{ id: "view-only", sourceNoteId: noteId, targetNoteId: childId, relationshipType: "questions" }] };
+    const source: PortableWorkspaceExportSnapshot = { ...snapshot,
+      notes: [...snapshot.notes, { ...snapshot.notes[0]!, id: childId, content: "# Child" }],
+      noteLocations: [...snapshot.noteLocations, { schema: "stash.note-location.v1", noteId: childId, workspaceId,
+        path: `notes/${childId}.md`, aliases: [], revision: 1 }],
+      durableObjects: [{ kind: "VisualizationBlock", id: blockId, schema: "stash.visualization.v1", payload: visualization }],
+    };
+    const first = new ImportMemory();
+    await new PortableWorkspaceImportService(first, { async put() {}, async get() { return Buffer.alloc(0); }, async delete() {} })
+      .import(randomUUID(), actor.localAccountId, await archiveFor(source));
+    assert.deepEqual(first.committed?.state.durableObjects, source.durableObjects);
+    const second = new ImportMemory();
+    await new PortableWorkspaceImportService(second, { async put() {}, async get() { return Buffer.alloc(0); }, async delete() {} })
+      .import(randomUUID(), actor.localAccountId, await archiveFor({ ...first.committed!.state, attachments: [] }));
+    assert.deepEqual(second.committed?.state.durableObjects, source.durableObjects);
+  });
   it("round-trips a canceled Workspace Task through its canonical Workspace Workflow", async () => {
     const workflowId = "41414141-4141-4141-8141-414141414141";
     const statusId = "42424242-4242-4242-8242-424242424242";

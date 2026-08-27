@@ -52,6 +52,10 @@ import { PostgresInstanceSetupRepository } from "./identity-access/postgres-inst
 import { PostgresOrganizationRoleRepository } from "./identity-access/postgres-organization-role-repository.js";
 import type { TutorialContributionRepository } from "./knowledge-authoring/collections.js";
 import { PostgresTutorialContributionRepository } from "./knowledge-authoring/postgres-tutorial-contribution-repository.js";
+import { PostgresRelationshipQueryRepository } from "./knowledge-authoring/postgres-relationship-query-repository.js";
+import type { RelationshipQueryRepository } from "./knowledge-authoring/relationship-query.js";
+import { PostgresVisualizationBlockRepository } from "./knowledge-authoring/postgres-visualization-block-repository.js";
+import type { VisualizationBlockRepository } from "./knowledge-authoring/visualization-block.js";
 import { PostgresProjectlessTaskRepository } from "./work-planning/postgres-projectless-task-repository.js";
 import { PostgresProjectPermissionRepository } from "./work-planning/postgres-project-permission-repository.js";
 import type { ProjectlessTaskRepository } from "./work-planning/projectless-tasks.js";
@@ -92,7 +96,7 @@ interface FailedAutomationRun {
   taskKey: string;
   taskTitle: string;
 }
-const portableProjectionObjectKinds = ["Workspace", "Project", "Workflow", "WorkspaceWorkflow", "Collection", "ViewBlock", "Board", "Note", "NoteLocation", "NoteLink", "Task", "GuestProjectAccess", "RepositoryConnection", "Attachment", "Discussion", "DiscussionWorkLink", "Activity"] as const;
+const portableProjectionObjectKinds = ["Workspace", "Project", "Workflow", "WorkspaceWorkflow", "Collection", "ViewBlock", "VisualizationBlock", "Board", "Note", "NoteLocation", "NoteLink", "Task", "GuestProjectAccess", "RepositoryConnection", "Attachment", "Discussion", "DiscussionWorkLink", "Activity"] as const;
 const portableProjectionObjectKindSql = portableProjectionObjectKinds.map((kind) => `'${kind}'`).join(", ");
 export const workflowTemporaryRenameSql = `UPDATE stash_workflow_statuses
   SET position = -position - 1, name = repeat('__stash_workflow_transition__', 4) || id::text
@@ -253,6 +257,8 @@ export class PostgresDatabase implements
   readonly #projectlessTaskRepository: PostgresProjectlessTaskRepository;
   readonly #organizationRoleRepository: PostgresOrganizationRoleRepository;
   readonly #projectPermissionRepository: PostgresProjectPermissionRepository;
+  readonly #relationshipQueryRepository: PostgresRelationshipQueryRepository;
+  readonly #visualizationBlockRepository: PostgresVisualizationBlockRepository;
   readonly #authenticationSecrets: AuthenticationSecretCodec;
 
   constructor(connectionString: string, authenticationSecrets: AuthenticationSecretCodec, options: PostgresDatabaseOptions = {}) {
@@ -276,10 +282,22 @@ export class PostgresDatabase implements
       await this.#ensureWorkspaceProjectSchema(client);
       await this.#organizationRoleRepository.prepare(client);
     });
+    this.#relationshipQueryRepository = new PostgresRelationshipQueryRepository(this.#kernel,
+      (client) => this.#noteTreeRepository.prepare(client));
+    this.#visualizationBlockRepository = new PostgresVisualizationBlockRepository(this.#kernel,
+      (client) => this.#noteTreeRepository.prepare(client));
   }
 
   noteTreeRepository(): NoteTreeRepository {
     return this.#noteTreeRepository;
+  }
+
+  relationshipQueryRepository(): RelationshipQueryRepository {
+    return this.#relationshipQueryRepository;
+  }
+
+  visualizationBlockRepository(): VisualizationBlockRepository {
+    return this.#visualizationBlockRepository;
   }
 
   instanceSetupRepository(): InstanceSetupRepository {
@@ -4243,9 +4261,9 @@ export class PostgresDatabase implements
 
   async #recordPortableProjection(
     client: PostgresQueryable,
-    objectKind: "Workspace" | "Project" | "Workflow" | "WorkspaceWorkflow" | "Collection" | "ViewBlock" | "Board" | "Note" | "NoteLocation" | "NoteLink" | "Task" | "GuestProjectAccess" | "RepositoryConnection" | "Attachment" | "Discussion" | "DiscussionWorkLink" | "Activity",
+    objectKind: "Workspace" | "Project" | "Workflow" | "WorkspaceWorkflow" | "Collection" | "ViewBlock" | "VisualizationBlock" | "Board" | "Note" | "NoteLocation" | "NoteLink" | "Task" | "GuestProjectAccess" | "RepositoryConnection" | "Attachment" | "Discussion" | "DiscussionWorkLink" | "Activity",
     objectId: string,
-    projectionSchema: "stash.workspace.v1" | "stash.project.v1" | "stash.workflow.v1" | "stash.workspace-workflow.v1" | "stash.collection.v1" | "stash.view-block.v1" | "stash.board.v1" | "stash.note.v1" | "stash.note.v2" | "stash.note-location.v1" | "stash.note-link.v1" | "stash.note-link.v2" | "stash.task.v1" | "stash.guest-project-access.v1" | "stash.repository-connection.v1" | "stash.attachment.v1" | "stash.discussion.v1" | "stash.discussion-work-link.v1" | "stash.activity.v1",
+    projectionSchema: "stash.workspace.v1" | "stash.project.v1" | "stash.workflow.v1" | "stash.workspace-workflow.v1" | "stash.collection.v1" | "stash.view-block.v1" | "stash.visualization.v1" | "stash.board.v1" | "stash.note.v1" | "stash.note.v2" | "stash.note-location.v1" | "stash.note-link.v1" | "stash.note-link.v2" | "stash.task.v1" | "stash.guest-project-access.v1" | "stash.repository-connection.v1" | "stash.attachment.v1" | "stash.discussion.v1" | "stash.discussion-work-link.v1" | "stash.activity.v1",
     payload: object,
   ): Promise<void> {
     await client.query(
@@ -4383,6 +4401,13 @@ export class PostgresDatabase implements
         const view=item.payload; await client.query(`INSERT INTO stash_view_blocks(id,workspace_id,owner_note_id,block_id,title,source_kind,source_workspace_id,source_project_scope,query,layout)
           VALUES($1,$2,$3,$4,$5,'tasks',$2,'none',$6::jsonb,$7)`,[view.id,state.workspace.id,view.ownerNoteId,view.blockId,view.title,JSON.stringify(view.definition.query),view.definition.layout]);
         await this.#recordPortableProjection(client,"ViewBlock",item.id,item.schema as any,view);
+      }
+      await this.#visualizationBlockRepository.prepare(client);
+      for (const item of durable.filter(({ kind }) => kind === "VisualizationBlock")) {
+        const view=item.payload; await client.query(`INSERT INTO stash_visualization_blocks(id,workspace_id,owner_note_id,definition,revision)
+          VALUES($1,$2,$3,$4::jsonb,$5)`,[view.id,state.workspace.id,view.ownerNoteId,JSON.stringify({schema:view.schema,id:view.id,kind:view.kind,
+            query:view.query,filters:view.filters,layout:view.layout,viewEdges:view.viewEdges}),view.revision]);
+        await this.#recordPortableProjection(client,"VisualizationBlock",item.id,"stash.visualization.v1",view);
       }
       for (const task of state.tasks) {
         await client.query(`INSERT INTO stash_tasks(id,workspace_id,project_id,task_key,workflow_status_id,workspace_workflow_status_id,title,created_by_account_id,created_at,
@@ -4643,14 +4668,14 @@ export class PostgresDatabase implements
         `SELECT DISTINCT ON (projection.object_kind, projection.object_id)
            projection.object_kind,projection.object_id,projection.projection_schema,projection.payload
          FROM stash_portable_projection_outbox projection
-         WHERE projection.object_kind IN ('Project','Workflow','WorkspaceWorkflow','Collection','ViewBlock','GuestProjectAccess','RepositoryConnection','Discussion','DiscussionWorkLink')
+         WHERE projection.object_kind IN ('Project','Workflow','WorkspaceWorkflow','Collection','ViewBlock','VisualizationBlock','GuestProjectAccess','RepositoryConnection','Discussion','DiscussionWorkLink')
            AND (
              (projection.object_kind='Project' AND projection.payload->>'workspaceId'=$1::text
                AND ($2::boolean OR projection.object_id=ANY($3::uuid[])))
              OR (projection.object_kind='Workflow'
                AND (projection.payload->>'projectId')::uuid IN (SELECT id FROM stash_projects WHERE workspace_id=$1::uuid)
                AND ($2::boolean OR (projection.payload->>'projectId')::uuid=ANY($3::uuid[])))
-             OR (projection.object_kind IN ('WorkspaceWorkflow','Collection','ViewBlock')
+             OR (projection.object_kind IN ('WorkspaceWorkflow','Collection','ViewBlock','VisualizationBlock')
                AND projection.payload->>'workspaceId'=$1::text AND $2::boolean)
              OR (projection.object_kind='GuestProjectAccess' AND $2::boolean AND EXISTS (
                SELECT 1 FROM jsonb_array_elements(projection.payload->'projects') selected

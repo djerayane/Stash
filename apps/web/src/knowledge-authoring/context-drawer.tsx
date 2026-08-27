@@ -3,6 +3,7 @@ import { useState, type FormEvent, type KeyboardEvent } from "react";
 import { Link } from "react-router";
 
 import { DiscussionPanel } from "./discussion-panel";
+import { RelatedNotes } from "./related-notes";
 import styles from "./note-tree.module.css";
 
 export interface NoteContextData {
@@ -59,7 +60,8 @@ export function ContextDrawer({ context, onClose, token, fetcher = globalThis.fe
         <label>Relationship type<input maxLength={80} placeholder="supports, contradicts…" value={relationshipType} onChange={(event) => setRelationshipType(event.target.value)} /></label>
         <button disabled={createLink.isPending} type="submit">Create Note link</button>{createLink.isError ? <p role="alert">{createLink.error.message}</p> : null}
       </form> : <p role="note"><strong>Read-only access.</strong> Note links are read-only for Project Guests.</p>}<section><h3>Backlinks</h3>{context.backlinks.length ? <ul>{context.backlinks.map((link) => <li key={link.id}><Link to={`/app/notes/${link.noteId}`}>{link.title}</Link><span>{link.relationshipType ?? link.label}</span></li>)}</ul> : <p>No Notes link here yet.</p>}</section>
-        <section><h3>Outgoing links</h3>{context.outgoingLinks.length ? <ul>{context.outgoingLinks.map((link) => <li key={link.id}><Link to={`/app/notes/${link.noteId}`}>{link.title}</Link><span>{link.relationshipType ?? link.label}</span></li>)}</ul> : <p>This Note has no outgoing links.</p>}</section></section>
+        <section><h3>Outgoing links</h3>{context.outgoingLinks.length ? <ul>{context.outgoingLinks.map((link) => <li key={link.id}><Link to={`/app/notes/${link.noteId}`}>{link.title}</Link><span>{link.relationshipType ?? link.label}</span></li>)}</ul> : <p>This Note has no outgoing links.</p>}</section>
+        <RelatedNotes access={context.access} fetcher={fetcher} noteId={context.noteId} token={token} workspaceId={context.workspaceId} /></section>
       <section {...panel("properties")} hidden={tab !== "properties"} role="tabpanel"><h3>Properties</h3><dl>
         <dt>State</dt><dd>{context.state[0]!.toUpperCase() + context.state.slice(1)}</dd>
         <dt>Parent</dt><dd>{context.parent ? <Link to={`/app/notes/${context.parent.id}`}>{context.parent.title}</Link> : "Root Note"}</dd>
