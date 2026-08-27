@@ -254,6 +254,8 @@ export class PostgresDatabase implements DatabaseProbe {
         assignCustomRole: (...args) => this.#organizationRoleRepository.assignCustomRole(...args),
         revokeCustomRole: (...args) => this.#organizationRoleRepository.revokeCustomRole(...args),
       },
+      prepareNotifications: (client) => this.#ensureNotificationSchema(client),
+      recordActivityProjection: (client, activity) => this.#recordPortableProjection(client, "Activity", activity.id, activity.schema, activity),
     });
     this.#projectlessTaskRepository = new PostgresProjectlessTaskRepository(this.#kernel,
       (client) => this.#instanceSetupRepository.prepare(client));
@@ -406,10 +408,6 @@ export class PostgresDatabase implements DatabaseProbe {
     return Object.assign(this.#identityAccessAdapter, {
       removeOrganizationMember: this.removeOrganizationMember.bind(this),
 
-      createAgentProposal: this.createAgentProposal.bind(this),
-      listAgentProposals: this.listAgentProposals.bind(this), findAgentProposal: this.findAgentProposal.bind(this),
-      claimAgentProposal: this.claimAgentProposal.bind(this), finishAgentProposal: this.finishAgentProposal.bind(this),
-      releaseAgentProposal: this.releaseAgentProposal.bind(this),
       listPendingImportedIdentities: this.listPendingImportedIdentities.bind(this),
       mapImportedIdentityAsMember: this.mapImportedIdentityAsMember.bind(this),
     });
@@ -1371,104 +1369,6 @@ export class PostgresDatabase implements DatabaseProbe {
       WHERE receipt.activity_id=activity.id AND receipt.restore_result IS NULL;
       ALTER TABLE stash_note_restore_receipts ALTER COLUMN restore_result SET NOT NULL;
     `);
-  }
-
-  async createAgentProposal(proposal: AgentProposal): Promise<void> {
-    await this.#withTransaction(async (client) => {
-      await this.#identityAccessAdapter.prepareAgentAuthority(client); await this.#ensureNotificationSchema(client);
-      const input = proposal.input as { workspaceId?: unknown };
-      const scope = await client.query<{ workspace_id: string; actor_name: string }>(`SELECT workspace.id workspace_id,account.name actor_name
-        FROM stash_agent_grants grant JOIN stash_accounts account ON account.id=grant.sponsoring_member_id
-        JOIN stash_workspaces workspace ON workspace.organization_owner_id=grant.organization_id
-        LEFT JOIN stash_projects project ON project.workspace_id=workspace.id AND project.id=$4
-        WHERE grant.id=$1 AND grant.sponsoring_member_id=$2 AND grant.organization_id=$3
-          AND EXISTS (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id=grant.organization_id AND membership.account_id=$2)
-          AND (($4::uuid IS NOT NULL AND project.id=$4) OR ($4::uuid IS NULL AND workspace.id=$5)) LIMIT 1`,
-      [proposal.grantId, proposal.sponsoringMemberId, proposal.organizationId, proposal.projectId ?? null,
-        typeof input?.workspaceId === "string" ? input.workspaceId : null]);
-      const authorized = scope.rows[0]; if (!authorized) throw new Error("proposal_notification_scope_forbidden");
-      const activity: ActivityRecord = { schema: "stash.activity.v1", id: proposal.id, workspaceId: authorized.workspace_id,
-        object: { kind: "Proposal", id: proposal.id }, action: "proposal_review_requested",
-        actor: { localAccountId: proposal.sponsoringMemberId, displayName: authorized.actor_name },
-        cause: { kind: "agent", agentGrantId: proposal.grantId, sponsoringMemberId: proposal.sponsoringMemberId, agentName: proposal.agentName },
-        occurredAt: proposal.createdAt, before: {}, after: { proposalId: proposal.id, capability: proposal.capability, status: proposal.status } };
-      await client.query(`INSERT INTO stash_agent_proposals (id,grant_id,sponsoring_member_id,capability,input,status,created_at,base_revision)
-        VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8)`, [proposal.id, proposal.grantId, proposal.sponsoringMemberId, proposal.capability,
-        JSON.stringify(proposal.input), proposal.status, proposal.createdAt, proposal.baseRevision ?? null]);
-      await client.query(`INSERT INTO stash_workspace_activity
-        (id,workspace_id,object_kind,object_id,action,actor_account_id,cause,occurred_at,before_state,after_state)
-        VALUES ($1,$2,'Proposal',$1,$3,$4,$5::jsonb,$6,$7::jsonb,$8::jsonb)`, [activity.id, activity.workspaceId, activity.action,
-        activity.actor.localAccountId, JSON.stringify(activity.cause), activity.occurredAt, JSON.stringify(activity.before), JSON.stringify(activity.after)]);
-      await this.#recordPortableProjection(client, "Activity", activity.id, activity.schema, activity);
-      const requested = requestedReviewNotificationInput(activity, proposal.sponsoringMemberId, proposal.projectId, proposal.agentName, proposal.capability);
-      let preferences: NotificationPreferences = { activity: "followed", digest: "off" };
-      if (proposal.projectId) { const settings = await client.query<any>(`SELECT preference.* FROM stash_projects project
-        LEFT JOIN stash_notification_preferences preference ON preference.project_id=project.id AND preference.member_id=$1 WHERE project.id=$2`,
-      [proposal.sponsoringMemberId, proposal.projectId]); const row = settings.rows[0]; if (row?.member_id) preferences = { activity: row.activity, digest: row.digest,
-        ...(row.quiet_start ? { quietHours: { start: row.quiet_start, end: row.quiet_end, timeZone: row.quiet_time_zone } } : {}) }; }
-      await client.query(`INSERT INTO stash_notifications
-        (id,member_id,workspace_id,project_id,trigger,summary,activity,created_at,delivery)
-        VALUES ($1,$2,$3,$4,'requested_review',$5,$6::jsonb,$7,$8)
-        ON CONFLICT (member_id,activity_id,trigger) DO NOTHING`, [randomUUID(), requested.memberId, activity.workspaceId,
-        proposal.projectId ?? null, requested.summary, JSON.stringify(activity), activity.occurredAt,
-        notificationDeliveryMode(new Date(activity.occurredAt), preferences)]);
-    });
-  }
-
-  async listAgentProposals(actorId: string, organizationId: string): Promise<AgentProposal[] | undefined> {
-    return this.#kernel.withSession(async (client) => {
-      await this.#identityAccessAdapter.prepareAgentAuthority(client);
-      const membership = await client.query("SELECT 1 FROM stash_organization_memberships WHERE organization_id=$1 AND account_id=$2", [organizationId, actorId]);
-      if (!membership.rowCount) return undefined;
-      const result = await client.query<any>(`SELECT proposal.*,grant.organization_id,grant.project_id,grant.name agent_name
-        FROM stash_agent_proposals proposal JOIN stash_agent_grants grant ON grant.id=proposal.grant_id
-        WHERE grant.organization_id=$1 AND proposal.sponsoring_member_id=$2 ORDER BY proposal.created_at DESC,proposal.id`, [organizationId, actorId]);
-      return result.rows.map(agentProposalFromRow);
-    });
-  }
-
-  async findAgentProposal(actorId: string, organizationId: string, proposalId: string): Promise<AgentProposal | "forbidden" | undefined> {
-    return this.#kernel.withSession(async (client) => {
-      await this.#identityAccessAdapter.prepareAgentAuthority(client);
-      const membership = await client.query("SELECT 1 FROM stash_organization_memberships WHERE organization_id=$1 AND account_id=$2", [organizationId, actorId]);
-      if (!membership.rowCount) return "forbidden";
-      const result = await client.query<any>(`SELECT proposal.*,grant.organization_id,grant.project_id,grant.name agent_name FROM stash_agent_proposals proposal
-        JOIN stash_agent_grants grant ON grant.id=proposal.grant_id WHERE proposal.id=$1 AND grant.organization_id=$2`, [proposalId, organizationId]);
-      if (!result.rowCount) return undefined; if (result.rows[0].sponsoring_member_id !== actorId) return "forbidden"; return agentProposalFromRow(result.rows[0]);
-    });
-  }
-
-  async claimAgentProposal(actorId: string, organizationId: string, proposalId: string, operationId: string) {
-    return this.#withTransaction(async (client) => { await this.#identityAccessAdapter.prepareAgentAuthority(client);
-      const membership = await client.query("SELECT 1 FROM stash_organization_memberships WHERE organization_id=$1 AND account_id=$2", [organizationId, actorId]);
-      if (!membership.rowCount) return { status: "forbidden" as const };
-      const result = await client.query<any>(`SELECT proposal.*,grant.organization_id,grant.project_id,grant.name agent_name FROM stash_agent_proposals proposal
-        JOIN stash_agent_grants grant ON grant.id=proposal.grant_id WHERE proposal.id=$1 AND grant.organization_id=$2 FOR UPDATE OF proposal`, [proposalId, organizationId]);
-      if (!result.rowCount) return { status: "not_found" as const }; const row = result.rows[0];
-      if (row.sponsoring_member_id !== actorId) return { status: "forbidden" as const };
-      if (row.status === "applying") return { status: row.operation_id === operationId ? "in_progress" as const : "in_progress" as const, proposal: agentProposalFromRow(row) };
-      if (!["pending", "conflict"].includes(row.status)) return { status: row.operation_id === operationId ? "duplicate" as const : "already_reviewed" as const, proposal: agentProposalFromRow(row) };
-      const claimed = await client.query<any>(`UPDATE stash_agent_proposals SET status='applying',operation_id=$2 WHERE id=$1 RETURNING *`, [proposalId, operationId]);
-      return { status: "claimed" as const, proposal: agentProposalFromRow({ ...claimed.rows[0], organization_id: row.organization_id, project_id: row.project_id, agent_name: row.agent_name }) };
-    });
-  }
-
-  async finishAgentProposal(actorId: string, proposalId: string, operationId: string, update: any): Promise<AgentProposal> {
-    return this.#withTransaction(async (client) => {
-      const result = await client.query<any>(`UPDATE stash_agent_proposals proposal SET status=$4,reviewed_at=$5,reviewed_by_account_id=$1,
-        result=$6::jsonb,conflict=$7::jsonb WHERE proposal.id=$2 AND proposal.sponsoring_member_id=$1 AND proposal.operation_id=$3
-        RETURNING proposal.*,(SELECT organization_id FROM stash_agent_grants WHERE id=proposal.grant_id),(SELECT project_id FROM stash_agent_grants WHERE id=proposal.grant_id),
-        (SELECT name FROM stash_agent_grants WHERE id=proposal.grant_id) agent_name`, [actorId, proposalId, operationId, update.status, update.reviewedAt,
-        JSON.stringify(update.result ?? null), JSON.stringify(update.conflict ?? null)]);
-      if (!result.rows[0]) throw new Error("proposal_claim_lost");
-      await client.query(`UPDATE stash_notifications SET read_at=CASE WHEN $3='conflict' THEN NULL ELSE COALESCE(read_at,$4::timestamptz) END
-        WHERE member_id=$1 AND activity_id=$2 AND trigger='requested_review'`, [actorId, proposalId, update.status, update.reviewedAt]);
-      return agentProposalFromRow(result.rows[0]);
-    });
-  }
-
-  async releaseAgentProposal(actorId: string, proposalId: string, operationId: string): Promise<void> {
-    await this.#kernel.query("UPDATE stash_agent_proposals SET status=CASE WHEN conflict IS NULL THEN 'pending' ELSE 'conflict' END,operation_id=NULL WHERE id=$1 AND sponsoring_member_id=$2 AND operation_id=$3 AND status='applying'", [proposalId, actorId, operationId]);
   }
 
   async #markFormerAssignments(client: PostgresQueryable, organizationId: string, accountId: string, actorId: string): Promise<string[]> {
