@@ -3,7 +3,7 @@ import type { AuthenticationSecretCodec } from "../authentication-secrets.js";
 import type { AccountAuthenticationRecord, PasswordAuthRepository, SessionRecord } from "../password-auth.js";
 import type { PostgresKernel, PostgresQueryable } from "../instance-operations/storage/postgres-kernel.js";
 import type { OidcAuthRepository, OidcIdentityKey, OidcIdentityRecord, OidcOrganizationConfiguration } from "../oidc-auth.js";
-import type { BuiltInOrganizationRole } from "../organization-roles.js";
+import type { BuiltInOrganizationRole, CustomOrganizationRole, OrganizationRoleRepository } from "../organization-roles.js";
 import type { MemberLocalizationPreferences, MemberLocalizationRepository } from "../member-localization.js";
 import type { PortableIdentity, PortableProjectProjection, PortableWorkspaceProjection, WorkspaceProjectRecord,
   WorkspaceProjectRepository, WorkspaceRecord } from "../workspaces-projects.js";
@@ -25,6 +25,7 @@ export class PostgresIdentityAccessRepositories implements PasswordAuthRepositor
       authorizeProject(client: PostgresQueryable, memberId: string, workspaceId: string): Promise<{ found: boolean; allowed: boolean }>;
       ensureDefaultWorkflow(client: PostgresQueryable, projectId: string): Promise<void>;
       findPortableMemberIdentity(memberId: string): Promise<PortableIdentity | undefined>;
+      roles: Pick<OrganizationRoleRepository,"assignBuiltInRole"|"listCustomRoles"|"createCustomRole"|"updateCustomRole"|"assignCustomRole"|"revokeCustomRole">;
     },
   ) {}
 
@@ -177,6 +178,13 @@ export class PostgresIdentityAccessRepositories implements PasswordAuthRepositor
     return (await this.kernel.query<{role:BuiltInOrganizationRole}>(
       "SELECT role FROM stash_organization_memberships WHERE organization_id=$1 AND account_id=$2",[organizationId,accountId])).rows[0]?.role;
   }
+
+  assignBuiltInRole(organizationId:string,actorId:string,accountId:string,role:BuiltInOrganizationRole){return this.dependencies.roles.assignBuiltInRole(organizationId,actorId,accountId,role);}
+  listCustomRoles(organizationId:string){return this.dependencies.roles.listCustomRoles(organizationId);}
+  createCustomRole(organizationId:string,actorId:string,role:CustomOrganizationRole){return this.dependencies.roles.createCustomRole(organizationId,actorId,role);}
+  updateCustomRole(organizationId:string,actorId:string,roleId:string,input:{name:string;permissions:Array<"create_project">}){return this.dependencies.roles.updateCustomRole(organizationId,actorId,roleId,input);}
+  assignCustomRole(organizationId:string,actorId:string,roleId:string,memberId:string){return this.dependencies.roles.assignCustomRole(organizationId,actorId,roleId,memberId);}
+  revokeCustomRole(organizationId:string,actorId:string,roleId:string,memberId:string){return this.dependencies.roles.revokeCustomRole(organizationId,actorId,roleId,memberId);}
 
   async findOidcConfiguration(organizationId:string):Promise<OidcOrganizationConfiguration|undefined>{
     await this.prepareOidc();const row=(await this.kernel.query<{organization_id:string;issuer:string;client_id:string;client_secret:string}>(
