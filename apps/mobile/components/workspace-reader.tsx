@@ -49,16 +49,32 @@ export function WorkspaceReader({ snapshot, pendingTaskIds, onUpdateTaskStatus }
 
 function NoteTree({ snapshot }: { snapshot: MobileWorkspaceSnapshot }) {
   const notes = new Map(snapshot.notes.map((note) => [note.id, note]));
+  const [activeId, setActiveId] = useState(snapshot.noteTree[0]?.id);
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
+  const hidden = (id: string) => ancestors(id, snapshot).some((parentId) => collapsed.has(parentId));
+  const active = activeId ? notes.get(activeId) : undefined;
   return <View style={{ gap: 10 }}>
-    {snapshot.noteTree.length ? snapshot.noteTree.map((node) => {
-      const note = notes.get(node.id);
+    {snapshot.noteTree.length ? snapshot.noteTree.filter((node) => !hidden(node.id)).map((node) => {
       const depth = ancestors(node.id, snapshot).length;
-      return <View key={node.id} style={{ ...cardStyle, marginLeft: Math.min(depth, 3) * 14 }}>
-        <Text selectable accessibilityRole="header" style={{ color: colors.label, fontSize: 17, fontWeight: "600" }}>{node.title}</Text>
-        <Text selectable style={{ color: colors.secondaryLabel, lineHeight: 21 }} numberOfLines={5}>{note?.content || "No content yet."}</Text>
-        {node.childCount ? <Text selectable style={{ color: colors.secondaryLabel }}>{node.childCount} child Note{node.childCount === 1 ? "" : "s"}</Text> : null}
+      const isCollapsed = collapsed.has(node.id);
+      return <View key={node.id} style={{ flexDirection: "row", gap: 8, marginLeft: Math.min(depth, 3) * 14 }}>
+        {node.childCount ? <Pressable accessibilityRole="button" accessibilityLabel={`${isCollapsed ? "Expand" : "Collapse"} ${node.title}`}
+          accessibilityState={{ expanded: !isCollapsed }} onPress={() => setCollapsed((current) => {
+            const next = new Set(current); if (next.has(node.id)) next.delete(node.id); else next.add(node.id); return next;
+          })} style={{ minWidth: 44, minHeight: 44, alignItems: "center", justifyContent: "center" }}>
+          <Text style={{ color: colors.accent, fontSize: 18 }}>{isCollapsed ? "+" : "−"}</Text>
+        </Pressable> : <View style={{ width: 44 }} />}
+        <Pressable accessibilityRole="button" accessibilityLabel={`Open Note ${node.title}`} accessibilityState={{ selected: activeId === node.id }}
+          onPress={() => setActiveId(node.id)} style={{ flex: 1, minHeight: 44, justifyContent: "center", paddingHorizontal: 12,
+            borderRadius: 12, borderCurve: "continuous", backgroundColor: activeId === node.id ? colors.background : "transparent" }}>
+          <Text selectable style={{ color: colors.label, fontSize: 17, fontWeight: activeId === node.id ? "700" : "500" }}>{node.title}</Text>
+        </Pressable>
       </View>;
     }) : <Empty text="No Notes are cached yet." />}
+    {active ? <View style={cardStyle}>
+      <Text selectable accessibilityRole="header" style={{ color: colors.label, fontSize: 19, fontWeight: "700" }}>{active.title}</Text>
+      <Text selectable style={{ color: colors.label, lineHeight: 22 }}>{active.content || "No content yet."}</Text>
+    </View> : null}
   </View>;
 }
 
@@ -88,15 +104,49 @@ function ReadableViews({ views, snapshot }: { views: ViewBlock[]; snapshot: Mobi
   return <View style={{ gap: 12 }}>
     {views.length ? views.map((view) => {
       const source = view.definition.source;
-      const count = source.kind === "tasks" ? snapshot.tasks.length
-        : snapshot.collections.find(({ id }) => id === source.collectionId)?.records.length ?? 0;
+      const collection = source.kind === "collection" ? snapshot.collections.find(({ id }) => id === source.collectionId) : undefined;
+      const tasks = source.kind === "tasks" ? snapshot.tasks.filter((task) => view.definition.filters.every((filter) =>
+        filter.propertyId === "task:status" ? filter.operator !== "equals" || task.status.id === filter.value
+          : filter.propertyId !== "task:assignee" || filter.operator !== "equals" || task.assigneeIds.includes(String(filter.value)))) : [];
+      const records = collection ? [...collection.records].filter((record) => view.definition.filters.every((filter) => {
+        const value = record.values[filter.propertyId]; const empty = value === undefined || value === null || value === "" || Array.isArray(value) && !value.length;
+        if (filter.operator === "is_empty") return empty; if (filter.operator === "is_not_empty") return !empty;
+        const comparable = displayValue(value).toLocaleLowerCase(); const expected = displayValue(filter.value).toLocaleLowerCase();
+        if (filter.operator === "equals") return comparable === expected; if (filter.operator === "not_equals") return comparable !== expected;
+        return comparable.includes(expected);
+      })).sort((left, right) => {
+        for (const sort of view.definition.sorts) {
+          const compared = displayValue(left.values[sort.propertyId]).localeCompare(displayValue(right.values[sort.propertyId]));
+          if (compared) return sort.direction === "ascending" ? compared : -compared;
+        }
+        return left.position - right.position;
+      }) : [];
+      const count = source.kind === "tasks" ? tasks.length : records.length;
       return <View key={view.id} style={cardStyle}>
         <Text selectable accessibilityRole="header" style={{ color: colors.label, fontSize: 17, fontWeight: "700" }}>{view.title}</Text>
         <Text selectable style={{ color: colors.secondaryLabel }}>{view.definition.presentation} view · {count} item{count === 1 ? "" : "s"}</Text>
-        <Text selectable style={{ color: colors.label, lineHeight: 21 }}>This desktop-authored view is available as a readable summary. Editing its layout remains on desktop.</Text>
+        {tasks.map((task) => <View key={task.id} style={{ gap: 3, paddingVertical: 7 }}>
+          <Text selectable style={{ color: colors.label, fontWeight: "600" }}>{task.title}</Text>
+          <Text selectable style={{ color: colors.secondaryLabel }}>{task.status.name} · {task.projectKeys.map(({ key }) => key).join(" · ") || "No Project"}</Text>
+        </View>)}
+        {collection && records.map((record) => <View key={record.id} style={{ gap: 3, paddingVertical: 7 }}>
+          {collection.properties.map((property) => <Text selectable key={property.id} style={{ color: colors.label }}>
+            <Text style={{ fontWeight: "600" }}>{property.name}: </Text>{displayValue(record.values[property.id]) || "—"}
+          </Text>)}
+        </View>)}
+        {!count ? <Text selectable style={{ color: colors.secondaryLabel }}>No items match this saved view.</Text> : null}
+        <Text selectable style={{ color: colors.secondaryLabel, lineHeight: 21 }}>Layout authoring remains on desktop.</Text>
       </View>;
     }) : <Empty text="No desktop-authored views are cached yet." />}
   </View>;
+}
+
+function displayValue(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return value.map((entry) => typeof entry === "object" && entry && "fallback" in entry ? String(entry.fallback) : String(entry)).join(", ");
+  if (typeof value === "object" && "start" in value) return String(value.start);
+  return "";
 }
 
 function ancestors(id: string, snapshot: MobileWorkspaceSnapshot) {
