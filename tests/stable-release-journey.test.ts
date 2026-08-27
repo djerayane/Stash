@@ -1,6 +1,8 @@
+import { temporaryTestDirectory } from "./support/temporary-directory.js";
+
 import assert from "node:assert/strict";
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -33,7 +35,7 @@ describe("first stable release journey through a running Instance", () => {
   afterEach(async () => { while (cleanups.length) await cleanups.pop()!(); });
 
   it("carries captured thinking through planning, development, Automation, and a portable round trip", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-stable-release-"));
+    const root = await temporaryTestDirectory("stash-stable-release-");
     const codec = createAuthenticationSecretCodec(randomBytes(32).toString("base64"));
     const store = await EmbeddedInstanceStore.open(root, codec);
     await store.database.prepareInstanceStore();
@@ -108,7 +110,7 @@ describe("first stable release journey through a running Instance", () => {
     assert.equal(exported.status, 200); assert.equal(exported.headers.get("content-type"), "application/zip");
     const archive = Buffer.from(await exported.arrayBuffer()); assert.ok(archive.byteLength > 0);
 
-    const destinationRoot = await mkdtemp(join(tmpdir(), "stash-stable-release-import-"));
+    const destinationRoot = await temporaryTestDirectory("stash-stable-release-import-");
     const destination = await EmbeddedInstanceStore.open(destinationRoot, codec);
     await destination.database.prepareInstanceStore();
     await destination.database.createFirstOrganizationOwner({ organizationId, organizationName: "Release Team", ownerId,

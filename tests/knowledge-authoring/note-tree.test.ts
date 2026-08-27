@@ -1,3 +1,5 @@
+import { temporaryTestDirectory } from "../support/temporary-directory.js";
+
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
@@ -27,7 +29,7 @@ describe("Note Tree", () => {
 
   before(async () => {
     store = await EmbeddedInstanceStore.open(
-      await mkdtemp(join(tmpdir(), "stash-note-tree-")),
+      await temporaryTestDirectory("stash-note-tree-"),
       createAuthenticationSecretCodec(randomBytes(32).toString("base64")),
     );
     await store.database.createFirstOrganizationOwner({

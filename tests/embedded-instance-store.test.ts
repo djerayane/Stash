@@ -1,6 +1,8 @@
+import { temporaryTestDirectory } from "./support/temporary-directory.js";
+
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,14 +23,14 @@ function masterKey(): string { return randomBytes(32).toString("base64"); }
 
 describe("embedded Instance store", () => {
   test("uses the shared Instance upgrade contract without an external PostgreSQL process", async () => {
-    const store = await EmbeddedInstanceStore.open(await mkdtemp(join(tmpdir(), "stash-embedded-upgrade-")), createAuthenticationSecretCodec(masterKey())); stores.push(store);
+    const store = await EmbeddedInstanceStore.open(await temporaryTestDirectory("stash-embedded-upgrade-"), createAuthenticationSecretCodec(masterKey())); stores.push(store);
     const target = new PostgresInstanceUpgradeTarget("embedded://local", async () => undefined, store.upgradeDatabase);
     const before = await target.inspect("0.1.0"); assert.equal(before.currentVersion, "0.0.0"); assert.equal(before.checks.every(({ status }) => status === "pass"), true);
     await target.apply("0.0.0", "0.1.0"); assert.equal((await target.inspect("0.1.0")).currentVersion, "0.1.0");
     await target.close(); await store.close(); stores.splice(stores.indexOf(store), 1);
   });
   test("persists PostgreSQL state beneath the selected data directory across a clean restart", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-embedded-restart-"));
+    const root = await temporaryTestDirectory("stash-embedded-restart-");
     const key = masterKey();
     const first = await EmbeddedInstanceStore.open(root, createAuthenticationSecretCodec(key)); stores.push(first);
     await first.database.verifyConnection();
@@ -45,7 +47,7 @@ describe("embedded Instance store", () => {
   });
 
   test("refuses a second writer and does not expose lock takeover", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-embedded-lock-"));
+    const root = await temporaryTestDirectory("stash-embedded-lock-");
     const first = await EmbeddedInstanceStore.open(root, createAuthenticationSecretCodec(masterKey())); stores.push(first);
     await assert.rejects(() => EmbeddedInstanceStore.open(root, createAuthenticationSecretCodec(masterKey())), EmbeddedInstanceStoreLocked);
     const lock = JSON.parse(await readFile(join(root, ".instance.lock"), "utf8")) as { pid: number; token?: string };
@@ -54,14 +56,14 @@ describe("embedded Instance store", () => {
   });
 
   test("reclaims a stale lock after an unclean shutdown", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-embedded-crash-"));
+    const root = await temporaryTestDirectory("stash-embedded-crash-");
     await writeFile(join(root, ".instance.lock"), `${JSON.stringify({ pid: 2_147_483_647 })}\n`, { mode: 0o600 });
     const store = await EmbeddedInstanceStore.open(root, createAuthenticationSecretCodec(masterKey())); stores.push(store);
     await store.database.verifyConnection();
   });
 
   test("preserves repository, authorization, search, and durable-job semantics", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-embedded-contract-")); const key = masterKey();
+    const root = await temporaryTestDirectory("stash-embedded-contract-"); const key = masterKey();
     const store = await EmbeddedInstanceStore.open(root, createAuthenticationSecretCodec(key)); stores.push(store); const database = store.database;
     const organizationId = "10000000-0000-4000-8000-000000000001"; const ownerId = "10000000-0000-4000-8000-000000000002";
     const workspaceId = "10000000-0000-4000-8000-000000000003"; const noteId = "10000000-0000-4000-8000-000000000004";
@@ -86,7 +88,7 @@ describe("embedded Instance store", () => {
   });
 
   test("creates an integrity-checked adapter-native backup without the master key", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-embedded-backup-")); const key = masterKey();
+    const root = await temporaryTestDirectory("stash-embedded-backup-"); const key = masterKey();
     const store = await EmbeddedInstanceStore.open(root, createAuthenticationSecretCodec(key)); stores.push(store); await store.database.verifyConnection();
     const backup = join(store.paths.backups, "manual"); const service = new InstanceBackupService(
       new EmbeddedLocalInstanceBackupSource({ store, publicOrigin: "http://127.0.0.1:3000" }), { masterKey: key });
@@ -100,7 +102,7 @@ describe("embedded Instance store", () => {
   });
 
   test("restores an embedded backup and requires restart before the restored state is used", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-embedded-restore-")); const key = masterKey();
+    const root = await temporaryTestDirectory("stash-embedded-restore-"); const key = masterKey();
     const store = await EmbeddedInstanceStore.open(root, createAuthenticationSecretCodec(key)); stores.push(store); await store.database.verifyConnection();
     const configurationPath = join(store.paths.configuration, "runtime.json");
     await writeFile(configurationPath, `${JSON.stringify({ locale: "fr-FR", registration: "closed" })}\n`, { mode: 0o600 });
@@ -117,7 +119,7 @@ describe("embedded Instance store", () => {
   });
 
   test("clears only a prepared restore journal after rollback snapshot failure and retries without restart", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-embedded-restore-retry-")); const key = masterKey();
+    const root = await temporaryTestDirectory("stash-embedded-restore-retry-"); const key = masterKey();
     const store = await EmbeddedInstanceStore.open(root, createAuthenticationSecretCodec(key)); stores.push(store); await store.database.verifyConnection();
     const backup = join(store.paths.backups, "retry"); const service = new InstanceBackupService(
       new EmbeddedLocalInstanceBackupSource({ store, publicOrigin: "http://127.0.0.1:3000" }), { masterKey: key });
@@ -134,7 +136,7 @@ describe("embedded Instance store", () => {
   test("recovers one coordinated database, Attachment, and configuration snapshot after every restore rename crash point", async () => {
     const key = masterKey();
     for (let renameCount = 0; renameCount <= 7; renameCount += 1) {
-      const root = await mkdtemp(join(tmpdir(), `stash-embedded-restore-crash-${renameCount}-`));
+      const root = await temporaryTestDirectory(`stash-embedded-restore-crash-${renameCount}-`);
       const store = await EmbeddedInstanceStore.open(root, createAuthenticationSecretCodec(key)); await store.database.verifyConnection();
       const backup = join(store.paths.backups, "crash-point"); const service = new InstanceBackupService(
         new EmbeddedLocalInstanceBackupSource({ store, publicOrigin: "http://127.0.0.1:3000" }), { masterKey: key });

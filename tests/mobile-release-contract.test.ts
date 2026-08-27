@@ -1,5 +1,7 @@
+import { temporaryTestDirectory } from "./support/temporary-directory.js";
+
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -141,7 +143,7 @@ describe("mobile release contract", () => {
   });
 
   it("compares normalized content across the complete generated native tree", async () => {
-    const parent = await mkdtemp(join(tmpdir(), "stash-native-hash-"));
+    const parent = await temporaryTestDirectory("stash-native-hash-");
     const first = join(parent, "first"); const second = join(parent, "second");
     await mkdir(join(first, "ios"), { recursive: true }); await mkdir(join(second, "ios"), { recursive: true });
     await writeFile(join(first, "ios", "project.pbxproj"), "AAAABBBBCCCCDDDDEEEEFFFF link AAAABBBBCCCCDDDDEEEEFFFF\nvalue=one\n");

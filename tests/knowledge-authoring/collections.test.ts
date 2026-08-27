@@ -1,3 +1,5 @@
+import { temporaryTestDirectory } from "../support/temporary-directory.js";
+
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
@@ -89,7 +91,7 @@ describe("Collection contracts", () => {
   });
 
   test("persists canonical Collections through the focused PGLite adapter and filters unauthorized reads before metadata", async () => {
-    const store = await EmbeddedInstanceStore.open(await mkdtemp(join(tmpdir(), "stash-collections-")),
+    const store = await EmbeddedInstanceStore.open(await temporaryTestDirectory("stash-collections-"),
       createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
     try {
       const ownerId = "88888888-8888-4888-8888-888888888888";
@@ -170,7 +172,7 @@ describe("Collection contracts", () => {
   });
 
   test("deletes only after an exact confirmed impact preview and repairs relations, views, projections, and Note ownership", async () => {
-    const store = await EmbeddedInstanceStore.open(await mkdtemp(join(tmpdir(), "stash-collection-deletion-")),
+    const store = await EmbeddedInstanceStore.open(await temporaryTestDirectory("stash-collection-deletion-"),
       createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
     try {
       const ownerId = "10101010-1010-4010-8010-101010101010";
@@ -225,7 +227,7 @@ describe("Collection contracts", () => {
   });
 
   test("removes forbidden relation identities and fallbacks before returning Collection or View metadata", async () => {
-    const store = await EmbeddedInstanceStore.open(await mkdtemp(join(tmpdir(), "stash-collection-permissions-")),
+    const store = await EmbeddedInstanceStore.open(await temporaryTestDirectory("stash-collection-permissions-"),
       createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
     try {
       const ownerId = "12121212-1212-4212-8212-121212121212"; const guestId = "13131313-1313-4313-8313-131313131313";

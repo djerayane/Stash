@@ -1,3 +1,5 @@
+import { temporaryTestDirectory } from "../support/temporary-directory.js";
+
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
@@ -18,7 +20,7 @@ describe("Collection HTTP capability", () => {
   const ownerId = "18181818-1818-4818-8818-181818181818"; let store: EmbeddedInstanceStore; let instance: RunningInstance;
   let workspaceId: string; let noteId: string; let dashboardId: string;
   before(async () => {
-    store = await EmbeddedInstanceStore.open(await mkdtemp(join(tmpdir(), "stash-collections-http-")),
+    store = await EmbeddedInstanceStore.open(await temporaryTestDirectory("stash-collections-http-"),
       createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
     await store.database.createFirstOrganizationOwner({ organizationId: "19191919-1919-4919-8919-191919191919", organizationName: "Studio",
       ownerId, ownerName: "Ada", ownerEmail: "collections-http@example.test", passwordHash: "test-only", role: "Owner" });

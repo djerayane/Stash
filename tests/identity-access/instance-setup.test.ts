@@ -1,6 +1,8 @@
+import { temporaryTestDirectory } from "../support/temporary-directory.js";
+
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -193,7 +195,7 @@ describe("fresh Instance setup", () => {
   });
 
   it("commits a usable authenticated personal Workspace and starter Note branch in the real store", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "stash-setup-test-"));
+    const directory = await temporaryTestDirectory("stash-setup-test-");
     directories.push(directory);
     const store = await EmbeddedInstanceStore.open(directory,
       createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
@@ -388,7 +390,7 @@ describe("fresh Instance setup", () => {
       (SELECT COUNT(*)::int FROM stash_portable_projection_outbox WHERE object_kind IN ('Collection','ViewBlock','WorkspaceWorkflow')) projections`, [result.workspaceId]);
     assert.deepEqual(cleanup.rows[0], { tutorials: 0, tasks: 0, links: 0, statuses: 0, collections: 0, views: 0, projections: 0 });
 
-    const destinationDirectory = await mkdtemp(join(tmpdir(), "stash-setup-import-test-")); directories.push(destinationDirectory);
+    const destinationDirectory = await temporaryTestDirectory("stash-setup-import-test-"); directories.push(destinationDirectory);
     const destination = await EmbeddedInstanceStore.open(destinationDirectory,
       createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
     const destinationOwner = "53535353-5353-4353-8353-535353535353";

@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
@@ -534,13 +534,18 @@ let closing = false;
 async function close() {
   if (closing) return;
   closing = true;
-  await instance.close();
-  await firstRunInstance.close();
-  await new Promise<void>((resolve, reject) => restartSupervisor.close((error) => error ? reject(error) : resolve()));
-  await firstRunStore.close();
-  await roleInstance.close();
-  await roleStore.close();
-  await browserTreeStore.close();
+  try {
+    await instance.close();
+    await firstRunInstance.close();
+    await new Promise<void>((resolve, reject) => restartSupervisor.close((error) => error ? reject(error) : resolve()));
+    await firstRunStore.close();
+    await roleInstance.close();
+    await roleStore.close();
+    await browserTreeStore.close();
+  } finally {
+    await Promise.all([browserTreeDirectory, firstRunDirectory, roleDirectory]
+      .map((directory) => rm(directory, { recursive: true, force: true })));
+  }
   process.exit(0);
 }
 

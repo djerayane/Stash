@@ -1,6 +1,8 @@
+import { temporaryTestDirectory } from "./support/temporary-directory.js";
+
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -21,7 +23,7 @@ describe("PostgreSQL and filesystem Instance Backup disaster-recovery drill", { 
     const target = new URL(configured); target.pathname = `/${databaseName}`; databaseUrl = target.toString();
     const client = new Client({ connectionString: administratorUrl }); await client.connect();
     try { await client.query(`CREATE DATABASE ${databaseName}`); } finally { await client.end(); }
-    root = await mkdtemp(join(tmpdir(), "stash-postgres-backup-"));
+    root = await temporaryTestDirectory("stash-postgres-backup-");
   });
 
   after(async () => {

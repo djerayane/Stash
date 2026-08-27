@@ -8,12 +8,13 @@ import { test } from "node:test";
 import { createAuthenticationSecretCodec } from "../../src/authentication-secrets.js";
 import { AutomationService } from "../../src/automations.js";
 import { EmbeddedInstanceStore } from "../../src/embedded-instance-store.js";
+import { temporaryTestDirectory } from "../support/temporary-directory.js";
 import { RepositoryConnectionService, type GitHubApp } from "../../src/repository-connections.js";
 import { CanonicalTaskService } from "../../src/work-planning/canonical-tasks.js";
 import { WorkspaceProjectService } from "../../src/workspaces-projects.js";
 
 test("development adapters resolve canonical active keys and aliases and automate one Workspace status", async () => {
-  const store=await EmbeddedInstanceStore.open(await mkdtemp(join(tmpdir(),"stash-canonical-development-")),
+  const store=await EmbeddedInstanceStore.open(await temporaryTestDirectory("stash-canonical-development-"),
     createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
   try {
     const ownerId="11111111-1111-4111-8111-111111111111", organizationId="22222222-2222-4222-8222-222222222222";

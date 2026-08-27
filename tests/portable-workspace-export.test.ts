@@ -1,3 +1,5 @@
+import { temporaryTestDirectory } from "./support/temporary-directory.js";
+
 import assert from "node:assert/strict";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
@@ -146,7 +148,7 @@ describe("readable Portable Workspace Export", () => {
     await assert.rejects(() => new PortableWorkspaceExportService(repository, undefined, { maxArchiveBytes: 1_024 }).export("ada", workspaceId),
       PortableWorkspaceExportTooLarge);
 
-    const directory = await mkdtemp(join(tmpdir(), "stash-export-bounded-")); const storage = new LocalAttachmentStorage(directory);
+    const directory = await temporaryTestDirectory("stash-export-bounded-"); const storage = new LocalAttachmentStorage(directory);
     const attachment = snapshot.attachments[0]!.projection; const storageKey = `${workspaceId}/${attachment.id}`;
     await storage.put(storageKey, Buffer.from("actual bytes exceed declared size"));
     const mismatched: PortableWorkspaceExportSnapshot = { ...snapshot, notes: [], noteLocations: [], noteLinks: [], tasks: [],
@@ -195,7 +197,7 @@ describe("PostgreSQL readable export wiring", { skip: postgresUrl ? false : "STA
     const separator = connectionString.includes("?") ? "&" : "?";
     const database = new PostgresDatabase(`${connectionString}${separator}options=-csearch_path%3D${schema}`,
       createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
-    const storage = new LocalAttachmentStorage(await mkdtemp(join(tmpdir(), "stash-export-integration-")));
+    const storage = new LocalAttachmentStorage(await temporaryTestDirectory("stash-export-integration-"));
     let running: RunningInstance | undefined;
     try {
       const ownerId = "10101010-1010-4010-8010-101010101010"; const guestId = "20202020-2020-4020-8020-202020202020";

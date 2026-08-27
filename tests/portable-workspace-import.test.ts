@@ -1,3 +1,5 @@
+import { temporaryTestDirectory } from "./support/temporary-directory.js";
+
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { randomBytes } from "node:crypto";
@@ -406,7 +408,7 @@ describe("PostgreSQL Portable Workspace import", { skip: postgresUrl ? false : "
     const database = new PostgresDatabase(`${connectionString}${separator}options=-csearch_path%3D${schema}`,
       createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
     const ownerId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"; const localGuestId = "abababab-abab-4bab-8bab-abababababab";
-    const storage = new LocalAttachmentStorage(await mkdtemp(join(tmpdir(), "stash-import-pg-")));
+    const storage = new LocalAttachmentStorage(await temporaryTestDirectory("stash-import-pg-"));
     let instance: Awaited<ReturnType<typeof startInstance>> | undefined;
     try {
       await database.createFirstOrganizationOwner({ organizationId: randomUUID(), organizationName: "Destination", ownerId, ownerName: "Grace",

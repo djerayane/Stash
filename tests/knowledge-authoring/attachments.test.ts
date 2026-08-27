@@ -1,5 +1,7 @@
+import { temporaryTestDirectory } from "../support/temporary-directory.js";
+
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -57,7 +59,7 @@ describe("Workspace Attachments", () => {
   let instance: RunningInstance | undefined;
   afterEach(async () => { await instance?.close(); instance = undefined; });
   async function run() {
-    const directory = await mkdtemp(join(tmpdir(), "stash-attachments-")); const database = new AttachmentDatabase(); const storage = new RecordingLocalStorage(directory);
+    const directory = await temporaryTestDirectory("stash-attachments-"); const database = new AttachmentDatabase(); const storage = new RecordingLocalStorage(directory);
     instance = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin", memberAccess: access,
       attachments: new AttachmentService(database, storage, { maxBytes: 12 }), notes: new NoteService(database) });
     return { database, directory, storage, baseUrl: instance.url };

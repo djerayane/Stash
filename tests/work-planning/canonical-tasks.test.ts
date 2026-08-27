@@ -1,3 +1,5 @@
+import { temporaryTestDirectory } from "../support/temporary-directory.js";
+
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
@@ -11,7 +13,7 @@ import { CanonicalTaskService } from "../../src/work-planning/canonical-tasks.js
 import { WorkspaceProjectService } from "../../src/workspaces-projects.js";
 
 test("keeps one canonical Workspace Task across optional Projects, keys, Workflow, and Subtasks", async () => {
-  const store = await EmbeddedInstanceStore.open(await mkdtemp(join(tmpdir(), "stash-canonical-tasks-")),
+  const store = await EmbeddedInstanceStore.open(await temporaryTestDirectory("stash-canonical-tasks-"),
     createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
   try {
     const ownerId = "11111111-1111-4111-8111-111111111111";

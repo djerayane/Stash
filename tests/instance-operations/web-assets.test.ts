@@ -1,5 +1,7 @@
+import { temporaryTestDirectory } from "../support/temporary-directory.js";
+
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -10,7 +12,7 @@ describe("Vite web application hosting", () => {
   afterEach(async () => { await instance?.close(); instance = undefined; });
 
   async function run() {
-    const directory = await mkdtemp(join(tmpdir(), "stash-web-"));
+    const directory = await temporaryTestDirectory("stash-web-");
     await mkdir(join(directory, "assets"));
     await writeFile(join(directory, "index.html"), '<div id="root">React shell</div>');
     await writeFile(join(directory, "assets", "app.js"), "globalThis.__stash = true");

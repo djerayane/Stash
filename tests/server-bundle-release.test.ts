@@ -1,6 +1,8 @@
+import { temporaryTestDirectory } from "./support/temporary-directory.js";
+
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { access, mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
@@ -8,7 +10,7 @@ import { describe, test } from "node:test";
 const repositoryRoot = new URL("../", import.meta.url);
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "stash-package-contract-"));
+  const root = await temporaryTestDirectory("stash-package-contract-");
   const paths = {
     root,
     server: join(root, "dist"),
@@ -122,6 +124,7 @@ describe("self-contained Instance bundle packaging", () => {
     assert.match(smoke, /deny network-outbound[\s\S]*localhost:/);
     const windowsIsolation = await readFile(new URL("../scripts/windows-bundle-isolation.ps1", import.meta.url), "utf8"); assert.match(windowsIsolation, /Get-Command docker\.exe,podman\.exe -All[\s\S]*Move-Item[\s\S]*remains executable/);
     assert.match(smoke, /Standalone descendant retained port/);
+    assert.match(smoke, /finally \{ await rm\(extraction, \{ recursive: true, force: true \}\); \}/);
     assert.match(JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")).scripts["package:server"], /prepare-server-deploy/);
     assert.match(release, /publish-server-bundles:\s*\n\s*needs: release-quality/);
     assert.match(release, /SHA256SUMS/);

@@ -1,6 +1,8 @@
+import { temporaryTestDirectory } from "../support/temporary-directory.js";
+
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -88,7 +90,7 @@ describe("Project creation permission", () => {
   });
 
   it("enforces built-in and custom Role grants in the real permission adapter", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "stash-project-permission-"));
+    const directory = await temporaryTestDirectory("stash-project-permission-");
     directories.push(directory);
     const store = await EmbeddedInstanceStore.open(directory,
       createAuthenticationSecretCodec(randomBytes(32).toString("base64")));

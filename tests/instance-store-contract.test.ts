@@ -1,6 +1,8 @@
+import { temporaryTestDirectory } from "./support/temporary-directory.js";
+
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
@@ -164,7 +166,7 @@ function contract(adapter: ContractAdapter): void {
 
 contract({ name: "embedded PGlite", exclusions: ["external PostgreSQL process administration", "pg_dump custom-format interoperability"],
   async open() {
-    const root = await mkdtemp(join(tmpdir(), "stash-contract-embedded-")); const masterKey = key();
+    const root = await temporaryTestDirectory("stash-contract-embedded-"); const masterKey = key();
     let store = await EmbeddedInstanceStore.open(root, createAuthenticationSecretCodec(masterKey));
     return { database: store.database, backupRoot: store.paths.backups, attachmentRoot: store.paths.attachments,
       runtimeEnvironment: { STASH_DATA_DIR: root, INSTANCE_MASTER_KEY: masterKey, INSTANCE_ADMIN_TOKEN: "contract-admin", PUBLIC_ORIGIN: "http://localhost", HOST: "127.0.0.1", PORT: "0", OPEN_REGISTRATION: "true" },
@@ -179,7 +181,7 @@ contract({ name: "embedded PGlite", exclusions: ["external PostgreSQL process ad
 const postgresUrl = process.env.STASH_TEST_DATABASE_URL;
 contract({ name: "external PostgreSQL", skip: postgresUrl ? false : "STASH_TEST_DATABASE_URL is not configured",
   exclusions: ["single-process data-directory locking", "PGlite data-directory snapshots"], async open() {
-    const root = await mkdtemp(join(tmpdir(), "stash-contract-postgres-")); const schema = `contract_${randomUUID().replaceAll("-", "")}`;
+    const root = await temporaryTestDirectory("stash-contract-postgres-"); const schema = `contract_${randomUUID().replaceAll("-", "")}`;
     const administrator = new Pool({ connectionString: postgresUrl! }); await administrator.query(`CREATE SCHEMA ${schema}`);
     const scoped = new URL(postgresUrl!); scoped.searchParams.set("options", `-csearch_path=${schema}`); const databaseUrl = scoped.toString();
     const masterKey = key(); let database = new PostgresDatabase(databaseUrl, createAuthenticationSecretCodec(masterKey));

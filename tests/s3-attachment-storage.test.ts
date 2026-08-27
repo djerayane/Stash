@@ -1,5 +1,7 @@
+import { temporaryTestDirectory } from "./support/temporary-directory.js";
+
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
@@ -75,7 +77,7 @@ describe("S3-compatible Attachment storage", () => {
   });
 
   it("includes remote objects in coordinated backups and restores them with rollback on provider failure", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-s3-backup-"));
+    const root = await temporaryTestDirectory("stash-s3-backup-");
     try {
       const protocol = new S3ProtocolFake(); const storage = new S3AttachmentStorage({ bucket: "stash-attachments", client: protocol });
       const oldKey = "11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
@@ -99,7 +101,7 @@ describe("S3-compatible Attachment storage", () => {
   });
 
   it("marks a remote restore unsafe when applying and rolling back both fail", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-s3-unsafe-"));
+    const root = await temporaryTestDirectory("stash-s3-unsafe-");
     try {
       const protocol = new S3ProtocolFake(); const storage = new S3AttachmentStorage({ bucket: "stash-attachments", client: protocol });
       const oldKey = "11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
