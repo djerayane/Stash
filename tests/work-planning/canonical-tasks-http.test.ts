@@ -19,7 +19,7 @@ before(async () => {
     createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
   await store.database.createFirstOrganizationOwner({ organizationId: "62626262-6262-4262-8262-626262626262", organizationName: "Studio",
     ownerId, ownerName: "Ada", ownerEmail: "tasks-http@example.test", passwordHash: "test", role: "Owner" });
-  const workspace = await new WorkspaceProjectService(store.database).createWorkspace(ownerId, { name: "Notebook", owner: { type: "personal" } });
+  const workspace = await new WorkspaceProjectService(store.database.identityAccessRepositories()).createWorkspace(ownerId, { name: "Notebook", owner: { type: "personal" } });
   assert.equal(workspace.status, "created"); if (workspace.status !== "created") throw new Error("setup failed"); workspaceId = workspace.workspace.id;
   const access: MemberAccessResolver = { async authenticateBearer(header) { return header === "Bearer owner" ? { accountId: ownerId, sessionId: "session" } : undefined; } };
   instance = await startInstance({ database: store.database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin", memberAccess: access,

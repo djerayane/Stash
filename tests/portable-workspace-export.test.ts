@@ -202,7 +202,7 @@ describe("PostgreSQL readable export wiring", { skip: postgresUrl ? false : "STA
       const organizationId = "30303030-3030-4030-8030-303030303030";
       await database.createFirstOrganizationOwner({ organizationId, organizationName: "Lab", ownerId, ownerName: "Ada",
         ownerEmail: "ada@example.test", passwordHash: "test-only", role: "Owner" });
-      const workspaces = new WorkspaceProjectService(database);
+      const workspaces = new WorkspaceProjectService(database.identityAccessRepositories());
       const createdWorkspace = await workspaces.createWorkspace(ownerId, { name: "Portable", owner: { type: "organization", organizationId } });
       assert.equal(createdWorkspace.status, "created"); if (createdWorkspace.status !== "created") return;
       const firstProject = await workspaces.createProject(ownerId, createdWorkspace.workspace.id, { name: "Visible", key: "VIS" });

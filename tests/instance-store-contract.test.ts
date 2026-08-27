@@ -57,7 +57,7 @@ function contract(adapter: ContractAdapter): void {
           workspace: { id: randomUUID(), name: "Outsider Workspace" },
           session: { id: randomUUID(), accountId: outsiderId, tokenHash: "token-hash", createdAt, lastSeenAt: createdAt },
         }), true);
-        assert.equal((await database.createWorkspace({ id: workspaceId, name: "Shared", owner: { type: "organization", id: organizationId },
+        assert.equal((await database.identityAccessRepositories().createWorkspace({ id: workspaceId, name: "Shared", owner: { type: "organization", id: organizationId },
           createdByMemberId: ownerId }, { localAccountId: ownerId, displayName: "Owner" })).status, "created");
         const document = paragraphDocument("Parity note", randomUUID());
         const projection = { schema: "stash.note.v1" as const, id: noteId, workspaceId, content: "Parity note", tags: ["parity"],
@@ -67,8 +67,8 @@ function contract(adapter: ContractAdapter): void {
         assert.equal(await database.knowledgeAuthoringRepositories().createNote(outsiderId, { id: randomUUID(), workspaceId, content: "Denied", document, revision: 1,
           tags: [], createdByMemberId: outsiderId, createdAt }, { ...projection, id: randomUUID(), content: "Denied",
           createdBy: { localAccountId: outsiderId, displayName: "Outsider" } }), "workspace_forbidden");
-        assert.equal((await database.listAccessibleWorkspaces(ownerId)).some((workspace: { id: string }) => workspace.id === workspaceId), true);
-        assert.equal((await database.listAccessibleWorkspaces(outsiderId)).some((workspace: { id: string }) => workspace.id === workspaceId), false);
+        assert.equal((await database.identityAccessRepositories!().listAccessibleWorkspaces!(ownerId)).some((workspace: { id: string }) => workspace.id === workspaceId), true);
+        assert.equal((await database.identityAccessRepositories!().listAccessibleWorkspaces!(outsiderId)).some((workspace: { id: string }) => workspace.id === workspaceId), false);
         assert.equal((await database.knowledgeAuthoringRepositories().listNoteHistory(ownerId, noteId)).status, "found");
         assert.equal((await database.knowledgeAuthoringRepositories().listWorkspaceActivity(ownerId, workspaceId)).status, "found");
 
@@ -122,7 +122,7 @@ function contract(adapter: ContractAdapter): void {
         assert.equal((await harness.upgrade.inspect("0.1.0")).currentVersion, "0.1.0");
         await harness.database.createFirstOrganizationOwner({ organizationId, organizationName: "Backup parity", ownerId,
           ownerName: "Backup Owner", ownerEmail: `${ownerId}@example.test`, passwordHash: "backup-auth-hash", role: "Owner" });
-        await harness.database.createWorkspace({ id: workspaceId, name: "Backup Workspace", owner: { type: "organization", id: organizationId },
+        await harness.database.identityAccessRepositories().createWorkspace({ id: workspaceId, name: "Backup Workspace", owner: { type: "organization", id: organizationId },
           createdByMemberId: ownerId }, { localAccountId: ownerId, displayName: "Backup Owner" });
         const document = paragraphDocument("Restored parity note", randomUUID());
         await harness.database.knowledgeAuthoringRepositories().createNote(ownerId, { id: noteId, workspaceId, content: "Restored parity note", document, revision: 1,
@@ -145,7 +145,7 @@ function contract(adapter: ContractAdapter): void {
         assert.deepEqual(await harness.backup.restore(backupPath, harness.restoreTarget, { dryRun: false }), { status: "restored" });
         const restored = await harness.reopen();
         assert.equal((await restored.identityAccessRepositories().findAccountByEmail(`${ownerId}@example.test`))?.passwordHash, "backup-auth-hash");
-        assert.equal((await restored.listAccessibleWorkspaces(ownerId)).some((workspace: { id: string }) => workspace.id === workspaceId), true);
+        assert.equal((await restored.identityAccessRepositories!().listAccessibleWorkspaces!(ownerId)).some((workspace: { id: string }) => workspace.id === workspaceId), true);
         assert.equal((await restored.knowledgeAuthoringRepositories().listNoteHistory(ownerId, noteId)).status, "found");
         assert.equal((await restored.knowledgeAuthoringRepositories().loadNoteCollaboration(ownerId, noteId))?.sequence, 1);
         assert.equal((await restored.knowledgeAuthoringRepositories().searchWorkspace(ownerId, workspaceId, { q: "Restored" })).status, "found");

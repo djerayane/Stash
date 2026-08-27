@@ -21,7 +21,7 @@ describe("PostgreSQL Note Tree concurrency", { skip: databaseUrl ? false : "STAS
     const ownerId = randomUUID(); const organizationId = randomUUID();
     await database.createFirstOrganizationOwner({ organizationId, organizationName: "Tree concurrency", ownerId, ownerName: "Owner",
       ownerEmail: `${ownerId}@stash.test`, passwordHash: "test-only", role: "Owner" });
-    const workspace = await new WorkspaceProjectService(database).createWorkspace(ownerId,
+    const workspace = await new WorkspaceProjectService(database.identityAccessRepositories()).createWorkspace(ownerId,
       { name: "Tree", owner: { type: "organization", organizationId } });
     assert.equal(workspace.status, "created"); if (workspace.status !== "created") return;
     const service = new NoteTreeService(database.noteTreeRepository(), new EmptyCollectionImpactInspector());

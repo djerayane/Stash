@@ -22,7 +22,7 @@ describe("Collection HTTP capability", () => {
       createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
     await store.database.createFirstOrganizationOwner({ organizationId: "19191919-1919-4919-8919-191919191919", organizationName: "Studio",
       ownerId, ownerName: "Ada", ownerEmail: "collections-http@example.test", passwordHash: "test-only", role: "Owner" });
-    const workspace = await new WorkspaceProjectService(store.database).createWorkspace(ownerId, { name: "Notebook", owner: { type: "personal" } });
+    const workspace = await new WorkspaceProjectService(store.database.identityAccessRepositories()).createWorkspace(ownerId, { name: "Notebook", owner: { type: "personal" } });
     assert.equal(workspace.status, "created"); if (workspace.status !== "created") throw new Error("workspace setup failed"); workspaceId = workspace.workspace.id;
     const note = await new NoteTreeService(store.database.noteTreeRepository(), new EmptyCollectionImpactInspector())
       .create(ownerId, workspaceId, { title: "Research" });

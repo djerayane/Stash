@@ -17,7 +17,7 @@ test("keeps one canonical Workspace Task across optional Projects, keys, Workflo
     const ownerId = "11111111-1111-4111-8111-111111111111";
     await store.database.createFirstOrganizationOwner({ organizationId: "22222222-2222-4222-8222-222222222222",
       organizationName: "Studio", ownerId, ownerName: "Ada", ownerEmail: "ada@example.test", passwordHash: "test", role: "Owner" });
-    const workspaces = new WorkspaceProjectService(store.database);
+    const workspaces = new WorkspaceProjectService(store.database.identityAccessRepositories());
     const workspace = await workspaces.createWorkspace(ownerId, { name: "Notebook", owner: { type: "personal" } });
     assert.equal(workspace.status, "created"); if (workspace.status !== "created") return;
     const alpha = await workspaces.createProject(ownerId, workspace.workspace.id, { name: "Alpha", key: "ALP" });

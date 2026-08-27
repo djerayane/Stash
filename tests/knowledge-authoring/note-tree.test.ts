@@ -40,7 +40,7 @@ describe("Note Tree", () => {
       role: "Owner",
     });
     await store.upgradeDatabase.query("INSERT INTO stash_accounts(id,name,email,password_hash) VALUES($1,'Grace Guest','grace@example.test','test-only')", [guestId]);
-    const workspace = await new WorkspaceProjectService(store.database).createWorkspace(ownerId, {
+    const workspace = await new WorkspaceProjectService(store.database.identityAccessRepositories()).createWorkspace(ownerId, {
       name: "Research",
       owner: { type: "organization", organizationId },
     });
@@ -116,7 +116,7 @@ describe("Note Tree", () => {
   });
 
   test("move previews inherit Project membership while ordinary links change neither containment nor access", async () => {
-    const projects = new WorkspaceProjectService(store.database);
+    const projects = new WorkspaceProjectService(store.database.identityAccessRepositories());
     const project = await projects.createProject(ownerId, workspaceId, { name: "Launch", key: "LAUNCH" });
     const strategy = await projects.createProject(ownerId, workspaceId, { name: "Strategy", key: "STRATEGY" });
     const review = await projects.createProject(ownerId, workspaceId, { name: "Review", key: "REVIEW" });

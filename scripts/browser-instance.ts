@@ -468,7 +468,7 @@ async function startFirstRunInstance() {
   const notes = new NoteService(database.knowledgeAuthoringRepositories());
   const workPlanning = database.workPlanningRepositories();
   const tasks = new TaskService(workPlanning, database.identityAccessRepositories());
-  const projects = new WorkspaceProjectService(database);
+  const projects = new WorkspaceProjectService(database.identityAccessRepositories());
   const attachments = new LocalAttachmentStorage(firstRunStore.paths.attachments);
   return startInstance({ database, host: "0.0.0.0", port: Number.parseInt(process.env.STASH_BROWSER_FIRST_RUN_PORT ?? "4174", 10),
     instanceAdminToken: "first-run-admin",
@@ -514,7 +514,7 @@ await roleStore.upgradeDatabase.query("INSERT INTO stash_organization_membership
 const roleAuth = new PasswordAuthService(roleStore.database.identityAccessRepositories());
 const roleWorkPlanning = roleStore.database.workPlanningRepositories();
 const roleTasks = new TaskService(roleWorkPlanning, roleStore.database.identityAccessRepositories());
-const roleProjects = new WorkspaceProjectService(roleStore.database);
+const roleProjects = new WorkspaceProjectService(roleStore.database.identityAccessRepositories());
 const roleService = new OrganizationRoleService(roleStore.database);
 const completedRoleSetup = new InstanceSetupService(roleStore.database.instanceSetupRepository(), { boundHost: "127.0.0.1", output() {} });
 const roleInstance = await startInstance({ database: roleStore.database, host: "127.0.0.1", port: Number.parseInt(process.env.STASH_BROWSER_ROLE_PORT ?? "4175", 10),

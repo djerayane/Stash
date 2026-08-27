@@ -239,7 +239,7 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
           workspace: { id: randomUUID(), name: `${name} Workspace` }, session: { id: randomUUID(), accountId: id,
             tokenHash: `${name}-migration-session`, createdAt: "2026-08-24T09:00:00.000Z", lastSeenAt: "2026-08-24T09:00:00.000Z" } });
       }
-      const invitations = new InvitationService(source.database);
+      const invitations = new InvitationService(source.database.identityAccessRepositories());
       for (const [id, role] of [[adminId, "Admin"], [memberId, "Member"]] as const) {
         const invitation = await invitations.create(organizationId, ownerId, { kind: "member", role }); assert.equal(invitation.status, "created");
         if (invitation.status === "created") assert.equal((await invitations.accept(id, { token: invitation.token }) as { status: string }).status, "accepted");
@@ -262,7 +262,7 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
         .import(importId, ownerId, portable.archive)).status, "imported");
       assert.equal((await source.database.listPendingImportedIdentities(ownerId))[0]?.sourceAccountId, importedAccountId);
       const workspaceId = randomUUID(); const noteId = randomUUID();
-      await source.database.createWorkspace({ id: workspaceId, name: "Migrated Workspace", owner: { type: "organization", id: organizationId }, createdByMemberId: ownerId },
+      await source.database.identityAccessRepositories().createWorkspace({ id: workspaceId, name: "Migrated Workspace", owner: { type: "organization", id: organizationId }, createdByMemberId: ownerId },
         { localAccountId: ownerId, displayName: "Ada" });
       const document = paragraphDocument("Migrated history", randomUUID());
       await source.database.knowledgeAuthoringRepositories().createNote(ownerId, { id: noteId, workspaceId, content: "Migrated history", document, revision: 1,
@@ -503,7 +503,7 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
         const organizationId = randomUUID(); const ownerId = randomUUID(); const workspaceId = randomUUID();
         await source.database.verifyConnection(); await source.database.prepareInstanceStore(); await source.database.createFirstOrganizationOwner({ organizationId,
           organizationName: "CLI", ownerId, ownerName: "CLI Owner", ownerEmail: `${mode}@example.test`, passwordHash: "cli-password", role: "Owner" });
-        await source.database.createWorkspace({ id: workspaceId, name: "CLI Workspace", owner: { type: "organization", id: organizationId }, createdByMemberId: ownerId },
+        await source.database.identityAccessRepositories().createWorkspace({ id: workspaceId, name: "CLI Workspace", owner: { type: "organization", id: organizationId }, createdByMemberId: ownerId },
           { localAccountId: ownerId, displayName: "CLI Owner" });
         const portable = await new PortableWorkspaceExportService(source.database.knowledgeAuthoringRepositories(), new LocalAttachmentStorage(source.paths.attachments)).export(ownerId, workspaceId);
         assert.equal(portable.status, "exported"); if (portable.status === "exported") for (const secret of [sourceKey, destinationKey])

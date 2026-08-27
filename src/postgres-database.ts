@@ -242,6 +242,10 @@ export class PostgresDatabase implements DatabaseProbe {
         owner: { type: "personal", identity: { localAccountId: record.account.id, displayName: record.account.name } },
         createdBy: { localAccountId: record.account.id, displayName: record.account.name },
       }),
+      recordProjection: (client, kind, id, schema, payload) => this.#recordPortableProjection(client, kind, id, schema, payload),
+      authorizeProject: (client, memberId, workspaceId) => this.#projectPermissionRepository.authorize(client, memberId, workspaceId),
+      ensureDefaultWorkflow: (client, projectId) => this.#workPlanningAdapter.ensureDefaultWorkflow(client, projectId),
+      findPortableMemberIdentity: (memberId) => this.#knowledgeAuthoringAdapter.findPortableMemberIdentity(memberId),
     });
     this.#projectlessTaskRepository = new PostgresProjectlessTaskRepository(this.#kernel,
       (client) => this.#instanceSetupRepository.prepare(client));
@@ -304,7 +308,11 @@ export class PostgresDatabase implements DatabaseProbe {
         this.#recordAgentExecutionAudit(client, memberId, note.workspaceId, "agent_note_created", note.id, cause),
     });
     this.#workPlanningAdapter = new PostgresWorkPlanningRepositories(this.#kernel, {
-      prepare: async (client) => { await this.#ensureNoteSchema(client); await this.#ensureInvitationSchema(client); },
+      prepare: async (client) => {
+        await this.#ensureNoteSchema(client);
+        await this.#canonicalTaskRepository.prepare(client);
+        await this.#ensureInvitationSchema(client);
+      },
       recordProjection: (client, task) => this.#recordPortableProjection(client, "Task", task.id, task.schema, task),
       recordWorkflowProjection: (client, workflow) => this.#recordPortableProjection(client, "Workflow", workflow.projectId, workflow.schema, workflow),
       recordBoardProjection: (client, board) => this.#recordPortableProjection(client, "Board", board.id, board.schema, board),
@@ -388,11 +396,6 @@ export class PostgresDatabase implements DatabaseProbe {
 
   identityAccessRepositories(): IdentityAccessPostgresRepositories {
     return Object.assign(this.#identityAccessAdapter, {
-      findMemberLocalizationPreferences: this.findMemberLocalizationPreferences.bind(this),
-      saveMemberLocalizationPreferences: this.saveMemberLocalizationPreferences.bind(this),
-      createWorkspace: this.createWorkspace.bind(this), listAccessibleWorkspaces: this.listAccessibleWorkspaces.bind(this),
-      canCreateProject: this.canCreateProject.bind(this), createProject: this.createProject.bind(this),
-      findPortableMemberIdentity: this.#knowledgeAuthoringAdapter.findPortableMemberIdentity.bind(this.#knowledgeAuthoringAdapter),
       findOidcIdentity: this.findOidcIdentity.bind(this), findOidcConfiguration: this.findOidcConfiguration.bind(this),
       organizationRole: this.organizationRole.bind(this), saveOidcConfiguration: this.saveOidcConfiguration.bind(this),
       linkOidcIdentity: this.linkOidcIdentity.bind(this),
@@ -401,7 +404,6 @@ export class PostgresDatabase implements DatabaseProbe {
       updateCustomRole: this.updateCustomRole.bind(this), assignCustomRole: this.assignCustomRole.bind(this),
       revokeCustomRole: this.revokeCustomRole.bind(this),
       createInvitation: this.createInvitation.bind(this), acceptInvitation: this.acceptInvitation.bind(this),
-      readProject: this.readProject.bind(this), canWriteProject: this.canWriteProject.bind(this),
       savePasskey: this.savePasskey.bind(this), findPasskey: this.findPasskey.bind(this),
       updatePasskeyCounterAndCreateSession: this.updatePasskeyCounterAndCreateSession.bind(this),
       replaceRecoveryCodes: this.replaceRecoveryCodes.bind(this),
@@ -444,7 +446,6 @@ export class PostgresDatabase implements DatabaseProbe {
       await this.#ensureAuthSchema(client); await this.#ensureOidcSchema(client); await this.#ensureRecoverySchema(client);
       await this.#ensureRepositoryConnectionSchema(client); await this.#ensureGitHubSignalSchema(client); await this.#ensureNotificationSchema(client);
       await this.#ensureMemberLocalizationSchema(client);
-      await this.#workPlanningAdapter.prepareAutomations(client);
       await this.#ensureNoteSchema(client); await this.#noteTreeRepository.prepare(client);
       await this.#workPlanningAdapter.prepareBoards(client); await this.#ensureAttachmentSchema(client);
       await this.#knowledgeAuthoringAdapter.prepareDiscussions(client); await this.#ensureInvitationSchema(client); await this.#ensurePortableProjectionSchema(client);
@@ -452,6 +453,7 @@ export class PostgresDatabase implements DatabaseProbe {
       await this.#knowledgeAuthoringAdapter.prepareCollaboration(client);
       await this.#instanceSetupRepository.prepare(client);
       await this.#canonicalTaskRepository.prepare(client);
+      await this.#workPlanningAdapter.prepareAutomations(client);
       await this.#tutorialContributionRepository.prepare(client);
       await this.#organizationRoleRepository.prepare(client);
     };
@@ -517,155 +519,6 @@ export class PostgresDatabase implements DatabaseProbe {
   /** Compatibility surface for capability callers not yet migrated off the universal store. */
   async findPortableMemberIdentity(memberId: string): Promise<PortableIdentity | undefined> {
     return this.#knowledgeAuthoringAdapter.findPortableMemberIdentity(memberId);
-  }
-
-  async findMemberLocalizationPreferences(memberId: string): Promise<MemberLocalizationPreferences | undefined> {
-    await this.#ensureMemberLocalizationSchema();
-    const result = await this.#kernel.query<MemberLocalizationRow>(
-      `SELECT locale, time_zone, date_format, week_starts_on, updated_at
-       FROM stash_member_localization_preferences WHERE account_id = $1`,
-      [memberId],
-    );
-    const row = result.rows[0];
-    return row ? {
-      locale: row.locale,
-      timeZone: row.time_zone,
-      dateFormat: row.date_format,
-      weekStartsOn: row.week_starts_on,
-      updatedAt: new Date(row.updated_at).toISOString(),
-    } : undefined;
-  }
-
-  async saveMemberLocalizationPreferences(memberId: string, preferences: MemberLocalizationPreferences): Promise<void> {
-    await this.#ensureMemberLocalizationSchema();
-    await this.#kernel.query(
-      `INSERT INTO stash_member_localization_preferences
-         (account_id, locale, time_zone, date_format, week_starts_on, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (account_id) DO UPDATE SET
-         locale = EXCLUDED.locale,
-         time_zone = EXCLUDED.time_zone,
-         date_format = EXCLUDED.date_format,
-         week_starts_on = EXCLUDED.week_starts_on,
-         updated_at = EXCLUDED.updated_at`,
-      [memberId, preferences.locale, preferences.timeZone, preferences.dateFormat, preferences.weekStartsOn, preferences.updatedAt],
-    );
-  }
-
-  async createWorkspace(
-    record: WorkspaceRecord,
-    createdBy: PortableIdentity,
-  ): Promise<
-    | { status: "created"; projection: PortableWorkspaceProjection }
-    | { status: "organization_forbidden" }
-  > {
-    return this.#withTransaction(async (client) => {
-      await this.#ensureWorkspaceProjectSchema(client);
-      let owner: PortableWorkspaceProjection["owner"];
-      if (record.owner.type === "organization") {
-        const authorizedOrganization = await client.query<{ id: string; name: string }>(
-          `SELECT organization.id, organization.name
-           FROM stash_organization_memberships membership
-           JOIN stash_organizations organization ON organization.id = membership.organization_id
-           WHERE membership.organization_id = $1 AND membership.account_id = $2`,
-          [record.owner.id, record.createdByMemberId],
-        );
-        const organization = authorizedOrganization.rows[0];
-        if (!organization) return { status: "organization_forbidden" };
-        owner = {
-          type: "organization",
-          identity: {
-            localOrganizationId: organization.id,
-            displayName: organization.name,
-          },
-        };
-      } else {
-        owner = { type: "personal", identity: createdBy };
-      }
-      const projection: PortableWorkspaceProjection = {
-        schema: "stash.workspace.v1",
-        id: record.id,
-        name: record.name,
-        owner,
-        createdBy,
-      };
-      await client.query(
-        `INSERT INTO stash_workspaces
-          (id, name, owner_type, personal_owner_id, organization_owner_id, created_by_account_id)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [
-          record.id,
-          record.name,
-          record.owner.type,
-          record.owner.type === "personal" ? record.owner.id : null,
-          record.owner.type === "organization" ? record.owner.id : null,
-          record.createdByMemberId,
-        ],
-      );
-      await this.#recordPortableProjection(
-        client,
-        "Workspace",
-        record.id,
-        "stash.workspace.v1",
-        projection,
-      );
-      return { status: "created", projection };
-    });
-  }
-
-  async listAccessibleWorkspaces(memberId: string) {
-    return this.#kernel.withSession(async (client) => {
-      await this.#ensureWorkspaceProjectSchema(client);
-      const result = await client.query<{ workspace_id: string; workspace_name: string; owner_type: "personal" | "organization"; project_id: string | null; project_name: string | null; project_key: string | null }>(`
-        SELECT workspace.id AS workspace_id, workspace.name AS workspace_name, workspace.owner_type,
-          project.id AS project_id, project.name AS project_name, project.project_key
-        FROM stash_workspaces workspace
-        LEFT JOIN stash_projects project ON project.workspace_id=workspace.id AND (
-          (workspace.owner_type='personal' AND workspace.personal_owner_id=$1)
-          OR (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$1))
-          OR EXISTS (SELECT 1 FROM stash_project_guests guest WHERE guest.project_id=project.id AND guest.account_id=$1))
-        WHERE (workspace.owner_type='personal' AND workspace.personal_owner_id=$1)
-          OR (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$1))
-          OR EXISTS (SELECT 1 FROM stash_projects visible JOIN stash_project_guests guest ON guest.project_id=visible.id WHERE visible.workspace_id=workspace.id AND guest.account_id=$1)
-        ORDER BY workspace.name, project.name`, [memberId]);
-      const workspaces = new Map<string, { id: string; name: string; ownerType: "personal" | "organization"; projects: Array<{ id: string; name: string; key: string }> }>();
-      for (const row of result.rows) { const workspace = workspaces.get(row.workspace_id) ?? { id: row.workspace_id, name: row.workspace_name, ownerType: row.owner_type, projects: [] }; if (row.project_id) workspace.projects.push({ id: row.project_id, name: row.project_name!, key: row.project_key! }); workspaces.set(row.workspace_id, workspace); }
-      return [...workspaces.values()];
-    });
-  }
-
-  async canCreateProject(memberId: string, workspaceId: string): Promise<boolean> {
-    return this.#projectPermissionRepository.canCreateProject(memberId, workspaceId);
-  }
-
-  async createProject(
-    memberId: string,
-    record: WorkspaceProjectRecord,
-    projection: PortableProjectProjection,
-  ): Promise<"created" | "workspace_forbidden" | "workspace_not_found" | "key_conflict"> {
-    return this.#withTransaction(async (client) => {
-      await this.#ensureNoteSchema(client);
-      const access = await this.#projectPermissionRepository.authorize(client, memberId, record.workspaceId);
-      if (!access.found) return "workspace_not_found";
-      if (!access.allowed) return "workspace_forbidden";
-      const inserted = await client.query(
-        `INSERT INTO stash_projects (id, workspace_id, name, project_key, created_by_account_id)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (workspace_id, project_key) DO NOTHING
-         RETURNING id`,
-        [record.id, record.workspaceId, record.name, record.key, record.createdByMemberId],
-      );
-      if (!inserted.rowCount) return "key_conflict";
-      await this.#recordPortableProjection(
-        client,
-        "Project",
-        record.id,
-        "stash.project.v1",
-        projection,
-      );
-      await this.#workPlanningAdapter.ensureDefaultWorkflow(client, record.id);
-      return "created";
-    });
   }
 
   async close(): Promise<void> {
@@ -948,36 +801,6 @@ export class PostgresDatabase implements DatabaseProbe {
       await this.#recordPortableProjection(client, "GuestProjectAccess", invitation.id, projection.schema, projection);
       await client.query("UPDATE stash_invitations SET accepted_at = $2, accepted_by_account_id = $3, token_lookup = NULL, token_secret = NULL WHERE id = $1", [invitation.id, acceptedAt, accountId]);
       return { status: "accepted", access: { kind: "guest", organizationId: invitation.organization_id, projectIds: projects.rows.map(({ project_id }) => project_id) } };
-    });
-  }
-
-  async readProject(accountId: string, projectId: string): Promise<ProjectAccessSummary | undefined> {
-    return this.#kernel.withSession(async (client) => {
-      await this.#ensureInvitationSchema(client);
-      const result = await client.query<{ id: string; organization_id: string; name: string; project_key: string; creator_id: string; creator_name: string }>(
-        `SELECT project.id, workspace.organization_owner_id AS organization_id, project.name, project.project_key,
-                creator.id AS creator_id, creator.name AS creator_name
-         FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
-         JOIN stash_accounts creator ON creator.id = project.created_by_account_id
-         WHERE project.id = $1 AND (
-           EXISTS (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)
-           OR EXISTS (SELECT 1 FROM stash_project_guests guest WHERE guest.project_id = project.id AND guest.account_id = $2)
-         )`, [projectId, accountId],
-      );
-      const row = result.rows[0];
-      return row ? { id: row.id, organizationId: row.organization_id, name: row.name, key: row.project_key, createdBy: { localAccountId: row.creator_id, displayName: row.creator_name } } : undefined;
-    });
-  }
-
-  async canWriteProject(accountId: string, projectId: string): Promise<boolean> {
-    return this.#kernel.withSession(async (client) => {
-      await this.#ensureInvitationSchema(client);
-      const result = await client.query(
-        `SELECT 1 FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
-         JOIN stash_organization_memberships membership ON membership.organization_id = workspace.organization_owner_id
-         WHERE project.id = $1 AND membership.account_id = $2`, [projectId, accountId],
-      );
-      return result.rowCount === 1;
     });
   }
 

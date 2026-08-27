@@ -19,7 +19,7 @@ test("development adapters resolve canonical active keys and aliases and automat
     const ownerId="11111111-1111-4111-8111-111111111111", organizationId="22222222-2222-4222-8222-222222222222";
     await store.database.createFirstOrganizationOwner({organizationId,organizationName:"Studio",ownerId,ownerName:"Ada",
       ownerEmail:"ada@example.test",passwordHash:"test",role:"Owner"});
-    const workspaces=new WorkspaceProjectService(store.database);
+    const workspaces=new WorkspaceProjectService(store.database.identityAccessRepositories());
     const workspace=await workspaces.createWorkspace(ownerId,{name:"Work",owner:{type:"organization",organizationId}});
     assert.equal(workspace.status,"created"); if(workspace.status!=="created")return;
     const alpha=await workspaces.createProject(ownerId,workspace.workspace.id,{name:"Alpha",key:"ALP"});

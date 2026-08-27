@@ -171,7 +171,7 @@ describe("relationship query contracts", () => {
       await store.database.createFirstOrganizationOwner({ organizationId, organizationName: "Studio", ownerId,
         ownerName: "Ada", ownerEmail: "ada@example.test", passwordHash: "test-only", role: "Owner" });
       await store.upgradeDatabase.query("INSERT INTO stash_accounts(id,name,email,password_hash) VALUES($1,'Guest','guest@example.test','test-only')", [guestId]);
-      const workspaces = new WorkspaceProjectService(store.database);
+      const workspaces = new WorkspaceProjectService(store.database.identityAccessRepositories());
       const createdWorkspace = await workspaces.createWorkspace(ownerId, { name: "Notebook", owner: { type: "organization", organizationId } });
       assert.equal(createdWorkspace.status, "created");
       if (createdWorkspace.status !== "created") return;
