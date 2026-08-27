@@ -6,7 +6,7 @@ import { Pool } from "pg";
 import { createAuthenticationSecretCodec } from "../src/authentication-secrets.js";
 import { AutomationService } from "../src/automations.js";
 import { GitHubSignalService } from "../src/github-signals.js";
-import { startInstance, type RunningInstance } from "../src/instance.js";
+import { startInstance, type RunningInstance } from "./support/start-test-instance.js";
 import { NoteService } from "../src/notes.js";
 import { PostgresDatabase } from "../src/postgres-database.js";
 import { RepositoryConnectionService, type GitHubApp } from "../src/repository-connections.js";
@@ -45,7 +45,7 @@ describe("PostgreSQL GitHub Signal acceptance", { skip: databaseUrl ? false : "S
       await automations.enable(ownerId, project.project.id, { trigger: "branch_created", targetStatusId: target.rows[0]!.id });
       await automations.enable(configuringMemberId, project.project.id, { trigger: "branch_created", targetStatusId: target.rows[0]!.id });
       const github: GitHubApp = { async inspectRepository(input) { return { installationId: input.installationId, repositoryId: "987", repositoryUrl: "https://github.com/acme/stash" }; }, async verifyRepository() {} };
-      const connections = new RepositoryConnectionService(database, github);
+      const connections = new RepositoryConnectionService(database.developmentIntegrationRepositories(), github);
       const connection = await connections.connect(ownerId, organizationId, { installationId: 42, owner: "acme", name: "stash" });
       assert.equal(await connections.attachToProject(ownerId, organizationId, connection.connection.id, project.project.id), "attached");
       await sql.query(`CREATE FUNCTION reject_automation_status_update() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
@@ -54,7 +54,7 @@ describe("PostgreSQL GitHub Signal acceptance", { skip: databaseUrl ? false : "S
         WHEN (OLD.workflow_status_id IS DISTINCT FROM NEW.workflow_status_id) EXECUTE FUNCTION reject_automation_status_update()`);
       const secret = "postgres-automation-failure-secret";
       instance = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin",
-        githubSignals: new GitHubSignalService(database, secret, automations), automations, notifications,
+        githubSignals: new GitHubSignalService(database.developmentIntegrationRepositories(), secret, automations), automations, notifications,
         memberAccess: { async authenticateBearer(value) { return value === "Bearer configurer" ? { accountId: configuringMemberId, sessionId: "configurer" } : undefined; } } });
       await database.listNotifications(configuringMemberId);
       await sql.query(`CREATE FUNCTION reject_first_automation_notification() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
@@ -128,7 +128,7 @@ describe("PostgreSQL GitHub Signal acceptance", { skip: databaseUrl ? false : "S
       }
       const alpha = await projectTask(ownerA, orgA, "Alpha project"); const beta = await projectTask(ownerB, orgB, "Beta project");
       const github: GitHubApp = { async inspectRepository(input) { return { installationId: input.installationId, repositoryId: "987", repositoryUrl: "https://github.com/acme/stash" }; }, async verifyRepository() {} };
-      const connections = new RepositoryConnectionService(database, github);
+      const connections = new RepositoryConnectionService(database.developmentIntegrationRepositories(), github);
       let departedConnectionId = "";
       for (const setup of [{ owner: ownerA, org: orgA, installationId: 42, projectId: alpha.projectId, ownership: "personal" as const },
         { owner: ownerB, org: orgB, installationId: 42, projectId: beta.projectId, ownership: "organization" as const }]) {
@@ -148,7 +148,7 @@ describe("PostgreSQL GitHub Signal acceptance", { skip: databaseUrl ? false : "S
       const recipe = await automations.enable(currentOwnerA, alpha.projectId, { trigger: "branch_created",
         targetStatusId: targetStatus.rows[0]!.id });
       assert.equal(recipe.trigger, "branch_created");
-      const secret = "postgres-github-signal-secret"; const signals = new GitHubSignalService(database, secret, automations);
+      const secret = "postgres-github-signal-secret"; const signals = new GitHubSignalService(database.developmentIntegrationRepositories(), secret, automations);
       instance = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin", githubSignals: signals,
         memberAccess: { async authenticateBearer(value) { return value === "Bearer alpha" ? { accountId: currentOwnerA, sessionId: "alpha" }
           : value === "Bearer beta" ? { accountId: ownerB, sessionId: "beta" } : undefined; } } });

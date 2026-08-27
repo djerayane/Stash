@@ -23,7 +23,7 @@ import type {
   WorkspaceRecord,
 } from "./workspaces-projects.js";
 import type { MemberLocalizationPreferences, MemberLocalizationRepository } from "./member-localization.js";
-import type { PortableRepositoryConnectionProjection, RepositoryConnectionRecord, RepositoryConnectionRepository } from "./repository-connections.js";
+import type { PortableRepositoryConnectionProjection, RepositoryConnectionRecord } from "./repository-connections.js";
 import { taskEditDigest, type CreateTaskFromBlockDraft, type CreateTaskFromBlockOutcome, type CreateWorkspaceTaskFromBlockOutcome, type LinkedTaskReadModel, type StructuredTaskEditRepository, type TaskEditBatch, type TaskEditConflict, type TaskFromBlockRepository, type TaskMoveActivity, type TaskMoveRepository, type TaskPlanningReadModel, type TaskPlanningRepository, type TaskPlanningUpdate, type TaskSourceBlockReference } from "./tasks.js";
 import type { AttachmentRecord, AttachmentRepository, PortableAttachmentProjection } from "./attachments.js";
 import type { MobileCaptureRepository } from "./mobile-captures.js";
@@ -35,7 +35,7 @@ import type { Board, BoardRepository, BoardTask } from "./boards.js";
 import type { NoteLinkRecord, NoteLinkRepository, NoteLocationRecord, PortableNoteLinkStateProjection, PortableNoteLocationProjection } from "./note-links.js";
 import type { ActivityCause, ActivityRecord, ActivityRepository, NoteHistoryRevision } from "./activity.js";
 import type { DevelopmentArtifact, GitHubArtifactRepository } from "./github-artifacts.js";
-import type { GitHubSignal, GitHubSignalRepository, SignalCandidate } from "./github-signals.js";
+import type { GitHubSignal } from "./github-signals.js";
 import { assignmentNotificationInputs, directMentionMemberIds, directMentionNotificationInputs, notificationDeliveryMode, requestedReviewNotificationInput, type NotificationDelivery, type NotificationPreferences, type NotificationRepository } from "./notifications.js";
 import type { AutomationCandidate, AutomationFailureNotification, AutomationRecipe, AutomationRepository, AutomationState, AutomationTransition, AutomationTrigger } from "./automations.js";
 import * as Y from "yjs";
@@ -66,6 +66,10 @@ import type { ProjectlessTaskRepository } from "./work-planning/projectless-task
 import type { CanonicalTaskRepository } from "./work-planning/canonical-tasks.js";
 import { PostgresCanonicalTaskRepository } from "./work-planning/postgres-canonical-task-repository.js";
 import {
+  PostgresDevelopmentIntegrationRepositories,
+  type DevelopmentIntegrationPostgresRepositories,
+} from "./development-integration/postgres-development-integration-repositories.js";
+import {
   PostgresKernel,
   type PostgresKernelOptions,
   type PostgresQueryable,
@@ -84,21 +88,7 @@ export type KnowledgeAuthoringPostgresRepositories = NoteRepository & NoteCollab
 export type WorkPlanningPostgresRepositories = TaskFromBlockRepository & TaskPlanningRepository
   & StructuredTaskEditRepository & TaskMoveRepository & ProjectWorkflowRepository & BoardRepository
   & NotificationRepository & AutomationRepository;
-export type DevelopmentIntegrationPostgresRepositories = RepositoryConnectionRepository
-  & GitHubArtifactRepository & GitHubSignalRepository;
-
-class FocusedPostgresCapabilityAdapter<T extends object> {
-  readonly port: T;
-
-  constructor(kernel: object) {
-    this.port = new Proxy({} as T, {
-      get(_target, property) {
-        const value = Reflect.get(kernel, property, kernel) as unknown;
-        return typeof value === "function" ? value.bind(kernel) : value;
-      },
-    });
-  }
-}
+export type { DevelopmentIntegrationPostgresRepositories } from "./development-integration/postgres-development-integration-repositories.js";
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
@@ -271,10 +261,10 @@ export class PostgresDatabase implements DatabaseProbe {
   readonly #visualizationBlockRepository: PostgresVisualizationBlockRepository;
   readonly #portableProjectionContributors: readonly PostgresPortableProjectionContributor[];
   readonly #authenticationSecrets: AuthenticationSecretCodec;
-  readonly #identityAccessAdapter = new FocusedPostgresCapabilityAdapter<IdentityAccessPostgresRepositories>(this);
-  readonly #knowledgeAuthoringAdapter = new FocusedPostgresCapabilityAdapter<KnowledgeAuthoringPostgresRepositories>(this);
-  readonly #workPlanningAdapter = new FocusedPostgresCapabilityAdapter<WorkPlanningPostgresRepositories>(this);
-  readonly #developmentIntegrationAdapter = new FocusedPostgresCapabilityAdapter<DevelopmentIntegrationPostgresRepositories>(this);
+  readonly #identityAccessAdapter = this as IdentityAccessPostgresRepositories;
+  readonly #knowledgeAuthoringAdapter = this as KnowledgeAuthoringPostgresRepositories;
+  readonly #workPlanningAdapter = this as WorkPlanningPostgresRepositories;
+  readonly #developmentIntegrationAdapter: PostgresDevelopmentIntegrationRepositories;
 
   constructor(connectionString: string, authenticationSecrets: AuthenticationSecretCodec, options: PostgresDatabaseOptions = {}) {
     this.#kernel = new PostgresKernel(connectionString, options);
@@ -308,6 +298,22 @@ export class PostgresDatabase implements DatabaseProbe {
     this.#visualizationBlockRepository = new PostgresVisualizationBlockRepository(this.#kernel,
       (client) => this.#noteTreeRepository.prepare(client));
     this.#portableProjectionContributors = [this.#visualizationBlockRepository];
+    this.#developmentIntegrationAdapter = new PostgresDevelopmentIntegrationRepositories(this.#kernel, {
+      organizationRole: (organizationId, accountId) => this.organizationRole(organizationId, accountId),
+      prepareConnections: (client) => this.#ensureRepositoryConnectionSchema(client),
+      lockedMemberships: (client, organizationId) => this.#lockedOrganizationMemberships(client, organizationId),
+      recordConnectionProjection: (client, record, revision) => this.#recordRepositoryConnectionProjection(client, record, revision),
+      prepareSignals: (client) => this.#ensureGitHubSignalSchema(client),
+      resolveTask: async (memberId, projectId, taskKey) => {
+        const result = await this.findTaskByKey(memberId, projectId, taskKey);
+        return result.status === "found" ? { status: "found", task: { id: result.task.id, key: result.task.key,
+          title: result.task.title, ...(result.task.developmentLinks ? { developmentLinks: result.task.developmentLinks } : {}) } }
+          : { status: result.status };
+      },
+      linkArtifact: (memberId, projectId, taskKey, artifact) => this.#linkDevelopmentArtifact(memberId, projectId, taskKey, artifact),
+      linkSignalArtifact: (client, taskId, signal, confirmingMemberId, organizationId) =>
+        this.#linkSignalArtifact(client, taskId, signal, confirmingMemberId, organizationId),
+    });
   }
 
   noteTreeRepository(): NoteTreeRepository {
@@ -343,19 +349,19 @@ export class PostgresDatabase implements DatabaseProbe {
   }
 
   identityAccessRepositories(): IdentityAccessPostgresRepositories {
-    return this.#identityAccessAdapter.port;
+    return this.#identityAccessAdapter;
   }
 
   knowledgeAuthoringRepositories(): KnowledgeAuthoringPostgresRepositories {
-    return this.#knowledgeAuthoringAdapter.port;
+    return this.#knowledgeAuthoringAdapter;
   }
 
   workPlanningRepositories(): WorkPlanningPostgresRepositories {
-    return this.#workPlanningAdapter.port;
+    return this.#workPlanningAdapter;
   }
 
   developmentIntegrationRepositories(): DevelopmentIntegrationPostgresRepositories {
-    return this.#developmentIntegrationAdapter.port;
+    return this.#developmentIntegrationAdapter;
   }
 
   async verifyConnection(): Promise<void> {
@@ -2682,93 +2688,7 @@ export class PostgresDatabase implements DatabaseProbe {
     return result.rows[0]?.role;
   }
 
-  async findRepositoryConnectionById(organizationId: string, connectionId: string): Promise<RepositoryConnectionRecord | undefined> {
-    await this.#ensureRepositoryConnectionSchema();
-    const result = await this.#kernel.query<RepositoryConnectionRow>(
-      `${repositoryConnectionSelect} WHERE organization_id = $1 AND connection.id = $2`,
-      [organizationId, connectionId],
-    );
-    return result.rows[0] ? repositoryConnectionRecord(result.rows[0]) : undefined;
-  }
-
-  async createRepositoryConnection(actorId: string, record: RepositoryConnectionRecord) {
-    await this.#ensureRepositoryConnectionSchema();
-    return this.#withTransaction(async (client) => {
-      const memberships = await this.#lockedOrganizationMemberships(client, record.organizationId);
-      if (!this.#canManageRepositoryConnections(memberships, actorId)) return { status: "forbidden" as const };
-      const existing = await client.query<RepositoryConnectionRow>(`${repositoryConnectionSelect} WHERE organization_id = $1 AND repository_id = $2 FOR UPDATE`, [record.organizationId, record.repositoryId]);
-      if (existing.rows[0]) return { status: "existing" as const, record: repositoryConnectionRecord(existing.rows[0]) };
-      await client.query(`INSERT INTO stash_repository_connections (id, organization_id, provider, installation_id, repository_id, repository_url, created_by_account_id, created_by_attribution, ownership, state) VALUES ($1,$2,$3,$4,$5,$6,$7,'recorded',$8,'active')`, [record.id, record.organizationId, record.provider, record.installationId, record.repositoryId, record.repositoryUrl, actorId, record.ownership ?? "organization"]);
-      await this.#recordRepositoryConnectionProjection(client, record, 1);
-      return { status: "created" as const, record };
-    });
-  }
-
-  async listRepositoryConnections(organizationId: string): Promise<RepositoryConnectionRecord[]> {
-    await this.#ensureRepositoryConnectionSchema();
-    const result = await this.#kernel.query<RepositoryConnectionRow>(
-      `${repositoryConnectionSelect} WHERE organization_id = $1 ORDER BY repository_url, id`,
-      [organizationId],
-    );
-    return result.rows.map(repositoryConnectionRecord);
-  }
-
-  async replaceDegradedRepositoryConnection(actorId: string, organizationId: string, connectionId: string,
-    replacement: import("./repository-connections.js").GitHubRepositoryIdentity) {
-    await this.#ensureRepositoryConnectionSchema();
-    return this.#withTransaction(async (client) => {
-      const memberships = await this.#lockedOrganizationMemberships(client, organizationId);
-      if (!this.#canManageRepositoryConnections(memberships, actorId)) return "forbidden" as const;
-      const repaired = await client.query<RepositoryConnectionRow>(`${repositoryConnectionSelect} WHERE connection.organization_id = $1 AND connection.id = $2 AND connection.state = 'degraded' FOR UPDATE`, [organizationId, connectionId]);
-      if (!repaired.rows[0]) return "not_found" as const;
-      await client.query(`UPDATE stash_repository_connections SET installation_id = $2, repository_id = $3,
-        repository_url = $4, created_by_account_id = $5, created_by_attribution = 'recorded',
-        ownership = 'organization', state = 'active' WHERE id = $1`,
-      [connectionId, replacement.installationId, replacement.repositoryId, replacement.repositoryUrl, actorId]);
-      const refreshed = { ...repositoryConnectionRecord(repaired.rows[0]), ...replacement,
-        createdByMemberId: actorId, createdByAttribution: "recorded" as const,
-        ownership: "organization" as const, state: "active" as const };
-      const revision = await client.query<{ revision: number }>("SELECT COALESCE(MAX(revision),0)+1 AS revision FROM stash_portable_projection_outbox WHERE object_kind='RepositoryConnection' AND object_id=$1", [connectionId]);
-      await this.#recordRepositoryConnectionProjection(client, refreshed, Number(revision.rows[0]!.revision));
-      return "repaired" as const;
-    });
-  }
-
-  async resolveTask(memberId: string, projectId: string, taskKey: string) {
-    const result = await this.findTaskByKey(memberId, projectId, taskKey);
-    return result.status === "found" ? { id: result.task.id, key: result.task.key, title: result.task.title } : undefined;
-  }
-
-  async resolveConnection(memberId: string, projectId: string, connectionId: string) {
-    await this.#ensureRepositoryConnectionSchema();
-    const result = await this.#kernel.query<RepositoryConnectionRow>(`${repositoryConnectionSelect}
-      JOIN stash_repository_connection_projects selected ON selected.connection_id = connection.id AND selected.project_id = $2
-      JOIN stash_projects project ON project.id = selected.project_id
-      JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
-      WHERE connection.id = $1 AND connection.state = 'active' AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $3)
-        OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $3)))`, [connectionId, projectId, memberId]);
-    const row = result.rows[0];
-    return row ? { installationId: Number(row.installation_id), repositoryId: row.repository_id, repositoryUrl: row.repository_url } : undefined;
-  }
-
-  async listConnections(memberId: string, projectId: string) {
-    await this.#ensureRepositoryConnectionSchema();
-    const result = await this.#kernel.query<{ id: string; repository_url: string }>(`SELECT connection.id, connection.repository_url
-      FROM stash_repository_connections connection
-      JOIN stash_repository_connection_projects selected ON selected.connection_id = connection.id AND selected.project_id = $1
-      JOIN stash_projects project ON project.id = selected.project_id
-      JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
-      WHERE connection.state = 'active' AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2)
-        OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)))
-      ORDER BY connection.repository_url`, [projectId, memberId]);
-    return result.rows.map((row) => ({ id: row.id, repositoryUrl: row.repository_url }));
-  }
-
-  async canLinkArtifact(memberId: string, projectId: string, taskKey: string) {
-    return (await this.findTaskByKey(memberId, projectId, taskKey)).status === "found";
-  }
-
-  async linkArtifact(memberId: string, projectId: string, taskKey: string, artifact: DevelopmentArtifact) {
+  async #linkDevelopmentArtifact(memberId: string, projectId: string, taskKey: string, artifact: DevelopmentArtifact) {
     return this.#withTransaction(async (client) => {
       await this.#ensureNoteSchema(client); await this.#ensureInvitationSchema(client);
       const current = await client.query<any>(`${taskPlanningSelect} FOR UPDATE OF task`, [projectId, taskKey, memberId]);
@@ -2780,84 +2700,6 @@ export class PostgresDatabase implements DatabaseProbe {
       if (!writable.rowCount) return "forbidden" as const;
       await this.#persistTaskDevelopmentArtifact(client, row, memberId, artifact, "task_planning_updated", { kind: "member" });
       return "linked" as const;
-    });
-  }
-
-  async listArtifacts(memberId: string, projectId: string, taskKey: string) {
-    const current = await this.findTaskByKey(memberId, projectId, taskKey);
-    if (current.status !== "found") return undefined;
-    return (current.task.developmentLinks ?? []).flatMap(({ url }) => developmentArtifactFromUrl(url));
-  }
-
-  async matchingTasks(installationId: number, repositoryId: string, keys: string[]) {
-    await this.#ensureGitHubSignalSchema();
-    if (!keys.length) return [];
-    const result = await this.#kernel.query<{ task_id: string; project_id: string; organization_id: string; task_key: string; title: string; matched_key: string }>(`
-      SELECT DISTINCT task.id AS task_id, link.project_id, connection.organization_id, identity.task_key, task.title, identity.matched_key
-      FROM stash_repository_connections connection
-      JOIN stash_repository_connection_projects link ON link.connection_id = connection.id
-      JOIN LATERAL (SELECT association.task_id,association.task_key,association.task_key matched_key FROM stash_task_projects association
-          WHERE association.project_id=link.project_id AND association.task_key=ANY($3::text[])
-        UNION SELECT alias.task_id,alias.task_key,alias.task_key FROM stash_task_key_aliases alias
-          WHERE alias.project_id=link.project_id AND alias.task_key=ANY($3::text[])) identity ON TRUE
-      JOIN stash_tasks task ON task.id=identity.task_id
-      WHERE connection.provider='github' AND connection.state='active'
-        AND connection.installation_id=$1 AND connection.repository_id=$2
-      `, [installationId, repositoryId, keys]);
-    return result.rows.map((row) => ({ taskId: row.task_id, projectId: row.project_id, organizationId: row.organization_id,
-      taskKey: row.task_key, title: row.title, matchedKey: row.matched_key }));
-  }
-
-  async receive(signal: GitHubSignal, candidates: SignalCandidate[]) {
-    await this.#ensureGitHubSignalSchema();
-    await this.#withTransaction(async (client) => {
-      const inserted = await client.query(`INSERT INTO stash_github_signals
-        (id, delivery_id, installation_id, repository_id, kind, provider_id, url, label, occurred_at, automation_trigger)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (delivery_id) DO NOTHING`,
-      [signal.id, signal.deliveryId, signal.installationId, signal.repositoryId, signal.kind, signal.providerId, signal.url, signal.label, signal.occurredAt, signal.trigger ?? null]);
-      if (!inserted.rowCount) return;
-      for (const candidate of candidates) {
-        await client.query(`INSERT INTO stash_github_signal_suggestions
-          (id, signal_id, task_id, project_id, organization_id, task_key, task_title, matched_key, status)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [candidate.id, signal.id, candidate.taskId, candidate.projectId, candidate.organizationId, candidate.taskKey, candidate.taskTitle, candidate.matchedKey, candidate.status]);
-        if (candidate.status === "confirmed") await this.#linkSignalArtifact(client, candidate.taskId, signal, undefined, candidate.organizationId);
-      }
-    });
-  }
-
-  async list(memberId: string, projectId: string, taskKey: string) {
-    await this.#ensureGitHubSignalSchema();
-    const visible = await this.findTaskByKey(memberId, projectId, taskKey);
-    if (visible.status !== "found") return undefined;
-    const result = await this.#kernel.query<any>(`SELECT signal.*, suggestion.id AS suggestion_id, suggestion.task_id,
-      suggestion.project_id, suggestion.organization_id, suggestion.task_key, suggestion.task_title, suggestion.matched_key, suggestion.status
-      FROM stash_github_signal_suggestions suggestion JOIN stash_github_signals signal ON signal.id = suggestion.signal_id
-      WHERE suggestion.task_id = $1 ORDER BY signal.occurred_at DESC, suggestion.id`, [visible.task.id]);
-    const grouped = new Map<string, { signal: GitHubSignal; suggestions: SignalCandidate[] }>();
-    for (const row of result.rows) {
-      const entry = grouped.get(row.id) ?? { signal: githubSignalFromRow(row), suggestions: [] };
-      entry.suggestions.push({ id: row.suggestion_id, signalId: row.id, taskId: row.task_id, projectId: row.project_id, organizationId: row.organization_id, taskKey: row.task_key, taskTitle: row.task_title, matchedKey: row.matched_key, status: row.status });
-      grouped.set(row.id, entry);
-    }
-    return [...grouped.values()];
-  }
-
-  async confirm(memberId: string, projectId: string, taskKey: string, suggestionId: string) {
-    await this.#ensureGitHubSignalSchema();
-    if (!await this.canLinkArtifact(memberId, projectId, taskKey)) return "forbidden" as const;
-    return this.#withTransaction(async (client) => {
-      const result = await client.query<any>(`SELECT suggestion.*, signal.kind, signal.provider_id, signal.url, signal.label,
-        signal.delivery_id, signal.repository_id, signal.occurred_at
-        FROM stash_github_signal_suggestions suggestion JOIN stash_github_signals signal ON signal.id = suggestion.signal_id
-        JOIN stash_tasks task ON task.id = suggestion.task_id
-        WHERE suggestion.id=$1 AND suggestion.project_id=$2 AND (suggestion.task_key=$3
-          OR EXISTS(SELECT 1 FROM stash_task_projects association WHERE association.task_id=task.id AND association.project_id=$2 AND association.task_key=$3)
-          OR EXISTS(SELECT 1 FROM stash_task_key_aliases alias WHERE alias.task_id=task.id AND alias.project_id=$2 AND alias.task_key=$3))
-        FOR UPDATE OF suggestion`, [suggestionId, projectId, taskKey]);
-      const row = result.rows[0]; if (!row) return "not_found" as const;
-      await client.query("UPDATE stash_github_signal_suggestions SET status='confirmed', confirmed_by_account_id=$2, confirmed_at=NOW() WHERE id=$1", [suggestionId, memberId]);
-      await this.#linkSignalArtifact(client, row.task_id, githubSignalFromRow(row), memberId);
-      return "confirmed" as const;
     });
   }
 
@@ -3086,40 +2928,6 @@ export class PostgresDatabase implements DatabaseProbe {
     const after = taskPlanningReadModelFromRow(saved.rows[0]);
     await this.#recordPortableProjection(client, "Task", after.id, after.schema, taskProjectionFromRow(saved.rows[0]));
     await this.#recordTaskActivity(client, actorId, after.workspaceId, after.id, action, before, after, cause);
-  }
-
-  async attachRepositoryConnectionToProject(actorId: string, organizationId: string, connectionId: string, projectId: string) {
-    await this.#ensureRepositoryConnectionSchema();
-    return this.#withTransaction(async (client) => {
-      const memberships = await this.#lockedOrganizationMemberships(client, organizationId);
-      if (!this.#canManageRepositoryConnections(memberships, actorId)) return "forbidden" as const;
-      const result = await client.query(
-      `INSERT INTO stash_repository_connection_projects (connection_id, project_id)
-       SELECT connection.id, project.id
-       FROM stash_repository_connections connection
-       JOIN stash_projects project ON project.id = $3
-       JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
-       WHERE connection.id = $2 AND connection.organization_id = $1 AND connection.state = 'active'
-         AND workspace.owner_type = 'organization' AND workspace.organization_owner_id = $1
-       ON CONFLICT DO NOTHING`,
-      [organizationId, connectionId, projectId],
-    );
-      if (!result.rowCount) {
-        const existing = await client.query(
-      `SELECT 1 FROM stash_repository_connection_projects link
-       JOIN stash_repository_connections connection ON connection.id = link.connection_id
-       WHERE connection.organization_id = $1 AND connection.state = 'active'
-         AND link.connection_id = $2 AND link.project_id = $3`,
-      [organizationId, connectionId, projectId],
-    );
-        if (!existing.rowCount) return "not_found" as const;
-      }
-      const refreshed = await client.query<RepositoryConnectionRow>(`${repositoryConnectionSelect} WHERE connection.organization_id = $1 AND connection.id = $2`, [organizationId, connectionId]);
-      const record = repositoryConnectionRecord(refreshed.rows[0]!);
-      const revision = await client.query<{ revision: number }>(`SELECT COALESCE(MAX(revision), 0) + 1 AS revision FROM stash_portable_projection_outbox WHERE object_kind = 'RepositoryConnection' AND object_id = $1`, [connectionId]);
-      await this.#recordRepositoryConnectionProjection(client, record, Number(revision.rows[0]!.revision));
-      return "attached" as const;
-    });
   }
 
   async assignBuiltInRole(
@@ -5609,11 +5417,6 @@ interface MemberLocalizationRow {
   updated_at: Date | string;
 }
 interface RepositoryConnectionRow { id: string; organization_id: string; provider: "github"; installation_id: string | number; repository_id: string; repository_url: string; created_by_account_id: string; created_by_attribution: "recorded" | "inferred-during-upgrade"; project_ids: string[]; ownership: "organization" | "personal"; state: "active" | "degraded" }
-function githubSignalFromRow(row: any): GitHubSignal {
-  return { id: row.id, deliveryId: row.delivery_id, installationId: Number(row.installation_id), repositoryId: row.repository_id, kind: row.kind,
-    providerId: row.provider_id, url: row.url, label: row.label, occurredAt: new Date(row.occurred_at).toISOString(),
-    ...(row.automation_trigger ? { trigger: row.automation_trigger } : {}) };
-}
 function automationRecipeFromRow(row: any): AutomationRecipe {
   return { id: row.id, trigger: row.trigger, targetStatus: { id: row.target_status_id, name: row.target_status_name }, enabled: row.enabled };
 }
@@ -5631,15 +5434,6 @@ function attachmentRecord(row: AttachmentRow): AttachmentRecord {
 function repositoryConnectionRecord(row: RepositoryConnectionRow): RepositoryConnectionRecord {
   return { id: row.id, organizationId: row.organization_id, provider: row.provider, installationId: Number(row.installation_id), repositoryId: row.repository_id, repositoryUrl: row.repository_url, createdByMemberId: row.created_by_account_id, createdByAttribution: row.created_by_attribution, projectIds: row.project_ids, ownership: row.ownership, state: row.state };
 }
-function developmentArtifactFromUrl(value: string): DevelopmentArtifact[] {
-  try {
-    const url = new URL(value); if (url.protocol !== "https:" || url.hostname !== "github.com") return [];
-    const match = url.pathname.match(/^\/[^/]+\/[^/]+\/(tree|commit|pull)\/(.+)$/); if (!match) return [];
-    const kind = match[1] === "tree" ? "branch" : match[1] === "commit" ? "commit" : "pull_request";
-    const label = decodeURIComponent(match[2]!); return [{ kind, providerId: label, label, url: value }];
-  } catch { return []; }
-}
-
 function triageObjectKind(result: NoteTriageResult): "Task" | "NoteLink" | "Note" {
   if (result.kind === "task_created") return "Task";
   if (result.kind === "linked") return "NoteLink";

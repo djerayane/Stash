@@ -34,12 +34,12 @@ test("development adapters resolve canonical active keys and aliases and automat
     assert.equal(removed.status,"updated");
 
     const github:GitHubApp={async inspectRepository(input){return{installationId:input.installationId,repositoryId:"987",repositoryUrl:"https://github.com/acme/stash"};},async verifyRepository(){}};
-    const connections=new RepositoryConnectionService(store.database,github);
+    const connections=new RepositoryConnectionService(store.database.developmentIntegrationRepositories(),github);
     const connection=await connections.connect(ownerId,organizationId,{installationId:42,owner:"acme",name:"stash"});
     assert.equal(await connections.attachToProject(ownerId,organizationId,connection.connection.id,alpha.project.id),"attached");
     assert.equal(await connections.attachToProject(ownerId,organizationId,connection.connection.id,beta.project.id),"attached");
     for(const [key,projectId] of [[alphaKey,alpha.project.id],[betaKey,beta.project.id]] as const){
-      const matches=await store.database.matchingTasks(42,"987",[key]);
+      const matches=await store.database.developmentIntegrationRepositories().matchingTasks(42,"987",[key]);
       assert.deepEqual(matches.map(({taskId})=>taskId),[created.task.id]);
       assert.equal(matches[0]?.projectId,projectId);
       assert.equal((await store.database.findTaskByKey(ownerId,projectId,key)).status,"found");
@@ -56,7 +56,7 @@ test("development adapters resolve canonical active keys and aliases and automat
       kind:"branch" as const,providerId:"branch",url:"https://github.com/acme/stash/tree/BET-1",label:betaKey,occurredAt:new Date().toISOString(),trigger:"branch_created" as const};
     const candidate={id:"44444444-4444-4444-8444-444444444444",signalId:signal.id,taskId:created.task.id,projectId:beta.project.id,
       organizationId,taskKey:betaKey,taskTitle:created.task.title,matchedKey:betaKey,status:"confirmed" as const};
-    await store.database.receive(signal,[candidate]); await automations.applySignal(signal,[candidate]);
+    await store.database.developmentIntegrationRepositories().receive(signal,[candidate]); await automations.applySignal(signal,[candidate]);
     const updated=await tasks.resolveKey(ownerId,beta.project.id,betaKey);
     assert.equal(updated.status,"found"); assert.equal(updated.status==="found"?updated.task.status.id:"",started.id);
   } finally { await store.close(); }
