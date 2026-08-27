@@ -80,6 +80,32 @@ it("creates children and offers keyboard and pointer alternatives for moving Not
   expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("Research gains Launch"));
 });
 
+it("expands a collapsed destination before restoring focus to a nested Note", async () => {
+  let nested = false;
+  const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+    const path = String(input); const method = init?.method ?? "GET";
+    if (method === "POST" && path.endsWith("/branch-preview")) return Response.json({ impact: {
+      projectAccessChanges: [], descendants: [], descendantCount: 0, collectionCount: 0, externalLinks: [],
+    } });
+    if (method === "POST" && path.endsWith("/move")) { nested = true; return Response.json({ status: "moved", movedIds: [researchId], projectAccessChanges: [] }); }
+    return Response.json({ nodes: [
+      { id: roadmapId, workspaceId, title: "Roadmap", position: "1", childCount: nested ? 2 : 1 },
+      { id: evidenceId, workspaceId, parentId: roadmapId, title: "Evidence", position: "1", childCount: 0 },
+      { id: researchId, workspaceId, ...(nested ? { parentId: roadmapId } : {}), title: "Research", position: nested ? "1" : "2", childCount: 0 },
+    ] });
+  });
+  render(wrapper(<NoteTree fetcher={fetcher} token="member" workspaceId={workspaceId} />));
+
+  const roadmap = await screen.findByRole("treeitem", { name: "Roadmap" });
+  fireEvent.click(within(roadmap).getByRole("button", { name: "Collapse Roadmap" }));
+  const research = screen.getByRole("treeitem", { name: "Research" });
+  research.focus();
+  fireEvent.click(within(research).getByRole("button", { name: "Nest Research under Roadmap" }));
+
+  await waitFor(() => expect(screen.getByRole("treeitem", { name: "Roadmap" })).toHaveAttribute("aria-expanded", "true"));
+  expect(screen.getByRole("treeitem", { name: "Research" })).toHaveFocus();
+});
+
 it("lists removed branches from durable Workspace state and restores them", async () => {
   const removedId = "55555555-5555-4555-8555-555555555555";
   const requests: string[] = [];

@@ -70,6 +70,7 @@ export function NoteTree({ workspaceId, token, activeNoteId, fetcher = globalThi
     return { cancelled: false as const };
   },
   onSuccess: async (value, variables) => { if (value.cancelled) { setStatus("Move cancelled."); return; } const title = byId.get(variables.noteId)?.title ?? "Note"; setStatus(`${title} moved.`);
+    if (variables.destination.parentId) setCollapsed((current) => { const next = new Set(current); next.delete(variables.destination.parentId!); return next; });
     await client.invalidateQueries({ queryKey }); requestAnimationFrame(() => itemRefs.current.get(variables.noteId)?.focus()); } });
   const restore = useMutation({ mutationFn: (branch: RemovedNoteBranch) => request(fetcher, token,
     `/api/notes/${encodeURIComponent(branch.id)}/restore`, { method: "POST" }).then(() => branch),
