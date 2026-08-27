@@ -517,7 +517,10 @@ const roleTasks = new TaskService(roleWorkPlanning, roleStore.database.identityA
 const roleProjects = new WorkspaceProjectService(roleStore.database.identityAccessRepositories());
 const roleService = new OrganizationRoleService(roleStore.database.identityAccessRepositories());
 const completedRoleSetup = new InstanceSetupService(roleStore.database.instanceSetupRepository(), { boundHost: "127.0.0.1", output() {} });
-const roleInstance = await startInstance({ database: roleStore.database, host: "127.0.0.1", port: Number.parseInt(process.env.STASH_BROWSER_ROLE_PORT ?? "4175", 10),
+const roleInstance = await startInstance({ database: {
+  verifyConnection: () => roleStore.database.verifyConnection(), close: () => roleStore.database.close(),
+  resolveClientSessionPrincipal: (accountId) => roleStore.database.identityAccessRepositories().resolveClientSessionPrincipal(accountId),
+}, host: "127.0.0.1", port: Number.parseInt(process.env.STASH_BROWSER_ROLE_PORT ?? "4175", 10),
   instanceAdminToken: "role-admin", passwordAuth: roleAuth, memberAccess: roleAuth, organizationRoles: roleService,
   workspaceProjects: roleProjects, tasks: roleTasks,
   capabilities: createCapabilityRegistry([identityAccessCapability({ passwordAuth: roleAuth, instanceSetup: completedRoleSetup }),
