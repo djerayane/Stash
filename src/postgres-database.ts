@@ -229,15 +229,10 @@ export class PostgresDatabase implements DatabaseProbe {
     this.#tutorialContributionRepository = new PostgresTutorialContributionRepository(this.#kernel,
       (client) => this.#noteTreeRepository.prepare(client));
     this.#instanceSetupRepository = new PostgresInstanceSetupRepository(this.#kernel, authenticationSecrets, async (client) => {
-      await this.#ensureBootstrapSchema(client);
-      await this.#ensureAuthSchema(client);
+      await this.#identityAccessAdapter.prepareRegistration(client);
       await this.#noteTreeRepository.prepare(client);
     }, this.#tutorialContributionRepository);
     this.#identityAccessAdapter = new PostgresIdentityAccessRepositories(this.#kernel, authenticationSecrets, {
-      prepareRegistration: async (client) => {
-        await this.#ensureWorkspaceProjectSchema(client);
-        await this.#ensureAuthSchema(client);
-      },
       recordWorkspaceProjection: (client, record) => this.#recordPortableProjection(client, "Workspace", record.workspace.id, "stash.workspace.v1", {
         schema: "stash.workspace.v1", id: record.workspace.id, name: record.workspace.name,
         owner: { type: "personal", identity: { localAccountId: record.account.id, displayName: record.account.name } },
@@ -249,6 +244,7 @@ export class PostgresDatabase implements DatabaseProbe {
       findPortableMemberIdentity: (memberId) => this.#knowledgeAuthoringAdapter.findPortableMemberIdentity(memberId),
       roles: {
         assignBuiltInRole: (...args) => this.#organizationRoleRepository.assignBuiltInRole(...args),
+        removeOrganizationMember: (...args) => this.#organizationRoleRepository.removeOrganizationMember(...args),
         listCustomRoles: (...args) => this.#organizationRoleRepository.listCustomRoles(...args),
         createCustomRole: (...args) => this.#organizationRoleRepository.createCustomRole(...args),
         updateCustomRole: (...args) => this.#organizationRoleRepository.updateCustomRole(...args),
@@ -269,9 +265,15 @@ export class PostgresDatabase implements DatabaseProbe {
       (client) => this.#noteTreeRepository.prepare(client),
       (memberId, workspaceId) => this.#canonicalTaskRepository.listTasks(memberId, workspaceId));
     this.#organizationRoleRepository = new PostgresOrganizationRoleRepository(this.#kernel,
-      (client) => this.#ensureWorkspaceProjectSchema(client));
+      (client) => this.#identityAccessAdapter.prepareRegistration(client), {
+        prepareAuthority: (client) => this.#identityAccessAdapter.prepareAgentAuthority(client),
+        markFormerAssignments: (client, organizationId, accountId, actorId) =>
+          this.#workPlanningAdapter.markFormerAssignments(client, organizationId, accountId, actorId),
+        degradePersonalConnections: (client, organizationId, accountId) =>
+          this.#developmentIntegrationAdapter.degradePersonalConnections(client, organizationId, accountId),
+      });
     this.#projectPermissionRepository = new PostgresProjectPermissionRepository(this.#kernel, async (client) => {
-      await this.#ensureWorkspaceProjectSchema(client);
+      await this.#identityAccessAdapter.prepareRegistration(client);
       await this.#organizationRoleRepository.prepare(client);
     });
     this.#relationshipQueryRepository = new PostgresRelationshipQueryRepository(this.#kernel,
@@ -285,7 +287,7 @@ export class PostgresDatabase implements DatabaseProbe {
       prepareAttachments: (client) => this.#ensureAttachmentSchema(client),
       backfillLegacyNoteHistory: (client) => this.#backfillLegacyNoteHistory(client),
       parseActivityCause: (value) => this.#parseActivityCause(value),
-      prepareBootstrap: (client) => this.#ensureBootstrapSchema(client),
+      prepareBootstrap: (client) => this.#identityAccessAdapter.prepareRegistration(client),
       prepareImports: (client) => this.#ensureWorkspaceImportSchema(client),
       prepareInstanceSetup: (client) => this.#instanceSetupRepository.prepare(client),
       prepareBoards: (client) => this.#workPlanningAdapter.prepareBoards(client),
@@ -301,7 +303,7 @@ export class PostgresDatabase implements DatabaseProbe {
       readContributedPortableObjects: async (client, context) =>
         (await Promise.all(this.#portableProjectionContributors.map((contributor) => contributor.readPortableObjects(client, context)))).flat(),
       prepareHistory: (client) => this.#ensureNoteHistorySchema(client),
-      prepareWorkspaceProjects: (client) => this.#ensureWorkspaceProjectSchema(client),
+      prepareWorkspaceProjects: (client) => this.#identityAccessAdapter.prepareRegistration(client),
       recordProjection: (client, kind, id, schema, projection) => this.#recordPortableProjection(client, kind, id, schema, projection),
       authorizeNote: (client, memberId, noteId) => this.#authorizeNote(client, memberId, noteId),
       recordNoteRevisionAndActivity: (client, memberId, before, after, action, cause) =>
@@ -360,7 +362,7 @@ export class PostgresDatabase implements DatabaseProbe {
     this.#developmentIntegrationAdapter = new PostgresDevelopmentIntegrationRepositories(this.#kernel, {
       organizationRole: (organizationId, accountId) => this.#identityAccessAdapter.organizationRole(organizationId, accountId),
       prepareConnections: (client) => this.#ensureRepositoryConnectionSchema(client),
-      lockedMemberships: (client, organizationId) => this.#lockedOrganizationMemberships(client, organizationId),
+      lockedMemberships: (client, organizationId) => this.#organizationRoleRepository.lockedMemberships(client, organizationId),
       recordConnectionProjection: (client, record, revision) => this.#recordRepositoryConnectionProjection(client, record, revision),
       prepareSignals: (client) => this.#ensureGitHubSignalSchema(client),
       resolveTask: async (memberId, projectId, taskKey) => {
@@ -408,10 +410,7 @@ export class PostgresDatabase implements DatabaseProbe {
   }
 
   identityAccessRepositories(): IdentityAccessPostgresRepositories {
-    return Object.assign(this.#identityAccessAdapter, {
-      removeOrganizationMember: this.removeOrganizationMember.bind(this),
-
-    });
+    return this.#identityAccessAdapter;
   }
   knowledgeAuthoringRepositories(): KnowledgeAuthoringPostgresRepositories {
     return this.#knowledgeAuthoringAdapter;
@@ -433,10 +432,10 @@ export class PostgresDatabase implements DatabaseProbe {
   /** Prepare every storage capability for contract validation or an empty semantic migration target. */
   async prepareInstanceStore(transactionClient?: PostgresQueryable): Promise<void> {
     const prepare = async (client: PostgresQueryable) => {
-      await this.#ensureBootstrapSchema(client); await this.#ensureWorkspaceProjectSchema(client);
-      await this.#ensureAuthSchema(client); await this.#identityAccessAdapter.prepareOidc(client); await this.#identityAccessAdapter.prepareRecovery(client);
+      await this.#identityAccessAdapter.prepareRegistration(client);
+      await this.#identityAccessAdapter.prepareOidc(client); await this.#identityAccessAdapter.prepareRecovery(client);
       await this.#ensureRepositoryConnectionSchema(client); await this.#ensureGitHubSignalSchema(client); await this.#ensureNotificationSchema(client);
-      await this.#ensureMemberLocalizationSchema(client);
+      await this.#identityAccessAdapter.prepareLocalization(client);
       await this.#ensureNoteSchema(client); await this.#noteTreeRepository.prepare(client);
       await this.#workPlanningAdapter.prepareBoards(client); await this.#ensureAttachmentSchema(client);
       await this.#knowledgeAuthoringAdapter.prepareDiscussions(client); await this.#identityAccessAdapter.prepareInvitations(client); await this.#ensurePortableProjectionSchema(client);
@@ -464,7 +463,7 @@ export class PostgresDatabase implements DatabaseProbe {
     const workspaceName = record.workspaceName ?? `${record.organizationName} Workspace`;
     const createdAt = record.createdAt ?? new Date().toISOString();
     return this.#kernel.preparedControlledTransaction(
-      (client) => this.#ensureWorkspaceProjectSchema(client),
+      (client) => this.#identityAccessAdapter.prepareRegistration(client),
       async (client) => {
         await this.#kernel.advisoryTransactionLock(client, 2_080_289_093);
         const existing = await client.query("SELECT 1 FROM stash_instance_bootstrap WHERE singleton = TRUE");
@@ -551,115 +550,6 @@ export class PostgresDatabase implements DatabaseProbe {
     await this.#recordTaskActivity(client, actorId, after.workspaceId, after.id, action, before, after, cause);
   }
 
-  async removeOrganizationMember(
-    organizationId: string,
-    actorId: string,
-    accountId: string,
-  ): Promise<{ status: "removed"; departure: import("./organization-roles.js").MemberDeparture }
-    | "member_not_found" | "final_owner" | "forbidden"> {
-    return this.#withTransaction(async (client) => {
-      const memberships = await this.#lockedOrganizationMemberships(client, organizationId);
-      if (!this.#canManageMembers(memberships, actorId)) return "forbidden";
-      const target = memberships.find((membership) => membership.account_id === accountId);
-      if (!target) return "member_not_found";
-      const actorRole = memberships.find((membership) => membership.account_id === actorId)?.role;
-      if (target.role === "Owner" && this.#isOnlyOwner(memberships, accountId)) {
-        return "final_owner";
-      }
-      if (actorRole === "Admin" && target.role === "Owner") return "forbidden";
-      await this.#identityAccessAdapter.prepareAgentAuthority(client);
-      await this.#organizationRoleRepository.removeAssignmentsForMember(client, organizationId, accountId);
-      const affectedTaskIds = await this.#markFormerAssignments(client, organizationId, accountId, actorId);
-      await client.query(
-        "DELETE FROM stash_organization_memberships WHERE organization_id = $1 AND account_id = $2",
-        [organizationId, accountId],
-      );
-      const { revokedSessions, revokedCredentials, revokedAgentGrants } =
-        await this.#revokeDepartedMemberAuthority(client, organizationId, accountId);
-      const degradedRepositoryConnectionIds = await this.#degradePersonalConnections(client, organizationId, accountId);
-      await this.#recordMemberDepartureAudit(client, { organizationId, actorId, accountId, role: target.role,
-        affectedTaskIds, degradedRepositoryConnectionIds, revokedSessions, revokedCredentials, revokedAgentGrants });
-      return { status: "removed", departure: {
-        memberId: accountId,
-        affectedTaskIds,
-        revokedSessions,
-        revokedCredentials,
-        revokedAgentGrants,
-        degradedRepositoryConnectionIds,
-      } };
-    });
-  }
-
-  async #lockedOrganizationMemberships(client: PostgresQueryable, organizationId: string) {
-    await this.#ensureBootstrapSchema(client);
-    const memberships = await client.query<{ account_id: string; role: BuiltInOrganizationRole }>(
-      `SELECT account_id, role FROM stash_organization_memberships
-       WHERE organization_id = $1 FOR UPDATE`,
-      [organizationId],
-    );
-    return memberships.rows;
-  }
-
-  #isOnlyOwner(
-    memberships: ReadonlyArray<{ account_id: string; role: BuiltInOrganizationRole }>,
-    accountId: string,
-  ): boolean {
-    return memberships.filter((membership) => membership.role === "Owner").length === 1
-      && memberships.some(
-        (membership) => membership.account_id === accountId && membership.role === "Owner",
-      );
-  }
-
-  #canManageRoles(
-    memberships: ReadonlyArray<{ account_id: string; role: BuiltInOrganizationRole }>,
-    accountId: string,
-  ): boolean {
-    return memberships.some(
-      (membership) => membership.account_id === accountId && membership.role === "Owner",
-    );
-  }
-
-  #canManageMembers(
-    memberships: ReadonlyArray<{ account_id: string; role: BuiltInOrganizationRole }>,
-    accountId: string,
-  ): boolean {
-    return memberships.some((membership) => membership.account_id === accountId
-      && (membership.role === "Owner" || membership.role === "Admin"));
-  }
-
-  #canManageRepositoryConnections(
-    memberships: ReadonlyArray<{ account_id: string; role: BuiltInOrganizationRole }>,
-    accountId: string,
-  ): boolean {
-    return memberships.some((membership) => membership.account_id === accountId
-      && (membership.role === "Owner" || membership.role === "Admin"));
-  }
-
-  async #insertSession(client: PostgresQueryable, session: SessionRecord): Promise<void> {
-    await client.query(
-      "INSERT INTO stash_sessions (id, account_id, token_lookup, token_hash, created_at, last_seen_at, user_agent) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-      [session.id, session.accountId, this.#authenticationSecrets.blindIndex(session.tokenHash), this.#authenticationSecrets.encrypt(session.tokenHash), session.createdAt, session.lastSeenAt, session.userAgent ?? null],
-    );
-  }
-
-  async #transaction<T>(work: (client: PostgresQueryable) => Promise<{ commit: boolean; value: T }>): Promise<T> {
-    return this.#kernel.controlledTransaction(work);
-  }
-
-  async #ensureAuthSchema(client: PostgresQueryable = this.#kernel): Promise<void> {
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS stash_sessions (
-        id UUID PRIMARY KEY,
-        account_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
-        token_lookup TEXT NOT NULL UNIQUE,
-        token_hash TEXT NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL,
-        last_seen_at TIMESTAMPTZ NOT NULL,
-        user_agent TEXT
-      )
-    `);
-  }
-
   async #verifyAuthenticationKey(transactionClient?: PostgresQueryable): Promise<void> {
     const prepareTable = (client: PostgresQueryable) => client.query(`
         CREATE TABLE IF NOT EXISTS stash_authentication_key_check (
@@ -708,33 +598,9 @@ export class PostgresDatabase implements DatabaseProbe {
     };
   }
 
-  async #ensureBootstrapSchema(client: PostgresQueryable): Promise<void> {
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS stash_organizations (
-        id UUID PRIMARY KEY,
-        name TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS stash_accounts (
-        id UUID PRIMARY KEY,
-        name TEXT NOT NULL,
-        email TEXT NOT NULL UNIQUE,
-        password_hash TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS stash_organization_memberships (
-        organization_id UUID NOT NULL REFERENCES stash_organizations(id),
-        account_id UUID NOT NULL REFERENCES stash_accounts(id),
-        role TEXT NOT NULL CHECK (role IN ('Owner', 'Admin', 'Member')),
-        PRIMARY KEY (organization_id, account_id)
-      );
-      CREATE TABLE IF NOT EXISTS stash_instance_bootstrap (
-        singleton BOOLEAN PRIMARY KEY CHECK (singleton)
-      );
-    `);
-  }
-
   async #ensureRepositoryConnectionSchema(transactionClient?: PostgresQueryable): Promise<void> {
     const prepare = async (client: PostgresQueryable) => {
-      await this.#ensureWorkspaceProjectSchema(client);
+      await this.#identityAccessAdapter.prepareRegistration(client);
       await client.query(`
         CREATE TABLE IF NOT EXISTS stash_repository_connections (
           id UUID PRIMARY KEY,
@@ -757,7 +623,7 @@ export class PostgresDatabase implements DatabaseProbe {
       `);
     };
     const upgrade = async (client: PostgresQueryable) => {
-      await this.#ensureRepositoryConnectionStateColumns(client);
+      await this.#developmentIntegrationAdapter.prepareConnectionStateColumns(client);
       await client.query(`
           ALTER TABLE stash_repository_connections ADD COLUMN IF NOT EXISTS created_by_account_id UUID REFERENCES stash_accounts(id);
           ALTER TABLE stash_repository_connections ADD COLUMN IF NOT EXISTS created_by_attribution TEXT NOT NULL DEFAULT 'inferred-during-upgrade';
@@ -857,49 +723,9 @@ export class PostgresDatabase implements DatabaseProbe {
     else await this.#kernel.transaction(prepare);
   }
 
-  async #ensureWorkspaceProjectSchema(client: PostgresQueryable): Promise<void> {
-    await this.#ensureBootstrapSchema(client);
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS stash_workspaces (
-        id UUID PRIMARY KEY,
-        name TEXT NOT NULL,
-        owner_type TEXT NOT NULL CHECK (owner_type IN ('personal', 'organization')),
-        personal_owner_id UUID REFERENCES stash_accounts(id),
-        organization_owner_id UUID REFERENCES stash_organizations(id),
-        created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id),
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        CHECK (
-          (owner_type = 'personal' AND personal_owner_id IS NOT NULL AND organization_owner_id IS NULL)
-          OR
-          (owner_type = 'organization' AND personal_owner_id IS NULL AND organization_owner_id IS NOT NULL)
-        )
-      );
-      ALTER TABLE stash_workspaces ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
-      CREATE TABLE IF NOT EXISTS stash_projects (
-        id UUID PRIMARY KEY,
-        workspace_id UUID NOT NULL REFERENCES stash_workspaces(id),
-        name TEXT NOT NULL,
-        project_key TEXT NOT NULL,
-        created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id),
-        next_task_number INTEGER NOT NULL DEFAULT 1 CHECK (next_task_number > 0),
-        workflow_revision INTEGER NOT NULL DEFAULT 0 CHECK (workflow_revision >= 0),
-        UNIQUE (workspace_id, project_key)
-      );
-      CREATE TABLE IF NOT EXISTS stash_project_guests (
-        project_id UUID NOT NULL REFERENCES stash_projects(id),
-        account_id UUID NOT NULL REFERENCES stash_accounts(id),
-        PRIMARY KEY (project_id, account_id)
-      );
-      ALTER TABLE stash_projects ADD COLUMN IF NOT EXISTS next_task_number INTEGER NOT NULL DEFAULT 1 CHECK (next_task_number > 0);
-      ALTER TABLE stash_projects ADD COLUMN IF NOT EXISTS workflow_revision INTEGER NOT NULL DEFAULT 0 CHECK (workflow_revision >= 0);
-      ALTER TABLE stash_projects ADD COLUMN IF NOT EXISTS parent_project_id UUID REFERENCES stash_projects(id) ON DELETE SET NULL;
-    `);
-    await this.#ensurePortableProjectionSchema(client);
-  }
-
   async #ensureNotificationSchema(transactionClient?: PostgresQueryable): Promise<void> {
     const prepare = async (client: PostgresQueryable) => {
-      await this.#ensureWorkspaceProjectSchema(client);
+      await this.#identityAccessAdapter.prepareRegistration(client);
       await client.query(`CREATE TABLE IF NOT EXISTS stash_notification_preferences (
         member_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
         project_id UUID NOT NULL REFERENCES stash_projects(id) ON DELETE CASCADE,
@@ -940,7 +766,7 @@ export class PostgresDatabase implements DatabaseProbe {
   }
 
   async #ensureNoteSchema(client: PostgresQueryable): Promise<void> {
-    await this.#ensureWorkspaceProjectSchema(client);
+    await this.#identityAccessAdapter.prepareRegistration(client);
     await client.query(`
       CREATE TABLE IF NOT EXISTS stash_notes (
         id UUID PRIMARY KEY,
@@ -1129,31 +955,13 @@ export class PostgresDatabase implements DatabaseProbe {
   }
 
   async #ensureAttachmentSchema(client: PostgresQueryable): Promise<void> {
-    await this.#ensureWorkspaceProjectSchema(client);
+    await this.#identityAccessAdapter.prepareRegistration(client);
     await client.query(`CREATE TABLE IF NOT EXISTS stash_attachments (id UUID PRIMARY KEY, workspace_id UUID NOT NULL REFERENCES stash_workspaces(id), filename TEXT NOT NULL, content_type TEXT NOT NULL, byte_size BIGINT NOT NULL CHECK (byte_size > 0), relative_path TEXT NOT NULL, storage_key TEXT NOT NULL UNIQUE, source TEXT NOT NULL CHECK (source IN ('upload','paste')), created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id), created_at TIMESTAMPTZ NOT NULL)`);
     await client.query(`CREATE TABLE IF NOT EXISTS stash_attachment_operation_receipts (
       operation_key UUID NOT NULL, workspace_id UUID NOT NULL REFERENCES stash_workspaces(id),
       created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id), payload_digest TEXT NOT NULL,
       attachment_id UUID NOT NULL UNIQUE REFERENCES stash_attachments(id), projection JSONB NOT NULL,
       PRIMARY KEY (operation_key, workspace_id, created_by_account_id))`);
-  }
-
-  async #ensureMemberLocalizationSchema(transactionClient?: PostgresQueryable): Promise<void> {
-    const prepare = async (client: PostgresQueryable) => {
-      await this.#ensureBootstrapSchema(client);
-      await client.query(`
-        CREATE TABLE IF NOT EXISTS stash_member_localization_preferences (
-          account_id UUID PRIMARY KEY REFERENCES stash_accounts(id) ON DELETE CASCADE,
-          locale TEXT NOT NULL,
-          time_zone TEXT NOT NULL,
-          date_format TEXT NOT NULL CHECK (date_format IN ('short', 'medium', 'long')),
-          week_starts_on TEXT NOT NULL CHECK (week_starts_on IN ('sunday', 'monday', 'saturday')),
-          updated_at TIMESTAMPTZ NOT NULL
-        )
-      `);
-    };
-    if (transactionClient) await prepare(transactionClient);
-    else await this.#kernel.withSession(prepare);
   }
 
   async #ensurePortableProjectionSchema(client: PostgresQueryable): Promise<void> {
@@ -1286,94 +1094,6 @@ export class PostgresDatabase implements DatabaseProbe {
       WHERE receipt.activity_id=activity.id AND receipt.restore_result IS NULL;
       ALTER TABLE stash_note_restore_receipts ALTER COLUMN restore_result SET NOT NULL;
     `);
-  }
-
-  async #markFormerAssignments(client: PostgresQueryable, organizationId: string, accountId: string, actorId: string): Promise<string[]> {
-    const table = await client.query<{ exists: boolean }>("SELECT to_regclass('stash_tasks') IS NOT NULL AS exists");
-    if (!table.rows[0]?.exists) return [];
-    await client.query("ALTER TABLE stash_tasks ADD COLUMN IF NOT EXISTS former_assignee_ids JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(former_assignee_ids) = 'array')");
-    const affected = await client.query<{ id: string }>(`SELECT task.id FROM stash_tasks task
-      JOIN stash_workspaces workspace ON task.workspace_id = workspace.id
-      WHERE workspace.owner_type = 'organization' AND workspace.organization_owner_id = $1
-        AND task.assignee_ids ? $2 ORDER BY task.id FOR UPDATE OF task`, [organizationId, accountId]);
-    const before = new Map<string, TaskPlanningReadModel>();
-    for (const { id } of affected.rows) {
-      const current = await client.query<any>(taskPlanningSelectById, [id, actorId]);
-      if (current.rows[0]) before.set(id, taskPlanningReadModelFromRow(current.rows[0]));
-    }
-    await client.query(`UPDATE stash_tasks task
-      SET former_assignee_ids = CASE WHEN former_assignee_ids ? $2 THEN former_assignee_ids ELSE former_assignee_ids || to_jsonb($2::text) END
-      FROM stash_workspaces workspace WHERE task.workspace_id = workspace.id AND workspace.owner_type = 'organization'
-        AND workspace.organization_owner_id = $1 AND task.assignee_ids ? $2`, [organizationId, accountId]);
-    const ids = affected.rows.map(({ id }) => id).sort();
-    for (const taskId of ids) {
-      const refreshed = await client.query<any>(taskPlanningSelectById, [taskId, actorId]);
-      if (!refreshed.rows[0]) continue;
-      const projection = taskProjectionFromRow(refreshed.rows[0]);
-      await this.#recordPortableProjection(client, "Task", taskId, projection.schema, projection);
-      const previous = before.get(taskId);
-      if (previous) await this.#recordTaskActivity(client, actorId, projection.workspaceId, taskId,
-        "task_departed_assignee_marked", previous, taskPlanningReadModelFromRow(refreshed.rows[0]));
-    }
-    return ids;
-  }
-
-  async #revokeDepartedMemberAuthority(client: PostgresQueryable, organizationId: string, accountId: string) {
-    const authorityTables = await client.query<{ tablename: string }>(`SELECT tablename FROM pg_tables
-      WHERE schemaname = current_schema() AND tablename = ANY($1::text[])`,
-    [["stash_sessions", "stash_personal_access_tokens"]]);
-    const present = new Set(authorityTables.rows.map(({ tablename }) => tablename));
-    const sessions = present.has("stash_sessions") ? await client.query("DELETE FROM stash_sessions WHERE account_id = $1", [accountId]) : { rowCount: 0 };
-    const personalTokens = present.has("stash_personal_access_tokens") ? await client.query(
-      `UPDATE stash_personal_access_tokens SET revoked_at = CURRENT_TIMESTAMP
-       WHERE organization_id = $1 AND account_id = $2 AND revoked_at IS NULL`, [organizationId, accountId]) : { rowCount: 0 };
-    const grants = await client.query(`UPDATE stash_agent_grants SET revoked_at = CURRENT_TIMESTAMP
-      WHERE organization_id = $1 AND sponsoring_member_id = $2 AND revoked_at IS NULL`, [organizationId, accountId]);
-    return { revokedSessions: sessions.rowCount ?? 0,
-      revokedCredentials: personalTokens.rowCount ?? 0,
-      revokedAgentGrants: grants.rowCount ?? 0 };
-  }
-
-  async #degradePersonalConnections(client: PostgresQueryable, organizationId: string, accountId: string): Promise<string[]> {
-    const table = await client.query<{ exists: boolean }>("SELECT to_regclass('stash_repository_connections') IS NOT NULL AS exists");
-    if (!table.rows[0]?.exists) return [];
-    await this.#ensureRepositoryConnectionStateColumns(client);
-    const degraded = await client.query<{ id: string }>(`UPDATE stash_repository_connections SET state = 'degraded'
-      WHERE organization_id = $1 AND created_by_account_id = $2 AND ownership = 'personal' AND state = 'active' RETURNING id`,
-    [organizationId, accountId]);
-    const ids = degraded.rows.map(({ id }) => id).sort();
-    for (const connectionId of ids) {
-      const refreshed = await client.query<RepositoryConnectionRow>(`${repositoryConnectionSelect} WHERE connection.id = $1`, [connectionId]);
-      const record = repositoryConnectionRecord(refreshed.rows[0]!);
-      const revision = await client.query<{ revision: number }>("SELECT COALESCE(MAX(revision),0)+1 AS revision FROM stash_portable_projection_outbox WHERE object_kind='RepositoryConnection' AND object_id=$1", [connectionId]);
-      await this.#recordRepositoryConnectionProjection(client, record, Number(revision.rows[0]!.revision));
-    }
-    return ids;
-  }
-
-  async #ensureRepositoryConnectionStateColumns(client: PostgresQueryable): Promise<void> {
-    await client.query(`ALTER TABLE stash_repository_connections ADD COLUMN IF NOT EXISTS ownership TEXT NOT NULL DEFAULT 'organization';
-      ALTER TABLE stash_repository_connections ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'active';
-      UPDATE stash_repository_connections SET ownership='organization' WHERE ownership NOT IN ('organization','personal');
-      UPDATE stash_repository_connections SET state='active' WHERE state NOT IN ('active','degraded');
-      DO $connection_state_constraints$ BEGIN
-        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='stash_repository_connections'::regclass AND conname='stash_repository_connections_ownership_check') THEN
-          ALTER TABLE stash_repository_connections ADD CONSTRAINT stash_repository_connections_ownership_check CHECK (ownership IN ('organization','personal'));
-        END IF;
-        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='stash_repository_connections'::regclass AND conname='stash_repository_connections_state_check') THEN
-          ALTER TABLE stash_repository_connections ADD CONSTRAINT stash_repository_connections_state_check CHECK (state IN ('active','degraded'));
-        END IF;
-      END $connection_state_constraints$`);
-  }
-
-  async #recordMemberDepartureAudit(client: PostgresQueryable, input: { organizationId: string; actorId: string; accountId: string;
-    role: BuiltInOrganizationRole; affectedTaskIds: string[]; degradedRepositoryConnectionIds: string[];
-    revokedSessions: number; revokedCredentials: number; revokedAgentGrants: number }): Promise<void> {
-    const { organizationId, actorId, accountId, role, ...after } = input;
-    await client.query(`INSERT INTO stash_operator_audit
-      (id, action, actor_account_id, organization_id, target_account_id, occurred_at, before_state, after_state)
-      VALUES ($1,'organization_member_departed',$2,$3,$4,CURRENT_TIMESTAMP,$5::jsonb,$6::jsonb)`,
-    [randomUUID(), actorId, organizationId, accountId, JSON.stringify({ role, active: true }), JSON.stringify({ active: false, ...after })]);
   }
 
   async #recordAgentExecutionAudit(client: PostgresQueryable, memberId: string, workspaceId: string, action: string,

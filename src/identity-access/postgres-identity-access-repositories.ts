@@ -28,14 +28,13 @@ export class PostgresIdentityAccessRepositories implements PasswordAuthRepositor
     private readonly kernel: PostgresKernel,
     private readonly secrets: AuthenticationSecretCodec,
     private readonly dependencies: {
-      prepareRegistration(client: PostgresQueryable): Promise<void>;
       recordWorkspaceProjection(client: PostgresQueryable, record: RegistrationRecord): Promise<void>;
       recordProjection(client: PostgresQueryable, kind: "Workspace" | "Project" | "GuestProjectAccess", id: string,
         schema: "stash.workspace.v1" | "stash.project.v1" | "stash.guest-project-access.v1", payload: object): Promise<void>;
       authorizeProject(client: PostgresQueryable, memberId: string, workspaceId: string): Promise<{ found: boolean; allowed: boolean }>;
       ensureDefaultWorkflow(client: PostgresQueryable, projectId: string): Promise<void>;
       findPortableMemberIdentity(memberId: string): Promise<PortableIdentity | undefined>;
-      roles: Pick<OrganizationRoleRepository,"assignBuiltInRole"|"listCustomRoles"|"createCustomRole"|"updateCustomRole"|"assignCustomRole"|"revokeCustomRole">;
+      roles: Pick<OrganizationRoleRepository,"assignBuiltInRole"|"removeOrganizationMember"|"listCustomRoles"|"createCustomRole"|"updateCustomRole"|"assignCustomRole"|"revokeCustomRole">;
       prepareNotifications(client:PostgresQueryable):Promise<void>;
       recordActivityProjection(client:PostgresQueryable,activity:ActivityRecord):Promise<void>;
       prepareWorkspaceImport(client:PostgresQueryable):Promise<void>;
@@ -46,7 +45,7 @@ export class PostgresIdentityAccessRepositories implements PasswordAuthRepositor
 
   async createAccountWithPersonalWorkspaceAndSession(record: RegistrationRecord): Promise<boolean> {
     return this.kernel.transaction(async (client) => {
-      await this.dependencies.prepareRegistration(client);
+      await this.prepareRegistration(client);
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`registration:${record.account.email}`]);
       if ((await client.query("SELECT 1 FROM stash_accounts WHERE email=$1", [record.account.email])).rowCount) return false;
       await client.query("INSERT INTO stash_accounts(id,name,email,password_hash) VALUES($1,$2,$3,$4)", [
@@ -195,6 +194,7 @@ export class PostgresIdentityAccessRepositories implements PasswordAuthRepositor
   }
 
   assignBuiltInRole(organizationId:string,actorId:string,accountId:string,role:BuiltInOrganizationRole){return this.dependencies.roles.assignBuiltInRole(organizationId,actorId,accountId,role);}
+  removeOrganizationMember(organizationId:string,actorId:string,accountId:string){return this.dependencies.roles.removeOrganizationMember(organizationId,actorId,accountId);}
   listCustomRoles(organizationId:string){return this.dependencies.roles.listCustomRoles(organizationId);}
   createCustomRole(organizationId:string,actorId:string,role:CustomOrganizationRole){return this.dependencies.roles.createCustomRole(organizationId,actorId,role);}
   updateCustomRole(organizationId:string,actorId:string,roleId:string,input:{name:string;permissions:Array<"create_project">}){return this.dependencies.roles.updateCustomRole(organizationId,actorId,roleId,input);}
@@ -218,7 +218,7 @@ export class PostgresIdentityAccessRepositories implements PasswordAuthRepositor
     ON CONFLICT(organization_id,issuer,account_id) DO UPDATE SET subject_lookup=EXCLUDED.subject_lookup,subject_secret=EXCLUDED.subject_secret`,
   [key.organizationId,accountId,key.issuer,this.oidcIdentityLookup(key),this.secrets.encrypt(key.subject)]);return result.rowCount===1;}
 
-  async prepareOidc(client:PostgresQueryable=this.kernel):Promise<void>{await this.dependencies.prepareRegistration(client);await client.query(`
+  async prepareOidc(client:PostgresQueryable=this.kernel):Promise<void>{await this.prepareRegistration(client);await client.query(`
     CREATE TABLE IF NOT EXISTS stash_oidc_configurations(organization_id UUID PRIMARY KEY REFERENCES stash_organizations(id) ON DELETE CASCADE,
       issuer TEXT NOT NULL,client_id TEXT NOT NULL,client_secret TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS stash_oidc_identities(organization_id UUID NOT NULL REFERENCES stash_organizations(id) ON DELETE CASCADE,
@@ -281,7 +281,7 @@ export class PostgresIdentityAccessRepositories implements PasswordAuthRepositor
       return {status:"accepted" as const,access:{kind:"guest" as const,organizationId:invitation.organization_id,projectIds:projects.rows.map(({project_id})=>project_id)}};});
   }
 
-  async prepareInvitations(client:PostgresQueryable=this.kernel):Promise<void>{await this.dependencies.prepareRegistration(client);await client.query(`
+  async prepareInvitations(client:PostgresQueryable=this.kernel):Promise<void>{await this.prepareRegistration(client);await client.query(`
     CREATE TABLE IF NOT EXISTS stash_invitations(id UUID PRIMARY KEY,organization_id UUID NOT NULL REFERENCES stash_organizations(id),token_lookup TEXT UNIQUE,
       token_secret TEXT,kind TEXT NOT NULL CHECK(kind IN ('member','guest')),member_role TEXT CHECK(member_role IN ('Owner','Admin','Member')),
       invited_by_account_id UUID NOT NULL REFERENCES stash_accounts(id),expires_at TIMESTAMPTZ NOT NULL,accepted_at TIMESTAMPTZ,
@@ -342,7 +342,7 @@ export class PostgresIdentityAccessRepositories implements PasswordAuthRepositor
   async retryEmailRecoveryDelivery(claim:EmailRecoveryDeliveryClaim,reason:string):Promise<boolean>{return (await this.kernel.query(
     "UPDATE stash_email_recovery_delivery_jobs SET attempts=attempts+1,last_error=$4,available_at=NOW()+INTERVAL '1 minute',claim_owner=NULL,lease_until=NULL WHERE id=$1 AND claim_owner=$2 AND claim_version=$3",
   [claim.jobId,claim.owner,claim.version,reason.slice(0,500)])).rowCount===1;}
-  async prepareRecovery(client:PostgresQueryable=this.kernel):Promise<void>{await this.dependencies.prepareRegistration(client);await client.query(`
+  async prepareRecovery(client:PostgresQueryable=this.kernel):Promise<void>{await this.prepareRegistration(client);await client.query(`
     CREATE TABLE IF NOT EXISTS stash_passkeys(credential_id TEXT PRIMARY KEY,account_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
       public_key TEXT NOT NULL,signature_counter BIGINT NOT NULL,transports TEXT[],created_at TIMESTAMPTZ NOT NULL);
     CREATE TABLE IF NOT EXISTS stash_recovery_codes(account_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,code_lookup TEXT NOT NULL,
@@ -388,7 +388,7 @@ export class PostgresIdentityAccessRepositories implements PasswordAuthRepositor
     return Boolean((await this.kernel.query(`SELECT 1 FROM stash_workspaces workspace LEFT JOIN stash_projects project ON project.workspace_id=workspace.id
       WHERE workspace.organization_owner_id=$1 AND ($2::uuid IS NULL OR workspace.id=$2) AND ($3::uuid IS NULL OR project.id=$3)
       AND ($4::uuid IS NULL OR project.id=$4) LIMIT 1`,[grant.organizationId,target.workspaceId??null,target.projectId??null,grant.projectId??null])).rowCount);}
-  async prepareAgentAuthority(client:PostgresQueryable=this.kernel):Promise<void>{await this.dependencies.prepareRegistration(client);await client.query(`CREATE TABLE IF NOT EXISTS stash_agent_grants(
+  async prepareAgentAuthority(client:PostgresQueryable=this.kernel):Promise<void>{await this.prepareRegistration(client);await client.query(`CREATE TABLE IF NOT EXISTS stash_agent_grants(
     id UUID PRIMARY KEY,organization_id UUID NOT NULL REFERENCES stash_organizations(id),project_id UUID REFERENCES stash_projects(id),
     sponsoring_member_id UUID NOT NULL REFERENCES stash_accounts(id),capabilities JSONB NOT NULL CHECK(jsonb_typeof(capabilities)='array'),expires_at TIMESTAMPTZ NOT NULL,
     confirmation_policy JSONB NOT NULL CHECK(jsonb_typeof(confirmation_policy)='object'),revoked_at TIMESTAMPTZ,name TEXT NOT NULL DEFAULT 'Agent',token_lookup TEXT UNIQUE,
@@ -510,7 +510,34 @@ export class PostgresIdentityAccessRepositories implements PasswordAuthRepositor
     return {member:{id:row.account_id,name:row.account_name,email:row.account_email},workspace:{id:row.workspace_id,name:row.workspace_name},capabilities:[],
       ...(organizationAdministrations.length?{organizationAdministrations}:{}),...(row.organization_id?{activeOrganizationId:row.organization_id}:{})};});}
 
-  async prepareWorkspaceProjects(client:PostgresQueryable):Promise<void>{await this.dependencies.prepareRegistration(client);}
+  async prepareRegistration(client:PostgresQueryable=this.kernel):Promise<void>{await client.query(`
+    CREATE TABLE IF NOT EXISTS stash_organizations (id UUID PRIMARY KEY,name TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS stash_accounts (id UUID PRIMARY KEY,name TEXT NOT NULL,email TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS stash_organization_memberships (
+      organization_id UUID NOT NULL REFERENCES stash_organizations(id),account_id UUID NOT NULL REFERENCES stash_accounts(id),
+      role TEXT NOT NULL CHECK (role IN ('Owner','Admin','Member')),PRIMARY KEY (organization_id,account_id));
+    CREATE TABLE IF NOT EXISTS stash_instance_bootstrap (singleton BOOLEAN PRIMARY KEY CHECK (singleton));
+    CREATE TABLE IF NOT EXISTS stash_sessions (
+      id UUID PRIMARY KEY,account_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,token_lookup TEXT NOT NULL UNIQUE,
+      token_hash TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL,last_seen_at TIMESTAMPTZ NOT NULL,user_agent TEXT);
+    CREATE TABLE IF NOT EXISTS stash_workspaces (
+      id UUID PRIMARY KEY,name TEXT NOT NULL,owner_type TEXT NOT NULL CHECK (owner_type IN ('personal','organization')),
+      personal_owner_id UUID REFERENCES stash_accounts(id),organization_owner_id UUID REFERENCES stash_organizations(id),
+      created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id),created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CHECK ((owner_type='personal' AND personal_owner_id IS NOT NULL AND organization_owner_id IS NULL)
+        OR (owner_type='organization' AND personal_owner_id IS NULL AND organization_owner_id IS NOT NULL)));
+    ALTER TABLE stash_workspaces ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+    CREATE TABLE IF NOT EXISTS stash_projects (
+      id UUID PRIMARY KEY,workspace_id UUID NOT NULL REFERENCES stash_workspaces(id),name TEXT NOT NULL,project_key TEXT NOT NULL,
+      created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id),next_task_number INTEGER NOT NULL DEFAULT 1 CHECK (next_task_number > 0),
+      workflow_revision INTEGER NOT NULL DEFAULT 0 CHECK (workflow_revision >= 0),UNIQUE (workspace_id,project_key));
+    CREATE TABLE IF NOT EXISTS stash_project_guests (
+      project_id UUID NOT NULL REFERENCES stash_projects(id),account_id UUID NOT NULL REFERENCES stash_accounts(id),PRIMARY KEY (project_id,account_id));
+    ALTER TABLE stash_projects ADD COLUMN IF NOT EXISTS next_task_number INTEGER NOT NULL DEFAULT 1 CHECK (next_task_number > 0);
+    ALTER TABLE stash_projects ADD COLUMN IF NOT EXISTS workflow_revision INTEGER NOT NULL DEFAULT 0 CHECK (workflow_revision >= 0);
+    ALTER TABLE stash_projects ADD COLUMN IF NOT EXISTS parent_project_id UUID REFERENCES stash_projects(id) ON DELETE SET NULL;
+  `);}
+  async prepareWorkspaceProjects(client:PostgresQueryable):Promise<void>{await this.prepareRegistration(client);}
   async prepareLocalization(client:PostgresQueryable):Promise<void>{await this.prepareWorkspaceProjects(client);await client.query(`CREATE TABLE IF NOT EXISTS stash_member_localization_preferences
     (account_id UUID PRIMARY KEY REFERENCES stash_accounts(id) ON DELETE CASCADE,locale TEXT NOT NULL,time_zone TEXT NOT NULL,date_format TEXT NOT NULL CHECK(date_format IN ('short','medium','long')),
     week_starts_on TEXT NOT NULL CHECK(week_starts_on IN ('sunday','monday','saturday')),updated_at TIMESTAMPTZ NOT NULL)`);}
