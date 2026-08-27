@@ -10,13 +10,15 @@ export interface RelationshipMaintenance {
     candidates: ReadonlyArray<{ id: string; title: string }>;
   }>;
 }
+export interface RelationshipMaintenancePage extends RelationshipMaintenance { readonly nextCursor?: string }
+export interface RelationshipMaintenanceQuery { readonly limit: number; readonly offset: number }
 
 export interface RelationshipQueryRepository {
   query(memberId: string, query: RelationshipQuery): Promise<
     { status: "found"; neighborhood: RelationshipNeighborhood } | { status: "not_found" }
   >;
-  maintenance(memberId: string, workspaceId: string): Promise<
-    { status: "found"; orphans: RelationshipMaintenance["orphans"]; brokenLinks: RelationshipMaintenance["brokenLinks"] }
+  maintenance(memberId: string, workspaceId: string, query: RelationshipMaintenanceQuery): Promise<
+    { status: "found"; orphans: RelationshipMaintenance["orphans"]; brokenLinks: RelationshipMaintenance["brokenLinks"]; nextCursor?: string }
     | { status: "workspace_forbidden" }
   >;
 }
@@ -48,8 +50,13 @@ export class RelationshipQueryService {
     return this.repository.query(memberId, query);
   }
 
-  async maintenance(memberId: string, workspaceId: string) {
-    if (!uuid.test(workspaceId)) throw new InvalidRelationshipQuery();
-    return this.repository.maintenance(memberId, workspaceId);
+  async maintenance(memberId: string, workspaceId: string, value?: unknown) {
+    if (!uuid.test(workspaceId) || value !== undefined && !object(value)) throw new InvalidRelationshipQuery();
+    const input = value as Record<string, unknown> | undefined;
+    if (input && !Object.keys(input).every((key) => ["limit", "cursor"].includes(key))) throw new InvalidRelationshipQuery();
+    const limit = input?.limit ?? 24; const cursor = input?.cursor ?? "0";
+    if (!Number.isInteger(limit) || Number(limit) < 1 || Number(limit) > 50 || typeof cursor !== "string" || !/^\d{1,5}$/.test(cursor))
+      throw new InvalidRelationshipQuery();
+    return this.repository.maintenance(memberId, workspaceId, { limit: Number(limit), offset: Number(cursor) });
   }
 }

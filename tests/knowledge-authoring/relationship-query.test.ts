@@ -13,15 +13,27 @@ import {
   type RelationshipQueryRepository,
 } from "../../src/knowledge-authoring/relationship-query.js";
 import { EmptyCollectionImpactInspector, NoteTreeService } from "../../src/knowledge-authoring/note-tree.js";
+import { PostgresRelationshipQueryRepository } from "../../src/knowledge-authoring/postgres-relationship-query-repository.js";
 import { VisualizationBlockService } from "../../src/knowledge-authoring/visualization-block.js";
 import { NoteLinkService } from "../../src/note-links.js";
 import { NoteService } from "../../src/notes.js";
 import { WorkspaceProjectService } from "../../src/workspaces-projects.js";
 import { normalizeVisualizationDefinition } from "../../packages/domain-types/src/visualizations.js";
+import { knowledgeAuthoringCapability } from "../../src/knowledge-authoring/index.js";
 
 const rootId = "11111111-1111-4111-8111-111111111111";
 
 describe("relationship query contracts", () => {
+  test("registers core relationship navigation without the optional saved-view service", () => {
+    const repository: RelationshipQueryRepository = { async query() { return { status: "not_found" }; },
+      async maintenance() { return { status: "workspace_forbidden" }; } };
+    const capability = knowledgeAuthoringCapability({ notes: {} as never, relationships: new RelationshipQueryService(repository),
+      memberAccess: { async authenticateBearer() { return undefined; } } });
+    const routes = capability.routes();
+    assert.equal(routes.some((route) => route.matches({} as never, new URL(`http://stash.test/api/notes/${rootId}/relationships`))), true);
+    assert.equal(routes.some((route) => route.matches({} as never,
+      new URL(`http://stash.test/api/notes/${rootId}/visualizations/22222222-2222-4222-8222-222222222222`))), false);
+  });
   test("normalizes a bounded focused query before it reaches persistence", async () => {
     const received: unknown[] = [];
     const repository: RelationshipQueryRepository = {
@@ -48,9 +60,9 @@ describe("relationship query contracts", () => {
       schema: "stash.visualization.v1",
       id: "22222222-2222-4222-8222-222222222222",
       kind: "local-graph",
-      query: { rootId, depth: 2, limit: 40, direction: "both", relationTypes: ["supports"], includeHierarchy: true },
+      query: { kind: "relationship", input: { rootId, depth: 2, limit: 40, direction: "both", relationTypes: ["supports"], includeHierarchy: true } },
       filters: { relationTypes: ["supports"], direction: "both" },
-      layout: { renderer: "focused", positions: { [rootId]: { x: 20, y: 30 } } },
+      layout: { kind: "focused", positions: { [rootId]: { x: 20, y: 30 } } },
       viewEdges: [{ id: "edge-local", sourceNoteId: rootId,
         targetNoteId: "33333333-3333-4333-8333-333333333333", relationshipType: "questions" }],
     });
@@ -58,10 +70,34 @@ describe("relationship query contracts", () => {
     assert.deepEqual(definition.viewEdges, [{ id: "edge-local", sourceNoteId: rootId,
       targetNoteId: "33333333-3333-4333-8333-333333333333", relationshipType: "questions" }]);
     assert.equal(definition.kind, "local-graph");
+    assert.deepEqual(normalizeVisualizationDefinition({ ...definition, layout: undefined }).layout,
+      { kind: "focused", positions: {} });
     assert.throws(() => normalizeVisualizationDefinition({ ...definition, kind: "third-party-script" }));
-    assert.throws(() => normalizeVisualizationDefinition({ ...definition, layout: { renderer: () => "untrusted" } }));
+    assert.throws(() => normalizeVisualizationDefinition({ ...definition, layout: { kind: "force", positions: {} } }));
+    assert.throws(() => normalizeVisualizationDefinition({ ...definition, query: { kind: "search", input: { text: "all", limit: 20 } } }));
     assert.throws(() => normalizeVisualizationDefinition({ ...definition,
       viewEdges: [definition.viewEdges[0], definition.viewEdges[0]] }));
+  });
+
+  test("bounds PostgreSQL traversal rounds and every candidate read", async () => {
+    const calls: Array<{ sql: string; values: readonly unknown[] }> = []; let candidateRound = 0;
+    const client = { async query(sql: string, values: readonly unknown[] = []) {
+      calls.push({ sql, values });
+      if (sql.includes("note.workspace_id") && !sql.includes("WITH candidates")) return { rows: [{ id: rootId, title: "Root", parent_id: null,
+        workspace_id: "99999999-9999-4999-8999-999999999999" }], rowCount: 1 };
+      if (sql.includes("WITH candidates")) { candidateRound += 1; return { rows: candidateRound <= 3
+        ? [{ id: `${String(candidateRound).padStart(8, "0")}-8888-4888-8888-888888888888`, title: `Depth ${candidateRound}`, parent_id: null }] : [], rowCount: candidateRound <= 3 ? 1 : 0 }; }
+      return { rows: [], rowCount: 0 };
+    } };
+    const kernel = { async withSession<T>(work: (session: typeof client) => Promise<T>) { return work(client); } };
+    const repository = new PostgresRelationshipQueryRepository(kernel as never, async () => undefined);
+    const result = await repository.query("member", { rootId, depth: 3, limit: 100, direction: "both", includeHierarchy: true });
+    assert.equal(result.status, "found");
+    assert.equal(calls.length, 6, "root + at most depth rounds + one continuation probe + bounded edges");
+    const bounded = calls.filter(({ sql }) => sql.includes("WITH candidates"));
+    assert.equal(bounded.length, 4);
+    assert.equal(bounded.every(({ values }) => Number(values[5]) <= 101), true);
+    assert.equal(calls.at(-1)?.values[2], 401, "edge reads are capped independently of graph density");
   });
 
   test("filters identities, edges, unresolved targets, and pagination metadata before returning a neighborhood", async () => {
@@ -148,9 +184,11 @@ describe("relationship query contracts", () => {
       const beforeLinks = await store.upgradeDatabase.query<{ count: number }>("SELECT count(*)::int count FROM stash_note_links");
       const saved = await visualization.save(ownerId, visibleRoot.node.id, {
         schema: "stash.visualization.v1", id: blockId, kind: "local-graph",
-        query: { rootId: visibleRoot.node.id, depth: 2, limit: 40, direction: "both", includeHierarchy: true },
-        filters: { relationTypes: [], direction: "both" }, layout: { renderer: "focused", positions: {} },
-        viewEdges: [{ id: "view-edge", sourceNoteId: visibleRoot.node.id, targetNoteId: orphan.node.id }],
+        query: { kind: "relationship", input: { rootId: visibleRoot.node.id, depth: 2, limit: 40, direction: "both", includeHierarchy: true } },
+        filters: { relationTypes: [], direction: "both" }, layout: { kind: "focused", positions: {
+          [visibleRoot.node.id]: { x: 10, y: 20 }, [orphan.node.id]: { x: 30, y: 40 } } },
+        viewEdges: [{ id: "view-edge", sourceNoteId: visibleRoot.node.id, targetNoteId: orphan.node.id },
+          { id: "visible-view-edge", sourceNoteId: visibleRoot.node.id, targetNoteId: visibleChild.node.id }],
       });
       assert.equal(saved.status, "saved");
       if (saved.status !== "saved") return;
@@ -158,22 +196,61 @@ describe("relationship query contracts", () => {
         beforeLinks.rows[0]!.count, "saving view-only state must not mutate canonical Note Links");
       const opened = await visualization.read(ownerId, visibleRoot.node.id, blockId);
       assert.equal(opened.status, "found");
-      if (opened.status === "found") assert.deepEqual(opened.block.definition.viewEdges,
-        [{ id: "view-edge", sourceNoteId: visibleRoot.node.id, targetNoteId: orphan.node.id }]);
+      if (opened.status === "found") assert.equal(opened.block.definition.viewEdges.length, 2);
       assert.equal((await visualization.save(ownerId, orphan.node.id, {
         ...saved.block.definition, id: blockId,
       })).status, "not_found", "a portable block id cannot be rebound to another owner Note");
       assert.equal((await visualization.read(ownerId, visibleRoot.node.id, blockId)).status, "found");
-      assert.equal((await visualization.read(guestId, visibleRoot.node.id, blockId)).status, "not_found");
+      const guestView = await visualization.read(guestId, visibleRoot.node.id, blockId);
+      assert.equal(guestView.status, "found");
+      if (guestView.status === "found") {
+        assert.deepEqual(guestView.block.definition.viewEdges,
+          [{ id: "visible-view-edge", sourceNoteId: visibleRoot.node.id, targetNoteId: visibleChild.node.id }]);
+        assert.deepEqual(Object.keys(guestView.block.definition.layout.positions), [visibleRoot.node.id]);
+        assert.equal(JSON.stringify(guestView.block).includes(orphan.node.id), false);
+      }
+      assert.equal((await visualization.save(guestId, visibleRoot.node.id, saved.block.definition)).status, "not_found");
       const exported = await store.database.readExportSnapshot(ownerId, workspaceId);
       assert.equal(exported.status, "found");
       if (exported.status === "found") assert.equal(exported.snapshot.durableObjects?.some(({ kind, id, schema }) =>
-        kind === "VisualizationBlock" && id === blockId && schema === "stash.visualization.v1"), true);
+        kind === "VisualizationBlock" && id === blockId && schema === "stash.visualization.v1"), true,
+      JSON.stringify(exported.snapshot.durableObjects));
 
-      const promoted = await visualization.promoteViewEdge(ownerId, visibleRoot.node.id, blockId, "view-edge");
+      assert.equal((await visualization.promoteViewEdge(guestId, visibleRoot.node.id, blockId, "view-edge",
+        "66666666-6666-4666-8666-666666666666")).status, "not_found");
+      const [promoted, promotedAgain] = await Promise.all([
+        visualization.promoteViewEdge(ownerId, visibleRoot.node.id, blockId, "view-edge",
+          "55555555-5555-4555-8555-555555555555"),
+        visualization.promoteViewEdge(ownerId, visibleRoot.node.id, blockId, "view-edge",
+          "55555555-5555-4555-8555-555555555555"),
+      ]);
       assert.equal(promoted.status, "promoted");
+      assert.deepEqual(promotedAgain, promoted);
+      assert.equal((await store.upgradeDatabase.query<{ count: number }>("SELECT count(*)::int count FROM stash_workspace_activity WHERE action='visualization_edge_promoted'")).rows[0]!.count, 1);
       assert.equal((await store.upgradeDatabase.query<{ count: number }>("SELECT count(*)::int count FROM stash_note_links")).rows[0]!.count,
         beforeLinks.rows[0]!.count + 1);
+
+      for (let index = 0; index < 80; index += 1) {
+        const child = await notes.create(ownerId, workspaceId, { title: `Wide ${String(index).padStart(2, "0")}`, parentId: visibleRoot.node.id });
+        assert.equal(child.status, "created");
+      }
+      const firstWidePage = await service.query(ownerId, visibleRoot.node.id,
+        { depth: 1, limit: 24, direction: "both", relationTypes: ["not-a-link-type"], includeHierarchy: true });
+      assert.equal(firstWidePage.status, "found");
+      if (firstWidePage.status === "found") { assert.equal(firstWidePage.neighborhood.nodes.length, 24); assert.equal(firstWidePage.neighborhood.hasMore, true); }
+      const expandedWidePage = await service.query(ownerId, visibleRoot.node.id,
+        { depth: 1, limit: 100, direction: "both", relationTypes: ["not-a-link-type"], includeHierarchy: true });
+      assert.equal(expandedWidePage.status, "found");
+      if (expandedWidePage.status === "found") assert.equal(expandedWidePage.neighborhood.nodes.length > 25, true);
+      const firstMaintenancePage = await service.maintenance(ownerId, workspaceId, { limit: 10, cursor: "0" });
+      assert.equal(firstMaintenancePage.status, "found");
+      if (firstMaintenancePage.status === "found") {
+        assert.equal(firstMaintenancePage.orphans.length, 10); assert.equal(firstMaintenancePage.nextCursor, "10");
+        const secondMaintenancePage = await service.maintenance(ownerId, workspaceId, { limit: 10, cursor: firstMaintenancePage.nextCursor });
+        assert.equal(secondMaintenancePage.status, "found");
+        if (secondMaintenancePage.status === "found") assert.equal(secondMaintenancePage.orphans.some(({ id }) =>
+          firstMaintenancePage.orphans.some((first) => first.id === id)), false);
+      }
     } finally { await store.close(); }
   });
 });

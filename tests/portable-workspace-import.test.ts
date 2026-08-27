@@ -182,8 +182,8 @@ describe("Portable Workspace import", () => {
     const childId = "99999999-9999-4999-8999-999999999999";
     const blockId = "77777777-7777-4777-8777-777777777777";
     const visualization = { schema: "stash.visualization.v1", id: blockId, workspaceId, ownerNoteId: noteId, revision: 2,
-      kind: "local-graph", query: { rootId: noteId, depth: 2, limit: 30, direction: "both", relationTypes: ["supports"], includeHierarchy: true },
-      filters: { relationTypes: ["supports"], direction: "outgoing" }, layout: { renderer: "focused", positions: { [noteId]: { x: 12, y: 18 } } },
+      kind: "local-graph", query: { kind: "relationship", input: { rootId: noteId, depth: 2, limit: 30, direction: "both", relationTypes: ["supports"], includeHierarchy: true } },
+      filters: { relationTypes: ["supports"], direction: "outgoing" }, layout: { kind: "focused", positions: { [noteId]: { x: 12, y: 18 } } },
       viewEdges: [{ id: "view-only", sourceNoteId: noteId, targetNoteId: childId, relationshipType: "questions" }] };
     const source: PortableWorkspaceExportSnapshot = { ...snapshot,
       notes: [...snapshot.notes, { ...snapshot.notes[0]!, id: childId, content: "# Child" }],

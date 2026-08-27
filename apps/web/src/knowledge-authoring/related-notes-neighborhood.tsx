@@ -15,8 +15,8 @@ const renderers: Readonly<Record<BuiltInRelationshipRenderer, RelationshipRender
   </div> }),
 });
 
-/** The visual lens and its complete non-spatial equivalent consume the same permission-filtered response. */
-export function VisualizationBlock({ neighborhood, renderer = "focused" }: {
+/** A focused relationship neighborhood and its complete non-spatial equivalent. */
+export function RelatedNotesNeighborhood({ neighborhood, renderer = "focused" }: {
   neighborhood: RelationshipNeighborhood; renderer?: BuiltInRelationshipRenderer;
 }) {
   return <div className={styles.visualizationBlock}>
@@ -24,7 +24,7 @@ export function VisualizationBlock({ neighborhood, renderer = "focused" }: {
     <ol aria-label="Related Notes outline" className={styles.relationshipOutline}>
       {neighborhood.outline.map((node) => <li key={node.id} style={{ "--relationship-depth": node.depth } as React.CSSProperties}>
         {node.id === neighborhood.rootId ? <span aria-current="true">{node.title}</span>
-          : <Link to={`/app/notes/${node.id}`}>{node.title}</Link>}
+          : <Link data-related-note-id={node.id} to={`/app/notes/${node.id}`}>{node.title}</Link>}
         <small>{node.depth === 0 ? "Focused Note" : `${node.depth} ${node.depth === 1 ? "step" : "steps"} away`}</small>
       </li>)}
     </ol>

@@ -37,6 +37,9 @@ import { knowledgeAuthoringCapability } from "../src/knowledge-authoring/index.j
 import { workPlanningCapability } from "../src/work-planning/index.js";
 import { ProjectlessTaskService } from "../src/work-planning/projectless-tasks.js";
 import { NoteService } from "../src/notes.js";
+import { NoteLinkService } from "../src/note-links.js";
+import { RelationshipQueryService } from "../src/knowledge-authoring/relationship-query.js";
+import { relationshipRoutes } from "../src/knowledge-authoring/relationship-routes.js";
 
 const noteId = "99999999-9999-4999-8999-999999999999";
 const secondNoteId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -246,6 +249,10 @@ const seededChild = await activeNoteTreeRepository.createTreeNote(browserMemberI
 if (seededChild.status !== "created") throw new Error("browser_note_tree_child_seed_failed");
 await browserTreeStore.upgradeDatabase.query("UPDATE stash_notes SET project_id=$2 WHERE id=$1", [noteId, projectId]);
 await browserTreeStore.upgradeDatabase.query("INSERT INTO stash_project_guests(project_id,account_id) VALUES($1,$2)", [projectId, browserGuestId]);
+const browserNoteLinks = new NoteLinkService(browserTreeStore.database);
+const unresolvedBrowserLink = await browserNoteLinks.importUnresolved(browserMemberId, noteId,
+  { targetPath: "notes/missing-browser.md", candidateNoteIds: [secondNoteId], label: "Missing browser evidence" });
+if (unresolvedBrowserLink.status !== "created") throw new Error("browser_unresolved_link_seed_failed");
 
 const browserNoteTreeRepository = new Proxy({} as NoteTreeRepository, {
   get(_target, property) {
@@ -310,6 +317,7 @@ const instance = await startInstance({
     async setupComplete() { return true; }, async createFirstPersonalInstance() { return false; },
   }, { boundHost: "127.0.0.1", output() {} }))] }, { name: "knowledge-authoring", routes: () => [
     noteTreeRoutes(new NoteTreeService(browserNoteTreeRepository, new EmptyCollectionImpactInspector()), browserMemberAccess),
+    relationshipRoutes(new RelationshipQueryService(browserTreeStore.database.relationshipQueryRepository()), browserMemberAccess),
     reopenNoteTreeRoute,
   ] }]),
   passwordAuth: browserPasswordAuth,
@@ -325,6 +333,7 @@ const instance = await startInstance({
   oidcCallbackOrigin: "http://127.0.0.1:4173",
   allowInsecureOidcCallbackOriginForTest: true,
   memberAccess: browserMemberAccess,
+  noteLinks: browserNoteLinks,
   workspaceProjects: new WorkspaceProjectService({ async findPortableMemberIdentity() { return { localAccountId: browserMemberId, displayName: "Browser Member" }; }, async canCreateProject(memberId, workspaceId) { return memberId === browserMemberId && workspaceId === browserWorkspaceId; }, async createWorkspace() { return { status: "organization_forbidden" }; }, async createProject(memberId, record) { if (memberId !== browserMemberId || record.workspaceId !== browserWorkspaceId) return "workspace_forbidden"; browserProjects = [...browserProjects, record]; return "created"; }, async listAccessibleWorkspaces() { return [{ id: browserWorkspaceId, name: "Acceptance Workspace", ownerType: "organization" as const, projects: browserProjects }, { id: "77777777-7777-4777-8777-777777777777", name: "Shared Workspace", ownerType: "organization" as const, projects: [{ id: "66666666-6666-4666-8666-666666666665", workspaceId: "77777777-7777-4777-8777-777777777777", createdByMemberId: browserMemberId, name: "Shared roadmap", key: "SHARED" }] }]; } }),
   notes: { async listInbox(memberId: string, workspaceId: string) { return memberId === browserMemberId && workspaceId === browserWorkspaceId ? { status: "found", notes: inboxNotes } : { status: "workspace_forbidden" }; },
     async listNotes(memberId: string, workspaceId: string) { return memberId === browserMemberId && workspaceId === browserWorkspaceId ? { status: "found", notes: [{ id: secondNoteId, workspaceId, content: "Authoritative second Note", createdAt: new Date(0).toISOString() }, { id: noteId, workspaceId, content: "Release collaboration plan", tags: ["decision"], createdAt: new Date(0).toISOString() }] } : { status: "workspace_forbidden" }; },
