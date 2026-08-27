@@ -350,9 +350,10 @@ replace its complete visible relationship set without creating a second copy of 
 replacements lock and validate the complete Workspace Task graph in one transaction. Any direct or
 indirect cycle rejects the whole update before canonical state changes. Successful changes append
 portable projection revisions for every endpoint whose derived view changed.
-Instances that briefly used the earlier per-Task dependency JSON upgrade it once into canonical
-edges (deduplicating equivalent inverse forms), then remove that operational column. It is never a
-second read or write source.
+The earlier prototype per-Task dependency JSON is not an upgrade source. In accordance with
+ADR-0053, pre-release development Instances using that prototype shape must reset their data; the
+canonical edge table is the only supported dependency source. Forward migrations remain required
+for data created by a functional release.
 
 Task API read models also include a derived `dependencyWarnings` array. Each incomplete direct
 prerequisite produces an `incomplete_dependency` warning carrying its stable Task identity. The

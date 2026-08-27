@@ -466,7 +466,8 @@ async function startFirstRunInstance() {
   const database = firstRunStore.database;
   const auth = new PasswordAuthService(database.identityAccessRepositories());
   const notes = new NoteService(database.knowledgeAuthoringRepositories());
-  const tasks = new TaskService(database, database);
+  const workPlanning = database.workPlanningRepositories();
+  const tasks = new TaskService(workPlanning, database.identityAccessRepositories());
   const projects = new WorkspaceProjectService(database);
   const attachments = new LocalAttachmentStorage(firstRunStore.paths.attachments);
   return startInstance({ database, host: "0.0.0.0", port: Number.parseInt(process.env.STASH_BROWSER_FIRST_RUN_PORT ?? "4174", 10),
@@ -511,7 +512,8 @@ await roleStore.upgradeDatabase.query("INSERT INTO stash_accounts(id,name,email,
 await roleStore.upgradeDatabase.query("INSERT INTO stash_organization_memberships(organization_id,account_id,role) VALUES($1,$2,'Member')",
   [roleOrganizationId, roleMemberId]);
 const roleAuth = new PasswordAuthService(roleStore.database.identityAccessRepositories());
-const roleTasks = new TaskService(roleStore.database, roleStore.database);
+const roleWorkPlanning = roleStore.database.workPlanningRepositories();
+const roleTasks = new TaskService(roleWorkPlanning, roleStore.database.identityAccessRepositories());
 const roleProjects = new WorkspaceProjectService(roleStore.database);
 const roleService = new OrganizationRoleService(roleStore.database);
 const completedRoleSetup = new InstanceSetupService(roleStore.database.instanceSetupRepository(), { boundHost: "127.0.0.1", output() {} });

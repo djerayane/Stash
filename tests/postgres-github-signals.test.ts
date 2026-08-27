@@ -30,7 +30,7 @@ describe("PostgreSQL GitHub Signal acceptance", { skip: databaseUrl ? false : "S
         ownerName: "Automation Owner", ownerEmail: "automation-owner@example.test", passwordHash: "test", role: "Owner" });
       await sql.query("INSERT INTO stash_accounts(id,name,email,password_hash) VALUES($1,'Automation Configurer','automation-configurer@example.test','test')", [configuringMemberId]);
       await sql.query("INSERT INTO stash_organization_memberships(organization_id,account_id,role) VALUES($1,$2,'Admin')", [organizationId, configuringMemberId]);
-      const workspaces = new WorkspaceProjectService(database); const notes = new NoteService(database.knowledgeAuthoringRepositories()); const tasks = new TaskService(database, database);
+      const workspaces = new WorkspaceProjectService(database); const notes = new NoteService(database.knowledgeAuthoringRepositories()); const tasks = new TaskService(database.workPlanningRepositories(), database);
       const workspace = await workspaces.createWorkspace(ownerId, { name: "Automation workspace", owner: { type: "organization", organizationId } });
       assert.equal(workspace.status, "created"); if (workspace.status !== "created") throw new Error("workspace setup failed");
       const project = await workspaces.createProject(ownerId, workspace.workspace.id, { name: "Automation project", key: "AUTO" });
@@ -114,7 +114,7 @@ describe("PostgreSQL GitHub Signal acceptance", { skip: databaseUrl ? false : "S
       await sql.query("INSERT INTO stash_organizations(id,name) VALUES($1,'Beta')", [orgB]);
       await sql.query("INSERT INTO stash_accounts(id,name,email,password_hash) VALUES($1,'Grace','grace-signals@example.test','test')", [ownerB]);
       await sql.query("INSERT INTO stash_organization_memberships(organization_id,account_id,role) VALUES($1,$2,'Owner')", [orgB, ownerB]);
-      const workspaces = new WorkspaceProjectService(database); const notes = new NoteService(database.knowledgeAuthoringRepositories()); const tasks = new TaskService(database, database);
+      const workspaces = new WorkspaceProjectService(database); const notes = new NoteService(database.knowledgeAuthoringRepositories()); const tasks = new TaskService(database.workPlanningRepositories(), database);
       async function projectTask(ownerId: string, organizationId: string, workspaceName: string) {
         const workspace = await workspaces.createWorkspace(ownerId, { name: workspaceName, owner: { type: "organization", organizationId } });
         assert.equal(workspace.status, "created"); if (workspace.status !== "created") throw new Error("workspace setup failed");

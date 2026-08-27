@@ -2,11 +2,15 @@ import { randomUUID } from "node:crypto";
 import type { ActivityCause, ActivityRecord } from "../activity.js";
 import type { AutomationCandidate, AutomationFailureNotification, AutomationRecipe, AutomationRepository, AutomationState, AutomationTransition, AutomationTrigger } from "../automations.js";
 import type { Board, BoardRepository, BoardTask } from "../boards.js";
-import type { PortableExportTaskProjection } from "../notes.js";
-import type { ProjectWorkflow, ProjectWorkflowRepository, WorkflowStatus } from "../project-workflows.js";
-import type { TaskPlanningReadModel, TaskPlanningRepository, TaskPlanningUpdate } from "../tasks.js";
+import type { PortableExportTaskProjection, PortableNoteProjection, PortableTaskProjection, TaskCreation } from "../notes.js";
+import { initialWorkflowStatus, type ProjectWorkflow, type ProjectWorkflowRepository, type WorkflowStatus } from "../project-workflows.js";
+import { taskEditDigest, type StructuredTaskEditRepository, type TaskEditBatch, type TaskEditConflict, type TaskMoveActivity,
+  type CreateTaskFromBlockDraft, type CreateTaskFromBlockOutcome, type CreateWorkspaceTaskFromBlockOutcome, type TaskFromBlockRepository,
+  type TaskMoveRepository, type TaskPlanningReadModel, type TaskPlanningRepository, type TaskPlanningUpdate, type TaskSourceBlockReference } from "../tasks.js";
 import type { NotificationDelivery, NotificationPreferences, NotificationRepository } from "../notifications.js";
 import { PostgresKernel, type PostgresQueryable } from "../instance-operations/storage/postgres-kernel.js";
+import type { WorkspaceWorkflow } from "./canonical-tasks.js";
+import { richTextToMarkdown } from "../rich-text.js";
 
 const taskPlanningSelect = `SELECT task.*, COALESCE(workspace_status.name,status.name) AS status_name,
   COALESCE(workspace_status.category,status.category) AS status_category, creator.name AS created_by_name,
@@ -65,6 +69,16 @@ function boardFromRow(row: any): Board {
   return { schema: "stash.board.v1", id: row.id, projectId: row.project_id, name: row.name,
     groupBy: row.group_by, createdAt: new Date(row.created_at).toISOString() };
 }
+function taskConflictFromRow(row: any): TaskEditConflict {
+  return { id: row.id, taskId: row.task_id, baseRevision: row.base_revision, currentRevision: row.current_revision,
+    fields: row.fields, contribution: row.contribution, createdAt: new Date(row.created_at).toISOString(),
+    createdBy: { displayName: row.created_by_display_name, attribution: "recorded" },
+    ...(row.resolved_at ? { resolvedAt: new Date(row.resolved_at).toISOString(), resolution: row.resolution } : {}) };
+}
+function formerAssignmentsAfterUpdate(previous: readonly string[], next: readonly string[], updated: boolean) {
+  if (!updated) return [...previous];
+  return previous.every((id) => !next.includes(id)) && next.some((id) => !previous.includes(id)) ? [] : [...previous];
+}
 function hasCycle(taskIds: ReadonlySet<string>, edges: ReadonlyArray<{ dependent_task_id: string; prerequisite_task_id: string }>) {
   const outgoing = new Map([...taskIds].map((id) => [id, [] as string[]]));
   for (const edge of edges) outgoing.get(edge.dependent_task_id)?.push(edge.prerequisite_task_id);
@@ -91,6 +105,17 @@ export interface WorkPlanningPersistenceHooks {
   recordAutomationActivity(client: PostgresQueryable, memberId: string, workspaceId: string, taskId: string,
     action: string, before: TaskPlanningReadModel, after: TaskPlanningReadModel, cause: ActivityCause): Promise<ActivityRecord>;
   persistAutomationFailureActivity(client: PostgresQueryable, activity: ActivityRecord): Promise<void>;
+  recordTaskActivity(client: PostgresQueryable, memberId: string, workspaceId: string, taskId: string, action: string,
+    before: TaskPlanningReadModel, after: TaskPlanningReadModel, cause?: ActivityCause): Promise<ActivityRecord>;
+  recordStructuredAgentAudit(client: PostgresQueryable, memberId: string, workspaceId: string, taskId: string,
+    cause: Extract<ActivityCause, { kind: "agent" }>): Promise<void>;
+  recordActivityProjection(client: PostgresQueryable, activity: ActivityRecord): Promise<void>;
+  recordProjectActivityNotifications(client: PostgresQueryable, activity: ActivityRecord): Promise<void>;
+  recordIdentifiedNoteBlock(client: PostgresQueryable, memberId: string, beforeRow: any, afterRow: any,
+    projection: PortableNoteProjection): Promise<void>;
+  recordTaskSourceActivity(client: PostgresQueryable, memberId: string, workspaceId: string,
+    task: PortableExportTaskProjection): Promise<void>;
+  ensureCanonicalWorkflow(client: PostgresQueryable, workspaceId: string): Promise<WorkspaceWorkflow>;
 }
 
 interface FailedAutomationRun {
@@ -98,8 +123,103 @@ interface FailedAutomationRun {
   projectId: string; taskId: string; taskKey: string; taskTitle: string;
 }
 
-export class PostgresWorkPlanningRepositories implements TaskPlanningRepository, ProjectWorkflowRepository, BoardRepository, NotificationRepository, AutomationRepository {
+export class PostgresWorkPlanningRepositories implements TaskFromBlockRepository, TaskPlanningRepository, StructuredTaskEditRepository, TaskMoveRepository,
+  ProjectWorkflowRepository, BoardRepository, NotificationRepository, AutomationRepository {
   constructor(private readonly kernel: PostgresKernel, private readonly hooks: WorkPlanningPersistenceHooks) {}
+
+  createTaskFromBlock(memberId: string, noteId: string, blockKey: string, draft: CreateTaskFromBlockDraft): Promise<CreateTaskFromBlockOutcome> {
+    return this.createTaskFromSourceBlock(memberId, noteId, blockKey, draft) as Promise<CreateTaskFromBlockOutcome>;
+  }
+
+  createWorkspaceTaskFromBlock(memberId: string, noteId: string, blockKey: string,
+    draft: Omit<CreateTaskFromBlockDraft, "projectId">): Promise<CreateWorkspaceTaskFromBlockOutcome> {
+    return this.createTaskFromSourceBlock(memberId, noteId, blockKey, draft) as Promise<CreateWorkspaceTaskFromBlockOutcome>;
+  }
+
+  private async createTaskFromSourceBlock(memberId: string, noteId: string, blockKey: string,
+    draft: CreateTaskFromBlockDraft | Omit<CreateTaskFromBlockDraft, "projectId">) {
+    return this.kernel.transaction(async (client) => { await this.hooks.prepare(client);
+      const row = (await client.query<any>(`SELECT note.workspace_id, note.content, note.document, note.revision,
+        note.tags, note.project_id, note.reminder_at, note.created_by_account_id, note.created_at, note.archived_at,
+        creator.name AS created_by_name FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id=note.workspace_id
+        JOIN stash_accounts creator ON creator.id=note.created_by_account_id WHERE note.id=$1 AND note.archived_at IS NULL AND
+        ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR (workspace.owner_type='organization' AND EXISTS
+          (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id=workspace.organization_owner_id
+            AND membership.account_id=$2))) FOR UPDATE`, [noteId, memberId])).rows[0];
+      if (!row) return { status: "note_not_found" as const };
+      if ("projectId" in draft && !(await client.query("SELECT 1 FROM stash_projects WHERE id=$1 AND workspace_id=$2", [draft.projectId, row.workspace_id])).rowCount)
+        return { status: "project_forbidden" as const };
+      const blocks = row.document.blocks as Array<{ blockKey?: string; id?: string }>;
+      const matches = blocks.filter((block) => block.blockKey === blockKey); if (matches.length !== 1) return { status: "block_not_found" as const };
+      const block = matches[0]!; const blockId = block.id ?? randomUUID();
+      if (block.id && blocks.filter((candidate) => candidate.id === blockId).length !== 1) return { status: "ambiguous_block" as const };
+      if (!block.id) {
+        const before = { ...row, id: noteId, workspace_id: row.workspace_id }; block.id = blockId;
+        const content = richTextToMarkdown(row.document);
+        await client.query("UPDATE stash_notes SET document=$2::jsonb,content=$3,revision=revision+1 WHERE id=$1", [noteId, JSON.stringify(row.document), content]);
+        row.content = content; row.revision = Number(row.revision) + 1;
+        await this.hooks.recordIdentifiedNoteBlock(client, memberId, before, { ...row, id: noteId, workspace_id: row.workspace_id }, noteProjection(row, noteId));
+      }
+      let task: PortableExportTaskProjection;
+      if ("projectId" in draft) {
+        task = await this.createTask(client, { ...draft, workspaceId: row.workspace_id, sourceNoteIds: [noteId], sourceBlocks: [{ noteId, blockId }] });
+        await client.query("INSERT INTO stash_tasks (id,workspace_id,project_id,task_key,workflow_status_id,title,created_by_account_id,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+          [task.id, row.workspace_id, task.projectId, task.key, task.status.id, task.title, memberId, task.createdAt]);
+      } else {
+        const workflow = await this.hooks.ensureCanonicalWorkflow(client, row.workspace_id);
+        const status = workflow.statuses.find(({ category }) => category === "unstarted")!;
+        task = { schema: "stash.task.v1", ...draft, workspaceId: row.workspace_id, status,
+          sourceNoteIds: [noteId], sourceBlocks: [{ noteId, blockId }] };
+        await client.query(`INSERT INTO stash_tasks(id,workspace_id,project_id,task_key,workflow_status_id,workspace_workflow_status_id,title,description,
+          created_by_account_id,created_at) VALUES($1,$2,NULL,NULL,NULL,$3,$4,'',$5,$6)`, [task.id, row.workspace_id, status.id, task.title, memberId, task.createdAt]);
+      }
+      await client.query("INSERT INTO stash_task_note_sources(task_id,note_id) VALUES($1,$2)", [task.id, noteId]);
+      await client.query("INSERT INTO stash_task_block_sources(task_id,note_id,block_id) VALUES($1,$2,$3)", [task.id, noteId, blockId]);
+      await this.hooks.recordProjection(client, task); await this.hooks.recordTaskSourceActivity(client, memberId, row.workspace_id, task);
+      return { status: "created" as const, task, sourceBlock: { noteId, blockId } };
+    });
+  }
+
+  async linkTaskToBlock(memberId: string, taskId: string, noteId: string, blockKey: string) {
+    return this.kernel.transaction(async (client) => { await this.hooks.prepare(client);
+      const taskRow = (await client.query<any>(`SELECT task.*,status.name AS status_name,status.category,creator.name AS created_by_name
+        FROM stash_tasks task JOIN stash_workflow_statuses status ON status.id=task.workflow_status_id
+        JOIN stash_accounts creator ON creator.id=task.created_by_account_id JOIN stash_workspaces workspace ON workspace.id=task.workspace_id
+        WHERE task.id=$1 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR (workspace.owner_type='organization' AND EXISTS
+          (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id=workspace.organization_owner_id
+            AND membership.account_id=$2))) FOR UPDATE`, [taskId, memberId])).rows[0];
+      if (!taskRow) return { status: "task_not_found" as const };
+      const noteRow = (await client.query<any>(`SELECT note.*,creator.name AS created_by_name FROM stash_notes note
+        JOIN stash_accounts creator ON creator.id=note.created_by_account_id WHERE note.id=$1 AND note.workspace_id=$2
+        AND note.archived_at IS NULL FOR UPDATE`, [noteId, taskRow.workspace_id])).rows[0];
+      if (!noteRow) return { status: "note_not_found" as const };
+      const blocks = noteRow.document.blocks as Array<{ blockKey?: string; id?: string }>;
+      const matches = blocks.filter((block) => block.blockKey === blockKey); if (matches.length !== 1) return { status: "block_not_found" as const };
+      const block = matches[0]!; const blockId = block.id ?? randomUUID();
+      if (block.id && blocks.filter((candidate) => candidate.id === blockId).length !== 1) return { status: "ambiguous_block" as const };
+      const existing = await client.query("SELECT 1 FROM stash_task_block_sources WHERE task_id=$1 AND note_id=$2 AND block_id=$3", [taskId, noteId, blockId]);
+      const sourceBlock: TaskSourceBlockReference = { noteId, blockId };
+      if (!existing.rowCount) {
+        if (!block.id) {
+          const before = { ...noteRow }; block.id = blockId; const content = richTextToMarkdown(noteRow.document);
+          await client.query("UPDATE stash_notes SET document=$2::jsonb,content=$3,revision=revision+1 WHERE id=$1", [noteId, JSON.stringify(noteRow.document), content]);
+          noteRow.content = content; noteRow.revision = Number(noteRow.revision) + 1;
+          await this.hooks.recordIdentifiedNoteBlock(client, memberId, before, noteRow, noteProjection(noteRow, noteId));
+        }
+        await client.query("INSERT INTO stash_task_note_sources(task_id,note_id) VALUES($1,$2) ON CONFLICT DO NOTHING", [taskId, noteId]);
+        await client.query("INSERT INTO stash_task_block_sources(task_id,note_id,block_id) VALUES($1,$2,$3)", [taskId, noteId, blockId]);
+      }
+      const noteSources = await client.query<{ note_id: string }>("SELECT note_id FROM stash_task_note_sources WHERE task_id=$1 ORDER BY note_id", [taskId]);
+      const blockSources = await client.query<{ note_id: string; block_id: string }>("SELECT note_id,block_id FROM stash_task_block_sources WHERE task_id=$1 ORDER BY note_id,block_id", [taskId]);
+      const task: PortableTaskProjection = { schema: "stash.task.v1", id: taskId, workspaceId: taskRow.workspace_id,
+        projectId: taskRow.project_id, title: taskRow.title, key: taskRow.task_key,
+        status: { id: taskRow.workflow_status_id, name: taskRow.status_name, category: taskRow.category },
+        sourceNoteIds: noteSources.rows.map(({ note_id }) => note_id), sourceBlocks: blockSources.rows.map(({ note_id, block_id }) => ({ noteId: note_id, blockId: block_id })),
+        createdAt: new Date(taskRow.created_at).toISOString(), createdBy: { localAccountId: taskRow.created_by_account_id, displayName: taskRow.created_by_name } };
+      if (!existing.rowCount) await this.hooks.recordProjection(client, task);
+      return { status: existing.rowCount ? "already_linked" as const : "linked" as const, task, sourceBlock };
+    });
+  }
 
   async findTaskByKey(memberId: string, projectId: string, taskKey: string) {
     return this.kernel.withSession(async (client) => { await this.hooks.prepare(client);
@@ -336,7 +456,7 @@ export class PostgresWorkPlanningRepositories implements TaskPlanningRepository,
     return { schema: "stash.workflow.v1", projectId, revision: project.rows[0]!.workflow_revision, statuses: statuses.rows };
   }
 
-  private async ensureDefaultWorkflow(client: PostgresQueryable, projectId: string) {
+  async ensureDefaultWorkflow(client: PostgresQueryable, projectId: string) {
     const statuses = [[randomUUID(),projectId,"Backlog","unstarted",0],[randomUUID(),projectId,"Ready","unstarted",1],
       [randomUUID(),projectId,"In Progress","started",2],[randomUUID(),projectId,"In Review","started",3],[randomUUID(),projectId,"Done","completed",4]] as const;
     await client.query(`INSERT INTO stash_workflow_statuses (id,project_id,name,category,position) VALUES
@@ -351,6 +471,259 @@ export class PostgresWorkPlanningRepositories implements TaskPlanningRepository,
       id UUID PRIMARY KEY, project_id UUID NOT NULL REFERENCES stash_projects(id) ON DELETE CASCADE,
       name TEXT NOT NULL CHECK (char_length(name) BETWEEN 1 AND 100), group_by TEXT NOT NULL CHECK (group_by IN ('status','priority')),
       created_at TIMESTAMPTZ NOT NULL, UNIQUE (project_id, name))`);
+  }
+
+  async prepareStructuredTaskEdits(client: PostgresQueryable) {
+    await this.hooks.prepare(client);
+    await client.query(`CREATE TABLE IF NOT EXISTS stash_task_edit_operations (
+      task_id UUID NOT NULL REFERENCES stash_tasks(id) ON DELETE CASCADE, operation_id UUID NOT NULL,
+      digest TEXT NOT NULL, outcome JSONB NOT NULL, PRIMARY KEY (task_id, operation_id))`);
+    await client.query(`CREATE TABLE IF NOT EXISTS stash_task_edit_conflicts (
+      id UUID PRIMARY KEY, task_id UUID NOT NULL REFERENCES stash_tasks(id) ON DELETE CASCADE,
+      base_revision INTEGER NOT NULL, current_revision INTEGER NOT NULL, fields JSONB NOT NULL,
+      contribution JSONB NOT NULL, created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id),
+      created_by_display_name TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL, resolved_at TIMESTAMPTZ,
+      resolution TEXT CHECK (resolution IN ('keep_current','apply_contribution')), resolution_operation_id UUID)`);
+    await client.query("ALTER TABLE stash_task_edit_conflicts ADD COLUMN IF NOT EXISTS resolution_operation_id UUID");
+    await client.query("ALTER TABLE stash_task_edit_conflicts ADD COLUMN IF NOT EXISTS created_by_display_name TEXT");
+    await client.query(`UPDATE stash_task_edit_conflicts conflict SET created_by_display_name=account.name
+      FROM stash_accounts account WHERE conflict.created_by_account_id=account.id AND conflict.created_by_display_name IS NULL`);
+    await client.query("ALTER TABLE stash_task_edit_conflicts ALTER COLUMN created_by_display_name SET NOT NULL");
+  }
+
+  async applyStructuredTaskEdit(memberId: string, projectId: string, taskKey: string, batch: TaskEditBatch) {
+    return this.kernel.transaction(async (client) => {
+      await this.prepareStructuredTaskEdits(client);
+      const writable = await client.query<{ workspace_id: string }>(`SELECT workspace.id AS workspace_id FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
+        WHERE project.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR
+        (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2))) FOR UPDATE OF project`, [projectId, memberId]);
+      if (!writable.rowCount) return { status: "not_found" as const };
+      if (batch.changes.dependencies !== undefined) await client.query("SELECT pg_advisory_xact_lock(hashtext('stash-task-dependencies'),hashtext($1))", [writable.rows[0]!.workspace_id]);
+      const current = await client.query<any>(`${taskPlanningSelect} FOR UPDATE OF task`, [projectId, taskKey, memberId]);
+      const row = current.rows[0]; if (!row) return { status: "not_found" as const };
+      const beforeTask = readModel(row);
+      if (batch.baseRevision > Number(row.revision)) return { status: "invalid_revision" as const };
+      const digest = taskEditDigest(batch);
+      const prior = await client.query<{ digest: string; outcome: any }>(
+        "SELECT digest, outcome FROM stash_task_edit_operations WHERE task_id = $1 AND operation_id = $2", [row.id, batch.operationId]);
+      if (prior.rows[0]) return prior.rows[0].digest === digest ? prior.rows[0].outcome : { status: "operation_identity_conflict" as const };
+      const fields = Object.keys(batch.changes);
+      const forcedConflicts = new Set<string>();
+      if (batch.changes.statusId) {
+        const status = await client.query<{ archived: boolean }>(
+          "SELECT archived FROM stash_workflow_statuses WHERE id=$1 AND project_id=$2 FOR UPDATE", [batch.changes.statusId, projectId]);
+        if (!status.rows[0]) return { status: "invalid_reference" as const };
+        if (status.rows[0].archived) forcedConflicts.add("statusId");
+      }
+      const incompatible = fields.filter((field) => forcedConflicts.has(field) || Number(row.field_revisions?.[field] ?? 0) > batch.baseRevision);
+      const compatible = Object.fromEntries(Object.entries(batch.changes).filter(([field]) => !incompatible.includes(field))) as TaskPlanningUpdate;
+      if (Object.keys(compatible).length) {
+        const applied = await this.applyStructuredTaskChanges(client, memberId, row, compatible);
+        if (!applied) return { status: "invalid_reference" as const };
+        row.revision += 1; row.field_revisions = { ...(row.field_revisions ?? {}) };
+        for (const field of Object.keys(compatible)) row.field_revisions[field] = row.revision;
+        await client.query("UPDATE stash_tasks SET revision = $2, field_revisions = $3::jsonb WHERE id = $1",
+          [row.id, row.revision, JSON.stringify(row.field_revisions)]);
+      }
+      let outcome: any;
+      if (incompatible.length) {
+        const conflictId = randomUUID();
+        const contribution = Object.fromEntries(incompatible.map((field) => [field, (batch.changes as Record<string, unknown>)[field]]));
+        const conflict: TaskEditConflict = { id: conflictId, taskId: row.id, baseRevision: batch.baseRevision,
+          currentRevision: row.revision, fields: incompatible, contribution, createdAt: batch.createdAt,
+          createdBy: { displayName: batch.createdBy.displayName, attribution: "recorded" } };
+        await client.query(`INSERT INTO stash_task_edit_conflicts
+          (id,task_id,base_revision,current_revision,fields,contribution,created_by_account_id,created_by_display_name,created_at)
+          VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8,$9)`, [conflictId, row.id, batch.baseRevision, row.revision,
+          JSON.stringify(incompatible), JSON.stringify(contribution), memberId, batch.createdBy.displayName, batch.createdAt]);
+        outcome = { status: "conflict_preserved", conflict };
+      } else {
+        const saved = await client.query<any>(taskPlanningSelect, [projectId, taskKey, memberId]);
+        const task = readModel(saved.rows[0]);
+        await this.hooks.recordProjection(client, projection(saved.rows[0]));
+        outcome = { status: "applied", task, revision: row.revision, appliedFields: fields };
+      }
+      if (Object.keys(compatible).length && incompatible.length) {
+        const saved = await client.query<any>(taskPlanningSelect, [projectId, taskKey, memberId]);
+        await this.hooks.recordProjection(client, projection(saved.rows[0]));
+      }
+      if (Object.keys(compatible).length) {
+        const saved = await client.query<any>(taskPlanningSelectById, [row.id, memberId]);
+        if (saved.rows[0]) {
+          const afterTask = readModel(saved.rows[0]);
+          const activity = await this.hooks.recordTaskActivity(client, memberId, row.workspace_id, row.id,
+            "task_structured_edit_applied", beforeTask, afterTask, batch.cause);
+          if (batch.cause?.kind === "agent") await this.hooks.recordStructuredAgentAudit(client, memberId, row.workspace_id, row.id, batch.cause);
+          await this.hooks.recordAssignmentNotifications(client, projectId, activity, beforeTask, afterTask);
+        }
+      }
+      await client.query("INSERT INTO stash_task_edit_operations (task_id,operation_id,digest,outcome) VALUES ($1,$2,$3,$4::jsonb)",
+        [row.id, batch.operationId, digest, JSON.stringify(outcome)]);
+      return outcome;
+    });
+  }
+
+  async listStructuredTaskConflicts(memberId: string, projectId: string, taskKey: string) {
+    return this.kernel.withSession(async (client) => {
+      await this.prepareStructuredTaskEdits(client);
+      const writable = await client.query(`SELECT 1 FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
+        WHERE project.id=$1 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
+        (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2)))`, [projectId,memberId]);
+      if (!writable.rowCount) return { status: "not_found" as const };
+      const task = await client.query<any>(taskPlanningSelect, [projectId, taskKey, memberId]);
+      if (!task.rows[0]) return { status: "not_found" as const };
+      const rows = await client.query<any>(`SELECT conflict.* FROM stash_task_edit_conflicts conflict
+        WHERE conflict.task_id = $1 AND conflict.resolved_at IS NULL ORDER BY conflict.created_at, conflict.id`, [task.rows[0].id]);
+      return { status: "found" as const, revision: task.rows[0].revision, conflicts: rows.rows.map(taskConflictFromRow) };
+    });
+  }
+
+  async resolveStructuredTaskConflict(memberId: string, projectId: string, taskKey: string, conflictId: string,
+    resolution: "keep_current" | "apply_contribution", expectedRevision: number, operationId?: string) {
+    return this.kernel.transaction(async (client) => {
+      await this.prepareStructuredTaskEdits(client);
+      const writable = await client.query<{ workspace_id: string }>(`SELECT workspace.id AS workspace_id FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
+        WHERE project.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR
+        (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2))) FOR UPDATE OF project`, [projectId, memberId]);
+      if (!writable.rowCount) return { status: "not_found" as const };
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('stash-task-dependencies'),hashtext($1))", [writable.rows[0]!.workspace_id]);
+      const taskResult = await client.query<any>(`${taskPlanningSelect} FOR UPDATE OF task`, [projectId, taskKey, memberId]);
+      const row = taskResult.rows[0]; if (!row) return { status: "not_found" as const };
+      const found = await client.query<any>(`SELECT conflict.* FROM stash_task_edit_conflicts conflict
+        WHERE conflict.id = $1 AND conflict.task_id = $2 FOR UPDATE OF conflict`, [conflictId, row.id]);
+      const conflictRow = found.rows[0]; if (!conflictRow) return { status: "conflict_not_found" as const };
+      if (conflictRow.resolved_at) {
+        if (operationId && conflictRow.resolution_operation_id === operationId && conflictRow.resolution === resolution)
+          return { status: "resolved" as const, task: readModel(row), revision: row.revision, activity: undefined };
+        return { status: "already_resolved" as const };
+      }
+      if (row.revision !== expectedRevision) return { status: "conflict_changed" as const, conflict: { ...taskConflictFromRow(conflictRow), currentRevision: row.revision } };
+      const before = projection(row);
+      if (resolution === "apply_contribution") {
+        if (!await this.applyStructuredTaskChanges(client, memberId, row, conflictRow.contribution)) return { status: "invalid_reference" as const };
+        row.revision += 1; row.field_revisions = { ...(row.field_revisions ?? {}) };
+        for (const field of conflictRow.fields) row.field_revisions[field] = row.revision;
+        await client.query("UPDATE stash_tasks SET revision = $2, field_revisions = $3::jsonb WHERE id = $1",
+          [row.id, row.revision, JSON.stringify(row.field_revisions)]);
+      }
+      const occurredAt = new Date().toISOString();
+      await client.query("UPDATE stash_task_edit_conflicts SET resolved_at = $2, resolution = $3, resolution_operation_id = $4 WHERE id = $1", [conflictId, occurredAt, resolution, operationId ?? null]);
+      const saved = await client.query<any>(taskPlanningSelect, [projectId, taskKey, memberId]); const task = readModel(saved.rows[0]);
+      const actor = await client.query<{ name: string }>("SELECT name FROM stash_accounts WHERE id = $1", [memberId]);
+      const activity = { schema: "stash.activity.v1" as const, id: randomUUID(), workspaceId: task.workspaceId,
+        action: "task_edit_conflict_resolved", object: { kind: "Task" as const, id: task.id },
+        actor: { localAccountId: memberId, displayName: actor.rows[0]!.name }, cause: { kind: "member" as const }, occurredAt,
+        before: { task: before, conflictId }, after: { task: projection(saved.rows[0]), resolution } };
+      await client.query(`INSERT INTO stash_workspace_activity
+        (id,workspace_id,object_kind,object_id,action,actor_account_id,cause,occurred_at,before_state,after_state)
+        VALUES ($1,$2,'Task',$3,$4,$5,'member',$6,$7::jsonb,$8::jsonb)`, [activity.id, activity.workspaceId, task.id,
+        activity.action, memberId, occurredAt, JSON.stringify(activity.before), JSON.stringify(activity.after)]);
+      await this.hooks.recordProjection(client, projection(saved.rows[0]));
+      await this.hooks.recordActivityProjection(client, activity);
+      await this.hooks.recordProjectActivityNotifications(client, activity);
+      if (resolution === "apply_contribution") await this.hooks.recordAssignmentNotifications(client, projectId, activity, before as TaskPlanningReadModel, task);
+      return { status: "resolved" as const, task, revision: row.revision, activity };
+    });
+  }
+
+  private async applyStructuredTaskChanges(client: PostgresQueryable, memberId: string, row: any, update: TaskPlanningUpdate): Promise<boolean> {
+    if (update.statusId) { const status = await client.query("SELECT 1 FROM stash_workflow_statuses WHERE id=$1 AND project_id=$2 AND archived=FALSE FOR UPDATE", [update.statusId, row.project_id]); if (!status.rowCount) return false; }
+    if (update.assigneeIds) { const result = await client.query(`SELECT account.id FROM stash_accounts account JOIN stash_workspaces workspace ON workspace.id=$2
+      WHERE account.id=ANY($1::uuid[]) AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=account.id) OR
+      (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=account.id)))`, [update.assigneeIds,row.workspace_id]); if (result.rowCount !== new Set(update.assigneeIds).size) return false; }
+    for (const noteId of update.linkedNoteIds ?? []) { const note = await client.query("SELECT 1 FROM stash_notes WHERE id=$1 AND workspace_id=$2", [noteId,row.workspace_id]); if (!note.rowCount) return false; }
+    if (update.dependencies !== undefined) {
+      const all = await client.query<{id:string}>("SELECT id FROM stash_tasks WHERE workspace_id=$1 ORDER BY id FOR UPDATE", [row.workspace_id]); const ids = new Set(all.rows.map(({id})=>id));
+      if (update.dependencies.some(({taskId})=>taskId===row.id || !ids.has(taskId))) return false;
+      const stored = await client.query<{dependent_task_id:string;prerequisite_task_id:string}>(`SELECT edge.dependent_task_id,edge.prerequisite_task_id FROM stash_task_dependencies edge JOIN stash_tasks task ON task.id=edge.dependent_task_id WHERE task.workspace_id=$1`,[row.workspace_id]);
+      const previous=stored.rows.filter((edge)=>edge.dependent_task_id===row.id||edge.prerequisite_task_id===row.id);
+      const retained=stored.rows.filter((edge)=>edge.dependent_task_id!==row.id&&edge.prerequisite_task_id!==row.id);
+      const proposed=update.dependencies.map((d)=>d.type==="depends_on"?{dependent_task_id:row.id,prerequisite_task_id:d.taskId}:{dependent_task_id:d.taskId,prerequisite_task_id:row.id});
+      if (hasCycle(ids,[...retained,...proposed])) return false;
+      await client.query("DELETE FROM stash_task_dependencies WHERE dependent_task_id=$1 OR prerequisite_task_id=$1",[row.id]);
+      for(const edge of proposed) await client.query("INSERT INTO stash_task_dependencies (dependent_task_id,prerequisite_task_id) VALUES ($1,$2) ON CONFLICT DO NOTHING",[edge.dependent_task_id,edge.prerequisite_task_id]);
+      for (const affectedId of [...new Set([...previous,...proposed].flatMap((edge)=>[edge.dependent_task_id,edge.prerequisite_task_id]))].filter((id)=>id!==row.id)) {
+        const beforeAffected=await client.query<any>(taskPlanningSelectById,[affectedId,memberId]);
+        await client.query(`UPDATE stash_tasks SET revision=revision+1,
+          field_revisions=jsonb_set(field_revisions,'{dependencies}',to_jsonb(revision+1),true) WHERE id=$1`,[affectedId]);
+        const affected=await client.query<any>(taskPlanningSelectById,[affectedId,memberId]);
+        if(affected.rows[0]) { const affectedProjection=projection(affected.rows[0]); await this.hooks.recordProjection(client,affectedProjection);
+          if(beforeAffected.rows[0]) await this.hooks.recordTaskActivity(client,memberId,row.workspace_id,affectedId,
+            "task_dependency_relationship_updated",readModel(beforeAffected.rows[0]),readModel(affected.rows[0])); }
+      }
+    }
+    const current=projection(row); const next={...current,...update} as any;
+    const nextAssigneeIds=[...new Set<string>(next.assigneeIds??[])];
+    const nextFormerAssigneeIds=formerAssignmentsAfterUpdate(
+      row.former_assignee_ids??[],nextAssigneeIds,update.assigneeIds!==undefined);
+    await client.query(`UPDATE stash_tasks SET title=$2,workflow_status_id=$3,assignee_ids=$4::jsonb,priority=$5,label_names=$6::jsonb,
+      due_date=$7,estimate=$8,linked_note_ids=$9::jsonb,development_links=$10::jsonb,
+      former_assignee_ids=$11::jsonb WHERE id=$1`,[row.id,next.title,
+      update.statusId??current.status.id,JSON.stringify(nextAssigneeIds),next.priority??"none",JSON.stringify(next.labelNames??[]),
+      next.dueDate??null,next.estimate??null,JSON.stringify(next.linkedNoteIds??[]),JSON.stringify(next.developmentLinks??[]),
+      JSON.stringify(nextFormerAssigneeIds)]);
+    return true;
+  }
+
+  async moveTask(memberId: string, projectId: string, taskKey: string, destinationProjectId: string) {
+    return this.kernel.transaction(async (client) => {
+      await this.hooks.prepare(client);
+      await client.query("SELECT id FROM stash_projects WHERE id=ANY($1::uuid[]) ORDER BY id FOR UPDATE", [[projectId, destinationProjectId]]);
+      const current = await client.query<any>(`${taskPlanningSelect} FOR UPDATE OF task`, [projectId, taskKey, memberId]);
+      const row = current.rows[0];
+      if (!row) return { status: "not_found" as const };
+      if (row.project_id === destinationProjectId) return { status: "same_project" as const };
+      const destination = await client.query<{ project_key: string; task_number: number }>(`UPDATE stash_projects project
+        SET next_task_number = next_task_number + 1 FROM stash_workspaces workspace
+        WHERE project.id = $1 AND workspace.id = project.workspace_id AND project.workspace_id = $2
+          AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $3)
+            OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+              WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $3)))
+        RETURNING project.project_key, project.next_task_number - 1 AS task_number`, [destinationProjectId, row.workspace_id, memberId]);
+      if (!destination.rowCount) return { status: "destination_forbidden" as const };
+      await this.ensureDefaultWorkflow(client, destinationProjectId);
+      const destinationStatus = initialWorkflowStatus(await this.loadWorkflow(client, destinationProjectId));
+      const nextKey = `${destination.rows[0]!.project_key}-${destination.rows[0]!.task_number}`;
+      const before = { projectId: row.project_id, key: row.task_key,
+        status: { id: row.workflow_status_id, name: row.status_name, category: row.status_category } };
+      await client.query(`INSERT INTO stash_task_key_aliases (project_id, task_key, task_id, created_at)
+        VALUES ($1,$2,$3,now())`, [row.project_id, row.task_key, row.id]);
+      await client.query(`UPDATE stash_tasks SET project_id = $2, task_key = $3, workflow_status_id = $4, revision=revision+1,
+        field_revisions=field_revisions || jsonb_build_object('projectId',revision+1,'key',revision+1,'statusId',revision+1) WHERE id = $1`,
+        [row.id, destinationProjectId, nextKey, destinationStatus.id]);
+      const saved = await client.query<any>(taskPlanningSelect, [destinationProjectId, nextKey, memberId]);
+      const task = readModel(saved.rows[0]);
+      await this.hooks.recordProjection(client, projection(saved.rows[0]));
+      const actor = await client.query<{ name: string }>("SELECT name FROM stash_accounts WHERE id = $1", [memberId]);
+      if (!actor.rows[0]) throw new Error("Task move actor identity is unavailable");
+      const activity: TaskMoveActivity = { schema: "stash.activity.v1", id: randomUUID(), workspaceId: task.workspaceId,
+        action: "task_moved", object: { kind: "Task", id: task.id },
+        actor: { localAccountId: memberId, displayName: actor.rows[0].name }, cause: { kind: "member" },
+        occurredAt: new Date().toISOString(), before,
+        after: { projectId: task.projectId, key: task.key, status: task.status } };
+      await client.query(`INSERT INTO stash_workspace_activity
+        (id, workspace_id, object_kind, object_id, action, actor_account_id, cause, occurred_at, before_state, after_state)
+        VALUES ($1,$2,'Task',$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb)`, [activity.id, activity.workspaceId, task.id,
+        activity.action, memberId, activity.cause.kind, activity.occurredAt, JSON.stringify(activity.before), JSON.stringify(activity.after)]);
+      await this.hooks.recordActivityProjection(client, activity);
+      await this.hooks.recordProjectActivityNotifications(client, activity);
+      return { status: "moved" as const, task, activity };
+    });
+  }
+
+  async createTask(client: PostgresQueryable, draft: TaskCreation): Promise<PortableTaskProjection> {
+    await client.query("SELECT id FROM stash_projects WHERE id = $1 FOR UPDATE", [draft.projectId]);
+    await this.ensureDefaultWorkflow(client, draft.projectId);
+    const workflowStatus = initialWorkflowStatus(await this.loadWorkflow(client, draft.projectId));
+    const allocation = await client.query<{ project_key: string; task_number: number }>(
+      `UPDATE stash_projects SET next_task_number = next_task_number + 1 WHERE id = $1
+       RETURNING project_key, next_task_number - 1 AS task_number`, [draft.projectId]);
+    const key = allocation.rows[0];
+    if (!key) throw new Error("task_project_unavailable");
+    return { schema: "stash.task.v1", ...draft, key: `${key.project_key}-${key.task_number}`, status: workflowStatus };
   }
 
   async saveNotification(delivery: NotificationDelivery) {
@@ -707,4 +1080,11 @@ function notificationFromRow(row: any): NotificationDelivery {
     activity: row.activity, delivery: row.delivery, createdAt: new Date(row.created_at).toISOString(),
     ...(row.read_at ? { readAt: new Date(row.read_at).toISOString() } : {}),
     ...(row.digested_at ? { digestedAt: new Date(row.digested_at).toISOString() } : {}) };
+}
+
+function noteProjection(row: any, id: string): PortableNoteProjection {
+  return { schema: "stash.note.v1", id, workspaceId: row.workspace_id, content: row.content, tags: row.tags,
+    createdAt: new Date(row.created_at).toISOString(), createdBy: { localAccountId: row.created_by_account_id, displayName: row.created_by_name },
+    ...(row.project_id ? { projectId: row.project_id } : {}),
+    ...(row.reminder_at ? { reminder: { at: new Date(row.reminder_at).toISOString() } } : {}) };
 }
