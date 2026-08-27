@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import { isIP } from "node:net";
 
 import { prepareSession } from "../auth-session.js";
+import type { Collection, ViewBlock } from "../knowledge-authoring/collections.js";
 import { passwordHashCodec, type PasswordHashCodec } from "../password-hash.js";
 import type { SessionRecord } from "../password-auth.js";
 
@@ -18,27 +19,6 @@ export interface StarterTaskSetup {
   workspaceWorkflowStatusId: string;
 }
 
-/**
- * The narrow durable hand-off that lets the Collection/View Block capability replace the
- * tutorial contribution without making setup own those domain models.
- */
-export interface StarterTutorialContribution {
-  schema: "stash.starter-tutorial.v1";
-  rootNoteId: string;
-  collection: {
-    id: string; ownerNoteId: string; name: string;
-    properties: Array<{ id: string; name: string; type: "text" }>;
-    records: Array<{ id: string; values: Record<string, string> }>;
-  };
-  taskView: {
-    id: string;
-    noteId: string;
-    name: string;
-    source: { kind: "tasks"; workspaceId: string; project: "none" };
-    presentation: "list";
-  };
-}
-
 export interface FirstPersonalInstanceSetup {
   account: { id: string; name: string; email: string; passwordHash: string };
   workspace: { id: string; name: string };
@@ -48,7 +28,7 @@ export interface FirstPersonalInstanceSetup {
     links: Array<{ id: string; sourceNoteId: string; targetNoteId: string; label: string }>;
     tasks: StarterTaskSetup[];
     workspaceWorkflowStatus: { id: string; name: "Ready"; category: "unstarted"; position: 1 };
-    contribution: StarterTutorialContribution;
+    knowledge: { rootNoteId: string; collection: Collection; viewBlock: ViewBlock };
   };
   createdAt: string;
 }
@@ -181,6 +161,8 @@ export class InstanceSetupService {
         { id: randomUUID(), title: "Turn one Note into action", workspaceWorkflowStatusId: workspaceWorkflowStatus.id },
       ];
       const collectionPropertyId = randomUUID();
+      const collectionId = randomUUID();
+      const viewBlockId = randomUUID();
       const record: FirstPersonalInstanceSetup = {
         account,
         workspace,
@@ -195,14 +177,16 @@ export class InstanceSetupService {
           links: [{ id: randomUUID(), sourceNoteId: organizeNoteId, targetNoteId: planNoteId, label: "Continue planning" }],
           tasks,
           workspaceWorkflowStatus,
-          contribution: {
-            schema: "stash.starter-tutorial.v1",
+          knowledge: {
             rootNoteId,
-            collection: { id: randomUUID(), ownerNoteId: organizeNoteId, name: "Ideas to explore",
-              properties: [{ id: collectionPropertyId, name: "Idea", type: "text" }],
-              records: [{ id: randomUUID(), values: { [collectionPropertyId]: "Shape your first idea" } }] },
-            taskView: { id: randomUUID(), noteId: planNoteId, source: { kind: "tasks", workspaceId: workspace.id, project: "none" },
-              name: "First moves", presentation: "list" },
+            collection: { schema: "stash.collection.v1", id: collectionId, workspaceId: workspace.id,
+              ownerNoteId: organizeNoteId, title: "Ideas to explore",
+              properties: [{ id: collectionPropertyId, name: "Idea", type: "text", position: 1 }],
+              records: [{ id: randomUUID(), position: 1, values: { [collectionPropertyId]: "Shape your first idea" } }] },
+            viewBlock: { schema: "stash.view-block.v1", id: viewBlockId, workspaceId: workspace.id,
+              ownerNoteId: planNoteId, blockId: viewBlockId, title: "First moves",
+              source: { kind: "tasks", workspaceId: workspace.id, project: "none" },
+              definition: { query: { scope: "projectless", titleContains: "" }, layout: "list" } },
           },
         },
       };

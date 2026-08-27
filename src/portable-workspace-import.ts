@@ -308,8 +308,9 @@ function parseState(content: Buffer): PortableWorkspaceCanonicalState {
     || note.projectId !== undefined && !projects.has(String(note.projectId))) throw new InvalidPortableWorkspaceImport("invalid_note"); }
   for (const task of value.tasks) { exact(task,["schema","id","workspaceId","projectId","title","key","status","keyAliases","sourceNoteIds","createdAt","createdBy","sourceBlocks","assigneeIds","formerAssigneeIds","priority","labelNames","dueDate","estimate","linkedNoteIds","dependencies","developmentLinks"],"task");
     exactIdentity(task.createdBy,"task_creator"); exact(task.status,["id","name","category"],"task_status");
-    if (!projects.has(String(task.projectId)) || typeof task.title !== "string" || !task.title
-    || typeof task.key !== "string" || !object(task.status) || !uuid.test(String(task.status.id)) || !timestamp(task.createdAt)
+    if (task.projectId !== undefined && !projects.has(String(task.projectId)) || typeof task.title !== "string" || !task.title
+    || task.key !== undefined && typeof task.key !== "string" || task.projectId === undefined !== (task.key === undefined)
+    || !object(task.status) || !uuid.test(String(task.status.id)) || !timestamp(task.createdAt)
     || !Array.isArray(task.sourceNoteIds) || task.sourceNoteIds.some((id) => !notes.has(String(id)))
     || task.linkedNoteIds !== undefined && (!Array.isArray(task.linkedNoteIds) || task.linkedNoteIds.some((id) => !notes.has(String(id))))
     || task.dependencies !== undefined && (!Array.isArray(task.dependencies) || task.dependencies.some((edge) => !object(edge) || !tasks.has(String(edge.taskId))))
@@ -340,6 +341,7 @@ function parseState(content: Buffer): PortableWorkspaceCanonicalState {
     || link.relationshipType !== undefined && (typeof link.relationshipType !== "string" || !link.relationshipType.trim() || link.relationshipType.trim().length > 80 || /[\r\n]/.test(link.relationshipType))
     || !Number.isInteger(link.revision ?? 1) || Number(link.revision ?? 1) < 1) throw new InvalidPortableWorkspaceImport("invalid_note_link"); }
   const allowedDurable = new Map([["Project", ["stash.project.v1"]], ["Workflow", ["stash.workflow.v1"]],
+    ["WorkspaceWorkflow", ["stash.workspace-workflow.v1"]], ["Collection", ["stash.collection.v1"]], ["ViewBlock", ["stash.view-block.v1"]],
     ["GuestProjectAccess", ["stash.guest-project-access.v1"]], ["RepositoryConnection", ["stash.repository-connection.v1","stash.disconnected-repository-connection.v1"]],
     ["Discussion", ["stash.discussion.v1"]], ["DiscussionWorkLink", ["stash.discussion-work-link.v1"]]]);
   const sanitizedDurable: PortableWorkspaceCanonicalState["durableObjects"] = [];
@@ -359,6 +361,24 @@ function parseState(content: Buffer): PortableWorkspaceCanonicalState {
       for(const status of payload.statuses as unknown[]) exact(status,["id","name","category","position","archived"],"workflow_status");
       if(!Number.isInteger(payload.revision)||Number(payload.revision)<0) throw new InvalidPortableWorkspaceImport("invalid_workflow");
       sanitized={schema:payload.schema,projectId:payload.projectId,revision:payload.revision,statuses:(payload.statuses as Record<string,unknown>[]).map((s)=>({...s}))}; }
+    if(item.kind==="WorkspaceWorkflow") { exact(payload,["schema","id","workspaceId","statuses"],"workspace_workflow");
+      if(payload.id!==item.id||payload.workspaceId!==workspaceId||!Array.isArray(payload.statuses)||payload.statuses.length<1) throw new InvalidPortableWorkspaceImport("invalid_workspace_workflow");
+      const positions=new Set<number>(); const names=new Set<string>();
+      for(const status of payload.statuses as unknown[]) { exact(status,["id","name","category","position"],"workspace_workflow_status");
+        if(!object(status)||!uuid.test(String(status.id))||typeof status.name!=="string"||!status.name.trim()||names.has(status.name)
+          ||!["unstarted","started","completed"].includes(String(status.category))||!Number.isInteger(status.position)||Number(status.position)<1||positions.has(Number(status.position))) throw new InvalidPortableWorkspaceImport("invalid_workspace_workflow");
+        names.add(status.name); positions.add(Number(status.position)); }
+      sanitized=structuredClone(payload); }
+    if(item.kind==="Collection") { exact(payload,["schema","id","workspaceId","ownerNoteId","title","properties","records"],"collection");
+      if(payload.id!==item.id||payload.workspaceId!==workspaceId||!notes.has(String(payload.ownerNoteId))||typeof payload.title!=="string"||!payload.title.trim()||payload.title.length>120||/[\r\n]/.test(payload.title)||!Array.isArray(payload.properties)||!Array.isArray(payload.records)) throw new InvalidPortableWorkspaceImport("invalid_collection");
+      const propertyIds=new Set<string>(); const propertyPositions=new Set<number>(); for(const property of payload.properties){exact(property,["id","name","type","position"],"collection_property"); if(!uuid.test(String(property.id))||propertyIds.has(String(property.id))||typeof property.name!=="string"||!property.name.trim()||property.name.length>120||/[\r\n]/.test(property.name)||property.type!=="text"||!Number.isInteger(property.position)||Number(property.position)<1||propertyPositions.has(Number(property.position))) throw new InvalidPortableWorkspaceImport("invalid_collection"); propertyIds.add(String(property.id));propertyPositions.add(Number(property.position));}
+      const recordIds=new Set<string>(); const recordPositions=new Set<number>(); for(const record of payload.records){exact(record,["id","position","values"],"collection_record");if(!uuid.test(String(record.id))||recordIds.has(String(record.id))||!Number.isInteger(record.position)||Number(record.position)<1||recordPositions.has(Number(record.position))||!object(record.values)||Object.keys(record.values).some((id)=>!propertyIds.has(id))||Object.values(record.values).some((entry)=>typeof entry!=="string"))throw new InvalidPortableWorkspaceImport("invalid_collection");recordIds.add(String(record.id));recordPositions.add(Number(record.position));}
+      sanitized=structuredClone(payload); }
+    if(item.kind==="ViewBlock") { exact(payload,["schema","id","workspaceId","ownerNoteId","blockId","title","source","definition"],"view_block");
+      if(payload.id!==item.id||payload.workspaceId!==workspaceId||!notes.has(String(payload.ownerNoteId))||!uuid.test(String(payload.blockId))||typeof payload.title!=="string"||!payload.title.trim()||payload.title.length>120||/[\r\n]/.test(payload.title)||!object(payload.source)||!object(payload.definition)) throw new InvalidPortableWorkspaceImport("invalid_view_block");
+      exact(payload.source,["kind","workspaceId","project"],"view_block_source"); exact(payload.definition,["query","layout"],"view_definition");
+      if(payload.source.kind!=="tasks"||payload.source.workspaceId!==workspaceId||payload.source.project!=="none"||!["list","table"].includes(String(payload.definition.layout))||!object(payload.definition.query)) throw new InvalidPortableWorkspaceImport("invalid_view_block");
+      exact(payload.definition.query,["scope","titleContains"],"view_query"); if(payload.definition.query.scope!=="projectless"||typeof payload.definition.query.titleContains!=="string"||payload.definition.query.titleContains.length>120||/[\r\n]/.test(payload.definition.query.titleContains)) throw new InvalidPortableWorkspaceImport("invalid_view_block"); sanitized=structuredClone(payload); }
     if (item.kind === "Discussion" && (payload.workspaceId !== workspaceId || !object(payload.target)
       || payload.target.kind === "task" && !tasks.has(String(payload.target.taskId))
       || ["note", "block"].includes(String(payload.target.kind)) && !notes.has(String(payload.target.noteId))
@@ -411,9 +431,14 @@ function parseState(content: Buffer): PortableWorkspaceCanonicalState {
         throw new InvalidPortableWorkspaceImport("invalid_repository_connection"); sanitized=structuredClone(payload); }
     sanitizedDurable.push({kind:String(item.kind),id:String(item.id),schema:String(item.schema),payload:sanitized!});
   }
-  const workflowStatuses = new Set(value.durableObjects.filter((item) => object(item) && item.kind === "Workflow" && object(item.payload))
-    .flatMap((item) => object(item) && object(item.payload) && Array.isArray(item.payload.statuses) ? ids(item.payload.statuses) : []));
-  if (value.tasks.some((task) => object(task) && object(task.status) && !workflowStatuses.has(String(task.status.id)))) throw new InvalidPortableWorkspaceImport("dangling_task_status");
+  const projectStatusOwners = new Map<string,string>(); const workspaceStatuses = new Set<string>();
+  for(const item of value.durableObjects) if(object(item)&&object(item.payload)&&Array.isArray(item.payload.statuses)) {
+    if(item.kind==="Workflow") for(const statusId of ids(item.payload.statuses)) projectStatusOwners.set(statusId,String(item.payload.projectId));
+    if(item.kind==="WorkspaceWorkflow") for(const statusId of ids(item.payload.statuses)) workspaceStatuses.add(statusId);
+  }
+  if (value.tasks.some((task) => object(task) && object(task.status) && (task.projectId === undefined
+    ? !workspaceStatuses.has(String(task.status.id)) : projectStatusOwners.get(String(task.status.id)) !== task.projectId)))
+    throw new InvalidPortableWorkspaceImport("dangling_task_status");
   const domainIds = new Set([...noteIds,...taskIds,...linkIds,...value.durableObjects.map((item) => object(item) ? String(item.id) : "")]);
   if (value.activities.some((activity) => !object(activity) || !object(activity.object) || !domainIds.has(String(activity.object.id))
     || typeof activity.action !== "string" || !timestamp(activity.occurredAt) || !object(activity.before) || !object(activity.after)))
@@ -505,7 +530,7 @@ export class PortableWorkspaceImportService {
     const requireCanonicalFile = (path: string) => { if (!safePath(path) || canonicalPaths.has(path) || !files.has(path))
       throw new InvalidPortableWorkspaceImport("canonical_file_binding"); canonicalPaths.add(path); };
     for (const location of state.noteLocations) requireCanonicalFile(location.path);
-    for (const task of state.tasks) requireCanonicalFile(`tasks/${task.key}--${task.id}.md`);
+    for (const task of state.tasks) requireCanonicalFile(`tasks/${task.key ?? "projectless"}--${task.id}.md`);
     for (const board of state.boards) requireCanonicalFile(`boards/${board.id}.json`);
     for (const attachment of state.attachments) {
       const path = attachment.relativePath.replace(/^\.\//, ""); const content = files.get(path);

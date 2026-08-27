@@ -21,6 +21,7 @@ import type { ActivityRecord, NotificationDelivery } from "@stash/domain-types";
 import { AccountRegistrationService, type RegistrationRecord } from "../src/account-registration.js";
 import { PasswordAuthService, hashPassword, type AccountAuthenticationRecord, type SessionRecord } from "../src/password-auth.js";
 import { PortableWorkspaceExportService } from "../src/portable-workspace-export.js";
+import { LocalAttachmentStorage } from "../src/attachments.js";
 import { createCapabilityRegistry } from "../src/capability-registry.js";
 import { instanceSetupRoutes } from "../src/identity-access/instance-setup-routes.js";
 import { InstanceSetupService } from "../src/identity-access/instance-setup.js";
@@ -420,13 +421,15 @@ const firstRunSetup = new InstanceSetupService(firstRunSetupRepository,
 const firstRunNotes = new NoteService(firstRunStore.database);
 const firstRunTasks = new TaskService(firstRunStore.database, firstRunStore.database);
 const firstRunProjects = new WorkspaceProjectService(firstRunStore.database);
+const firstRunAttachments = new LocalAttachmentStorage(firstRunStore.paths.attachments);
 const firstRunInstance = await startInstance({ database: firstRunStore.database, host: "0.0.0.0", port: Number.parseInt(process.env.STASH_BROWSER_FIRST_RUN_PORT ?? "4174", 10),
   instanceAdminToken: "first-run-admin", passwordAuth: firstRunAuth, memberAccess: firstRunAuth, notes: firstRunNotes,
   noteCollaboration: new NoteCollaborationService(firstRunStore.database), tasks: firstRunTasks, workspaceProjects: firstRunProjects,
+  portableWorkspaceExports: new PortableWorkspaceExportService(firstRunStore.database, firstRunAttachments),
   capabilities: createCapabilityRegistry([
     identityAccessCapability({ passwordAuth: firstRunAuth, instanceSetup: firstRunSetup,
-      starterTutorials: new StarterTutorialService(firstRunSetupRepository), memberAccess: firstRunAuth }),
-    knowledgeAuthoringCapability({ notes: firstRunNotes, noteTree: new NoteTreeService(firstRunStore.database.noteTreeRepository(), firstRunSetupRepository), memberAccess: firstRunAuth }),
+      starterTutorials: new StarterTutorialService(firstRunStore.database.tutorialContributionRepository()), memberAccess: firstRunAuth }),
+    knowledgeAuthoringCapability({ notes: firstRunNotes, noteTree: new NoteTreeService(firstRunStore.database.noteTreeRepository(), firstRunStore.database.tutorialContributionRepository()), memberAccess: firstRunAuth }),
     workPlanningCapability({ tasks: firstRunTasks, workspaceProjects: firstRunProjects, memberAccess: firstRunAuth,
       projectlessTasks: new ProjectlessTaskService(firstRunStore.database.projectlessTaskRepository()) }),
   ]), webClientRoot: fileURLToPath(new URL("../apps/web/dist", import.meta.url)) });

@@ -45,9 +45,22 @@ test("@a11y completes protected first-run setup by keyboard and opens the starte
   await expect(page.getByRole("heading", { name: "Task View · First moves" })).toBeVisible();
   await expect(page.getByText("Shape your first idea").last()).toBeVisible();
   await expect(page.getByText("Ready")).toHaveCount(2);
-  await page.getByRole("textbox", { name: "Collection name" }).fill("Questions worth keeping");
-  await page.getByRole("button", { name: "Rename Collection" }).press("Enter");
-  await expect(page.getByRole("textbox", { name: "Collection name" })).toHaveValue("Questions worth keeping");
+  await page.getByRole("textbox", { name: "Collection title" }).fill("Questions worth keeping");
+  await page.getByRole("textbox", { name: "Idea" }).fill("Shape a durable question");
+  await page.getByRole("button", { name: "Save Collection" }).press("Enter");
+  await expect(page.getByRole("textbox", { name: "Collection title" })).toHaveValue("Questions worth keeping");
+  await page.getByRole("combobox", { name: "Layout" }).selectOption("table");
+  await page.getByRole("textbox", { name: "Task title contains" }).fill("Shape");
+  await page.getByRole("button", { name: "Save Task View" }).press("Enter");
+  await expect(page.getByRole("table")).toContainText("Shape your first idea");
+  await expect(page.getByRole("table")).not.toContainText("Turn one Note into action");
+
+  const exportedStatus = await page.evaluate(async () => {
+    const session = JSON.parse(localStorage.getItem("stash.member-session")!);
+    const current = await (await fetch("/api/client-session", { headers: { authorization: `Bearer ${session.token}` } })).json();
+    return (await fetch(`/api/workspaces/${current.workspace.id}/export`, { headers: { authorization: `Bearer ${session.token}` } })).status;
+  });
+  expect(exportedStatus).toBe(200);
 
   await page.goto("http://127.0.0.1:4174/app/projects");
   await page.getByRole("button", { name: "Create a Project in Ada's Workspace" }).press("Enter");
@@ -61,6 +74,22 @@ test("@a11y completes protected first-run setup by keyboard and opens the starte
   await page.getByRole("button", { name: "Move Note branch to trash" }).press("Enter");
   await expect(page.getByText("This Note branch is trashed.")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Try the pieces together" })).toHaveCount(0);
+  await page.reload();
+  await page.goto("http://127.0.0.1:4174/app/notes");
+  const noteTreeWorkspace = page.getByRole("region", { name: "Note Tree workspace" });
+  await noteTreeWorkspace.getByRole("button", { name: "Show archived and trashed branches" }).press("Enter");
+  await noteTreeWorkspace.getByRole("button", { name: "Restore Start here" }).press("Enter");
+  await expect(noteTreeWorkspace.getByText("Start here restored.")).toBeVisible();
+  await page.goto(`http://127.0.0.1:4174/app/notes/${starterNoteId}`);
+  await expect(page.getByRole("textbox", { name: "Collection title" })).toHaveValue("Questions worth keeping");
+  await expect(page.getByRole("textbox", { name: "Idea" })).toHaveValue("Shape a durable question");
+  await expect(page.getByRole("combobox", { name: "Layout" })).toHaveValue("table");
+  await expect(page.getByRole("textbox", { name: "Task title contains" })).toHaveValue("Shape");
+
+  page.once("dialog", (dialog) => void dialog.accept());
+  await page.getByRole("button", { name: "Remove tutorial" }).press("Enter");
+  await expect(page.getByText("The starter tutorial and its sample Tasks were permanently removed.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Restore Note branch" })).toHaveCount(0);
   const cleanup = await page.evaluate(async ({ starterNoteId }) => {
     const token = JSON.parse(localStorage.getItem("stash.member-session")!).token;
     const tutorial = await fetch(`/api/notes/${starterNoteId}/starter-tutorial`, { headers: { authorization: `Bearer ${token}` } });

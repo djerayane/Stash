@@ -1,6 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { DatabaseProbe } from "./instance.js";
-import { noteOperationDigest, type NoteConflictResolution, type NoteEditBatch, type NoteEditConflict, type NoteRecord, type NoteRepository, type NoteTriageChange, type NoteTriageResult, type PortableNoteLinkProjection, type PortableNoteProjection, type PortableTaskProjection, type TaskCreation } from "./notes.js";
+import { noteOperationDigest, type NoteConflictResolution, type NoteEditBatch, type NoteEditConflict, type NoteRecord, type NoteRepository, type NoteTriageChange, type NoteTriageResult, type PortableExportTaskProjection, type PortableNoteLinkProjection, type PortableNoteProjection, type PortableTaskProjection, type TaskCreation } from "./notes.js";
 import { isRichTextDocument, markdownToRichText, paragraphDocument, richTextToMarkdown } from "./rich-text.js";
 import type { BootstrapRecord, OwnerBootstrapRepository } from "./owner-bootstrap.js";
 import type { AccountAuthenticationRecord, PasswordAuthRepository, SessionRecord } from "./password-auth.js";
@@ -45,12 +45,13 @@ import { InvalidCollaborationUpdate, type CollaborationSnapshot, type NoteCollab
 import type { WorkspaceSearchFacet, WorkspaceSearchKind, WorkspaceSearchQuery, WorkspaceSearchRepository, WorkspaceSearchResult } from "./workspace-search.js";
 import { proseMirrorToRichText, richTextToProseMirror } from "@stash/rich-text";
 import type { AgentGrant, AgentGrantOption, AgentProposal, StoredAgentGrant } from "./agent-grants.js";
-import type { NoteTreeImpactInspector, NoteTreeRepository } from "./knowledge-authoring/note-tree.js";
+import type { NoteTreeRepository } from "./knowledge-authoring/note-tree.js";
 import { PostgresNoteTreeRepository } from "./knowledge-authoring/postgres-note-tree-repository.js";
 import type { FirstPersonalInstanceSetup, InstanceSetupRepository } from "./identity-access/instance-setup.js";
 import { PostgresInstanceSetupRepository } from "./identity-access/postgres-instance-setup-repository.js";
 import { PostgresOrganizationRoleRepository } from "./identity-access/postgres-organization-role-repository.js";
-import type { StarterTutorialRepository } from "./identity-access/starter-tutorial.js";
+import type { TutorialContributionRepository } from "./knowledge-authoring/collections.js";
+import { PostgresTutorialContributionRepository } from "./knowledge-authoring/postgres-tutorial-contribution-repository.js";
 import { PostgresProjectlessTaskRepository } from "./work-planning/postgres-projectless-task-repository.js";
 import { PostgresProjectPermissionRepository } from "./work-planning/postgres-project-permission-repository.js";
 import type { ProjectlessTaskRepository } from "./work-planning/projectless-tasks.js";
@@ -91,7 +92,7 @@ interface FailedAutomationRun {
   taskKey: string;
   taskTitle: string;
 }
-const portableProjectionObjectKinds = ["Workspace", "Project", "Workflow", "Board", "Note", "NoteLocation", "NoteLink", "Task", "GuestProjectAccess", "RepositoryConnection", "Attachment", "Discussion", "DiscussionWorkLink", "Activity"] as const;
+const portableProjectionObjectKinds = ["Workspace", "Project", "Workflow", "WorkspaceWorkflow", "Collection", "ViewBlock", "Board", "Note", "NoteLocation", "NoteLink", "Task", "GuestProjectAccess", "RepositoryConnection", "Attachment", "Discussion", "DiscussionWorkLink", "Activity"] as const;
 const portableProjectionObjectKindSql = portableProjectionObjectKinds.map((kind) => `'${kind}'`).join(", ");
 export const workflowTemporaryRenameSql = `UPDATE stash_workflow_statuses
   SET position = -position - 1, name = repeat('__stash_workflow_transition__', 4) || id::text
@@ -248,6 +249,7 @@ export class PostgresDatabase implements
   readonly #kernel: PostgresKernel;
   readonly #noteTreeRepository: PostgresNoteTreeRepository;
   readonly #instanceSetupRepository: PostgresInstanceSetupRepository;
+  readonly #tutorialContributionRepository: PostgresTutorialContributionRepository;
   readonly #projectlessTaskRepository: PostgresProjectlessTaskRepository;
   readonly #organizationRoleRepository: PostgresOrganizationRoleRepository;
   readonly #projectPermissionRepository: PostgresProjectPermissionRepository;
@@ -256,14 +258,14 @@ export class PostgresDatabase implements
   constructor(connectionString: string, authenticationSecrets: AuthenticationSecretCodec, options: PostgresDatabaseOptions = {}) {
     this.#kernel = new PostgresKernel(connectionString, options);
     this.#authenticationSecrets = authenticationSecrets;
-    this.#noteTreeRepository = new PostgresNoteTreeRepository(this.#kernel, (client) => this.#ensureNoteSchema(client), {
-      trashed: (client, rootNoteId) => this.#instanceSetupRepository.retireForTrashedBranch(client, rootNoteId),
-    });
+    this.#noteTreeRepository = new PostgresNoteTreeRepository(this.#kernel, (client) => this.#ensureNoteSchema(client));
+    this.#tutorialContributionRepository = new PostgresTutorialContributionRepository(this.#kernel,
+      (client) => this.#noteTreeRepository.prepare(client));
     this.#instanceSetupRepository = new PostgresInstanceSetupRepository(this.#kernel, authenticationSecrets, async (client) => {
       await this.#ensureBootstrapSchema(client);
       await this.#ensureAuthSchema(client);
       await this.#noteTreeRepository.prepare(client);
-    });
+    }, this.#tutorialContributionRepository);
     this.#projectlessTaskRepository = new PostgresProjectlessTaskRepository(this.#kernel,
       (client) => this.#instanceSetupRepository.prepare(client));
     this.#organizationRoleRepository = new PostgresOrganizationRoleRepository(this.#kernel,
@@ -278,8 +280,12 @@ export class PostgresDatabase implements
     return this.#noteTreeRepository;
   }
 
-  instanceSetupRepository(): InstanceSetupRepository & StarterTutorialRepository & NoteTreeImpactInspector {
+  instanceSetupRepository(): InstanceSetupRepository {
     return this.#instanceSetupRepository;
+  }
+
+  tutorialContributionRepository(): TutorialContributionRepository {
+    return this.#tutorialContributionRepository;
   }
 
   projectlessTaskRepository(): ProjectlessTaskRepository {
@@ -305,6 +311,7 @@ export class PostgresDatabase implements
       await this.#ensureNoteHistorySchema(client); await this.#ensureMemberDepartureSchema(client); await this.#ensureWorkspaceImportSchema(client);
       await this.#ensureCollaborationSchema(client);
       await this.#instanceSetupRepository.prepare(client);
+      await this.#tutorialContributionRepository.prepare(client);
       await this.#organizationRoleRepository.prepare(client);
     };
     if (transactionClient) await prepare(transactionClient);
@@ -4234,9 +4241,9 @@ export class PostgresDatabase implements
 
   async #recordPortableProjection(
     client: PostgresQueryable,
-    objectKind: "Workspace" | "Project" | "Workflow" | "Board" | "Note" | "NoteLocation" | "NoteLink" | "Task" | "GuestProjectAccess" | "RepositoryConnection" | "Attachment" | "Discussion" | "DiscussionWorkLink" | "Activity",
+    objectKind: "Workspace" | "Project" | "Workflow" | "WorkspaceWorkflow" | "Collection" | "ViewBlock" | "Board" | "Note" | "NoteLocation" | "NoteLink" | "Task" | "GuestProjectAccess" | "RepositoryConnection" | "Attachment" | "Discussion" | "DiscussionWorkLink" | "Activity",
     objectId: string,
-    projectionSchema: "stash.workspace.v1" | "stash.project.v1" | "stash.workflow.v1" | "stash.board.v1" | "stash.note.v1" | "stash.note.v2" | "stash.note-location.v1" | "stash.note-link.v1" | "stash.note-link.v2" | "stash.task.v1" | "stash.guest-project-access.v1" | "stash.repository-connection.v1" | "stash.attachment.v1" | "stash.discussion.v1" | "stash.discussion-work-link.v1" | "stash.activity.v1",
+    projectionSchema: "stash.workspace.v1" | "stash.project.v1" | "stash.workflow.v1" | "stash.workspace-workflow.v1" | "stash.collection.v1" | "stash.view-block.v1" | "stash.board.v1" | "stash.note.v1" | "stash.note.v2" | "stash.note-location.v1" | "stash.note-link.v1" | "stash.note-link.v2" | "stash.task.v1" | "stash.guest-project-access.v1" | "stash.repository-connection.v1" | "stash.attachment.v1" | "stash.discussion.v1" | "stash.discussion-work-link.v1" | "stash.activity.v1",
     payload: object,
   ): Promise<void> {
     await client.query(
@@ -4291,6 +4298,7 @@ export class PostgresDatabase implements
   async importWorkspace(importId: string, bundle: PortableWorkspaceImportBundle) {
     return this.#withTransaction(async (client) => {
       await this.#ensureWorkspaceImportSchema(client);
+      await this.#instanceSetupRepository.prepare(client);
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`workspace-import:${importId}`]);
       const receipt = await client.query<{ archive_sha256: string; report: PortableWorkspaceImportReport }>(
         "SELECT archive_sha256,report FROM stash_workspace_imports WHERE import_id=$1", [importId]);
@@ -4336,12 +4344,23 @@ export class PostgresDatabase implements
         [status.id, workflow.projectId, status.name, status.category, status.position, status.archived]);
         await this.#recordPortableProjection(client, "Workflow", item.id, item.schema as any, workflow);
       }
+      for (const item of durable.filter(({ kind }) => kind === "WorkspaceWorkflow")) {
+        const workflow = item.payload;
+        for (const status of workflow.statuses) await client.query(`INSERT INTO stash_workspace_workflow_statuses
+          (id,workspace_id,name,category,position) VALUES($1,$2,$3,$4,$5)`,
+        [status.id, state.workspace.id, status.name, status.category, status.position]);
+        await this.#recordPortableProjection(client, "WorkspaceWorkflow", item.id, item.schema as any, workflow);
+      }
       for (const note of state.notes) {
         const history = state.noteHistory.filter((revision) => revision.noteId === note.id).sort((a,b) => a.revision-b.revision);
         const latest = history.at(-1); const location = state.noteLocations.find(({ noteId }) => noteId === note.id)!;
+        const document = structuredClone(latest?.document ?? markdownToRichText(note.content));
+        const view = durable.find(({ kind, payload }) => kind === "ViewBlock" && payload.ownerNoteId === note.id)?.payload;
+        if (view && !document.blocks.some(({ id }: any) => id === view.blockId)) document.blocks.push({ type: "paragraph",
+          blockKey: randomUUID(), id: view.blockId, content: [{ text: `Task View: ${view.title}` }] });
         await client.query(`INSERT INTO stash_notes(id,workspace_id,project_id,content,document,revision,tags,reminder_at,
           created_by_account_id,created_at,portable_path,location_revision) VALUES($1,$2,$3,$4,$5::jsonb,$6,$7::jsonb,$8,$9,$10,$11,$12)`,
-        [note.id,state.workspace.id,note.projectId ?? null,note.content,JSON.stringify(latest?.document ?? markdownToRichText(note.content)),
+        [note.id,state.workspace.id,note.projectId ?? null,note.content,JSON.stringify(document),
           latest?.revision ?? 1,JSON.stringify(note.tags),note.reminder?.at ?? null,accountFor(note.createdBy),note.createdAt,location.path,location.revision]);
         for (const alias of location.aliases) await client.query("INSERT INTO stash_note_path_aliases(workspace_id,note_id,path) VALUES($1,$2,$3)",
           [state.workspace.id,note.id,alias]);
@@ -4349,11 +4368,25 @@ export class PostgresDatabase implements
         await this.#recordPortableProjection(client,"NoteLocation",note.id,location.schema,location);
       }
       await this.#noteTreeRepository.applyImportedLocations(client, state.noteLocations);
+      for (const item of durable.filter(({ kind }) => kind === "Collection")) {
+        const collection=item.payload; await client.query("INSERT INTO stash_collections(id,workspace_id,owner_note_id,title) VALUES($1,$2,$3,$4)",
+          [collection.id,state.workspace.id,collection.ownerNoteId,collection.title]);
+        for(const property of collection.properties) await client.query("INSERT INTO stash_collection_properties(id,collection_id,name,property_type,position) VALUES($1,$2,$3,$4,$5)",
+          [property.id,collection.id,property.name,property.type,property.position]);
+        for(const record of collection.records){await client.query("INSERT INTO stash_collection_records(id,collection_id,position) VALUES($1,$2,$3)",[record.id,collection.id,record.position]);
+          for(const [propertyId,value] of Object.entries(record.values))await client.query("INSERT INTO stash_collection_record_values(record_id,property_id,value) VALUES($1,$2,$3::jsonb)",[record.id,propertyId,JSON.stringify(value)]);}
+        await this.#recordPortableProjection(client,"Collection",item.id,item.schema as any,collection);
+      }
+      for (const item of durable.filter(({ kind }) => kind === "ViewBlock")) {
+        const view=item.payload; await client.query(`INSERT INTO stash_view_blocks(id,workspace_id,owner_note_id,block_id,title,source_kind,source_workspace_id,source_project_scope,query,layout)
+          VALUES($1,$2,$3,$4,$5,'tasks',$2,'none',$6::jsonb,$7)`,[view.id,state.workspace.id,view.ownerNoteId,view.blockId,view.title,JSON.stringify(view.definition.query),view.definition.layout]);
+        await this.#recordPortableProjection(client,"ViewBlock",item.id,item.schema as any,view);
+      }
       for (const task of state.tasks) {
-        await client.query(`INSERT INTO stash_tasks(id,workspace_id,project_id,task_key,workflow_status_id,title,created_by_account_id,created_at,
+        await client.query(`INSERT INTO stash_tasks(id,workspace_id,project_id,task_key,workflow_status_id,workspace_workflow_status_id,title,created_by_account_id,created_at,
           assignee_ids,former_assignee_ids,priority,label_names,due_date,estimate,linked_note_ids,development_links)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11,$12::jsonb,$13,$14,$15::jsonb,$16::jsonb)`,
-        [task.id,state.workspace.id,task.projectId,task.key,task.status.id,task.title,accountFor(task.createdBy),task.createdAt,
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12,$13::jsonb,$14,$15,$16::jsonb,$17::jsonb)`,
+        [task.id,state.workspace.id,task.projectId??null,task.key??null,task.projectId?task.status.id:null,task.projectId?null:task.status.id,task.title,accountFor(task.createdBy),task.createdAt,
           JSON.stringify(task.assigneeIds ?? []),JSON.stringify(task.formerAssigneeIds ?? []),task.priority ?? "none",
           JSON.stringify(task.labelNames ?? []),task.dueDate ?? null,task.estimate ?? null,
           JSON.stringify(task.linkedNoteIds ?? []),JSON.stringify(task.developmentLinks ?? [])]);
@@ -4365,7 +4398,7 @@ export class PostgresDatabase implements
       for (const task of state.tasks) for (const edge of task.dependencies ?? []) if (edge.type === "depends_on")
         await client.query("INSERT INTO stash_task_dependencies(dependent_task_id,prerequisite_task_id) VALUES($1,$2) ON CONFLICT DO NOTHING",[task.id,edge.taskId]);
       for (const project of durable.filter(({ kind }) => kind === "Project").map(({ id }) => id)) {
-        const numbers = state.tasks.filter(({ projectId }) => projectId === project).map(({ key }) => Number(key.slice(key.lastIndexOf("-") + 1)))
+        const numbers = state.tasks.filter((task) => task.projectId === project && task.key).map(({ key }) => Number(key!.slice(key!.lastIndexOf("-") + 1)))
           .filter(Number.isSafeInteger);
         await client.query("UPDATE stash_projects SET next_task_number=$2 WHERE id=$1",[project,Math.max(0,...numbers)+1]);
       }
@@ -4420,7 +4453,7 @@ export class PostgresDatabase implements
         integrationTransformations.push({kind:source.schema===disconnected.schema?"skipped":"transformed",object:`RepositoryConnection:${item.id}`,
           reason:source.schema===disconnected.schema?"already_disconnected":"credentials_not_portable"});
       }
-      for (const item of durable.filter(({ kind }) => !["Project","Workflow","RepositoryConnection"].includes(kind)))
+      for (const item of durable.filter(({ kind }) => !["Project","Workflow","WorkspaceWorkflow","Collection","ViewBlock","RepositoryConnection"].includes(kind)))
         await this.#recordPortableProjection(client,item.kind as any,item.id,item.schema as any,item.payload);
       const ownership: ImportTransformation = {kind:"transformed",object:`Workspace:${state.workspace.id}`,
         reason:`ownership_mapped:${bundle.destinationOwnerAccountId}`};
@@ -4571,7 +4604,7 @@ export class PostgresDatabase implements
          WHERE link.workspace_id=$1 AND ($2::boolean OR
            source.project_id=ANY($3::uuid[]) AND target.project_id=ANY($3::uuid[])) ORDER BY link.id`,
       [workspaceId, permission.member, guestProjectIds]);
-      const tasks = await client.query<{ id: string; payload: PortableTaskProjection | null }>(
+      const tasks = await client.query<{ id: string; payload: PortableExportTaskProjection | null }>(
         `SELECT task.id, projection.payload FROM stash_tasks task
          LEFT JOIN LATERAL (SELECT payload FROM stash_portable_projection_outbox
            WHERE object_kind = 'Task' AND object_id = task.id ORDER BY revision DESC LIMIT 1) projection ON TRUE
@@ -4608,13 +4641,15 @@ export class PostgresDatabase implements
         `SELECT DISTINCT ON (projection.object_kind, projection.object_id)
            projection.object_kind,projection.object_id,projection.projection_schema,projection.payload
          FROM stash_portable_projection_outbox projection
-         WHERE projection.object_kind IN ('Project','Workflow','GuestProjectAccess','RepositoryConnection','Discussion','DiscussionWorkLink')
+         WHERE projection.object_kind IN ('Project','Workflow','WorkspaceWorkflow','Collection','ViewBlock','GuestProjectAccess','RepositoryConnection','Discussion','DiscussionWorkLink')
            AND (
              (projection.object_kind='Project' AND projection.payload->>'workspaceId'=$1::text
                AND ($2::boolean OR projection.object_id=ANY($3::uuid[])))
              OR (projection.object_kind='Workflow'
                AND (projection.payload->>'projectId')::uuid IN (SELECT id FROM stash_projects WHERE workspace_id=$1::uuid)
                AND ($2::boolean OR (projection.payload->>'projectId')::uuid=ANY($3::uuid[])))
+             OR (projection.object_kind IN ('WorkspaceWorkflow','Collection','ViewBlock')
+               AND projection.payload->>'workspaceId'=$1::text AND $2::boolean)
              OR (projection.object_kind='GuestProjectAccess' AND $2::boolean AND EXISTS (
                SELECT 1 FROM jsonb_array_elements(projection.payload->'projects') selected
                WHERE selected->>'workspaceId'=$1::text))

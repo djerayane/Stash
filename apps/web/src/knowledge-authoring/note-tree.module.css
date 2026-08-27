@@ -59,10 +59,15 @@
 .tutorialLink { display: flex; justify-content: space-between; gap: .5rem; margin: .75rem 0 0; }
 .starterTutorial form, .starterTutorial label { display: grid; gap: .45rem; }
 .starterTutorial label { color: var(--stash-color-muted); font-size: .7rem; font-weight: 700; }
-.starterTutorial input, .starterTutorial button { min-height: 2.35rem; padding: .45rem .6rem; border: 1px solid var(--stash-border-strong); background: var(--stash-color-canvas); color: var(--stash-color-ink); }
+.starterTutorial input, .starterTutorial select, .starterTutorial button { min-height: 2.35rem; padding: .45rem .6rem; border: 1px solid var(--stash-border-strong); background: var(--stash-color-canvas); color: var(--stash-color-ink); }
 .starterTutorial button { justify-self: start; font-weight: 700; }
 .starterTutorial table { width: 100%; margin-top: .8rem; border-collapse: collapse; font-size: .74rem; }
 .starterTutorial th, .starterTutorial td { padding: .5rem; border: 1px solid var(--stash-border-subtle); text-align: left; }
+.tutorialRemoval { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 1rem; padding: 1.2rem; background: var(--stash-color-surface); border-top: 1px solid var(--stash-border-subtle); }
+.tutorialRemoval div { display: grid; gap: .25rem; max-width: 46rem; }
+.tutorialRemoval strong { font-size: .78rem; }
+.tutorialRemoval span { color: var(--stash-color-muted); font-size: .72rem; line-height: 1.45; }
+.tutorialRemoval button { border-color: var(--stash-color-error); }
 .drawer { grid-column: 2; grid-row: 3; min-width: 0; border-left: 1px solid var(--stash-border-subtle); background: var(--stash-color-surface); }
 .drawer header { display: flex; align-items: center; justify-content: space-between; padding: var(--stash-space-5); border-bottom: 1px solid var(--stash-border-subtle); }
 .drawer header p { color: var(--stash-color-accent); }
