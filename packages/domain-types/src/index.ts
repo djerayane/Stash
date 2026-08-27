@@ -231,7 +231,7 @@ export function normalizeMobileWorkspaceSnapshot(value: unknown): MobileWorkspac
       || mobileIdentity(entry.workspaceId) !== workspaceId || !Number.isInteger(entry.revision) || Number(entry.revision) < 1
       || entry.document !== undefined && (!mobileObject(entry.document) || entry.document.type !== "doc" || !Array.isArray(entry.document.blocks))) invalidMobileSnapshot();
     return { id: mobileIdentity(entry.id), workspaceId, title: mobileString(entry.title, 240), content: mobileString(entry.content), revision: Number(entry.revision),
-      ...(entry.document === undefined ? {} : { document: structuredClone(entry.document) as MobileNoteReadModel["document"] }) };
+      ...(entry.document === undefined ? {} : { document: structuredClone(entry.document) as NonNullable<MobileNoteReadModel["document"]> }) };
   });
   if (!mobileObject(value.workflow) || !mobileExact(value.workflow, ["schema", "workspaceId", "statuses"])
     || value.workflow.schema !== "stash.workspace-workflow.v1" || mobileIdentity(value.workflow.workspaceId) !== workspaceId || !Array.isArray(value.workflow.statuses)) invalidMobileSnapshot();
