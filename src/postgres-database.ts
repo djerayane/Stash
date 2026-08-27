@@ -1,6 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { DatabaseProbe } from "./instance.js";
-import { noteOperationDigest, type NoteConflictResolution, type NoteEditBatch, type NoteEditConflict, type NoteRecord, type NoteRepository, type NoteTriageChange, type NoteTriageResult, type PortableExportTaskProjection, type PortableNoteLinkProjection, type PortableNoteProjection, type PortableTaskProjection, type TaskCreation } from "./notes.js";
+import { noteOperationDigest, type NoteConflictResolution, type NoteEditBatch, type NoteEditConflict, type NoteRecord, type NoteRepository, type NoteTriageChange, type NoteTriageResult, type PortableExportTaskProjection, type PortableNoteLinkProjection, type PortableNoteProjection, type PortableNoteStateProjection, type PortableTaskProjection, type TaskCreation } from "./notes.js";
 import { isRichTextDocument, markdownToRichText, paragraphDocument, richTextToMarkdown } from "./rich-text.js";
 import type { BootstrapRecord, OwnerBootstrapRepository } from "./owner-bootstrap.js";
 import type { AccountAuthenticationRecord, PasswordAuthRepository, SessionRecord } from "./password-auth.js";
@@ -56,6 +56,7 @@ import { PostgresRelationshipQueryRepository } from "./knowledge-authoring/postg
 import type { RelationshipQueryRepository } from "./knowledge-authoring/relationship-query.js";
 import { PostgresVisualizationBlockRepository } from "./knowledge-authoring/postgres-visualization-block-repository.js";
 import type { VisualizationBlockRepository } from "./knowledge-authoring/visualization-block.js";
+import { effectiveNoteReadSql } from "./knowledge-authoring/postgres-note-access.js";
 import type { PostgresPortableProjectionContributor } from "./instance-operations/storage/portable-projection-contributor.js";
 import { PostgresProjectlessTaskRepository } from "./work-planning/postgres-projectless-task-repository.js";
 import { PostgresProjectPermissionRepository } from "./work-planning/postgres-project-permission-repository.js";
@@ -4610,18 +4611,22 @@ export class PostgresDatabase implements
       if (!permission.member && guestProjectIds.length === 0) return { status: "workspace_forbidden" };
       if (!permission.workspace_projection) throw new Error("workspace_projection_unavailable");
 
-      const notes = await client.query<{ id: string; payload: PortableNoteProjection | null }>(
+      const notes = await client.query<{ id: string; payload: PortableNoteProjection | PortableNoteStateProjection | null }>(
         `SELECT note.id, projection.payload FROM stash_notes note
+         JOIN stash_workspaces workspace ON workspace.id=note.workspace_id
          LEFT JOIN LATERAL (SELECT payload FROM stash_portable_projection_outbox
            WHERE object_kind = 'Note' AND object_id = note.id ORDER BY revision DESC LIMIT 1) projection ON TRUE
-         WHERE note.workspace_id = $1 AND ($2::boolean OR note.project_id = ANY($3::uuid[]))
-         ORDER BY note.id`, [workspaceId, permission.member, guestProjectIds]);
+         WHERE note.workspace_id = $1 AND ($2::boolean OR ${effectiveNoteReadSql("note", "workspace", "$3")})
+         ORDER BY note.id`, [workspaceId, permission.member, memberId]);
+      if (notes.rows.some(({ payload }) => !payload)) throw new Error("portable_projection_unavailable");
+      const noteProjections = notes.rows.map(({ payload }) => portableExportNoteProjection(payload!));
+      const visibleNoteIds = new Set(noteProjections.map(({ id }) => id));
       const noteLocations = await client.query<{ note_id: string; payload: PortableNoteLocationProjection | null }>(
         `SELECT note.id AS note_id, projection.payload FROM stash_notes note
          LEFT JOIN LATERAL (SELECT payload FROM stash_portable_projection_outbox
            WHERE object_kind='NoteLocation' AND object_id=note.id ORDER BY revision DESC LIMIT 1) projection ON TRUE
-         WHERE note.workspace_id=$1 AND ($2::boolean OR note.project_id=ANY($3::uuid[])) ORDER BY note.id`,
-      [workspaceId, permission.member, guestProjectIds]);
+         WHERE note.workspace_id=$1 AND note.id=ANY($2::uuid[]) ORDER BY note.id`,
+      [workspaceId, [...visibleNoteIds]]);
       const noteLinks = await client.query<{ id: string; payload: PortableNoteLinkStateProjection | PortableNoteLinkProjection | null }>(
         `SELECT link.id, projection.payload FROM stash_note_links link
          JOIN stash_notes source ON source.id=link.source_note_id
@@ -4629,8 +4634,8 @@ export class PostgresDatabase implements
          LEFT JOIN LATERAL (SELECT payload FROM stash_portable_projection_outbox
            WHERE object_kind='NoteLink' AND object_id=link.id ORDER BY revision DESC LIMIT 1) projection ON TRUE
          WHERE link.workspace_id=$1 AND ($2::boolean OR
-           source.project_id=ANY($3::uuid[]) AND target.project_id=ANY($3::uuid[])) ORDER BY link.id`,
-      [workspaceId, permission.member, guestProjectIds]);
+           (link.source_note_id=ANY($3::uuid[]) AND link.target_note_id IS NOT NULL AND link.target_note_id=ANY($3::uuid[]))) ORDER BY link.id`,
+      [workspaceId, permission.member, [...visibleNoteIds]]);
       const tasks = await client.query<{ id: string; payload: PortableExportTaskProjection | null }>(
         `SELECT task.id, projection.payload FROM stash_tasks task
          LEFT JOIN LATERAL (SELECT payload FROM stash_portable_projection_outbox
@@ -4650,10 +4655,10 @@ export class PostgresDatabase implements
            WHERE object_kind = 'Attachment' AND object_id = attachment.id ORDER BY revision DESC LIMIT 1) projection ON TRUE
          WHERE attachment.workspace_id = $1 AND ($2::boolean OR EXISTS (
            SELECT 1 FROM stash_notes note WHERE note.workspace_id = attachment.workspace_id
-             AND note.project_id = ANY($3::uuid[])
+             AND note.id = ANY($3::uuid[])
              AND (strpos(note.content, attachment.relative_path) > 0
                OR strpos(note.content, replace(attachment.relative_path, '%', '%25')) > 0)))
-         ORDER BY attachment.id`, [workspaceId, permission.member, guestProjectIds]);
+         ORDER BY attachment.id`, [workspaceId, permission.member, [...visibleNoteIds]]);
       const activities = permission.member ? await client.query<{ payload: ActivityRecord }>(`SELECT projection.payload
         FROM stash_workspace_activity activity JOIN LATERAL (SELECT payload FROM stash_portable_projection_outbox
           WHERE object_kind='Activity' AND object_id=activity.id ORDER BY revision DESC LIMIT 1) projection ON TRUE
@@ -4662,8 +4667,8 @@ export class PostgresDatabase implements
         COALESCE(stub.source_account_id,history.actor_account_id::text) AS portable_actor_id FROM stash_note_history history
         JOIN stash_accounts actor ON actor.id=history.actor_account_id LEFT JOIN stash_identity_stubs stub ON stub.account_id=actor.id
         JOIN stash_notes note ON note.id=history.note_id
-        WHERE history.workspace_id=$1 AND ($2::boolean OR note.project_id=ANY($3::uuid[]))
-        ORDER BY history.note_id,history.revision`, [workspaceId, permission.member, guestProjectIds]);
+        WHERE history.workspace_id=$1 AND note.id=ANY($2::uuid[])
+        ORDER BY history.note_id,history.revision`, [workspaceId, [...visibleNoteIds]]);
       const durableObjects = await client.query<{ object_kind: string; object_id: string; projection_schema: string; payload: unknown }>(
         `SELECT DISTINCT ON (projection.object_kind, projection.object_id)
            projection.object_kind,projection.object_id,projection.projection_schema,projection.payload
@@ -4692,8 +4697,7 @@ export class PostgresDatabase implements
         || boards.rows.some(({ payload }) => !payload)
         || noteLocations.rows.some(({ payload }) => !payload) || noteLinks.rows.some(({ payload }) => !payload)
         || attachments.rows.some(({ payload }) => !payload)) throw new Error("portable_projection_unavailable");
-      const noteProjections = notes.rows.map(({ payload }) => payload!); const taskProjections = tasks.rows.map(({ payload }) => payload!);
-      const visibleNoteIds = new Set(notes.rows.map(({ id }) => id));
+      const taskProjections = tasks.rows.map(({ payload }) => payload!);
       const visibleTaskIds = new Set(taskProjections.map(({ id }) => id));
       const visibleProjectIds = new Set(guestProjectIds);
       const contributedDurable = (await Promise.all(this.#portableProjectionContributors.map((contributor) =>
@@ -4713,7 +4717,8 @@ export class PostgresDatabase implements
         boards: boards.rows.map(({ payload }) => payload!),
         attachments: attachments.rows.map(({ storage_key, payload }) => ({ storageKey: storage_key, projection: payload! })),
         noteLocations: noteLocations.rows.map(({ payload }) => payload!),
-        noteLinks: noteLinks.rows.map(({ payload }) => payload!),
+        noteLinks: noteLinks.rows.map(({ payload }) => payload!).map((payload) => "candidateNoteIds" in payload
+          ? { ...payload, candidateNoteIds: payload.candidateNoteIds.filter((id) => visibleNoteIds.has(id)) } : payload),
         activities: activities.rows.map(({ payload }) => payload),
         noteHistory: histories.rows.map((row): NoteHistoryRevision => ({ noteId: row.note_id, workspaceId: row.workspace_id,
           revision: Number(row.revision), content: row.content, document: row.document, recordedAt: new Date(row.recorded_at).toISOString(),
@@ -5508,4 +5513,11 @@ function triageObjectId(result: NoteTriageResult, noteId: string): string {
   if (result.kind === "task_created") return result.task.id;
   if (result.kind === "linked") return result.link.id;
   return noteId;
+}
+
+function portableExportNoteProjection(payload: PortableNoteProjection | PortableNoteStateProjection): PortableNoteProjection {
+  if (payload.schema === "stash.note.v1") return payload;
+  const { id, workspaceId, content, tags, createdAt, projectId, reminder } = payload.note;
+  return { schema: "stash.note.v1", id, workspaceId, content, tags, createdAt, createdBy: payload.createdBy,
+    ...(projectId ? { projectId } : {}), ...(reminder ? { reminder } : {}) };
 }
