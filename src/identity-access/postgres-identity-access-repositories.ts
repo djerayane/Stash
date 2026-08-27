@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import type { AccountRegistrationRepository, RegistrationRecord } from "../account-registration.js";
 import type { AuthenticationSecretCodec } from "../authentication-secrets.js";
 import type { AccountAuthenticationRecord, PasswordAuthRepository, SessionRecord } from "../password-auth.js";
@@ -8,7 +8,9 @@ import type { BuiltInOrganizationRole, CustomOrganizationRole, OrganizationRoleR
 import type { InvitationRecord, InvitationRepository } from "../invitations.js";
 import type { AccountRecoveryRepository, ClaimedEmailRecoveryDelivery, EmailRecoveryDeliveryClaim,
   EmailRecoveryDeliveryJob, EmailRecoveryRecord, PasskeyRecord, RecoveryCodeRecord } from "../account-recovery.js";
-import type { AgentGrant, AgentGrantOption, StoredAgentGrant } from "../agent-grants.js";
+import type { AgentGrant, AgentGrantOption, AgentProposal, StoredAgentGrant } from "../agent-grants.js";
+import type { ActivityRecord } from "../activity.js";
+import { notificationDeliveryMode, requestedReviewNotificationInput, type NotificationPreferences } from "../notifications.js";
 import type { MemberLocalizationPreferences, MemberLocalizationRepository } from "../member-localization.js";
 import type { PortableIdentity, PortableProjectProjection, PortableWorkspaceProjection, WorkspaceProjectRecord,
   WorkspaceProjectRepository, WorkspaceRecord } from "../workspaces-projects.js";
@@ -31,6 +33,8 @@ export class PostgresIdentityAccessRepositories implements PasswordAuthRepositor
       ensureDefaultWorkflow(client: PostgresQueryable, projectId: string): Promise<void>;
       findPortableMemberIdentity(memberId: string): Promise<PortableIdentity | undefined>;
       roles: Pick<OrganizationRoleRepository,"assignBuiltInRole"|"listCustomRoles"|"createCustomRole"|"updateCustomRole"|"assignCustomRole"|"revokeCustomRole">;
+      prepareNotifications(client:PostgresQueryable):Promise<void>;
+      recordActivityProjection(client:PostgresQueryable,activity:ActivityRecord):Promise<void>;
     },
   ) {}
 
@@ -398,6 +402,68 @@ export class PostgresIdentityAccessRepositories implements PasswordAuthRepositor
       organization_id UUID NOT NULL REFERENCES stash_organizations(id),target_account_id UUID NOT NULL REFERENCES stash_accounts(id),occurred_at TIMESTAMPTZ NOT NULL,
       before_state JSONB NOT NULL,after_state JSONB NOT NULL);`);}
 
+  async createAgentProposal(proposal:AgentProposal):Promise<void>{await this.kernel.transaction(async(client)=>{await this.prepareAgentAuthority(client);
+    await this.dependencies.prepareNotifications(client);const input=proposal.input as {workspaceId?:unknown};
+    const authorized=(await client.query<{workspace_id:string;actor_name:string}>(`SELECT workspace.id workspace_id,account.name actor_name
+      FROM stash_agent_grants grant JOIN stash_accounts account ON account.id=grant.sponsoring_member_id
+      JOIN stash_workspaces workspace ON workspace.organization_owner_id=grant.organization_id
+      LEFT JOIN stash_projects project ON project.workspace_id=workspace.id AND project.id=$4
+      WHERE grant.id=$1 AND grant.sponsoring_member_id=$2 AND grant.organization_id=$3
+      AND EXISTS(SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id=grant.organization_id AND membership.account_id=$2)
+      AND (($4::uuid IS NOT NULL AND project.id=$4) OR ($4::uuid IS NULL AND workspace.id=$5)) LIMIT 1`,
+    [proposal.grantId,proposal.sponsoringMemberId,proposal.organizationId,proposal.projectId??null,typeof input?.workspaceId==="string"?input.workspaceId:null])).rows[0];
+    if(!authorized)throw new Error("proposal_notification_scope_forbidden");
+    const activity:ActivityRecord={schema:"stash.activity.v1",id:proposal.id,workspaceId:authorized.workspace_id,
+      object:{kind:"Proposal",id:proposal.id},action:"proposal_review_requested",actor:{localAccountId:proposal.sponsoringMemberId,displayName:authorized.actor_name},
+      cause:{kind:"agent",agentGrantId:proposal.grantId,sponsoringMemberId:proposal.sponsoringMemberId,agentName:proposal.agentName},
+      occurredAt:proposal.createdAt,before:{},after:{proposalId:proposal.id,capability:proposal.capability,status:proposal.status}};
+    await client.query(`INSERT INTO stash_agent_proposals(id,grant_id,sponsoring_member_id,capability,input,status,created_at,base_revision)
+      VALUES($1,$2,$3,$4,$5::jsonb,$6,$7,$8)`,[proposal.id,proposal.grantId,proposal.sponsoringMemberId,proposal.capability,
+      JSON.stringify(proposal.input),proposal.status,proposal.createdAt,proposal.baseRevision??null]);
+    await client.query(`INSERT INTO stash_workspace_activity(id,workspace_id,object_kind,object_id,action,actor_account_id,cause,occurred_at,before_state,after_state)
+      VALUES($1,$2,'Proposal',$1,$3,$4,$5::jsonb,$6,$7::jsonb,$8::jsonb)`,[activity.id,activity.workspaceId,activity.action,activity.actor.localAccountId,
+      JSON.stringify(activity.cause),activity.occurredAt,JSON.stringify(activity.before),JSON.stringify(activity.after)]);
+    await this.dependencies.recordActivityProjection(client,activity);
+    const requested=requestedReviewNotificationInput(activity,proposal.sponsoringMemberId,proposal.projectId,proposal.agentName,proposal.capability);
+    let preferences:NotificationPreferences={activity:"followed",digest:"off"};if(proposal.projectId){const row=(await client.query<any>(`SELECT preference.*
+      FROM stash_projects project LEFT JOIN stash_notification_preferences preference ON preference.project_id=project.id AND preference.member_id=$1 WHERE project.id=$2`,
+    [proposal.sponsoringMemberId,proposal.projectId])).rows[0];if(row?.member_id)preferences={activity:row.activity,digest:row.digest,
+      ...(row.quiet_start?{quietHours:{start:row.quiet_start,end:row.quiet_end,timeZone:row.quiet_time_zone}}:{})};}
+    await client.query(`INSERT INTO stash_notifications(id,member_id,workspace_id,project_id,trigger,summary,activity,created_at,delivery)
+      VALUES($1,$2,$3,$4,'requested_review',$5,$6::jsonb,$7,$8) ON CONFLICT(member_id,activity_id,trigger) DO NOTHING`,
+    [randomUUID(),requested.memberId,activity.workspaceId,proposal.projectId??null,requested.summary,JSON.stringify(activity),activity.occurredAt,
+      notificationDeliveryMode(new Date(activity.occurredAt),preferences)]);});}
+  async listAgentProposals(actorId:string,organizationId:string):Promise<AgentProposal[]|undefined>{return this.kernel.withSession(async(client)=>{
+    await this.prepareAgentAuthority(client);if(!(await client.query("SELECT 1 FROM stash_organization_memberships WHERE organization_id=$1 AND account_id=$2",
+      [organizationId,actorId])).rowCount)return undefined;return (await client.query<any>(`SELECT proposal.*,grant.organization_id,grant.project_id,grant.name agent_name
+      FROM stash_agent_proposals proposal JOIN stash_agent_grants grant ON grant.id=proposal.grant_id WHERE grant.organization_id=$1
+      AND proposal.sponsoring_member_id=$2 ORDER BY proposal.created_at DESC,proposal.id`,[organizationId,actorId])).rows.map(agentProposalFromRow);});}
+  async findAgentProposal(actorId:string,organizationId:string,proposalId:string):Promise<AgentProposal|"forbidden"|undefined>{return this.kernel.withSession(async(client)=>{
+    await this.prepareAgentAuthority(client);if(!(await client.query("SELECT 1 FROM stash_organization_memberships WHERE organization_id=$1 AND account_id=$2",
+      [organizationId,actorId])).rowCount)return "forbidden";const row=(await client.query<any>(`SELECT proposal.*,grant.organization_id,grant.project_id,grant.name agent_name
+      FROM stash_agent_proposals proposal JOIN stash_agent_grants grant ON grant.id=proposal.grant_id WHERE proposal.id=$1 AND grant.organization_id=$2`,
+    [proposalId,organizationId])).rows[0];return !row?undefined:row.sponsoring_member_id!==actorId?"forbidden":agentProposalFromRow(row);});}
+  async claimAgentProposal(actorId:string,organizationId:string,proposalId:string,operationId:string){return this.kernel.transaction(async(client)=>{
+    await this.prepareAgentAuthority(client);if(!(await client.query("SELECT 1 FROM stash_organization_memberships WHERE organization_id=$1 AND account_id=$2",
+      [organizationId,actorId])).rowCount)return {status:"forbidden" as const};const row=(await client.query<any>(`SELECT proposal.*,grant.organization_id,grant.project_id,grant.name agent_name
+      FROM stash_agent_proposals proposal JOIN stash_agent_grants grant ON grant.id=proposal.grant_id WHERE proposal.id=$1 AND grant.organization_id=$2 FOR UPDATE OF proposal`,
+    [proposalId,organizationId])).rows[0];if(!row)return {status:"not_found" as const};if(row.sponsoring_member_id!==actorId)return {status:"forbidden" as const};
+    if(row.status==="applying")return {status:"in_progress" as const,proposal:agentProposalFromRow(row)};
+    if(!["pending","conflict"].includes(row.status))return {status:row.operation_id===operationId?"duplicate" as const:"already_reviewed" as const,proposal:agentProposalFromRow(row)};
+    const claimed=(await client.query<any>("UPDATE stash_agent_proposals SET status='applying',operation_id=$2 WHERE id=$1 RETURNING *",[proposalId,operationId])).rows[0];
+    return {status:"claimed" as const,proposal:agentProposalFromRow({...claimed,organization_id:row.organization_id,project_id:row.project_id,agent_name:row.agent_name})};});}
+  async finishAgentProposal(actorId:string,proposalId:string,operationId:string,update:any):Promise<AgentProposal>{return this.kernel.transaction(async(client)=>{
+    const row=(await client.query<any>(`UPDATE stash_agent_proposals proposal SET status=$4,reviewed_at=$5,reviewed_by_account_id=$1,result=$6::jsonb,conflict=$7::jsonb
+      WHERE proposal.id=$2 AND proposal.sponsoring_member_id=$1 AND proposal.operation_id=$3 RETURNING proposal.*,
+      (SELECT organization_id FROM stash_agent_grants WHERE id=proposal.grant_id),(SELECT project_id FROM stash_agent_grants WHERE id=proposal.grant_id),
+      (SELECT name FROM stash_agent_grants WHERE id=proposal.grant_id) agent_name`,[actorId,proposalId,operationId,update.status,update.reviewedAt,
+      JSON.stringify(update.result??null),JSON.stringify(update.conflict??null)])).rows[0];if(!row)throw new Error("proposal_claim_lost");
+    await client.query("UPDATE stash_notifications SET read_at=CASE WHEN $3='conflict' THEN NULL ELSE COALESCE(read_at,$4::timestamptz) END WHERE member_id=$1 AND activity_id=$2 AND trigger='requested_review'",
+      [actorId,proposalId,update.status,update.reviewedAt]);return agentProposalFromRow(row);});}
+  async releaseAgentProposal(actorId:string,proposalId:string,operationId:string):Promise<void>{await this.kernel.query(
+    "UPDATE stash_agent_proposals SET status=CASE WHEN conflict IS NULL THEN 'pending' ELSE 'conflict' END,operation_id=NULL WHERE id=$1 AND sponsoring_member_id=$2 AND operation_id=$3 AND status='applying'",
+  [proposalId,actorId,operationId]);}
+
   async prepareWorkspaceProjects(client:PostgresQueryable):Promise<void>{await this.dependencies.prepareRegistration(client);}
   async prepareLocalization(client:PostgresQueryable):Promise<void>{await this.prepareWorkspaceProjects(client);await client.query(`CREATE TABLE IF NOT EXISTS stash_member_localization_preferences
     (account_id UUID PRIMARY KEY REFERENCES stash_accounts(id) ON DELETE CASCADE,locale TEXT NOT NULL,time_zone TEXT NOT NULL,date_format TEXT NOT NULL CHECK(date_format IN ('short','medium','long')),
@@ -425,3 +491,8 @@ export class PostgresIdentityAccessRepositories implements PasswordAuthRepositor
 function agentGrantFromRow(row:any):AgentGrant{return {id:row.id,organizationId:row.organization_id,sponsoringMemberId:row.sponsoring_member_id,
   name:row.name,...(row.project_id?{projectId:row.project_id}:{}),scopes:row.capabilities,expiresAt:new Date(row.expires_at).toISOString(),
   createdAt:new Date(row.created_at).toISOString(),...(row.revoked_at?{revokedAt:new Date(row.revoked_at).toISOString()}: {})};}
+function agentProposalFromRow(row:any):AgentProposal{return {id:row.id,grantId:row.grant_id,organizationId:row.organization_id,
+  sponsoringMemberId:row.sponsoring_member_id,agentName:row.agent_name,...(row.project_id?{projectId:row.project_id}:{}),capability:row.capability,input:row.input,
+  ...(row.base_revision?{baseRevision:Number(row.base_revision)}:{}),createdAt:new Date(row.created_at).toISOString(),status:row.status,
+  ...(row.operation_id?{operationId:row.operation_id}:{}),...(row.reviewed_at?{reviewedAt:new Date(row.reviewed_at).toISOString()}:{}),
+  ...(row.reviewed_by_account_id?{reviewedByMemberId:row.reviewed_by_account_id}:{}),...(row.result?{result:row.result}:{}),...(row.conflict?{conflict:row.conflict}:{})};}
