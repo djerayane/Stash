@@ -87,6 +87,25 @@
 .linkForm label { display: grid; gap: .3rem; color: var(--stash-color-muted); font-size: .7rem; font-weight: 700; }
 .linkForm input, .linkForm select { min-width: 0; padding: .55rem; border: 1px solid var(--stash-border-strong); color: var(--stash-color-ink); background: var(--stash-color-canvas); }
 .linkForm button { min-height: 2.25rem; border: 0; color: var(--stash-color-accent-contrast); background: var(--stash-color-accent); font-weight: 720; }
+.relatedNotes { display: grid; gap: var(--stash-space-3); margin-top: var(--stash-space-6); padding-top: var(--stash-space-5); border-top: 1px solid var(--stash-border-subtle); }
+.relatedNotes > header { display: grid; gap: var(--stash-space-3); padding: 0; border: 0; }
+.relatedNotes > header p { margin: 0; }
+.relatedNotes label { display: grid; gap: .3rem; color: var(--stash-color-muted); font-size: .7rem; font-weight: 700; }
+.relatedNotes select, .relatedNotes input, .relatedNotes button { min-height: 2.25rem; min-width: 0; padding: .45rem .55rem; border: 1px solid var(--stash-border-strong); color: var(--stash-color-ink); background: var(--stash-color-canvas); }
+.visualizationBlock { display: grid; gap: var(--stash-space-3); }
+.relationshipVisual { min-height: 8rem; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); place-items: center; gap: 1px; padding: var(--stash-space-3); background: var(--stash-border-subtle); }
+.relationshipVisual span { width: 100%; min-height: 3rem; display: grid; place-items: center; padding: .35rem; background: var(--stash-color-canvas); color: var(--stash-color-muted); font-size: .65rem; text-align: center; }
+.relationshipVisual .relationshipRoot { color: var(--stash-color-accent-contrast); background: var(--stash-color-accent); font-weight: 750; }
+.relationshipOutline { display: grid; gap: 1px; margin: 0; padding: 1px; background: var(--stash-border-subtle); list-style: none; }
+.relationshipOutline li { display: grid; gap: .15rem; padding: .6rem .65rem .6rem calc(.65rem + var(--relationship-depth) * .7rem); background: var(--stash-color-surface); }
+.relationshipOutline small, .relationshipMaintenance small { color: var(--stash-color-muted); font-size: .64rem; }
+.relationshipMaintenance { display: grid; gap: var(--stash-space-4); padding: var(--stash-space-3); background: var(--stash-color-canvas-deep); }
+.relationshipMaintenance h4 { margin: 0 0 var(--stash-space-2); font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; }
+.relationshipMaintenance p { color: var(--stash-color-ink); }
+.relationshipMaintenance ul { gap: var(--stash-space-2); }
+.relationshipMaintenance li { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+.relationshipMaintenance li div { display: grid; gap: .2rem; }
+.relationshipMaintenance .repairChoice { grid-template-columns: minmax(8rem, 1fr) auto; align-items: end; }
 @media (max-width: 760px) {
   .treePanel:not(.treePage) { display: none; }
   .noteWorkspace.drawerIsOpen { grid-template-columns: 1fr; }

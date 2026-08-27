@@ -6,6 +6,7 @@ import { inflateRawSync } from "node:zlib";
 import { encodePortableFilename, type AttachmentStorage } from "./attachments.js";
 import type { PortableWorkspaceCanonicalState } from "./portable-workspace-export.js";
 import { isRichTextDocument, markdownToRichText } from "./rich-text.js";
+import { normalizeVisualizationDefinition } from "@stash/domain-types";
 
 export interface ImportTransformation { kind: "transformed" | "skipped" | "ambiguous"; object: string; reason: string }
 export interface IdentityStub { sourceAccountId: string; displayName: string }
@@ -343,6 +344,7 @@ function parseState(content: Buffer): PortableWorkspaceCanonicalState {
     || !Number.isInteger(link.revision ?? 1) || Number(link.revision ?? 1) < 1) throw new InvalidPortableWorkspaceImport("invalid_note_link"); }
   const allowedDurable = new Map([["Project", ["stash.project.v1"]], ["Workflow", ["stash.workflow.v1"]],
     ["WorkspaceWorkflow", ["stash.workspace-workflow.v1"]], ["Collection", ["stash.collection.v1"]], ["ViewBlock", ["stash.view-block.v1"]],
+    ["VisualizationBlock", ["stash.visualization.v1"]],
     ["GuestProjectAccess", ["stash.guest-project-access.v1"]], ["RepositoryConnection", ["stash.repository-connection.v1","stash.disconnected-repository-connection.v1"]],
     ["Discussion", ["stash.discussion.v1"]], ["DiscussionWorkLink", ["stash.discussion-work-link.v1"]]]);
   const sanitizedDurable: PortableWorkspaceCanonicalState["durableObjects"] = [];
@@ -380,6 +382,14 @@ function parseState(content: Buffer): PortableWorkspaceCanonicalState {
       exact(payload.source,["kind","workspaceId","project"],"view_block_source"); exact(payload.definition,["query","layout"],"view_definition");
       if(payload.source.kind!=="tasks"||payload.source.workspaceId!==workspaceId||payload.source.project!=="none"||!["list","table"].includes(String(payload.definition.layout))||!object(payload.definition.query)) throw new InvalidPortableWorkspaceImport("invalid_view_block");
       exact(payload.definition.query,["scope","titleContains"],"view_query"); if(payload.definition.query.scope!=="projectless"||typeof payload.definition.query.titleContains!=="string"||payload.definition.query.titleContains.length>120||/[\r\n]/.test(payload.definition.query.titleContains)) throw new InvalidPortableWorkspaceImport("invalid_view_block"); sanitized=structuredClone(payload); }
+    if(item.kind==="VisualizationBlock") { exact(payload,["schema","id","kind","query","filters","layout","viewEdges","workspaceId","ownerNoteId","revision"],"visualization_block");
+      if(payload.workspaceId!==workspaceId||payload.id!==item.id||!notes.has(String(payload.ownerNoteId))||!Number.isInteger(payload.revision)||Number(payload.revision)<1)
+        throw new InvalidPortableWorkspaceImport("invalid_visualization_block");
+      let definition; try { definition=normalizeVisualizationDefinition({ schema:payload.schema,id:payload.id,kind:payload.kind,query:payload.query,
+        filters:payload.filters,layout:payload.layout,viewEdges:payload.viewEdges }); } catch { throw new InvalidPortableWorkspaceImport("invalid_visualization_block"); }
+      if(!notes.has(definition.query.rootId)||definition.viewEdges.some((edge)=>!notes.has(edge.sourceNoteId)||!notes.has(edge.targetNoteId)))
+        throw new InvalidPortableWorkspaceImport("invalid_visualization_block");
+      sanitized={...definition,workspaceId,ownerNoteId:payload.ownerNoteId,revision:payload.revision}; }
     if (item.kind === "Discussion" && (payload.workspaceId !== workspaceId || !object(payload.target)
       || payload.target.kind === "task" && !tasks.has(String(payload.target.taskId))
       || ["note", "block"].includes(String(payload.target.kind)) && !notes.has(String(payload.target.noteId))

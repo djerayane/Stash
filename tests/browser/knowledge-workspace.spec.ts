@@ -1,3 +1,4 @@
+import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 
 const workspaceId = "88888888-8888-4888-8888-888888888888";
@@ -47,6 +48,18 @@ async function mockKnowledgeApi(page: Page) {
     await route.fulfill({ json: { status: "moved", movedIds: [evidenceId], projectAccessChanges: [] } }); });
   await page.route("**/api/notes/*/context/links", async (route) => { requests.push({ path: new URL(route.request().url()).pathname, body: route.request().postDataJSON() });
     await route.fulfill({ status: 201, json: { link: { id: "new-link" } } }); });
+  await page.route("**/api/notes/*/relationships?*", async (route) => {
+    const depth = new URL(route.request().url()).searchParams.get("depth") === "2" ? 2 : 1;
+    await route.fulfill({ json: { rootId: roadmapId, depth, limit: 24, direction: "both", hasMore: depth === 1,
+      nodes: [{ id: roadmapId, title: "Release collaboration plan", depth: 0 },
+        { id: evidenceId, title: "Authoritative second Note", depth: 1 }],
+      edges: [{ id: "link-1", sourceNoteId: roadmapId, targetNoteId: evidenceId, kind: "note-link", relationshipType: "supports" }],
+      outline: [{ id: roadmapId, title: "Release collaboration plan", depth: 0 },
+        { id: evidenceId, title: "Authoritative second Note", depth: 1 }] } });
+  });
+  await page.route("**/api/workspaces/*/relationships/maintenance", (route) => route.fulfill({ json: {
+    orphans: [{ id: evidenceId, title: "Authoritative second Note" }], brokenLinks: [],
+  } }));
   await page.route(/\/api\/notes\/[^/]+\/(?:archive|trash|restore)$/, async (route) => { requests.push({ path: new URL(route.request().url()).pathname });
     await route.fulfill({ json: route.request().url().endsWith("/restore") ? { status: "restored", restoredIds: [roadmapId, evidenceId], parentRestored: true }
       : { status: "updated", affectedIds: [roadmapId, evidenceId] } }); });
@@ -70,8 +83,16 @@ test("authors and recovers knowledge through the keyboard-accessible Note worksp
   await page.getByRole("button", { name: "Open Note context" }).click();
   const drawer = page.getByRole("complementary", { name: "Note context" });
   await expect(drawer).toContainText("Backlinks"); await expect(drawer).toContainText("Outgoing links");
+  const related = drawer.getByRole("region", { name: "Related Notes" });
+  await expect(related.getByRole("list", { name: "Related Notes outline" })).toBeVisible();
+  await expect(related.getByRole("link", { name: "Authoritative second Note" })).toBeVisible();
+  await expect(related.getByTestId("relationship-visual")).toHaveAttribute("aria-hidden", "true");
+  await related.getByRole("button", { name: "Expand related Notes" }).click();
+  await expect(related.getByRole("button", { name: "Expand related Notes" })).toHaveCount(0);
+  await related.getByRole("button", { name: "Review relationship maintenance" }).click();
+  await expect(related.getByRole("heading", { name: "Orphan Notes" })).toBeVisible();
   await drawer.getByRole("combobox", { name: "Target Note" }).selectOption(evidenceId);
-  await drawer.getByRole("textbox", { name: "Relationship type" }).fill("supports");
+  await drawer.getByRole("textbox", { name: "Relationship type", exact: true }).fill("supports");
   await drawer.getByRole("button", { name: "Create Note link" }).click();
   await drawer.getByRole("button", { name: "Close Note context" }).click();
   await expect(page.getByRole("button", { name: "Open Note context" })).toBeFocused();
@@ -85,6 +106,17 @@ test("authors and recovers knowledge through the keyboard-accessible Note worksp
     expect.objectContaining({ path: `/api/notes/${roadmapId}/archive` }),
     expect.objectContaining({ path: `/api/notes/${roadmapId}/restore` }),
   ]));
+});
+
+test("related Note navigation has no automatically detectable accessibility violations @a11y", async ({ page }) => {
+  await authenticate(page); await mockKnowledgeApi(page); await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto(`/app/notes/${roadmapId}`);
+  await page.getByRole("button", { name: "Open Note context" }).click();
+  const related = page.getByRole("region", { name: "Related Notes" });
+  await expect(related.getByRole("list", { name: "Related Notes outline" })).toBeVisible();
+  await related.getByRole("button", { name: "Review relationship maintenance" }).click();
+  await expect(related.getByRole("heading", { name: "Orphan Notes" })).toBeVisible();
+  expect((await new AxeBuilder({ page }).include('[aria-label="Related Notes"]').analyze()).violations).toEqual([]);
 });
 
 test("persists a real Note branch lifecycle through the acceptance Instance", async ({ page }) => {
@@ -118,7 +150,7 @@ test("persists a real Note branch lifecycle through the acceptance Instance", as
   await page.getByRole("button", { name: "Open Note context" }).click();
   const drawer = page.getByRole("complementary", { name: "Note context" });
   await drawer.getByRole("combobox", { name: "Target Note" }).selectOption({ label: "Private linked research" });
-  await drawer.getByRole("textbox", { name: "Relationship type" }).fill("supports");
+  await drawer.getByRole("textbox", { name: "Relationship type", exact: true }).fill("supports");
   await drawer.getByRole("button", { name: "Create Note link" }).click();
   await drawer.getByRole("button", { name: "Close Note context" }).click();
   const memberLinkedContext = await page.request.get(`/api/notes/${guideId}/context`, { headers: { authorization: "Bearer browser-acceptance-durable-token" } });

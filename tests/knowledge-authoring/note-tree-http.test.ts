@@ -13,6 +13,9 @@ import { DiscussionService } from "../../src/discussions.js";
 import { startInstance, type RunningInstance } from "../../src/instance.js";
 import { EmptyCollectionImpactInspector, NoteTreeService } from "../../src/knowledge-authoring/note-tree.js";
 import { noteTreeRoutes } from "../../src/knowledge-authoring/note-tree-routes.js";
+import { relationshipRoutes } from "../../src/knowledge-authoring/relationship-routes.js";
+import { RelationshipQueryService } from "../../src/knowledge-authoring/relationship-query.js";
+import { VisualizationBlockService } from "../../src/knowledge-authoring/visualization-block.js";
 import { NoteService } from "../../src/notes.js";
 import { WorkspaceProjectService, type MemberAccessResolver } from "../../src/workspaces-projects.js";
 
@@ -43,7 +46,9 @@ describe("Note Tree HTTP", () => {
     instance = await startInstance({ database: store.database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin",
       activities: new ActivityService(store.database), discussions: new DiscussionService(store.database), memberAccess: access,
       capabilities: createCapabilityRegistry([{ name: "knowledge-authoring", routes: () => [noteTreeRoutes(new NoteTreeService(
-        store.database.noteTreeRepository(), new EmptyCollectionImpactInspector()), access)] }]) });
+        store.database.noteTreeRepository(), new EmptyCollectionImpactInspector()), access), relationshipRoutes(
+          new RelationshipQueryService(store.database.relationshipQueryRepository()),
+          new VisualizationBlockService(store.database.visualizationBlockRepository()), access)] }]) });
   });
 
   after(async () => { await instance.close(); await store.close(); });
@@ -156,5 +161,42 @@ describe("Note Tree HTTP", () => {
     assert.equal(historyBody.revisions.length >= 1, true);
     assert.equal((await guestRequest(`/api/notes/${child.id}/history/1/restore`, { method: "POST",
       body: JSON.stringify({ expectedRevision: 1, idempotencyKey: "32323232-3232-4232-8232-323232323232" }) })).status, 404);
+  });
+
+  test("serves bounded relationship and portable Visualization Block operations", async () => {
+    const rootResponse = await request(`/api/workspaces/${workspaceId}/note-tree`, { method: "POST", body: JSON.stringify({ title: "Relationship root" }) });
+    const root = (await rootResponse.json() as any).node;
+    const childResponse = await request(`/api/workspaces/${workspaceId}/note-tree`, { method: "POST",
+      body: JSON.stringify({ title: "Related child", parentId: root.id }) });
+    const child = (await childResponse.json() as any).node;
+    assert.equal((await request(`/api/notes/${root.id}/context/links`, { method: "POST",
+      body: JSON.stringify({ targetNoteId: child.id, label: "Supports", relationshipType: "supports" }) })).status, 201);
+
+    const neighborhood = await request(`/api/notes/${root.id}/relationships?depth=1&limit=20&direction=outgoing&relationType=supports&includeHierarchy=false`);
+    assert.equal(neighborhood.status, 200);
+    const neighborhoodBody = await neighborhood.json() as any;
+    assert.deepEqual(neighborhoodBody.nodes.map(({ title }: any) => title), ["Relationship root", "Related child"]);
+    assert.equal(neighborhoodBody.edges[0].relationshipType, "supports");
+    assert.equal((await request(`/api/notes/${root.id}/relationships?depth=99`)).status, 422);
+    assert.equal((await request(`/api/notes/${root.id}/relationships?includeHierarchy=sometimes`)).status, 422);
+    assert.equal((await request(`/api/workspaces/${workspaceId}/relationships/maintenance`)).status, 200);
+
+    const blockId = "78787878-7878-4878-8878-787878787878";
+    const definition = { schema: "stash.visualization.v1", id: blockId, kind: "local-graph",
+      query: { rootId: root.id, depth: 1, limit: 20, direction: "both", includeHierarchy: true },
+      filters: { relationTypes: [], direction: "both" }, layout: { renderer: "focused" },
+      viewEdges: [{ id: "http-view-edge", sourceNoteId: child.id, targetNoteId: root.id, relationshipType: "questions" }] };
+    const saved = await request(`/api/notes/${root.id}/visualizations/${blockId}`, { method: "PUT",
+      body: JSON.stringify({ definition }) });
+    assert.equal(saved.status, 200);
+    assert.equal((await saved.json() as any).block.revision, 1);
+    assert.equal((await request(`/api/notes/${root.id}/visualizations/79797979-7979-4979-8979-797979797979`, { method: "PUT",
+      body: JSON.stringify({ definition }) })).status, 422);
+    assert.equal((await request(`/api/notes/${root.id}/visualizations/${blockId}`)).status, 200);
+    const promoted = await request(`/api/notes/${root.id}/visualizations/${blockId}/view-edges/http-view-edge/promote`, { method: "POST" });
+    assert.equal(promoted.status, 201);
+    const childContext = await request(`/api/notes/${child.id}/context`);
+    assert.equal((await childContext.json() as any).outgoingLinks.some(({ noteId, relationshipType }: any) =>
+      noteId === root.id && relationshipType === "questions"), true);
   });
 });

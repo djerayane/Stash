@@ -54,6 +54,8 @@ import { TutorialContributionService } from "./knowledge-authoring/collections.j
 import { instanceOperationsCapability } from "./instance-operations/index.js";
 import { knowledgeAuthoringCapability } from "./knowledge-authoring/index.js";
 import { NoteTreeService } from "./knowledge-authoring/note-tree.js";
+import { RelationshipQueryService } from "./knowledge-authoring/relationship-query.js";
+import { VisualizationBlockService } from "./knowledge-authoring/visualization-block.js";
 import { workPlanningCapability } from "./work-planning/index.js";
 import { ProjectlessTaskService } from "./work-planning/projectless-tasks.js";
 
@@ -144,7 +146,9 @@ export async function composeInstanceRuntime(environment: NodeJS.ProcessEnv): Pr
     identityAccessCapability({ passwordAuth, instanceAdminToken, instanceSetup,
       ...(accountRegistration ? { accountRegistration } : {}), reportAuthenticationFailure }),
     knowledgeAuthoringCapability({ notes, noteTree: new NoteTreeService(database.noteTreeRepository(),
-      database.tutorialContributionRepository()), starterTutorials, memberAccess: passwordAuth }),
+      database.tutorialContributionRepository()), starterTutorials,
+      relationships: new RelationshipQueryService(database.relationshipQueryRepository()),
+      visualizations: new VisualizationBlockService(database.visualizationBlockRepository()), memberAccess: passwordAuth }),
     workPlanningCapability({ tasks, workspaceProjects, projectlessTasks, memberAccess: passwordAuth }),
     developmentIntegrationCapability({ memberAccess: passwordAuth,
       ...(repositoryConnections ? { repositoryConnections } : {}), ...(githubArtifacts ? { githubArtifacts } : {}),

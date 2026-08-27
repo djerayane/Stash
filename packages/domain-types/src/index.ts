@@ -1,3 +1,5 @@
+export * from "./visualizations.js";
+
 export type EntityId = string;
 
 export const agentGrantModes = ["direct", "propose", "deny"] as const;
