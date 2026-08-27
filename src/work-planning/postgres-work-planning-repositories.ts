@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ActivityCause, ActivityRecord } from "../activity.js";
+import type { DevelopmentArtifactKind } from "../github-artifacts.js";
 import type { AutomationCandidate, AutomationFailureNotification, AutomationRecipe, AutomationRepository, AutomationState, AutomationTransition, AutomationTrigger } from "../automations.js";
 import type { Board, BoardRepository, BoardTask } from "../boards.js";
 import type { PortableExportTaskProjection, PortableNoteProjection, PortableTaskProjection, TaskCreation } from "../notes.js";
@@ -12,8 +13,9 @@ import { assignmentNotificationInputs, notificationDeliveryMode, type Notificati
 import { PostgresKernel, type PostgresQueryable } from "../instance-operations/storage/postgres-kernel.js";
 import type { WorkspaceWorkflow } from "./canonical-tasks.js";
 import { richTextToMarkdown } from "../rich-text.js";
+import type { DevelopmentArtifactTarget, WorkPlanningDevelopmentArtifactPort } from "./development-artifact-port.js";
 
-export const postgresTaskPlanningSelect = `SELECT task.*, COALESCE(workspace_status.name,status.name) AS status_name,
+const taskPlanningSelect = `SELECT task.*, COALESCE(workspace_status.name,status.name) AS status_name,
   COALESCE(workspace_status.category,status.category) AS status_category, creator.name AS created_by_name,
   ARRAY(SELECT source.note_id FROM stash_task_note_sources source WHERE source.task_id = task.id ORDER BY source.note_id) AS source_note_ids,
   COALESCE((SELECT jsonb_agg(jsonb_build_object('noteId', source.note_id, 'blockId', source.block_id) ORDER BY source.note_id, source.block_id)
@@ -43,15 +45,13 @@ export const postgresTaskPlanningSelect = `SELECT task.*, COALESCE(workspace_sta
         WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $3))
       OR EXISTS (SELECT 1 FROM stash_project_guests guest JOIN stash_task_projects association ON association.project_id=guest.project_id
         WHERE association.task_id=task.id AND guest.account_id=$3))`;
-export const postgresTaskPlanningSelectById = postgresTaskPlanningSelect
+const taskPlanningSelectById = taskPlanningSelect
   .replace(/\(task\.project_id = \$1[\s\S]*?alias\.task_key = \$2\)\)/, "task.id = $1").replaceAll("$3", "$2");
-const taskPlanningSelect = postgresTaskPlanningSelect;
-const taskPlanningSelectById = postgresTaskPlanningSelectById;
 export const workflowTemporaryRenameSql = `UPDATE stash_workflow_statuses
   SET position = -position - 1, name = repeat('__stash_workflow_transition__', 4) || id::text
   WHERE project_id = $1`;
 
-export function taskProjectionFromPostgresRow(row: any): PortableExportTaskProjection {
+function projection(row: any): PortableExportTaskProjection {
   return { schema: "stash.task.v1", id: row.id, workspaceId: row.workspace_id, ...(row.project_id ? { projectId: row.project_id } : {}),
     ...(row.task_key ? { key: row.task_key } : {}), ...(row.project_keys?.length ? { projectKeys: row.project_keys,
       projectAssociations: row.project_keys.map((entry: any) => entry.projectId) } : {}),
@@ -65,11 +65,9 @@ export function taskProjectionFromPostgresRow(row: any): PortableExportTaskProje
     ...(row.source_blocks?.length ? { sourceBlocks: row.source_blocks } : {}), createdAt: new Date(row.created_at).toISOString(),
     createdBy: { localAccountId: row.created_by_account_id, displayName: row.created_by_name } };
 }
-export function taskPlanningReadModelFromPostgresRow(row: any): TaskPlanningReadModel {
-  return { ...taskProjectionFromPostgresRow(row), revision: Number(row.revision), dependencyWarnings: row.dependency_warnings ?? [] } as TaskPlanningReadModel;
+function readModel(row: any): TaskPlanningReadModel {
+  return { ...projection(row), revision: Number(row.revision), dependencyWarnings: row.dependency_warnings ?? [] } as TaskPlanningReadModel;
 }
-const projection = taskProjectionFromPostgresRow;
-const readModel = taskPlanningReadModelFromPostgresRow;
 function boardFromRow(row: any): Board {
   return { schema: "stash.board.v1", id: row.id, projectId: row.project_id, name: row.name,
     groupBy: row.group_by, createdAt: new Date(row.created_at).toISOString() };
@@ -118,12 +116,51 @@ interface FailedAutomationRun {
 }
 
 export class PostgresWorkPlanningRepositories implements TaskFromBlockRepository, TaskPlanningRepository, StructuredTaskEditRepository, TaskMoveRepository,
-  ProjectWorkflowRepository, BoardRepository, NotificationRepository, AutomationRepository {
+  ProjectWorkflowRepository, BoardRepository, NotificationRepository, AutomationRepository, WorkPlanningDevelopmentArtifactPort {
   constructor(private readonly kernel: PostgresKernel, private readonly hooks: WorkPlanningPersistenceHooks) {}
 
-  prepare(client: PostgresQueryable): Promise<void> { return this.hooks.prepare(client); }
-  recordTaskProjection(client: PostgresQueryable, task: PortableExportTaskProjection): Promise<void> {
-    return this.hooks.recordProjection(client, task);
+  async linkDevelopmentArtifact(client: PostgresQueryable, target: DevelopmentArtifactTarget,
+    artifact: { kind: DevelopmentArtifactKind; url: string }, action: string, cause: ActivityCause): Promise<"linked" | "forbidden"> {
+    await this.hooks.prepare(client);
+    let actorId: string;
+    let row: any;
+    if (target.kind === "task_key") {
+      actorId = target.memberId;
+      row = (await client.query<any>(`${taskPlanningSelect} FOR UPDATE OF task`,
+        [target.projectId, target.taskKey, actorId])).rows[0];
+      if (!row) return "forbidden";
+      const writable = await client.query(`SELECT 1 FROM stash_workspaces workspace WHERE workspace.id = $1
+        AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2)
+          OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+            WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2))) FOR UPDATE`,
+        [row.workspace_id, actorId]);
+      if (!writable.rowCount) return "forbidden";
+    } else {
+      const actor = target.actor.kind === "member" ? { id: target.actor.memberId }
+        : (await client.query<{ id: string }>(`SELECT membership.account_id AS id FROM stash_organization_memberships membership
+          WHERE membership.organization_id=$1 AND membership.role='Owner' ORDER BY membership.account_id LIMIT 1`,
+          [target.actor.organizationId])).rows[0];
+      if (!actor) return "forbidden";
+      actorId = actor.id;
+      row = (await client.query<any>(`${taskPlanningSelectById} FOR UPDATE OF task`, [target.taskId, actorId])).rows[0];
+      if (!row) return "forbidden";
+    }
+    await this.persistTaskDevelopmentArtifact(client, row, actorId, artifact, action, cause);
+    return "linked";
+  }
+
+  private async persistTaskDevelopmentArtifact(client: PostgresQueryable, row: any, actorId: string,
+    artifact: { kind: DevelopmentArtifactKind; url: string }, action: string, cause: ActivityCause): Promise<void> {
+    const before = readModel(row); const links = before.developmentLinks ?? [];
+    if (links.some(({ url }) => url === artifact.url)) return;
+    const revision = Number(row.revision) + 1;
+    await client.query(`UPDATE stash_tasks SET development_links=$2::jsonb, revision=$3,
+      field_revisions=jsonb_set(field_revisions,'{developmentLinks}',to_jsonb($3::int),true) WHERE id=$1`,
+      [row.id, JSON.stringify([...links, { provider: "github", kind: artifact.kind, url: artifact.url }]), revision]);
+    const saved = await client.query<any>(taskPlanningSelectById, [row.id, actorId]);
+    const after = readModel(saved.rows[0]);
+    await this.hooks.recordProjection(client, projection(saved.rows[0]));
+    await this.recordTaskActivity(client, actorId, after.workspaceId, after.id, action, before, after, cause);
   }
 
   async prepareNotifications(client: PostgresQueryable): Promise<void> {

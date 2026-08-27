@@ -3,14 +3,7 @@ import type { GitHubSignalRepository } from "../github-signals.js";
 import type { RepositoryConnectionRecord, RepositoryConnectionRepository } from "../repository-connections.js";
 import type { BuiltInOrganizationRole } from "../organization-roles.js";
 import type { PostgresKernel, PostgresQueryable } from "../instance-operations/storage/postgres-kernel.js";
-import type { ActivityCause } from "../activity.js";
-import {
-  postgresTaskPlanningSelect,
-  postgresTaskPlanningSelectById,
-  taskPlanningReadModelFromPostgresRow,
-  taskProjectionFromPostgresRow,
-  type PostgresWorkPlanningRepositories,
-} from "../work-planning/postgres-work-planning-repositories.js";
+import type { DevelopmentArtifactTarget, WorkPlanningDevelopmentArtifactPort } from "../work-planning/development-artifact-port.js";
 
 export type DevelopmentIntegrationPostgresRepositories = RepositoryConnectionRepository
   & GitHubArtifactRepository & GitHubSignalRepository;
@@ -30,8 +23,7 @@ export class PostgresDevelopmentIntegrationRepositories implements DevelopmentIn
         task?: { id: string; key: string; title: string; developmentLinks?: Array<{ url: string }> };
       }>;
     },
-    private readonly taskPersistence: Pick<PostgresWorkPlanningRepositories,
-      "prepare" | "recordTaskActivity" | "recordTaskProjection">,
+    private readonly taskPersistence: WorkPlanningDevelopmentArtifactPort,
   ) {}
 
   organizationRole(...args: Parameters<RepositoryConnectionRepository["organizationRole"]>) { return this.dependencies.organizationRole(...args); }
@@ -138,48 +130,20 @@ export class PostgresDevelopmentIntegrationRepositories implements DevelopmentIn
   }
   async canLinkArtifact(memberId: string, projectId: string, taskKey: string) { return (await this.dependencies.resolveTask(memberId,projectId,taskKey)).status==="found"; }
   async linkArtifact(memberId: string, projectId: string, taskKey: string, artifact: DevelopmentArtifact) {
-    return this.kernel.transaction(async (client) => {
-      await this.taskPersistence.prepare(client);
-      const current = await client.query<any>(`${postgresTaskPlanningSelect} FOR UPDATE OF task`, [projectId, taskKey, memberId]);
-      const row = current.rows[0]; if (!row) return "forbidden" as const;
-      const writable = await client.query(`SELECT 1 FROM stash_workspaces workspace WHERE workspace.id = $1
-        AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2)
-          OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
-            WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2))) FOR UPDATE`,
-        [row.workspace_id, memberId]);
-      if (!writable.rowCount) return "forbidden" as const;
-      await this.persistTaskDevelopmentArtifact(client, row, memberId, artifact, "task_planning_updated", { kind: "member" });
-      return "linked" as const;
-    });
+    return this.kernel.transaction((client) => this.taskPersistence.linkDevelopmentArtifact(client,
+      { kind: "task_key", memberId, projectId, taskKey }, artifact, "task_planning_updated", { kind: "member" }));
   }
   async listArtifacts(memberId: string, projectId: string, taskKey: string) { const result=await this.dependencies.resolveTask(memberId,projectId,taskKey);
     if(result.status!=="found"||!result.task) return undefined; return (result.task.developmentLinks??[]).flatMap(({url})=>developmentArtifactFromUrl(url)); }
 
   async linkSignalArtifact(client: PostgresQueryable, taskId: string, signal: import("../github-signals.js").GitHubSignal,
     confirmingMemberId?: string, organizationId?: string): Promise<void> {
-    await this.taskPersistence.prepare(client);
-    const actor = confirmingMemberId ? { id: confirmingMemberId }
-      : (await client.query<{ id: string }>(`SELECT membership.account_id AS id FROM stash_organization_memberships membership
-        WHERE membership.organization_id=$1 AND membership.role='Owner' ORDER BY membership.account_id LIMIT 1`, [organizationId])).rows[0];
-    if (!actor) return;
-    const task = await client.query<any>(`${postgresTaskPlanningSelectById} FOR UPDATE OF task`, [taskId, actor.id]);
-    const row = task.rows[0]; if (!row) return;
-    await this.persistTaskDevelopmentArtifact(client, row, actor.id, signal, "task_development_signal_linked",
-      confirmingMemberId ? { kind: "member" } : { kind: "signal", signalId: signal.id });
-  }
-
-  private async persistTaskDevelopmentArtifact(client: PostgresQueryable, row: any, actorId: string,
-    artifact: Pick<DevelopmentArtifact, "kind" | "url">, action: string, cause: ActivityCause): Promise<void> {
-    const before = taskPlanningReadModelFromPostgresRow(row); const links = before.developmentLinks ?? [];
-    if (links.some(({ url }) => url === artifact.url)) return;
-    const revision = Number(row.revision) + 1;
-    await client.query(`UPDATE stash_tasks SET development_links=$2::jsonb, revision=$3,
-      field_revisions=jsonb_set(field_revisions,'{developmentLinks}',to_jsonb($3::int),true) WHERE id=$1`,
-      [row.id, JSON.stringify([...links, { provider: "github", kind: artifact.kind, url: artifact.url }]), revision]);
-    const saved = await client.query<any>(postgresTaskPlanningSelectById, [row.id, actorId]);
-    const after = taskPlanningReadModelFromPostgresRow(saved.rows[0]);
-    await this.taskPersistence.recordTaskProjection(client, taskProjectionFromPostgresRow(saved.rows[0]));
-    await this.taskPersistence.recordTaskActivity(client, actorId, after.workspaceId, after.id, action, before, after, cause);
+    const target: DevelopmentArtifactTarget | undefined = confirmingMemberId
+      ? { kind: "task_id", taskId, actor: { kind: "member", memberId: confirmingMemberId } }
+      : organizationId ? { kind: "task_id", taskId, actor: { kind: "organization_owner", organizationId } } : undefined;
+    if (!target) return;
+    await this.taskPersistence.linkDevelopmentArtifact(client, target, signal, "task_development_signal_linked",
+    confirmingMemberId ? { kind: "member" } : { kind: "signal", signalId: signal.id });
   }
 
   async matchingTasks(installationId: number, repositoryId: string, keys: string[]) {
