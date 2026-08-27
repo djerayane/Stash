@@ -37,6 +37,8 @@ import { collectionRoutes } from "../src/knowledge-authoring/collection-routes.j
 import { knowledgeAuthoringCapability } from "../src/knowledge-authoring/index.js";
 import { workPlanningCapability } from "../src/work-planning/index.js";
 import { ProjectlessTaskService } from "../src/work-planning/projectless-tasks.js";
+import { canonicalTaskRoutes } from "../src/work-planning/canonical-task-routes.js";
+import { CanonicalTaskService, type CanonicalTask } from "../src/work-planning/canonical-tasks.js";
 import { NoteService } from "../src/notes.js";
 import { NoteLinkService } from "../src/note-links.js";
 import { RelationshipQueryService } from "../src/knowledge-authoring/relationship-query.js";
@@ -281,6 +283,36 @@ const browserNoteTreeRepository = new Proxy({} as NoteTreeRepository, {
   },
 });
 
+const browserWorkspaceWorkflow = { schema: "stash.workspace-workflow.v1" as const, workspaceId: browserWorkspaceId, statuses: [
+  { id: "41414141-4141-4141-8141-414141414141", name: "Ready", category: "unstarted" as const, position: 1 },
+  { id: "42424242-4242-4242-8242-424242424242", name: "In progress", category: "started" as const, position: 2 },
+  { id: "43434343-4343-4343-8343-434343434343", name: "Done", category: "completed" as const, position: 3 },
+] };
+let browserCanonicalTasks: CanonicalTask[] = [{ schema: "stash.task.v1", id: task.id, workspaceId: browserWorkspaceId,
+  title: task.title, description: "", status: browserWorkspaceWorkflow.statuses[0]!, assigneeIds: [browserMemberId],
+  projectAssociations: [projectId], projectKeys: [{ projectId, key: task.key }], keyAliases: [], sourceNoteIds: [], sourceBlocks: [],
+  createdBy: task.createdBy, createdAt: task.createdAt }];
+const browserCanonicalTaskService = new CanonicalTaskService({
+  async listTasks(memberId, workspaceId) { return memberId === browserMemberId && workspaceId === browserWorkspaceId
+    ? { status: "found" as const, tasks: browserCanonicalTasks, workflow: browserWorkspaceWorkflow } : { status: "workspace_not_found" as const }; },
+  async workspaceWorkflow(memberId, workspaceId) { return memberId === browserMemberId && workspaceId === browserWorkspaceId
+    ? { status: "found" as const, workflow: browserWorkspaceWorkflow } : { status: "workspace_not_found" as const }; },
+  async createTask(memberId, workspaceId, input) { if (memberId !== browserMemberId || workspaceId !== browserWorkspaceId) return { status: "workspace_not_found" as const };
+    const created: CanonicalTask = { schema: "stash.task.v1", id: crypto.randomUUID(), workspaceId, title: input.title, description: input.description,
+      status: browserWorkspaceWorkflow.statuses[0]!, assigneeIds: [], projectAssociations: [], projectKeys: [], keyAliases: [], sourceNoteIds: [], sourceBlocks: [],
+      ...(input.parentTaskId ? { parentTaskId: input.parentTaskId } : {}), createdBy: task.createdBy, createdAt: new Date().toISOString() };
+    browserCanonicalTasks = [...browserCanonicalTasks, created]; return { status: "created" as const, task: created }; },
+  async updateTask(_memberId, taskId, input) { const found = browserCanonicalTasks.find((item) => item.id === taskId); if (!found) return { status: "task_not_found" as const };
+    const status = input.statusId ? browserWorkspaceWorkflow.statuses.find((item) => item.id === input.statusId) : found.status;
+    if (!status) return { status: "invalid_reference" as const }; const updated = { ...found, ...input, status };
+    browserCanonicalTasks = browserCanonicalTasks.map((item) => item.id === taskId ? updated : item); return { status: "updated" as const, task: updated }; },
+  async associateTask() { return { status: "task_not_found" as const }; }, async setTaskParent() { return { status: "task_not_found" as const }; },
+  async resolveTaskKey() { return { status: "task_not_found" as const }; },
+  async configureWorkflow() { return { status: "workspace_not_found" as const }; },
+  async setProjectParent() { return { status: "project_not_found" as const }; },
+  async listProjectTasks() { return { status: "project_not_found" as const }; },
+});
+
 const reopenNoteTreeRoute: HttpRoute = {
   matches(request, url) { return request.method === "POST" && url.pathname === "/api/test/note-tree/reopen"; },
   async handle(request, response) {
@@ -324,7 +356,7 @@ const instance = await startInstance({
     collectionRoutes(new CollectionService(browserTreeStore.database.collectionRepository()), browserMemberAccess),
     relationshipRoutes(new RelationshipQueryService(browserTreeStore.database.relationshipQueryRepository()), browserMemberAccess),
     reopenNoteTreeRoute,
-  ] }]),
+  ] }, { name: "work-planning", routes: () => [canonicalTaskRoutes(browserCanonicalTaskService, browserMemberAccess)] }]),
   passwordAuth: browserPasswordAuth,
   accountRegistration: new AccountRegistrationService(browserAuthRepository),
   accountRecovery: { async authenticationOptions() { return { challenge: "cHJvb2Y", rpId: "127.0.0.1", userVerification: "required", allowCredentials: [] }; }, async signInWithPasskey() { return { token: "browser-acceptance-member-token" }; }, async signInWithRecoveryCode() { return { token: "browser-acceptance-member-token" }; }, async requestEmailRecovery() { throw new EmailRecoveryUnavailable(); }, async signInWithEmailRecovery() { return { token: "browser-acceptance-member-token" }; } } as any,

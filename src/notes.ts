@@ -55,6 +55,10 @@ export interface PortableWorkspaceTaskProjection extends Omit<PortableTaskProjec
   projectId?: never;
   key?: never;
   status: { id: string; name: string; category: "unstarted" | "started" | "completed" | "canceled" };
+  description?: string;
+  parentTaskId?: string;
+  projectAssociations?: string[];
+  projectKeys?: Array<{ projectId: string; key: string }>;
 }
 
 export type PortableExportTaskProjection = PortableTaskProjection | PortableWorkspaceTaskProjection;

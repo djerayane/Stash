@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { PortableTaskProjection } from "./notes.js";
+import type { PortableTaskProjection, PortableWorkspaceTaskProjection } from "./notes.js";
 import type { PortableIdentity } from "./workspaces-projects.js";
 import type { ActivityCause } from "./activity.js";
 
@@ -52,9 +52,14 @@ export interface TaskMoveRepository {
 export type CreateTaskFromBlockOutcome =
   | { status: "created"; task: PortableTaskProjection; sourceBlock: TaskSourceBlockReference }
   | { status: "note_not_found" | "block_not_found" | "project_forbidden" | "ambiguous_block" };
+export type CreateWorkspaceTaskFromBlockOutcome =
+  | { status: "created"; task: PortableWorkspaceTaskProjection; sourceBlock: TaskSourceBlockReference }
+  | { status: "note_not_found" | "block_not_found" | "ambiguous_block" };
 
 export interface TaskFromBlockRepository {
   createTaskFromBlock(memberId: string, noteId: string, blockKey: string, draft: CreateTaskFromBlockDraft): Promise<CreateTaskFromBlockOutcome>;
+  createWorkspaceTaskFromBlock?(memberId: string, noteId: string, blockKey: string,
+    draft: Omit<CreateTaskFromBlockDraft,"projectId">): Promise<CreateWorkspaceTaskFromBlockOutcome>;
   listLinkedTasks(memberId: string, noteId: string): Promise<{ status: "found"; tasks: LinkedTaskReadModel[] } | { status: "note_not_found" }>;
   linkTaskToBlock(memberId: string, taskId: string, noteId: string, blockKey: string): Promise<
     | { status: "linked" | "already_linked"; task: PortableTaskProjection; sourceBlock: TaskSourceBlockReference }
@@ -128,6 +133,17 @@ export class TaskService {
       id: randomUUID(), projectId: input.projectId, title: input.title.trim(),
       createdAt: new Date().toISOString(), createdBy: actor,
     });
+  }
+  async createWorkspaceFromBlock(memberId: string, noteId: string, blockKey: string, value: unknown): Promise<CreateWorkspaceTaskFromBlockOutcome> {
+    if (!uuid.test(noteId) || !uuid.test(blockKey) || value === null || typeof value !== "object" || Array.isArray(value))
+      throw new InvalidTaskFromBlockInput();
+    const input = value as Record<string, unknown>;
+    if (typeof input.title !== "string" || !input.title.trim() || input.title.trim().length > 500 || Object.keys(input).some((key) => key !== "title"))
+      throw new InvalidTaskFromBlockInput();
+    const actor = await this.actors.findPortableMemberIdentity(memberId); if (!actor) throw new Error("member_identity_unavailable");
+    if (!this.tasks.createWorkspaceTaskFromBlock) throw new Error("task_creation_unavailable");
+    return this.tasks.createWorkspaceTaskFromBlock(memberId,noteId,blockKey,
+      { id: randomUUID(),title: input.title.trim(),createdAt: new Date().toISOString(),createdBy: actor });
   }
 
   async listLinked(memberId: string, noteId: string) {

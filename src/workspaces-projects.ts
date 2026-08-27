@@ -49,6 +49,7 @@ export interface PortableProjectProjection {
   name: string;
   key: string;
   createdBy: PortableIdentity;
+  parentProjectId?: string;
 }
 
 export interface WorkspaceProjectRepository {

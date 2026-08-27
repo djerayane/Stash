@@ -6,18 +6,22 @@ import { workspaceProjectRoutes } from "../workspace-project-routes.js";
 import type { WorkspaceProjectService } from "../workspaces-projects.js";
 import { projectlessTaskRoutes } from "./projectless-task-routes.js";
 import type { ProjectlessTaskService } from "./projectless-tasks.js";
+import { canonicalTaskRoutes } from "./canonical-task-routes.js";
+import type { CanonicalTaskService } from "./canonical-tasks.js";
 
 export function workPlanningCapability(options: {
   tasks: TaskService;
   memberAccess: MemberAccessResolver;
   workspaceProjects?: WorkspaceProjectService;
   projectlessTasks?: ProjectlessTaskService;
+  canonicalTasks?: CanonicalTaskService;
 }): CapabilityModule {
   return {
     name: "work-planning",
     routes: () => [
       ...(options.workspaceProjects ? [workspaceProjectRoutes(options.workspaceProjects, options.memberAccess)] : []),
       ...(options.projectlessTasks ? [projectlessTaskRoutes(options.projectlessTasks, options.memberAccess)] : []),
+      ...(options.canonicalTasks ? [canonicalTaskRoutes(options.canonicalTasks, options.memberAccess)] : []),
       taskRoutes(options.tasks, options.memberAccess),
     ],
   };

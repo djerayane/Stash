@@ -6,7 +6,7 @@ import type { CollectionImpact } from "@stash/domain-types";
 
 export type CollectionViewResult =
   | { status: "found"; view: CanonicalViewBlock; source: { kind: "collection"; collection: CanonicalCollection } }
-  | { status: "found"; view: CanonicalViewBlock; source: { kind: "tasks"; records: readonly unknown[] } }
+  | { status: "found"; view: CanonicalViewBlock; source: { kind: "tasks"; records: readonly unknown[]; statuses: readonly unknown[] } }
   | { status: "view_not_found" | "source_unavailable" };
 
 export interface CollectionRepository {

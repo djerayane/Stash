@@ -24,7 +24,7 @@ import type {
 } from "./workspaces-projects.js";
 import type { MemberLocalizationPreferences, MemberLocalizationRepository } from "./member-localization.js";
 import type { PortableRepositoryConnectionProjection, RepositoryConnectionRecord, RepositoryConnectionRepository } from "./repository-connections.js";
-import { taskEditDigest, type CreateTaskFromBlockDraft, type LinkedTaskReadModel, type StructuredTaskEditRepository, type TaskEditBatch, type TaskEditConflict, type TaskFromBlockRepository, type TaskMoveActivity, type TaskMoveRepository, type TaskPlanningReadModel, type TaskPlanningRepository, type TaskPlanningUpdate, type TaskSourceBlockReference } from "./tasks.js";
+import { taskEditDigest, type CreateTaskFromBlockDraft, type CreateTaskFromBlockOutcome, type CreateWorkspaceTaskFromBlockOutcome, type LinkedTaskReadModel, type StructuredTaskEditRepository, type TaskEditBatch, type TaskEditConflict, type TaskFromBlockRepository, type TaskMoveActivity, type TaskMoveRepository, type TaskPlanningReadModel, type TaskPlanningRepository, type TaskPlanningUpdate, type TaskSourceBlockReference } from "./tasks.js";
 import type { AttachmentRecord, AttachmentRepository, PortableAttachmentProjection } from "./attachments.js";
 import type { MobileCaptureRepository } from "./mobile-captures.js";
 import type { CreateDiscussionWorkDraft, DiscussionDraft, DiscussionMessage, DiscussionRecord, DiscussionRepository, DiscussionTarget, DiscussionWorkActivity, DiscussionWorkOutcome, PortableDiscussionProjection, PortableDiscussionTarget, PortableDiscussionWorkLinkProjection } from "./discussions.js";
@@ -62,6 +62,8 @@ import type { PostgresPortableProjectionContributor } from "./instance-operation
 import { PostgresProjectlessTaskRepository } from "./work-planning/postgres-projectless-task-repository.js";
 import { PostgresProjectPermissionRepository } from "./work-planning/postgres-project-permission-repository.js";
 import type { ProjectlessTaskRepository } from "./work-planning/projectless-tasks.js";
+import type { CanonicalTaskRepository } from "./work-planning/canonical-tasks.js";
+import { PostgresCanonicalTaskRepository } from "./work-planning/postgres-canonical-task-repository.js";
 import {
   PostgresKernel,
   type PostgresKernelOptions,
@@ -260,6 +262,7 @@ export class PostgresDatabase implements
   readonly #tutorialContributionRepository: PostgresTutorialContributionRepository;
   readonly #collectionRepository: PostgresCollectionRepository;
   readonly #projectlessTaskRepository: PostgresProjectlessTaskRepository;
+  readonly #canonicalTaskRepository: PostgresCanonicalTaskRepository;
   readonly #organizationRoleRepository: PostgresOrganizationRoleRepository;
   readonly #projectPermissionRepository: PostgresProjectPermissionRepository;
   readonly #relationshipQueryRepository: PostgresRelationshipQueryRepository;
@@ -275,8 +278,6 @@ export class PostgresDatabase implements
     });
     this.#tutorialContributionRepository = new PostgresTutorialContributionRepository(this.#kernel,
       (client) => this.#noteTreeRepository.prepare(client));
-    this.#collectionRepository = new PostgresCollectionRepository(this.#kernel,
-      (client) => this.#noteTreeRepository.prepare(client));
     this.#instanceSetupRepository = new PostgresInstanceSetupRepository(this.#kernel, authenticationSecrets, async (client) => {
       await this.#ensureBootstrapSchema(client);
       await this.#ensureAuthSchema(client);
@@ -284,6 +285,12 @@ export class PostgresDatabase implements
     }, this.#tutorialContributionRepository);
     this.#projectlessTaskRepository = new PostgresProjectlessTaskRepository(this.#kernel,
       (client) => this.#instanceSetupRepository.prepare(client));
+    this.#canonicalTaskRepository = new PostgresCanonicalTaskRepository(this.#kernel,
+      (client) => this.#instanceSetupRepository.prepare(client), async (memberId, noteId) =>
+        (await this.#noteTreeRepository.readNoteTreeContext(memberId, noteId)).status === "found");
+    this.#collectionRepository = new PostgresCollectionRepository(this.#kernel,
+      (client) => this.#noteTreeRepository.prepare(client),
+      (memberId, workspaceId) => this.#canonicalTaskRepository.listTasks(memberId, workspaceId));
     this.#organizationRoleRepository = new PostgresOrganizationRoleRepository(this.#kernel,
       (client) => this.#ensureWorkspaceProjectSchema(client));
     this.#projectPermissionRepository = new PostgresProjectPermissionRepository(this.#kernel, async (client) => {
@@ -325,6 +332,10 @@ export class PostgresDatabase implements
     return this.#projectlessTaskRepository;
   }
 
+  canonicalTaskRepository(): CanonicalTaskRepository {
+    return this.#canonicalTaskRepository;
+  }
+
   async verifyConnection(): Promise<void> {
     await this.#kernel.query("SELECT 1");
     await this.#verifyAuthenticationKey();
@@ -344,6 +355,7 @@ export class PostgresDatabase implements
       await this.#ensureNoteHistorySchema(client); await this.#ensureMemberDepartureSchema(client); await this.#ensureWorkspaceImportSchema(client);
       await this.#ensureCollaborationSchema(client);
       await this.#instanceSetupRepository.prepare(client);
+      await this.#canonicalTaskRepository.prepare(client);
       await this.#tutorialContributionRepository.prepare(client);
       await this.#organizationRoleRepository.prepare(client);
     };
@@ -877,7 +889,13 @@ export class PostgresDatabase implements
     });
   }
 
-  async createTaskFromBlock(memberId: string, noteId: string, blockKey: string, draft: CreateTaskFromBlockDraft) {
+  createTaskFromBlock(memberId: string,noteId: string,blockKey: string,draft: CreateTaskFromBlockDraft): Promise<CreateTaskFromBlockOutcome> {
+    return this.#createTaskFromBlock(memberId,noteId,blockKey,draft) as Promise<CreateTaskFromBlockOutcome>;
+  }
+  createWorkspaceTaskFromBlock(memberId: string,noteId: string,blockKey: string,draft: Omit<CreateTaskFromBlockDraft,"projectId">): Promise<CreateWorkspaceTaskFromBlockOutcome> {
+    return this.#createTaskFromBlock(memberId,noteId,blockKey,draft) as Promise<CreateWorkspaceTaskFromBlockOutcome>;
+  }
+  async #createTaskFromBlock(memberId: string, noteId: string, blockKey: string, draft: CreateTaskFromBlockDraft | Omit<CreateTaskFromBlockDraft,"projectId">) {
     return this.#withTransaction(async (client) => {
       await this.#ensureNoteSchema(client);
       const source = await client.query<any>(`SELECT note.workspace_id, note.content, note.document, note.revision,
@@ -890,8 +908,8 @@ export class PostgresDatabase implements
       [noteId, memberId]);
       const row = source.rows[0];
       if (!row) return { status: "note_not_found" as const };
-      const project = await client.query("SELECT 1 FROM stash_projects WHERE id = $1 AND workspace_id = $2", [draft.projectId, row.workspace_id]);
-      if (!project.rowCount) return { status: "project_forbidden" as const };
+      if ("projectId" in draft) { const project = await client.query("SELECT 1 FROM stash_projects WHERE id = $1 AND workspace_id = $2", [draft.projectId, row.workspace_id]);
+        if (!project.rowCount) return { status: "project_forbidden" as const }; }
       const blocks = row.document.blocks as Array<{ blockKey?: string; id?: string }>;
       const matches = blocks.filter((block) => block.blockKey === blockKey);
       if (matches.length !== 1) return { status: "block_not_found" as const };
@@ -915,10 +933,17 @@ export class PostgresDatabase implements
         await this.#recordNoteRevisionAndActivity(client, memberId, before, this.#noteFromRow({ ...row, id: noteId,
           workspace_id: row.workspace_id }), "note_block_identified", { kind: "member" });
       }
-      const task = await this.#createTask(client, { ...draft, workspaceId: row.workspace_id, sourceNoteIds: [noteId],
-        sourceBlocks: [{ noteId, blockId }] });
-      await client.query("INSERT INTO stash_tasks (id, workspace_id, project_id, task_key, workflow_status_id, title, created_by_account_id, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
-        [task.id, row.workspace_id, task.projectId, task.key, task.status.id, task.title, memberId, task.createdAt]);
+      let task: any;
+      if ("projectId" in draft) {
+        task = await this.#createTask(client, { ...draft, workspaceId: row.workspace_id, sourceNoteIds: [noteId], sourceBlocks: [{ noteId, blockId }] });
+        await client.query("INSERT INTO stash_tasks (id, workspace_id, project_id, task_key, workflow_status_id, title, created_by_account_id, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+          [task.id,row.workspace_id,task.projectId,task.key,task.status.id,task.title,memberId,task.createdAt]);
+      } else {
+        const workflow = await this.#canonicalTaskRepository.ensureWorkflow(client,row.workspace_id); const status=workflow.statuses.find(({category})=>category==="unstarted")!;
+        task={schema:"stash.task.v1",...draft,workspaceId:row.workspace_id,status,sourceNoteIds:[noteId],sourceBlocks:[{noteId,blockId}]};
+        await client.query(`INSERT INTO stash_tasks(id,workspace_id,project_id,task_key,workflow_status_id,workspace_workflow_status_id,title,description,
+          created_by_account_id,created_at) VALUES($1,$2,NULL,NULL,NULL,$3,$4,'',$5,$6)`,[task.id,row.workspace_id,status.id,task.title,memberId,task.createdAt]);
+      }
       await client.query("INSERT INTO stash_task_note_sources (task_id, note_id) VALUES ($1,$2)", [task.id, noteId]);
       await client.query("INSERT INTO stash_task_block_sources (task_id, note_id, block_id) VALUES ($1,$2,$3)", [task.id, noteId, blockId]);
       await this.#recordPortableProjection(client, "Task", task.id, task.schema, task);
@@ -2361,12 +2386,18 @@ export class PostgresDatabase implements
           FROM stash_notes note JOIN stash_accounts author ON author.id=note.created_by_account_id
           WHERE note.workspace_id=$1 AND (($11 AND note.project_id IS NULL) OR note.project_id IN (SELECT id FROM visible_projects))
           UNION ALL
-          SELECT task.id::text,'task',task.task_key||' · '||task.title,task.title,'/app/projects/'||task.project_id||'/tasks/'||task.task_key,task.project_id,
+          SELECT task.id::text,'task',CASE WHEN association.task_key IS NULL THEN task.title ELSE association.task_key||' · '||task.title END,
+            task.title,'/app/tasks/'||task.id,association.project_id,
             author.name, (SELECT string_agg(account.name,', ' ORDER BY account.name) FROM stash_accounts account
-              WHERE task.assignee_ids ? account.id::text), status.name, task.created_at,
-            concat_ws(' ',task.task_key,task.title,task.label_names::text,task.development_links::text)
+              WHERE task.assignee_ids ? account.id::text), COALESCE(workspace_status.name,status.name), task.created_at,
+            concat_ws(' ',association.task_key,task.task_key,task.title,task.label_names::text,task.development_links::text)
           FROM stash_tasks task JOIN stash_accounts author ON author.id=task.created_by_account_id
-          JOIN stash_workflow_statuses status ON status.id=task.workflow_status_id WHERE task.workspace_id=$1 AND task.project_id IN (SELECT id FROM visible_projects)
+          LEFT JOIN stash_workflow_statuses status ON status.id=task.workflow_status_id
+          LEFT JOIN stash_workspace_workflow_statuses workspace_status ON workspace_status.id=task.workspace_workflow_status_id
+          LEFT JOIN LATERAL (SELECT link.project_id,link.task_key FROM stash_task_projects link
+            WHERE link.task_id=task.id AND link.project_id IN(SELECT id FROM visible_projects)
+              AND ($4::uuid IS NULL OR link.project_id=$4) ORDER BY link.project_id LIMIT 1) association ON TRUE
+          WHERE task.workspace_id=$1 AND ($11 OR association.project_id IS NOT NULL)
           UNION ALL
           SELECT discussion.id::text,'discussion',left(message.content,120),left(message.content,240),
             CASE discussion.target_kind WHEN 'task' THEN '/app/tasks/'||discussion.task_id||'/discussions' ELSE '/app/notes/'||discussion.note_id||'/discussions' END,
@@ -3774,6 +3805,7 @@ export class PostgresDatabase implements
       );
       ALTER TABLE stash_projects ADD COLUMN IF NOT EXISTS next_task_number INTEGER NOT NULL DEFAULT 1 CHECK (next_task_number > 0);
       ALTER TABLE stash_projects ADD COLUMN IF NOT EXISTS workflow_revision INTEGER NOT NULL DEFAULT 0 CHECK (workflow_revision >= 0);
+      ALTER TABLE stash_projects ADD COLUMN IF NOT EXISTS parent_project_id UUID REFERENCES stash_projects(id) ON DELETE SET NULL;
     `);
     await this.#ensurePortableProjectionSchema(client);
   }
@@ -3907,6 +3939,14 @@ export class PostgresDatabase implements
         PRIMARY KEY (project_id, task_key),
         UNIQUE (task_id, project_id, task_key)
       );
+      CREATE TABLE IF NOT EXISTS stash_task_projects(
+        task_id UUID NOT NULL REFERENCES stash_tasks(id) ON DELETE CASCADE,
+        project_id UUID NOT NULL REFERENCES stash_projects(id) ON DELETE CASCADE,
+        task_key TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(task_id,project_id), UNIQUE(project_id,task_key)
+      );
+      INSERT INTO stash_task_projects(task_id,project_id,task_key)
+        SELECT id,project_id,task_key FROM stash_tasks WHERE project_id IS NOT NULL AND task_key IS NOT NULL ON CONFLICT DO NOTHING;
       CREATE TABLE IF NOT EXISTS stash_workspace_activity (
         id UUID PRIMARY KEY,
         workspace_id UUID NOT NULL REFERENCES stash_workspaces(id) ON DELETE CASCADE,
@@ -3927,6 +3967,8 @@ export class PostgresDatabase implements
       ALTER TABLE stash_tasks ADD COLUMN IF NOT EXISTS estimate DOUBLE PRECISION CHECK (estimate >= 0);
       ALTER TABLE stash_tasks ADD COLUMN IF NOT EXISTS linked_note_ids JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(linked_note_ids) = 'array');
       ALTER TABLE stash_tasks ADD COLUMN IF NOT EXISTS development_links JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(development_links) = 'array');
+      ALTER TABLE stash_tasks ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
+      ALTER TABLE stash_tasks ADD COLUMN IF NOT EXISTS parent_task_id UUID REFERENCES stash_tasks(id) ON DELETE SET NULL;
       ALTER TABLE stash_tasks ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0);
       ALTER TABLE stash_tasks ADD COLUMN IF NOT EXISTS field_revisions JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(field_revisions) = 'object');
       CREATE TABLE IF NOT EXISTS stash_task_edit_operations (
@@ -4369,6 +4411,8 @@ export class PostgresDatabase implements
           [project.id, state.workspace.id, project.name, project.key, accountFor(project.createdBy), 0]);
         await this.#recordPortableProjection(client, "Project", item.id, item.schema as any, project);
       }
+      for (const item of durable.filter(({ kind }) => kind === "Project")) if (item.payload.parentProjectId)
+        await client.query("UPDATE stash_projects SET parent_project_id=$2 WHERE id=$1", [item.id,item.payload.parentProjectId]);
       for (const item of durable.filter(({ kind }) => kind === "Workflow")) {
         const workflow = item.payload as ProjectWorkflow;
         await client.query("UPDATE stash_projects SET workflow_revision=$2 WHERE id=$1", [workflow.projectId, workflow.revision]);
@@ -4424,18 +4468,23 @@ export class PostgresDatabase implements
       for (const contributor of this.#portableProjectionContributors)
         await contributor.importPortableObjects(client, durable, state.workspace.id);
       for (const task of state.tasks) {
-        await client.query(`INSERT INTO stash_tasks(id,workspace_id,project_id,task_key,workflow_status_id,workspace_workflow_status_id,title,created_by_account_id,created_at,
+        await client.query(`INSERT INTO stash_tasks(id,workspace_id,project_id,task_key,workflow_status_id,workspace_workflow_status_id,title,description,parent_task_id,created_by_account_id,created_at,
           assignee_ids,former_assignee_ids,priority,label_names,due_date,estimate,linked_note_ids,development_links)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12,$13::jsonb,$14,$15,$16::jsonb,$17::jsonb)`,
-        [task.id,state.workspace.id,task.projectId??null,task.key??null,task.projectId?task.status.id:null,task.projectId?null:task.status.id,task.title,accountFor(task.createdBy),task.createdAt,
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,NULL,$9,$10,$11::jsonb,$12::jsonb,$13,$14::jsonb,$15,$16,$17::jsonb,$18::jsonb)`,
+        [task.id,state.workspace.id,task.projectId??null,task.key??null,task.projectId?task.status.id:null,task.projectId?null:task.status.id,task.title,(task as any).description??"",accountFor(task.createdBy),task.createdAt,
           JSON.stringify(task.assigneeIds ?? []),JSON.stringify(task.formerAssigneeIds ?? []),task.priority ?? "none",
           JSON.stringify(task.labelNames ?? []),task.dueDate ?? null,task.estimate ?? null,
           JSON.stringify(task.linkedNoteIds ?? []),JSON.stringify(task.developmentLinks ?? [])]);
         for (const noteId of task.sourceNoteIds) await client.query("INSERT INTO stash_task_note_sources(task_id,note_id) VALUES($1,$2)",[task.id,noteId]);
         for (const source of task.sourceBlocks ?? []) await client.query("INSERT INTO stash_task_block_sources(task_id,note_id,block_id) VALUES($1,$2,$3)",[task.id,source.noteId,source.blockId]);
         for (const alias of task.keyAliases ?? []) await client.query("INSERT INTO stash_task_key_aliases(project_id,task_key,task_id) VALUES($1,$2,$3)",[alias.projectId,alias.key,task.id]);
+        for (const association of (task as any).projectKeys ?? []) await client.query(
+          "INSERT INTO stash_task_projects(task_id,project_id,task_key) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",
+          [task.id,association.projectId,association.key]);
         await this.#recordPortableProjection(client,"Task",task.id,task.schema,task);
       }
+      for (const task of state.tasks) if ((task as any).parentTaskId) await client.query(
+        "UPDATE stash_tasks SET parent_task_id=$2 WHERE id=$1", [task.id,(task as any).parentTaskId]);
       for (const task of state.tasks) for (const edge of task.dependencies ?? []) if (edge.type === "depends_on")
         await client.query("INSERT INTO stash_task_dependencies(dependent_task_id,prerequisite_task_id) VALUES($1,$2) ON CONFLICT DO NOTHING",[task.id,edge.taskId]);
       for (const project of durable.filter(({ kind }) => kind === "Project").map(({ id }) => id)) {
@@ -4654,7 +4703,8 @@ export class PostgresDatabase implements
         `SELECT task.id, projection.payload FROM stash_tasks task
          LEFT JOIN LATERAL (SELECT payload FROM stash_portable_projection_outbox
            WHERE object_kind = 'Task' AND object_id = task.id ORDER BY revision DESC LIMIT 1) projection ON TRUE
-         WHERE task.workspace_id = $1 AND ($2::boolean OR task.project_id = ANY($3::uuid[]))
+         WHERE task.workspace_id = $1 AND ($2::boolean OR task.project_id = ANY($3::uuid[]) OR EXISTS(
+           SELECT 1 FROM stash_task_projects association WHERE association.task_id=task.id AND association.project_id=ANY($3::uuid[])))
          ORDER BY task.id`, [workspaceId, permission.member, guestProjectIds]);
       const boards = await client.query<{ id: string; payload: Board | null }>(
         `SELECT board.id, projection.payload FROM stash_boards board

@@ -44,9 +44,10 @@ test("keeps topbar actions visible and keyboard focus distinct at a narrow viewp
   expect(focusRing).toEqual({ style: "solid", width: "3px" });
 });
 
-test("navigates Notes, Boards, Discussions, notifications, and Activity through the running Instance", async ({ page }) => {
+test("navigates canonical Tasks, Notes, Boards, Discussions, notifications, and Activity through the running Instance", async ({ page }) => {
   await authenticate(page);
-  await page.goto("/app/tasks"); const workspace = page.getByRole("combobox", { name: "Workspace" }); await workspace.focus(); await workspace.selectOption({ label: "Shared Workspace" }); await page.getByRole("button", { name: /Shared roadmap/ }).press("Enter"); await expect(page).toHaveURL(/\/app\/projects\/66666666-6666-4666-8666-666666666665\/boards$/);
+  await page.goto("/app/tasks"); await expect(page.getByRole("heading", { name: "Tasks", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Board" }).press("Enter"); await expect(page.getByRole("region", { name: "board Task view" })).toBeVisible();
   await page.goto("/app/notes");
   await expect(page.getByRole("heading", { name: "Note Tree" }).last()).toBeVisible();
   await page.goto("/app/notes/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");

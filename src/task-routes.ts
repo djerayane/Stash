@@ -90,7 +90,9 @@ export function taskRoutes(service: TaskService, memberAccess: MemberAccessResol
           blockKey = decodeURIComponent(segments[5]!);
         }
         catch { throw new InvalidTaskFromBlockInput(); }
-        const result = await service.createFromBlock(access.accountId, noteId!, blockKey!, await readJson(request));
+        const input = await readJson(request); const result = input && typeof input === "object" && !Array.isArray(input) && !("projectId" in input)
+          ? await service.createWorkspaceFromBlock(access.accountId,noteId!,blockKey!,input)
+          : await service.createFromBlock(access.accountId, noteId!, blockKey!, input);
         if (result.status === "created") json(response, 201, { task: result.task, sourceBlock: result.sourceBlock });
         else if (result.status === "project_forbidden") json(response, 403, { error: result.status, message: "This Member cannot create a Task in that Project." });
         else if (result.status === "ambiguous_block") json(response, 422, { error: result.status,
