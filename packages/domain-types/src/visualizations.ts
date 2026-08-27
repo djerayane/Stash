@@ -65,10 +65,12 @@ function normalizePositions(value: unknown): Record<string, VisualizationPoint> 
   if (!object(value) || Object.keys(value).length > 100) throw new TypeError("Invalid visualization positions");
   return Object.fromEntries(Object.entries(value).map(([id, point]) => {
     if (!uuid.test(id) || !object(point)) throw new TypeError("Invalid visualization position");
-    exact(point, ["x", "y"]); const x = Number(point.x); const y = Number(point.y);
-    if (!Number.isFinite(x) || !Number.isFinite(y) || Math.abs(x) > 100_000 || Math.abs(y) > 100_000)
+    exact(point, ["x", "y"]);
+    if (typeof point.x !== "number" || typeof point.y !== "number"
+      || !Number.isFinite(point.x) || !Number.isFinite(point.y)
+      || Math.abs(point.x) > 100_000 || Math.abs(point.y) > 100_000)
       throw new TypeError("Invalid visualization position");
-    return [id, { x, y }];
+    return [id, { x: point.x, y: point.y }];
   }));
 }
 function normalizeQuery(value: Record<string, unknown>): VisualizationQuery {
@@ -147,11 +149,13 @@ export function normalizeVisualizationDefinition(value: unknown): VisualizationD
     if (!["facet", "aggregate"].includes(query.kind) || viewEdges.length) throw new TypeError("Invalid word-cloud definition");
     const layout = value.layout ?? { kind: "word-cloud", minFontSize: 12, maxFontSize: 48 };
     if (!object(layout) || !owns(layout, "kind")) throw new TypeError("Invalid word-cloud layout"); exact(layout, ["kind", "minFontSize", "maxFontSize"]);
-    const minFontSize = Number(layout.minFontSize); const maxFontSize = Number(layout.maxFontSize);
-    if (layout.kind !== "word-cloud" || !Number.isFinite(minFontSize) || !Number.isFinite(maxFontSize)
-      || minFontSize < 8 || maxFontSize > 200 || maxFontSize < minFontSize) throw new TypeError("Invalid word-cloud layout");
+    if (layout.kind !== "word-cloud" || typeof layout.minFontSize !== "number" || typeof layout.maxFontSize !== "number"
+      || !Number.isFinite(layout.minFontSize) || !Number.isFinite(layout.maxFontSize)
+      || layout.minFontSize < 8 || layout.maxFontSize > 200 || layout.maxFontSize < layout.minFontSize)
+      throw new TypeError("Invalid word-cloud layout");
     return { schema: "stash.visualization.v1", id: value.id, kind: "word-cloud", query: query as WordLens,
-      filters: filters as TermVisualizationFilters, layout: { kind: "word-cloud", minFontSize, maxFontSize }, viewEdges: [] };
+      filters: filters as TermVisualizationFilters,
+      layout: { kind: "word-cloud", minFontSize: layout.minFontSize, maxFontSize: layout.maxFontSize }, viewEdges: [] };
   }
   if (value.kind === "canvas") {
     if (!["relationship", "search"].includes(query.kind)) throw new TypeError("Invalid canvas query");

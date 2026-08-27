@@ -131,7 +131,7 @@ export class PostgresVisualizationBlockRepository implements VisualizationBlockR
     const types = await client.query<{ relationship_type: string }>(`SELECT DISTINCT COALESCE(link.relationship_type,'untyped') AS relationship_type
       FROM stash_note_links link JOIN stash_notes source ON source.id=link.source_note_id JOIN stash_notes target ON target.id=link.target_note_id
       WHERE link.workspace_id=$1 AND link.source_note_id=ANY($2::uuid[]) AND link.target_note_id=ANY($2::uuid[])
-        AND source.archived_at IS NULL AND source.trashed_at IS NULL AND target.archived_at IS NULL AND target.trashed_at IS NULL LIMIT 100`,
+      LIMIT 100`,
     [workspaceId, [...visibleIds]]);
     return new Set(types.rows.map(({ relationship_type }) => relationship_type));
   }
@@ -200,16 +200,13 @@ export class PostgresVisualizationBlockRepository implements VisualizationBlockR
   }
   async readPortableObjects(client: PostgresQueryable, input: { workspaceId: string; memberId: string; member: boolean;
     visibleNoteIds: ReadonlySet<string> }): Promise<PortableDurableObject[]> {
-    const active = await client.query<{ id: string }>(`SELECT note.id FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id=note.workspace_id
-      WHERE note.workspace_id=$1 AND note.archived_at IS NULL AND note.trashed_at IS NULL
-        AND ${effectiveNoteReadSql("note", "workspace", "$2")} ORDER BY note.id`, [input.workspaceId, input.memberId]);
-    const activeVisibleIds = new Set(active.rows.map(({ id }) => id)); if (!activeVisibleIds.size) return [];
+    if (!input.visibleNoteIds.size) return [];
     const rows = await client.query<{ id: string; definition: VisualizationDefinition; owner_note_id: string; revision: number }>(`SELECT id,definition,owner_note_id,revision
       FROM stash_visualization_blocks WHERE workspace_id=$1 AND owner_note_id=ANY($2::uuid[]) ORDER BY id`,
-    [input.workspaceId, [...activeVisibleIds]]);
-    const visibleTypes = input.member ? undefined : await this.#visibleRelationTypes(client, input.workspaceId, activeVisibleIds);
+    [input.workspaceId, [...input.visibleNoteIds]]);
+    const visibleTypes = input.member ? undefined : await this.#visibleRelationTypes(client, input.workspaceId, input.visibleNoteIds);
     return rows.rows.flatMap((row) => {
-      const filtered = permissionFilteredDefinition(row.definition, activeVisibleIds, visibleTypes); if (!filtered) return [];
+      const filtered = permissionFilteredDefinition(row.definition, input.visibleNoteIds, visibleTypes); if (!filtered) return [];
       return [{ kind: "VisualizationBlock", id: row.id, schema: "stash.visualization.v1",
         payload: projection(filtered, input.workspaceId, row.owner_note_id, Number(row.revision)) }];
     });

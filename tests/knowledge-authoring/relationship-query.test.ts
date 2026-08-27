@@ -20,8 +20,23 @@ import { NoteService } from "../../src/notes.js";
 import { WorkspaceProjectService } from "../../src/workspaces-projects.js";
 import { normalizeVisualizationDefinition } from "../../packages/domain-types/src/visualizations.js";
 import { knowledgeAuthoringCapability } from "../../src/knowledge-authoring/index.js";
+import { PortableWorkspaceExportService } from "../../src/portable-workspace-export.js";
+import { PortableWorkspaceImportService } from "../../src/portable-workspace-import.js";
 
 const rootId = "11111111-1111-4111-8111-111111111111";
+const emptyAttachments = { async put() {}, async get() { return Buffer.alloc(0); }, async delete() {} };
+function visualizationReferences(payload: any): string[] {
+  return [payload.ownerNoteId, ...(payload.query?.kind === "relationship" ? [payload.query.input.rootId] : []),
+    ...Object.keys(payload.layout?.positions ?? {}),
+    ...(payload.viewEdges ?? []).flatMap((edge: any) => [edge.sourceNoteId, edge.targetNoteId])];
+}
+function assertVisualizationClosure(snapshot: { notes: Array<{ id: string }>; durableObjects?: Array<{ kind: string; payload: unknown }> }) {
+  const noteIds = new Set(snapshot.notes.map(({ id }) => id));
+  for (const item of snapshot.durableObjects ?? []) if (item.kind === "VisualizationBlock") {
+    const missing = visualizationReferences(item.payload).filter((id) => !noteIds.has(id));
+    assert.deepEqual(missing, [], `VisualizationBlock escaped its exported Note universe ${JSON.stringify([...noteIds])}: ${JSON.stringify(item.payload)}`);
+  }
+}
 
 describe("relationship query contracts", () => {
   test("registers core relationship navigation without the optional saved-view service", () => {
@@ -82,6 +97,10 @@ describe("relationship query contracts", () => {
     assert.throws(() => normalizeVisualizationDefinition({ ...definition, query: { kind: "search", input: { text: "all", limit: 20 } } }));
     assert.throws(() => normalizeVisualizationDefinition({ ...definition,
       viewEdges: [definition.viewEdges[0], definition.viewEdges[0]] }));
+    for (const coordinate of ["20", Number.NaN, Number.POSITIVE_INFINITY])
+      assert.throws(() => normalizeVisualizationDefinition({ ...definition,
+        layout: { kind: "focused", positions: { [rootId]: { x: coordinate, y: 30 } } } }),
+      "positions require finite native numbers");
 
     const wordCloud = normalizeVisualizationDefinition({ schema: "stash.visualization.v1",
       id: "44444444-4444-4444-8444-444444444444", kind: "word-cloud",
@@ -92,6 +111,10 @@ describe("relationship query contracts", () => {
     const aggregateCloud = normalizeVisualizationDefinition({ ...wordCloud, id: "45454545-4545-4545-8545-454545454545",
       query: { kind: "aggregate", input: { field: "relationshipType", operation: "count", terms: [], limit: 30 } } });
     assert.equal(aggregateCloud.query.kind, "aggregate");
+    for (const fontSize of ["12", Number.NaN, Number.NEGATIVE_INFINITY])
+      assert.throws(() => normalizeVisualizationDefinition({ ...wordCloud,
+        layout: { kind: "word-cloud", minFontSize: fontSize, maxFontSize: 40 } }),
+      "word-cloud sizes require finite native numbers");
 
     const canvas = normalizeVisualizationDefinition({ schema: "stash.visualization.v1",
       id: "55555555-5555-4555-8555-555555555555", kind: "canvas",
@@ -243,15 +266,20 @@ describe("relationship query contracts", () => {
       const blockId = "77777777-7777-4777-8777-777777777777";
       const visualization = new VisualizationBlockService(store.database.visualizationBlockRepository());
       const beforeLinks = await store.upgradeDatabase.query<{ count: number }>("SELECT count(*)::int count FROM stash_note_links");
+      assert.equal((await notes.restore(ownerId, archivedBrokenSource.node.id)).status, "restored");
+      assert.equal((await notes.restore(ownerId, trashedBrokenSource.node.id)).status, "restored");
       const createSaveKey = "11111111-1111-4111-8111-111111111111";
       const saved = await visualization.save(ownerId, visibleRoot.node.id, {
         schema: "stash.visualization.v1", id: blockId, kind: "local-graph",
         query: { kind: "relationship", input: { rootId: visibleRoot.node.id, depth: 2, limit: 40, direction: "both",
           relationTypes: ["supports", "contradicts"], includeHierarchy: true } },
         filters: { relationTypes: ["supports", "contradicts"], direction: "both" }, layout: { kind: "focused", positions: {
-          [visibleRoot.node.id]: { x: 10, y: 20 }, [orphan.node.id]: { x: 30, y: 40 } } },
+          [visibleRoot.node.id]: { x: 10, y: 20 }, [orphan.node.id]: { x: 30, y: 40 },
+          [archivedBrokenSource.node.id]: { x: 50, y: 60 }, [trashedBrokenSource.node.id]: { x: 70, y: 80 } } },
         viewEdges: [{ id: "view-edge", sourceNoteId: visibleRoot.node.id, targetNoteId: orphan.node.id, relationshipType: "contradicts" },
-          { id: "visible-view-edge", sourceNoteId: visibleRoot.node.id, targetNoteId: visibleChild.node.id, relationshipType: "supports" }],
+          { id: "visible-view-edge", sourceNoteId: visibleRoot.node.id, targetNoteId: visibleChild.node.id, relationshipType: "supports" },
+          { id: "archived-view-edge", sourceNoteId: visibleRoot.node.id, targetNoteId: archivedBrokenSource.node.id },
+          { id: "trashed-view-edge", sourceNoteId: visibleRoot.node.id, targetNoteId: trashedBrokenSource.node.id }],
       }, undefined, createSaveKey);
       assert.equal(saved.status, "saved");
       if (saved.status !== "saved") return;
@@ -264,7 +292,7 @@ describe("relationship query contracts", () => {
         beforeLinks.rows[0]!.count, "saving view-only state must not mutate canonical Note Links");
       const opened = await visualization.read(ownerId, visibleRoot.node.id, blockId);
       assert.equal(opened.status, "found");
-      if (opened.status === "found") assert.equal(opened.block.definition.viewEdges.length, 2);
+      if (opened.status === "found") assert.equal(opened.block.definition.viewEdges.length, 4);
       assert.equal((await visualization.save(ownerId, orphan.node.id, {
         ...saved.block.definition, id: blockId,
       }, undefined, "22222222-2222-4222-8222-222222222222")).status, "not_found", "a portable block id cannot be rebound to another owner Note");
@@ -290,6 +318,8 @@ describe("relationship query contracts", () => {
       assert.equal(updated.status, "saved");
       if (updated.status === "saved") assert.equal(updated.block.revision, 2);
       assert.equal((await store.upgradeDatabase.query<{ count: number }>("SELECT count(*)::int count FROM stash_workspace_activity WHERE action='visualization_block_updated'")).rows[0]!.count, 1);
+      assert.equal((await notes.remove(ownerId, archivedBrokenSource.node.id, "archived")).status, "updated");
+      assert.equal((await notes.remove(ownerId, trashedBrokenSource.node.id, "trashed")).status, "updated");
       const exported = await store.database.readExportSnapshot(ownerId, workspaceId);
       assert.equal(exported.status, "found");
       if (exported.status === "found") {
@@ -303,13 +333,40 @@ describe("relationship query contracts", () => {
         assert.deepEqual(saveActivities[0]?.before, { present: false });
         assert.equal((saveActivities[1]?.before as { revision?: number }).revision, 1);
         assert.equal((saveActivities[1]?.after as { revision?: number }).revision, 2);
+        assertVisualizationClosure(exported.snapshot);
+        assert.equal(exported.snapshot.notes.some(({ id }) => id === archivedBrokenSource.node.id), true);
+        assert.equal(exported.snapshot.notes.some(({ id }) => id === trashedBrokenSource.node.id), true);
+        assert.equal(exported.snapshot.noteLocations.find(({ noteId }) => noteId === archivedBrokenSource.node.id)?.archivedAt !== undefined, true);
+        assert.equal(exported.snapshot.noteLocations.find(({ noteId }) => noteId === trashedBrokenSource.node.id)?.trashedAt !== undefined, true);
+        const ownerBlock = exported.snapshot.durableObjects?.find(({ kind, id }) => kind === "VisualizationBlock" && id === blockId);
+        assert.equal(JSON.stringify(ownerBlock).includes(archivedBrokenSource.node.id), true);
+        assert.equal(JSON.stringify(ownerBlock).includes(trashedBrokenSource.node.id), true);
       }
       const guestExport = await store.database.readExportSnapshot(guestId, workspaceId);
       assert.equal(guestExport.status, "found");
       if (guestExport.status === "found") {
+        assert.deepEqual(guestExport.snapshot.notes.map(({ id }) => id).sort(),
+          [visibleRoot.node.id, visibleChild.node.id, visibleIsolated.node.id].sort());
+        assertVisualizationClosure(guestExport.snapshot);
         const guestPortable = guestExport.snapshot.durableObjects?.find(({ kind, id }) => kind === "VisualizationBlock" && id === blockId);
         assert.equal(JSON.stringify(guestPortable).includes("contradicts"), false);
         assert.equal(JSON.stringify(guestPortable).includes("supports"), true);
+      }
+
+      for (const [memberId, importId, destinationOwnerId] of [[ownerId, "91919191-9191-4191-8191-919191919191", "92929292-9292-4292-8292-929292929292"],
+        [guestId, "93939393-9393-4393-8393-939393939393", "94949494-9494-4494-8494-949494949494"]] as const) {
+        const archive = await new PortableWorkspaceExportService(store.database, emptyAttachments).export(memberId, workspaceId);
+        assert.equal(archive.status, "exported"); if (archive.status !== "exported") continue;
+        const destination = await EmbeddedInstanceStore.open(await mkdtemp(join(tmpdir(), "stash-relationship-import-")),
+          createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
+        try {
+          await destination.database.createFirstOrganizationOwner({ organizationId: `${destinationOwnerId.slice(0, -1)}1`, organizationName: "Destination",
+            ownerId: destinationOwnerId, ownerName: "Importer", ownerEmail: `${destinationOwnerId}@example.test`, passwordHash: "test-only", role: "Owner" });
+          const imported = await new PortableWorkspaceImportService(destination.database, emptyAttachments).import(importId, destinationOwnerId, archive.archive);
+          assert.equal(imported.status, "imported");
+          const roundTrip = await destination.database.readExportSnapshot(destinationOwnerId, workspaceId);
+          assert.equal(roundTrip.status, "found"); if (roundTrip.status === "found") assertVisualizationClosure(roundTrip.snapshot);
+        } finally { await destination.close(); }
       }
 
       assert.equal((await visualization.promoteViewEdge(guestId, visibleRoot.node.id, blockId, "view-edge",
