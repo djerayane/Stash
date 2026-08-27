@@ -470,7 +470,9 @@ async function startFirstRunInstance() {
   const tasks = new TaskService(workPlanning, database.identityAccessRepositories());
   const projects = new WorkspaceProjectService(database.identityAccessRepositories());
   const attachments = new LocalAttachmentStorage(firstRunStore.paths.attachments);
-  return startInstance({ database, host: "0.0.0.0", port: Number.parseInt(process.env.STASH_BROWSER_FIRST_RUN_PORT ?? "4174", 10),
+  const probe = { verifyConnection: () => database.verifyConnection(), close: () => database.close(),
+    resolveClientSessionPrincipal: (accountId: string) => database.identityAccessRepositories().resolveClientSessionPrincipal(accountId) };
+  return startInstance({ database: probe, host: "0.0.0.0", port: Number.parseInt(process.env.STASH_BROWSER_FIRST_RUN_PORT ?? "4174", 10),
     instanceAdminToken: "first-run-admin",
     capabilities: createCapabilityRegistry([
       identityAccessCapability({ passwordAuth: auth, instanceSetup: new InstanceSetupService(database.instanceSetupRepository(),
