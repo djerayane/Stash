@@ -14,7 +14,9 @@ vi.stubGlobal("localStorage", {
 describe("first-run setup", () => {
   it("asks only for identity and Workspace fields on a loopback Instance", async () => {
     render(<SetupPage state="available-local" />);
-    expect(screen.getByRole("heading", { name: "Make Stash yours." })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Keep the thread." })).toBeVisible();
+    expect(screen.getByText("Stash")).toBeVisible();
+    expect(screen.getByRole("progressbar", { name: "Step 1 of 2" })).toHaveAttribute("aria-valuenow", "1");
     expect(screen.getByLabelText("Name")).toBeVisible();
     expect(screen.getByLabelText("Email")).toBeVisible();
     expect(screen.queryByLabelText("Setup code")).not.toBeInTheDocument();

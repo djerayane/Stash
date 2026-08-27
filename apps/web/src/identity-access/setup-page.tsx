@@ -42,9 +42,6 @@ export function SetupPage({ state, fetcher = fetch, onComplete = defaultCompleti
     gsap.fromTo(`.${styles.reveal}`, { y: 18 }, {
       y: 0, duration: 0.5, stagger: 0.06, ease: "power2.out", clearProps: "all",
     });
-    gsap.fromTo(`.${styles.assurance}`, { y: 22, scale: 0.985 }, {
-      y: 0, scale: 1, duration: 0.45, stagger: 0.07, ease: "power2.out", clearProps: "all",
-    });
   }, { scope: rootRef, dependencies: [step] });
 
   const createWorkspace = async () => {
@@ -70,32 +67,30 @@ export function SetupPage({ state, fetcher = fetch, onComplete = defaultCompleti
   };
 
   return <main className={styles.page} ref={rootRef}>
-    <nav className={styles.navigation} aria-label="First-run setup">
-      <span className={styles.brandMark} aria-hidden="true">S</span>
-      <strong>Stash</strong>
-      <span>Step {step === "identity" ? "1" : "2"} of 2</span>
-    </nav>
     <div className={styles.layout}>
       <section className={styles.introduction} aria-labelledby="setup-title">
-        <p className={`${styles.eyebrow} ${styles.reveal}`}>A personal place to think</p>
-        <h1 aria-label="Make Stash yours." className={styles.reveal} id="setup-title">Make Stash <span className={styles.inlineImage} aria-hidden="true" /> yours.</h1>
-        <p className={`${styles.lede} ${styles.reveal}`}>Create one personal Workspace. You can add people, Organizations, and integrations when they become useful.</p>
-        <div className={styles.assuranceGrid}>
-          <article className={styles.assurance}><strong>Start with Notes</strong><span>A small editable branch shows nesting and links.</span></article>
-          <article className={styles.assurance}><strong>Plan real work</strong><span>Two real sample Tasks give the guide room to grow.</span></article>
-          <article className={styles.assurance}><strong>Keep it portable</strong><span>Your Workspace remains yours to export.</span></article>
-          <article className={styles.assurance}><strong>Remove the guide</strong><span>Move, edit, or trash the starter branch anytime.</span></article>
+        <div className={`${styles.brand} ${styles.reveal}`}>
+          <svg className={styles.brandMark} viewBox="0 0 64 52" aria-hidden="true">
+            <path d="M14 4h37a9 9 0 0 1 9 9v2a9 9 0 0 1-9 9H25c-4 0-6 2-6 6H4V14A10 10 0 0 1 14 4Z" />
+            <path d="M50 48H13a9 9 0 0 1-9-9v-2a9 9 0 0 1 9-9h26c4 0 6-2 6-6h15v16a10 10 0 0 1-10 10Z" />
+          </svg>
+          <strong>Stash</strong>
         </div>
+        <h1 aria-label="Keep the thread." className={styles.reveal} id="setup-title">Keep the<br /><span>thread.</span></h1>
+        <img className={styles.artwork} src="/assets/setup-thread.png" alt="" />
       </section>
       <section className={styles.panel} aria-labelledby="form-title">
-        <div className={styles.progress} aria-hidden="true"><span className={step === "identity" ? styles.active : styles.complete} /><span className={step === "workspace" ? styles.active : ""} /></div>
+        <div className={styles.mobileBrand}>Step {step === "identity" ? "1" : "2"} of 2</div>
+        <div className={styles.progress} aria-label={`Step ${step === "identity" ? "1" : "2"} of 2`} role="progressbar" aria-valuemin={1} aria-valuemax={2} aria-valuenow={step === "identity" ? 1 : 2}>
+          <span className={step === "identity" ? styles.active : styles.complete} /><span className={step === "workspace" ? styles.active : ""} />
+        </div>
         {step === "identity" ? <form className={styles.form} onSubmit={(event) => { event.preventDefault(); setStep("workspace"); }}>
-          <div className={styles.reveal}><p className={styles.stepName}>About you</p><h2 id="form-title">Who is this Workspace for?</h2><p>These details identify you inside Stash.</p></div>
+          <div className={styles.reveal}><p className={styles.stepName}>Set up your Workspace</p><h2 id="form-title">Make Stash yours</h2><p>You’ll be the first owner and admin of this Instance.</p></div>
           <label className={styles.reveal}>Name<input aria-label="Name" autoComplete="name" autoFocus maxLength={200} required value={name} onChange={(event) => setName(event.target.value)} /></label>
           <label className={styles.reveal}>Email<input aria-label="Email" autoComplete="email" maxLength={320} required type="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label>
           <button className={`${styles.primary} ${styles.reveal}`} type="submit">Continue</button>
         </form> : <form className={styles.form} onSubmit={(event) => { event.preventDefault(); void createWorkspace(); }}>
-          <div className={styles.reveal}><p className={styles.stepName}>Your space</p><h2 id="form-title">Name the place where ideas grow.</h2><p>Use a familiar name. You can change it later.</p></div>
+          <div className={styles.reveal}><p className={styles.stepName}>Set up your Workspace</p><h2 id="form-title">Create your Stash Workspace</h2><p>Name your space and secure the first owner account.</p></div>
           <label className={styles.reveal}>Workspace name<input aria-label="Workspace name" autoComplete="organization" maxLength={200} ref={workspaceNameRef} required value={workspaceName} onChange={(event) => setWorkspaceName(event.target.value)} /></label>
           <label className={styles.reveal}>Password<input aria-label="Password" autoComplete="new-password" minLength={12} required type="password" value={password} onChange={(event) => setPassword(event.target.value)} /><small>Use at least 12 characters.</small></label>
           {state === "code-required" ? <label className={styles.reveal}>Setup code<input aria-label="Setup code" autoCapitalize="characters" autoComplete="one-time-code" required value={setupCode} onChange={(event) => setSetupCode(event.target.value)} /><small>Copy the short-lived code from the Instance startup output.</small></label> : null}
