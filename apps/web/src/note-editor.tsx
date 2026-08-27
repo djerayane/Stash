@@ -121,7 +121,9 @@ function NoteEditorDocument({ noteId, memberId, fetcher = globalThis.fetch, toke
   const [markdownDraft, setMarkdownDraft] = useState("");
   const [markdownError, setMarkdownError] = useState("");
   const [markdownDraftStored, setMarkdownDraftStored] = useState(true);
-  const [documentReady, setDocumentReady] = useState(false);
+  const [readyDocumentIdentity, setReadyDocumentIdentity] = useState("");
+  const documentIdentity = `${memberId}:${noteId}`;
+  const documentReady = readyDocumentIdentity === documentIdentity;
   const [taskTitle, setTaskTitle] = useState(""); const [taskProjectId, setTaskProjectId] = useState(""); const [taskComposerOpen, setTaskComposerOpen] = useState(false);
   const queryClient = useQueryClient();
   const [, refreshToolbar] = useState(0);
@@ -187,17 +189,13 @@ function NoteEditorDocument({ noteId, memberId, fetcher = globalThis.fetch, toke
   }, { scope: layoutRef, dependencies: [editorMode], revertOnUpdate: true });
 
   useEffect(() => {
-    setDocumentReady(false);
-  }, [memberId, noteId]);
-
-  useEffect(() => {
     if (!editor || !note.data || !collaboration.data) return;
     if (shouldSeedCanonicalDocument.current) { shouldSeedCanonicalDocument.current = false; editor.commands.setContent(toTiptap(note.data.document)); }
     editor.setEditable(canEdit);
     editor.view.dom.setAttribute("aria-readonly", String(!canEdit));
-    setDocumentReady(true);
+    setReadyDocumentIdentity(documentIdentity);
     setStatus(canEdit ? restoredPendingUpdate.current ? "Restoring changes from this device" : "All changes saved" : "Read-only Note"); setError("");
-  }, [canEdit, editor, note.data, collaboration.data, ydoc]);
+  }, [canEdit, collaboration.data, documentIdentity, editor, note.data, ydoc]);
 
   const performSynchronization = useCallback(async () => {
     if (!canEditRef.current) return;

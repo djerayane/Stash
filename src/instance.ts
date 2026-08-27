@@ -74,7 +74,7 @@ import { instanceUpgradeRoute } from "./instance-upgrade-routes.js";
 import type { InstanceUpgradeService } from "./instance-upgrade.js";
 import { accountRegistrationRoute, type AuthenticationFailureReporter } from "./account-registration-routes.js";
 import type { AccountRegistrationService } from "./account-registration.js";
-import { publicRoutesFromCapabilities, routesFromCapabilities, type CapabilityRegistry } from "./capability-registry.js";
+import { memberAccessFromCapabilities, publicRoutesFromCapabilities, routesFromCapabilities, type CapabilityRegistry } from "./capability-registry.js";
 
 export interface DatabaseProbe {
   verifyConnection(): Promise<void>;
@@ -212,7 +212,7 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
   });
   diagnostics.record({ kind: "instance_started", occurredAt: new Date().toISOString() });
   const acceleration = options.acceleration ?? createOptionalRedisAcceleration();
-  const memberAccess = options.memberAccess ?? options.passwordAuth;
+  const memberAccess = options.capabilities ? memberAccessFromCapabilities(options.capabilities) : options.memberAccess ?? options.passwordAuth;
   const capabilityRegistry = options.capabilities ?? { modules: [] };
   const capabilityRouteOwnership = new Set(capabilityRegistry.modules.flatMap(({ owns }) => [...(owns ?? [])]));
   const ownsRoute = (feature: string) => capabilityRouteOwnership.has(feature);
