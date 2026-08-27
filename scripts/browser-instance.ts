@@ -253,7 +253,7 @@ const seededChild = await activeNoteTreeRepository.createTreeNote(browserMemberI
 if (seededChild.status !== "created") throw new Error("browser_note_tree_child_seed_failed");
 await browserTreeStore.upgradeDatabase.query("UPDATE stash_notes SET project_id=$2 WHERE id=$1", [noteId, projectId]);
 await browserTreeStore.upgradeDatabase.query("INSERT INTO stash_project_guests(project_id,account_id) VALUES($1,$2)", [projectId, browserGuestId]);
-const browserNoteLinks = new NoteLinkService(browserTreeStore.database);
+const browserNoteLinks = new NoteLinkService(browserTreeStore.database.knowledgeAuthoringRepositories());
 for (let index = 1; index <= 25; index += 1) {
   const suffix = String(index).padStart(2, "0");
   const unresolvedBrowserLink = await browserNoteLinks.importUnresolved(browserMemberId, noteId,
@@ -476,7 +476,7 @@ async function startFirstRunInstance() {
         { boundHost: "0.0.0.0", code: "STASH-ONE", output() {} }) }),
       knowledgeAuthoringCapability({ notes, noteTree: new NoteTreeService(database.noteTreeRepository(), database.tutorialContributionRepository()),
         starterTutorials: new TutorialContributionService(database.tutorialContributionRepository()),
-        collections: new CollectionService(database.collectionRepository()), noteLinks: new NoteLinkService(database),
+        collections: new CollectionService(database.collectionRepository()), noteLinks: new NoteLinkService(database.knowledgeAuthoringRepositories()),
         discussions: new DiscussionService(database), searches: new WorkspaceSearchService(database),
         portableWorkspaceExports: new PortableWorkspaceExportService(database, attachments), memberAccess: auth }),
       workPlanningCapability({ tasks, workspaceProjects: projects, memberAccess: auth,

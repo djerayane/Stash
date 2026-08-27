@@ -201,7 +201,7 @@ describe("relationship query contracts", () => {
         { targetNoteId: privateNote.node.id, label: "Secret contradiction", relationshipType: "contradicts" })).status, "created");
       assert.equal((await notes.createContextLink(ownerId, visibleIsolated.node.id,
         { targetNoteId: privateNote.node.id, label: "Hidden relation", relationshipType: "supports" })).status, "created");
-      const unresolved = await new NoteLinkService(store.database).importUnresolved(ownerId, visibleRoot.node.id,
+      const unresolved = await new NoteLinkService(store.database.knowledgeAuthoringRepositories()).importUnresolved(ownerId, visibleRoot.node.id,
         { targetPath: "notes/missing.md", candidateNoteIds: [privateNote.node.id], label: "Hidden lead" });
       assert.equal(unresolved.status, "created");
       const archivedBrokenSource = await notes.create(ownerId, workspaceId, { title: "Archived broken source" });
@@ -212,7 +212,7 @@ describe("relationship query contracts", () => {
       assert.equal(activeWithInactiveTarget.status, "created"); assert.equal(inactiveTarget.status, "created");
       if (archivedBrokenSource.status !== "created" || trashedBrokenSource.status !== "created"
         || activeWithInactiveTarget.status !== "created" || inactiveTarget.status !== "created") return;
-      const linkService = new NoteLinkService(store.database);
+      const linkService = new NoteLinkService(store.database.knowledgeAuthoringRepositories());
       assert.equal((await linkService.importUnresolved(ownerId, archivedBrokenSource.node.id,
         { targetPath: "archived-missing.md", candidateNoteIds: [], label: "Archived unresolved" })).status, "created");
       assert.equal((await linkService.importUnresolved(ownerId, trashedBrokenSource.node.id,
