@@ -276,7 +276,7 @@ export class PostgresDatabase implements DatabaseProbe {
     this.#portableProjectionContributors = [this.#visualizationBlockRepository];
     this.#knowledgeAuthoringAdapter = new PostgresKnowledgeAuthoringRepositories(this.#kernel, {
       prepare: (client) => this.#ensureNoteSchema(client),
-      prepareInvitations: (client) => this.#ensureInvitationSchema(client),
+      prepareInvitations: (client) => this.#identityAccessAdapter.prepareInvitations(client),
       prepareAttachments: (client) => this.#ensureAttachmentSchema(client),
       backfillLegacyNoteHistory: (client) => this.#backfillLegacyNoteHistory(client),
       parseActivityCause: (value) => this.#parseActivityCause(value),
@@ -319,7 +319,7 @@ export class PostgresDatabase implements DatabaseProbe {
       prepare: async (client) => {
         await this.#ensureNoteSchema(client);
         await this.#canonicalTaskRepository.prepare(client);
-        await this.#ensureInvitationSchema(client);
+        await this.#identityAccessAdapter.prepareInvitations(client);
       },
       recordProjection: (client, task) => this.#recordPortableProjection(client, "Task", task.id, task.schema, task),
       recordWorkflowProjection: (client, workflow) => this.#recordPortableProjection(client, "Workflow", workflow.projectId, workflow.schema, workflow),
@@ -405,7 +405,7 @@ export class PostgresDatabase implements DatabaseProbe {
   identityAccessRepositories(): IdentityAccessPostgresRepositories {
     return Object.assign(this.#identityAccessAdapter, {
       removeOrganizationMember: this.removeOrganizationMember.bind(this),
-      createInvitation: this.createInvitation.bind(this), acceptInvitation: this.acceptInvitation.bind(this),
+
       savePasskey: this.savePasskey.bind(this), findPasskey: this.findPasskey.bind(this),
       updatePasskeyCounterAndCreateSession: this.updatePasskeyCounterAndCreateSession.bind(this),
       replaceRecoveryCodes: this.replaceRecoveryCodes.bind(this),
@@ -450,7 +450,7 @@ export class PostgresDatabase implements DatabaseProbe {
       await this.#ensureMemberLocalizationSchema(client);
       await this.#ensureNoteSchema(client); await this.#noteTreeRepository.prepare(client);
       await this.#workPlanningAdapter.prepareBoards(client); await this.#ensureAttachmentSchema(client);
-      await this.#knowledgeAuthoringAdapter.prepareDiscussions(client); await this.#ensureInvitationSchema(client); await this.#ensurePortableProjectionSchema(client);
+      await this.#knowledgeAuthoringAdapter.prepareDiscussions(client); await this.#identityAccessAdapter.prepareInvitations(client); await this.#ensurePortableProjectionSchema(client);
       await this.#ensureNoteHistorySchema(client); await this.#ensureMemberDepartureSchema(client); await this.#ensureWorkspaceImportSchema(client);
       await this.#knowledgeAuthoringAdapter.prepareCollaboration(client);
       await this.#instanceSetupRepository.prepare(client);
@@ -529,7 +529,7 @@ export class PostgresDatabase implements DatabaseProbe {
 
   async resolveClientSessionPrincipal(accountId: string) {
     return this.#kernel.withSession(async (client) => {
-      await this.#ensureInvitationSchema(client);
+      await this.#identityAccessAdapter.prepareInvitations(client);
       const result = await client.query<{ account_id: string; account_name: string; account_email: string; workspace_id: string; workspace_name: string; organization_id: string | null }>(`
         SELECT account.id account_id, account.name account_name, account.email account_email,
           workspace.id workspace_id, workspace.name workspace_name, workspace.organization_owner_id organization_id
@@ -575,7 +575,7 @@ export class PostgresDatabase implements DatabaseProbe {
 
   async #linkDevelopmentArtifact(memberId: string, projectId: string, taskKey: string, artifact: DevelopmentArtifact) {
     return this.#withTransaction(async (client) => {
-      await this.#ensureNoteSchema(client); await this.#ensureInvitationSchema(client);
+      await this.#ensureNoteSchema(client); await this.#identityAccessAdapter.prepareInvitations(client);
       const current = await client.query<any>(`${taskPlanningSelect} FOR UPDATE OF task`, [projectId, taskKey, memberId]);
       const row = current.rows[0]; if (!row) return "forbidden" as const;
       const writable = await client.query(`SELECT 1 FROM stash_workspaces workspace WHERE workspace.id = $1
@@ -652,78 +652,6 @@ export class PostgresDatabase implements DatabaseProbe {
     });
   }
 
-  async createInvitation(record: InvitationRecord, token: string): Promise<"created" | "forbidden" | "project_forbidden"> {
-    return this.#withTransaction(async (client) => {
-      await this.#ensureInvitationSchema(client);
-      const memberships = await this.#lockedOrganizationMemberships(client, record.organizationId);
-      const actorRole = memberships.find(({ account_id }) => account_id === record.invitedByAccountId)?.role;
-      if (actorRole !== "Owner" && actorRole !== "Admin") return "forbidden";
-      if (actorRole === "Admin" && record.access.kind === "member" && record.access.role !== "Member") return "forbidden";
-      if (record.access.kind === "guest") {
-        const allowed = await client.query<{ id: string }>(
-          `SELECT project.id FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
-           WHERE project.id = ANY($1::uuid[]) AND workspace.organization_owner_id = $2`,
-          [record.access.projectIds, record.organizationId],
-        );
-        if (allowed.rowCount !== record.access.projectIds.length) return "project_forbidden";
-      }
-      await client.query(
-        `INSERT INTO stash_invitations (id, organization_id, token_lookup, token_secret, kind, member_role, invited_by_account_id, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [record.id, record.organizationId, this.#authenticationSecrets.blindIndex(token, "invitation-v1"), this.#authenticationSecrets.encrypt(token, "invitation-v1"), record.access.kind, record.access.kind === "member" ? record.access.role : null, record.invitedByAccountId, record.expiresAt],
-      );
-      if (record.access.kind === "guest") for (const projectId of record.access.projectIds) {
-        await client.query("INSERT INTO stash_invitation_projects (invitation_id, project_id) VALUES ($1, $2)", [record.id, projectId]);
-      }
-      return "created";
-    });
-  }
-
-  async acceptInvitation(token: string, accountId: string, acceptedAt: string): Promise<
-    | { status: "accepted"; access: { kind: "member"; organizationId: string; role: BuiltInOrganizationRole } | { kind: "guest"; organizationId: string; projectIds: string[] } }
-    | "invalid_invitation"
-  > {
-    return this.#withTransaction(async (client) => {
-      await this.#ensureInvitationSchema(client);
-      await client.query("UPDATE stash_invitations SET token_lookup = NULL, token_secret = NULL WHERE accepted_at IS NULL AND expires_at <= $1", [acceptedAt]);
-      const result = await client.query<{ id: string; organization_id: string; kind: "member" | "guest"; member_role: BuiltInOrganizationRole | null; token_secret: string }>(
-        `SELECT id, organization_id, kind, member_role, token_secret FROM stash_invitations
-         WHERE token_lookup = $1 AND accepted_at IS NULL AND expires_at > $2 FOR UPDATE`, [this.#authenticationSecrets.blindIndex(token, "invitation-v1"), acceptedAt],
-      );
-      const invitation = result.rows[0];
-      if (!invitation || !this.#invitationTokenMatches(invitation.token_secret, token)) return "invalid_invitation";
-      if (invitation.kind === "member") {
-        const memberships = await this.#lockedOrganizationMemberships(client, invitation.organization_id);
-        const invitedRole = invitation.member_role!;
-        const existingRole = memberships.find(({ account_id }) => account_id === accountId)?.role;
-        const role = existingRole && this.#roleRank(existingRole) >= this.#roleRank(invitedRole) ? existingRole : invitedRole;
-        if (!existingRole) await client.query("INSERT INTO stash_organization_memberships (organization_id, account_id, role) VALUES ($1, $2, $3)", [invitation.organization_id, accountId, role]);
-        else if (existingRole !== role) await client.query("UPDATE stash_organization_memberships SET role = $3 WHERE organization_id = $1 AND account_id = $2", [invitation.organization_id, accountId, role]);
-        await client.query("UPDATE stash_invitations SET accepted_at = $2, accepted_by_account_id = $3, token_lookup = NULL, token_secret = NULL WHERE id = $1", [invitation.id, acceptedAt, accountId]);
-        return { status: "accepted", access: { kind: "member", organizationId: invitation.organization_id, role } };
-      }
-      const projects = await client.query<{ project_id: string; workspace_id: string }>(
-        `SELECT selected.project_id, project.workspace_id FROM stash_invitation_projects selected
-         JOIN stash_projects project ON project.id = selected.project_id WHERE selected.invitation_id = $1 ORDER BY selected.project_id`, [invitation.id]);
-      const guest = await client.query<{ id: string; name: string }>("SELECT id, name FROM stash_accounts WHERE id = $1", [accountId]);
-      if (!guest.rows[0]) throw new Error("guest_identity_unavailable");
-      for (const { project_id } of projects.rows) {
-        await client.query("INSERT INTO stash_project_guests (project_id, account_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [project_id, accountId]);
-      }
-      const inviter = await client.query<{ id: string; name: string }>(
-        `SELECT account.id, account.name FROM stash_invitations invitation
-         JOIN stash_accounts account ON account.id = invitation.invited_by_account_id WHERE invitation.id = $1`, [invitation.id]);
-      if (!inviter.rows[0]) throw new Error("inviter_identity_unavailable");
-      const projection = { schema: "stash.guest-project-access.v1" as const, id: invitation.id, organizationId: invitation.organization_id,
-        guest: { localAccountId: guest.rows[0].id, displayName: guest.rows[0].name },
-        projects: projects.rows.map(({ project_id, workspace_id }) => ({ projectId: project_id, workspaceId: workspace_id })),
-        acceptedAt, invitedBy: { localAccountId: inviter.rows[0].id, displayName: inviter.rows[0].name } };
-      await this.#recordPortableProjection(client, "GuestProjectAccess", invitation.id, projection.schema, projection);
-      await client.query("UPDATE stash_invitations SET accepted_at = $2, accepted_by_account_id = $3, token_lookup = NULL, token_secret = NULL WHERE id = $1", [invitation.id, acceptedAt, accountId]);
-      return { status: "accepted", access: { kind: "guest", organizationId: invitation.organization_id, projectIds: projects.rows.map(({ project_id }) => project_id) } };
-    });
-  }
-
   async #lockedOrganizationMemberships(client: PostgresQueryable, organizationId: string) {
     await this.#ensureBootstrapSchema(client);
     const memberships = await client.query<{ account_id: string; role: BuiltInOrganizationRole }>(
@@ -742,16 +670,6 @@ export class PostgresDatabase implements DatabaseProbe {
       && memberships.some(
         (membership) => membership.account_id === accountId && membership.role === "Owner",
       );
-  }
-
-  #roleRank(role: BuiltInOrganizationRole): number { return { Member: 0, Admin: 1, Owner: 2 }[role]; }
-
-  #invitationTokenMatches(encryptedToken: string, candidate: string): boolean {
-    try {
-      const expected = Buffer.from(this.#authenticationSecrets.decrypt(encryptedToken, "invitation-v1"));
-      const actual = Buffer.from(candidate);
-      return expected.length === actual.length && timingSafeEqual(expected, actual);
-    } catch { return false; }
   }
 
   #canManageRoles(
@@ -1435,49 +1353,6 @@ export class PostgresDatabase implements DatabaseProbe {
     else await this.#kernel.withSession(prepare);
   }
 
-  async #ensureInvitationSchema(client: PostgresQueryable): Promise<void> {
-    await this.#ensureWorkspaceProjectSchema(client);
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS stash_invitations (
-        id UUID PRIMARY KEY,
-        organization_id UUID NOT NULL REFERENCES stash_organizations(id),
-        token_lookup TEXT UNIQUE,
-        token_secret TEXT,
-        kind TEXT NOT NULL CHECK (kind IN ('member', 'guest')),
-        member_role TEXT CHECK (member_role IN ('Owner', 'Admin', 'Member')),
-        invited_by_account_id UUID NOT NULL REFERENCES stash_accounts(id),
-        expires_at TIMESTAMPTZ NOT NULL,
-        accepted_at TIMESTAMPTZ,
-        accepted_by_account_id UUID REFERENCES stash_accounts(id),
-        CHECK ((token_lookup IS NULL) = (token_secret IS NULL)),
-        CHECK ((kind = 'member' AND member_role IS NOT NULL) OR (kind = 'guest' AND member_role IS NULL))
-      );
-      CREATE TABLE IF NOT EXISTS stash_invitation_projects (
-        invitation_id UUID NOT NULL REFERENCES stash_invitations(id) ON DELETE CASCADE,
-        project_id UUID NOT NULL REFERENCES stash_projects(id),
-        PRIMARY KEY (invitation_id, project_id)
-      );
-      CREATE TABLE IF NOT EXISTS stash_project_guests (
-        project_id UUID NOT NULL REFERENCES stash_projects(id),
-        account_id UUID NOT NULL REFERENCES stash_accounts(id),
-        PRIMARY KEY (project_id, account_id)
-      );
-    `);
-    await this.#kernel.advisoryTransactionLock(client, 1_465_271_063);
-    await client.query(`
-      ALTER TABLE stash_invitations ADD COLUMN IF NOT EXISTS token_lookup TEXT;
-      ALTER TABLE stash_invitations ADD COLUMN IF NOT EXISTS token_secret TEXT;
-      DO $migration$
-      BEGIN
-        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'stash_invitations' AND column_name = 'token_hash') THEN
-          DELETE FROM stash_invitations WHERE token_lookup IS NULL OR token_secret IS NULL;
-          ALTER TABLE stash_invitations DROP COLUMN token_hash;
-        END IF;
-      END
-      $migration$;
-    `);
-  }
-
   async #ensurePortableProjectionSchema(client: PostgresQueryable): Promise<void> {
     await this.#kernel.advisoryTransactionLock(client, 1_094_218_495);
     await client.query(`
@@ -1972,7 +1847,7 @@ export class PostgresDatabase implements DatabaseProbe {
     await this.#ensureAttachmentSchema(client);
     await this.#workPlanningAdapter.prepareBoards(client);
     await this.#knowledgeAuthoringAdapter.prepareDiscussions(client);
-    await this.#ensureInvitationSchema(client);
+    await this.#identityAccessAdapter.prepareInvitations(client);
     await client.query(`CREATE TABLE IF NOT EXISTS stash_identity_stubs (
       source_account_id TEXT PRIMARY KEY, account_id UUID NOT NULL UNIQUE REFERENCES stash_accounts(id), display_name TEXT NOT NULL
     );
