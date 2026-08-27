@@ -48,7 +48,7 @@ describe("first stable release journey through a running Instance", () => {
     const instance = await startInstance({ database: store.database, host: "127.0.0.1", port: 0, instanceAdminToken: "operator",
       memberAccess: { async authenticateBearer(value) { return value === bearer ? { accountId: ownerId, sessionId: "release-session" } : undefined; } },
       workspaceProjects: new WorkspaceProjectService(store.database.identityAccessRepositories()), notes: new NoteService(store.database.knowledgeAuthoringRepositories()),
-      mobileCaptures: new MobileCaptureService(store.database.knowledgeAuthoringRepositories()), tasks: new TaskService(store.database.workPlanningRepositories(), store.database),
+      mobileCaptures: new MobileCaptureService(store.database.knowledgeAuthoringRepositories()), tasks: new TaskService(store.database.workPlanningRepositories(), store.database.identityAccessRepositories()),
       projectWorkflows: new ProjectWorkflowService(store.database.workPlanningRepositories()), boards: new BoardService(store.database.workPlanningRepositories()),
       repositoryConnections: connections, githubSignals: new GitHubSignalService(store.database.developmentIntegrationRepositories(), webhookSecret, automations),
       automations, activities: new ActivityService(store.database.knowledgeAuthoringRepositories()), portableWorkspaceExports: new PortableWorkspaceExportService(store.database.knowledgeAuthoringRepositories(), attachments) });
@@ -116,7 +116,7 @@ describe("first stable release journey through a running Instance", () => {
     const destinationAttachments = new LocalAttachmentStorage(destination.paths.attachments);
     const importedInstance = await startInstance({ database: destination.database, host: "127.0.0.1", port: 0, instanceAdminToken: "operator",
       memberAccess: { async authenticateBearer(value) { return value === bearer ? { accountId: ownerId, sessionId: "import-session" } : undefined; } },
-      notes: new NoteService(destination.database.knowledgeAuthoringRepositories()), tasks: new TaskService(destination.database.workPlanningRepositories(), destination.database),
+      notes: new NoteService(destination.database.knowledgeAuthoringRepositories()), tasks: new TaskService(destination.database.workPlanningRepositories(), destination.database.identityAccessRepositories()),
       portableWorkspaceImports: new PortableWorkspaceImportService(destination.database.knowledgeAuthoringRepositories(), destinationAttachments),
       portableWorkspaceExports: new PortableWorkspaceExportService(destination.database.knowledgeAuthoringRepositories(), destinationAttachments) });
     cleanups.push(async () => { await importedInstance.close(); await destination.close(); await rm(destinationRoot, { recursive: true, force: true }); });
