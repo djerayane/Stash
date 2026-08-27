@@ -1,6 +1,8 @@
+import { temporaryTestDirectory } from "./support/temporary-directory.js";
+
 import assert from "node:assert/strict";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmod, cp, mkdir, mkdtemp, opendir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, opendir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, test } from "node:test";
@@ -52,7 +54,7 @@ async function assertDirectoryExcludesSecrets(root: string, secrets: string[]): 
 
 describe("embedded-to-PostgreSQL migration key preflight", () => {
   test("reads preserve keys only from owner-private files", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-preserve-key-"));
+    const root = await temporaryTestDirectory("stash-preserve-key-");
     const source = join(root, "source.key"); await writeFile(source, `${key()}\n`, { mode: 0o600 });
     const keys = await readMigrationKeys({ mode: "preserve", sourceKeyFile: source });
     assert.equal(keys.source, keys.destination);
@@ -61,13 +63,13 @@ describe("embedded-to-PostgreSQL migration key preflight", () => {
   });
 
   test("rejects a destination key file in preserve mode instead of silently ignoring it", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-preserve-extra-key-")); const source = join(root, "source.key");
+    const root = await temporaryTestDirectory("stash-preserve-extra-key-"); const source = join(root, "source.key");
     const destination = join(root, "destination.key"); await writeFile(source, key(), { mode: 0o600 }); await writeFile(destination, key(), { mode: 0o600 });
     await assert.rejects(() => readMigrationKeys({ mode: "preserve", sourceKeyFile: source, destinationKeyFile: destination }), /preserve.*destination key/i);
   });
 
   test("rotate requires distinct source and destination key files", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-rotate-key-"));
+    const root = await temporaryTestDirectory("stash-rotate-key-");
     const source = join(root, "source.key"); const destination = join(root, "destination.key"); const shared = key();
     await writeFile(source, shared, { mode: 0o600 }); await writeFile(destination, shared, { mode: 0o600 });
     await assert.rejects(() => readMigrationKeys({ mode: "rotate", sourceKeyFile: source }), /destination key file/i);
@@ -83,7 +85,7 @@ describe("embedded-to-PostgreSQL migration key preflight", () => {
   });
 
   test("fails closed on invalid destination-preparation key modes before database effects", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-prepare-key-modes-")); const source = join(root, "source.key"); const destination = join(root, "destination.key");
+    const root = await temporaryTestDirectory("stash-prepare-key-modes-"); const source = join(root, "source.key"); const destination = join(root, "destination.key");
     await writeFile(source, key(), { mode: 0o600 }); await writeFile(destination, key(), { mode: 0o600 });
     const run = (arguments_: string[]) => spawnSync(process.execPath, ["--import", "tsx", "src/migrate-embedded-command.ts", "prepare-destination", ...arguments_],
       { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, DESTINATION_DATABASE_URL: "" } });
@@ -155,7 +157,7 @@ const postgresUrl = process.env.STASH_TEST_DATABASE_URL;
 describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? false : "STASH_TEST_DATABASE_URL is not configured" }, () => {
   test("prepares an empty destination schema, format, and authentication key boundary from a protected file", async () => {
     const admin = new Pool({ connectionString: postgresUrl! }); const schema = `embedded_prepare_${randomUUID().replaceAll("-", "")}`;
-    const root = await mkdtemp(join(tmpdir(), "stash-prepare-destination-")); const sourceKeyFile = join(root, "source.key"); await writeFile(sourceKeyFile, key(), { mode: 0o600 });
+    const root = await temporaryTestDirectory("stash-prepare-destination-"); const sourceKeyFile = join(root, "source.key"); await writeFile(sourceKeyFile, key(), { mode: 0o600 });
     try {
       await admin.query(`CREATE SCHEMA ${schema}`); const separator = postgresUrl!.includes("?") ? "&" : "?";
       const scoped = `${postgresUrl}${separator}options=-csearch_path%3D${schema}`;
@@ -170,7 +172,7 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
 
   test("refuses to prepare a nonempty destination schema", async () => {
     const admin = new Pool({ connectionString: postgresUrl! });
-    const root = await mkdtemp(join(tmpdir(), "stash-prepare-nonempty-")); const sourceKeyFile = join(root, "source.key"); await writeFile(sourceKeyFile, key(), { mode: 0o600 });
+    const root = await temporaryTestDirectory("stash-prepare-nonempty-"); const sourceKeyFile = join(root, "source.key"); await writeFile(sourceKeyFile, key(), { mode: 0o600 });
     try {
       for (const create of ["CREATE TABLE OBJECT (id INTEGER)", "CREATE VIEW OBJECT AS SELECT 1 id", "CREATE MATERIALIZED VIEW OBJECT AS SELECT 1 id",
         "CREATE SEQUENCE OBJECT", "CREATE FUNCTION OBJECT() RETURNS integer LANGUAGE SQL AS 'SELECT 1'", "CREATE TYPE OBJECT AS ENUM ('one')",
@@ -190,14 +192,14 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
   });
 
   test("rejects an unconfigured destination instead of defining its master-key identity from migration input", async () => {
-    const sourceKey = key(); const source = await EmbeddedInstanceStore.open(await mkdtemp(join(tmpdir(), "stash-migration-unconfigured-")), createAuthenticationSecretCodec(sourceKey));
+    const sourceKey = key(); const source = await EmbeddedInstanceStore.open(await temporaryTestDirectory("stash-migration-unconfigured-"), createAuthenticationSecretCodec(sourceKey));
     const admin = new Pool({ connectionString: postgresUrl! }); const schema = `embedded_unconfigured_${randomUUID().replaceAll("-", "")}`;
     try {
       await source.database.verifyConnection(); await source.database.prepareInstanceStore(); await admin.query(`CREATE SCHEMA ${schema}`);
       const separator = postgresUrl!.includes("?") ? "&" : "?"; const scoped = `${postgresUrl}${separator}options=-csearch_path%3D${schema}`;
       await assert.rejects(migrateEmbeddedInstance({ source, destinationDatabaseUrl: scoped,
-        destinationAttachmentRoot: join(await mkdtemp(join(tmpdir(), "stash-unconfigured-attachments-")), "attachments"),
-        destinationConfigurationRoot: join(await mkdtemp(join(tmpdir(), "stash-unconfigured-config-")), "config"),
+        destinationAttachmentRoot: join(await temporaryTestDirectory("stash-unconfigured-attachments-"), "attachments"),
+        destinationConfigurationRoot: join(await temporaryTestDirectory("stash-unconfigured-config-"), "config"),
         destinationDatabaseAvailableBytes: BigInt(Number.MAX_SAFE_INTEGER),
         keys: { source: sourceKey, destination: sourceKey, mode: "preserve" } }), /prepared with its configured master key/i);
     } finally { await source.close(); await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined); await admin.end(); }
@@ -205,9 +207,9 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
 
   test("rejects a destination Instance configured with a different master key", async () => {
     const sourceKey = key(); const configuredDestinationKey = key(); const suppliedDestinationKey = key();
-    const source = await EmbeddedInstanceStore.open(await mkdtemp(join(tmpdir(), "stash-migration-key-boundary-")), createAuthenticationSecretCodec(sourceKey));
+    const source = await EmbeddedInstanceStore.open(await temporaryTestDirectory("stash-migration-key-boundary-"), createAuthenticationSecretCodec(sourceKey));
     const admin = new Pool({ connectionString: postgresUrl! }); const schema = `embedded_key_boundary_${randomUUID().replaceAll("-", "")}`;
-    const attachments = join(await mkdtemp(join(tmpdir(), "stash-key-boundary-attachments-")), "attachments");
+    const attachments = join(await temporaryTestDirectory("stash-key-boundary-attachments-"), "attachments");
     try {
       await source.database.verifyConnection(); await source.database.prepareInstanceStore(); await source.database.createFirstOrganizationOwner({ organizationId: randomUUID(), organizationName: "Source",
         ownerId: randomUUID(), ownerName: "Source Owner", ownerEmail: "source@example.test", passwordHash: "hash", role: "Owner" });
@@ -224,10 +226,10 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
   });
 
   test("preserves a complete prepared store and rotates protected authentication state", async () => {
-    const sourceRoot = await mkdtemp(join(tmpdir(), "stash-migration-source-")); const sourceKey = key(); const destinationKey = key();
+    const sourceRoot = await temporaryTestDirectory("stash-migration-source-"); const sourceKey = key(); const destinationKey = key();
     const source = await EmbeddedInstanceStore.open(sourceRoot, createAuthenticationSecretCodec(sourceKey));
     const admin = new Pool({ connectionString: postgresUrl! }); const schema = `embedded_migration_${randomUUID().replaceAll("-", "")}`;
-    const attachmentRoot = await mkdtemp(join(tmpdir(), "stash-migration-attachments-parent-")); const destinationAttachments = join(attachmentRoot, "attachments");
+    const attachmentRoot = await temporaryTestDirectory("stash-migration-attachments-parent-"); const destinationAttachments = join(attachmentRoot, "attachments");
     const destinationConfiguration = join(attachmentRoot, "config");
     try {
       await source.database.verifyConnection(); await source.database.prepareInstanceStore();
@@ -314,9 +316,9 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
   });
 
   test("preserve mode keeps authentication usable with the source key", async () => {
-    const sourceRoot = await mkdtemp(join(tmpdir(), "stash-migration-preserve-")); const sourceKey = key();
+    const sourceRoot = await temporaryTestDirectory("stash-migration-preserve-"); const sourceKey = key();
     const source = await EmbeddedInstanceStore.open(sourceRoot, createAuthenticationSecretCodec(sourceKey)); const admin = new Pool({ connectionString: postgresUrl! });
-    const schema = `embedded_preserve_${randomUUID().replaceAll("-", "")}`; const destinationRoot = await mkdtemp(join(tmpdir(), "stash-preserve-attachments-"));
+    const schema = `embedded_preserve_${randomUUID().replaceAll("-", "")}`; const destinationRoot = await temporaryTestDirectory("stash-preserve-attachments-");
     const destinationAttachments = join(destinationRoot, "attachments"); const destinationConfiguration = join(destinationRoot, "config");
     try {
       await source.database.verifyConnection(); await source.database.prepareInstanceStore(); const organizationId = randomUUID(); const ownerId = randomUUID();
@@ -341,9 +343,9 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
 
   test("serializes every query issued through a migration transaction client", async () => {
     const sourceKey = key();
-    const source = await EmbeddedInstanceStore.open(await mkdtemp(join(tmpdir(), "stash-migration-serial-source-")), createAuthenticationSecretCodec(sourceKey));
+    const source = await EmbeddedInstanceStore.open(await temporaryTestDirectory("stash-migration-serial-source-"), createAuthenticationSecretCodec(sourceKey));
     const admin = new Pool({ connectionString: postgresUrl! }); const schema = `embedded_serial_${randomUUID().replaceAll("-", "")}`;
-    const root = await mkdtemp(join(tmpdir(), "stash-migration-serial-destination-"));
+    const root = await temporaryTestDirectory("stash-migration-serial-destination-");
     try {
       await source.database.verifyConnection(); await source.database.prepareInstanceStore();
       await source.database.createFirstOrganizationOwner({ organizationId: randomUUID(), organizationName: "Serial", ownerId: randomUUID(), ownerName: "Owner",
@@ -368,9 +370,9 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
   });
 
   test("rolls back a deterministic pre-commit failure without mutating files and reruns safely", async () => {
-    const sourceKey = key(); const source = await EmbeddedInstanceStore.open(await mkdtemp(join(tmpdir(), "stash-migration-rollback-source-")), createAuthenticationSecretCodec(sourceKey));
+    const sourceKey = key(); const source = await EmbeddedInstanceStore.open(await temporaryTestDirectory("stash-migration-rollback-source-"), createAuthenticationSecretCodec(sourceKey));
     const admin = new Pool({ connectionString: postgresUrl! }); const schema = `embedded_rollback_${randomUUID().replaceAll("-", "")}`;
-    const destinationRoot = await mkdtemp(join(tmpdir(), "stash-migration-rollback-destination-"));
+    const destinationRoot = await temporaryTestDirectory("stash-migration-rollback-destination-");
     const destinationAttachments = join(destinationRoot, "attachments"); const destinationConfiguration = join(destinationRoot, "configuration");
     try {
       await source.database.verifyConnection(); await source.database.prepareInstanceStore();
@@ -398,9 +400,9 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
   });
 
   test("recovers an ambiguous COMMIT acknowledgement from its journal without deleting committed state", async () => {
-    const sourceKey = key(); const source = await EmbeddedInstanceStore.open(await mkdtemp(join(tmpdir(), "stash-migration-ambiguous-source-")), createAuthenticationSecretCodec(sourceKey));
+    const sourceKey = key(); const source = await EmbeddedInstanceStore.open(await temporaryTestDirectory("stash-migration-ambiguous-source-"), createAuthenticationSecretCodec(sourceKey));
     const admin = new Pool({ connectionString: postgresUrl! }); const schema = `embedded_ambiguous_${randomUUID().replaceAll("-", "")}`;
-    const destinationRoot = await mkdtemp(join(tmpdir(), "stash-migration-ambiguous-destination-"));
+    const destinationRoot = await temporaryTestDirectory("stash-migration-ambiguous-destination-");
     const attachments = join(destinationRoot, "attachments"); const configuration = join(destinationRoot, "configuration");
     try {
       await source.database.verifyConnection(); await source.database.prepareInstanceStore();
@@ -432,9 +434,9 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
   });
 
   test("converges a journaled COMMIT with a rolled-back database outcome and reruns safely", async () => {
-    const sourceKey = key(); const source = await EmbeddedInstanceStore.open(await mkdtemp(join(tmpdir(), "stash-migration-unknown-rollback-source-")), createAuthenticationSecretCodec(sourceKey));
+    const sourceKey = key(); const source = await EmbeddedInstanceStore.open(await temporaryTestDirectory("stash-migration-unknown-rollback-source-"), createAuthenticationSecretCodec(sourceKey));
     const admin = new Pool({ connectionString: postgresUrl! }); const schema = `embedded_unknown_rollback_${randomUUID().replaceAll("-", "")}`;
-    const root = await mkdtemp(join(tmpdir(), "stash-migration-unknown-rollback-destination-")); const attachments = join(root, "attachments"); const configuration = join(root, "configuration");
+    const root = await temporaryTestDirectory("stash-migration-unknown-rollback-destination-"); const attachments = join(root, "attachments"); const configuration = join(root, "configuration");
     try {
       await source.database.verifyConnection(); await source.database.prepareInstanceStore();
       await source.database.createFirstOrganizationOwner({ organizationId: randomUUID(), organizationName: "Rolled back", ownerId: randomUUID(), ownerName: "Owner",
@@ -458,8 +460,8 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
   });
 
   test("preserves a compatible upgraded Instance format boundary", async () => {
-    const sourceKey = key(); const source = await EmbeddedInstanceStore.open(await mkdtemp(join(tmpdir(), "stash-migration-versioned-source-")), createAuthenticationSecretCodec(sourceKey));
-    const admin = new Pool({ connectionString: postgresUrl! }); const schema = `embedded_versioned_${randomUUID().replaceAll("-", "")}`; const root = await mkdtemp(join(tmpdir(), "stash-migration-versioned-destination-"));
+    const sourceKey = key(); const source = await EmbeddedInstanceStore.open(await temporaryTestDirectory("stash-migration-versioned-source-"), createAuthenticationSecretCodec(sourceKey));
+    const admin = new Pool({ connectionString: postgresUrl! }); const schema = `embedded_versioned_${randomUUID().replaceAll("-", "")}`; const root = await temporaryTestDirectory("stash-migration-versioned-destination-");
     try {
       await source.database.verifyConnection(); await source.database.prepareInstanceStore();
       const sourceUpgrade = new PostgresInstanceUpgradeTarget("embedded://local", async () => undefined, source.upgradeDatabase); await sourceUpgrade.apply("0.0.0", "0.1.0");
@@ -475,9 +477,9 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
   });
 
   test("rejects corrupt protected source state before cutover and leaves both Instances restartable", async () => {
-    const sourceKey = key(); const sourceRoot = await mkdtemp(join(tmpdir(), "stash-migration-corrupt-source-"));
+    const sourceKey = key(); const sourceRoot = await temporaryTestDirectory("stash-migration-corrupt-source-");
     let source = await EmbeddedInstanceStore.open(sourceRoot, createAuthenticationSecretCodec(sourceKey));
-    const admin = new Pool({ connectionString: postgresUrl! }); const schema = `embedded_corrupt_${randomUUID().replaceAll("-", "")}`; const root = await mkdtemp(join(tmpdir(), "stash-migration-corrupt-destination-"));
+    const admin = new Pool({ connectionString: postgresUrl! }); const schema = `embedded_corrupt_${randomUUID().replaceAll("-", "")}`; const root = await temporaryTestDirectory("stash-migration-corrupt-destination-");
     try {
       await source.database.verifyConnection(); await source.database.prepareInstanceStore(); await source.database.createFirstOrganizationOwner({ organizationId: randomUUID(), organizationName: "Corrupt",
         ownerId: randomUUID(), ownerName: "Owner", ownerEmail: "corrupt@example.test", passwordHash: "protected-password", role: "Owner" });
@@ -498,7 +500,7 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
     try {
       for (const mode of ["preserve", "rotate"] as const) {
         const sourceKey = key(); const destinationKey = mode === "preserve" ? sourceKey : key();
-        const root = await mkdtemp(join(tmpdir(), `stash-migration-cli-${mode}-`)); const sourceRoot = join(root, "source");
+        const root = await temporaryTestDirectory(`stash-migration-cli-${mode}-`); const sourceRoot = join(root, "source");
         const source = await EmbeddedInstanceStore.open(sourceRoot, createAuthenticationSecretCodec(sourceKey));
         const organizationId = randomUUID(); const ownerId = randomUUID(); const workspaceId = randomUUID();
         await source.database.verifyConnection(); await source.database.prepareInstanceStore(); await source.database.createFirstOrganizationOwner({ organizationId,
@@ -511,7 +513,7 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
         await writeFile(join(source.paths.attachments, "audit.txt"), "migration audit Attachment");
         await writeFile(join(source.paths.configuration, "runtime.json"), JSON.stringify({ diagnostics: "local" }));
         await source.close();
-        const keyRoot = await mkdtemp(join(tmpdir(), "stash-migration-cli-keys-")); const sourceKeyFile = join(keyRoot, "source.key"); const destinationKeyFile = join(keyRoot, "destination.key");
+        const keyRoot = await temporaryTestDirectory("stash-migration-cli-keys-"); const sourceKeyFile = join(keyRoot, "source.key"); const destinationKeyFile = join(keyRoot, "destination.key");
         await writeFile(sourceKeyFile, sourceKey, { mode: 0o600 }); if (mode === "rotate") await writeFile(destinationKeyFile, destinationKey, { mode: 0o600 });
         const schema = `embedded_cli_${mode}_${randomUUID().replaceAll("-", "")}`; await admin.query(`CREATE SCHEMA ${schema}`);
         const scoped = new URL(postgresUrl!); scoped.searchParams.set("options", `-csearch_path=${schema}`);

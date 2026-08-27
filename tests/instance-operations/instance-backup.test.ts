@@ -1,6 +1,8 @@
+import { temporaryTestDirectory } from "../support/temporary-directory.js";
+
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -52,7 +54,7 @@ describe("coordinated Instance Backup", () => {
   afterEach(async () => { await Promise.all(instances.splice(0).map((instance) => instance.close())); });
 
   it("creates a versioned, integrity-checked backup without embedding the master key", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-backup-test-"));
+    const root = await temporaryTestDirectory("stash-backup-test-");
     const source = new FakeSource();
     const service = new InstanceBackupService(source, { masterKey, now: () => new Date("2026-08-23T10:00:00.000Z") });
     const result = await service.create(join(root, "backup"));
@@ -73,7 +75,7 @@ describe("coordinated Instance Backup", () => {
   });
 
   it("closes the mutation boundary and drains in-flight work before capturing coordinated state", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-backup-drain-")); const source = new FakeSource();
+    const root = await temporaryTestDirectory("stash-backup-drain-"); const source = new FakeSource();
     const service = new InstanceBackupService(source, { masterKey }); let releaseMutation!: () => void; let enteredBarrier!: () => void;
     const mutation = new Promise<void>((resolve) => { releaseMutation = () => { source.calls.push("mutation_committed"); resolve(); }; });
     const barrierEntered = new Promise<void>((resolve) => { enteredBarrier = resolve; });
@@ -85,7 +87,7 @@ describe("coordinated Instance Backup", () => {
   });
 
   it("wires the running Instance drain without making the backup request wait on itself", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-backup-instance-drain-")); const source = new FakeSource();
+    const root = await temporaryTestDirectory("stash-backup-instance-drain-"); const source = new FakeSource();
     const service = new InstanceBackupService(source, { masterKey }); let releaseRequest!: () => void; let enteredRequest!: () => void;
     const requestGate = new Promise<void>((resolve) => { releaseRequest = resolve; });
     const requestEntered = new Promise<void>((resolve) => { enteredRequest = resolve; });
@@ -105,7 +107,7 @@ describe("coordinated Instance Backup", () => {
   });
 
   it("creates, verifies, and restores an Instance with no Attachments", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-backup-empty-"));
+    const root = await temporaryTestDirectory("stash-backup-empty-");
     const source = new FakeSource(); source.emptyAttachments = true;
     const path = join(root, "backup"); const service = new InstanceBackupService(source, { masterKey });
     await service.create(path);
@@ -117,7 +119,7 @@ describe("coordinated Instance Backup", () => {
   });
 
   it("rejects a database adapter mismatch during dry-run before restore preparation", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-backup-adapter-mismatch-"));
+    const root = await temporaryTestDirectory("stash-backup-adapter-mismatch-");
     const path = join(root, "backup"); const service = new InstanceBackupService(new FakeSource(), { masterKey });
     await service.create(path); const target = new FakeRestoreTarget();
     Object.defineProperty(target, "databaseFormat", { value: "pglite-data-directory-v1" });
@@ -142,7 +144,7 @@ describe("coordinated Instance Backup", () => {
   });
 
   it("dry-runs restore verification and rejects corruption, missing files, wrong keys, and versions", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-backup-verify-"));
+    const root = await temporaryTestDirectory("stash-backup-verify-");
     const path = join(root, "backup");
     const service = new InstanceBackupService(new FakeSource(), { masterKey });
     await service.create(path);
@@ -161,7 +163,7 @@ describe("coordinated Instance Backup", () => {
   });
 
   it("verifies before restoration and makes dry-run non-mutating", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-backup-restore-"));
+    const root = await temporaryTestDirectory("stash-backup-restore-");
     const path = join(root, "backup");
     const service = new InstanceBackupService(new FakeSource(), { masterKey });
     await service.create(path);
@@ -173,7 +175,7 @@ describe("coordinated Instance Backup", () => {
   });
 
   it("stages Attachments before database mutation and rolls the database back if their atomic swap fails", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-backup-rollback-"));
+    const root = await temporaryTestDirectory("stash-backup-rollback-");
     const path = join(root, "backup"); const service = new InstanceBackupService(new FakeSource(), { masterKey }); await service.create(path);
     const target = new FakeRestoreTarget(); target.commitFailure = new Error("attachment swap unavailable");
     await assert.rejects(service.restore(path, target, { dryRun: false }), /attachment swap unavailable/);
@@ -182,7 +184,7 @@ describe("coordinated Instance Backup", () => {
   });
 
   it("gates all application API traffic before the rollback snapshot and throughout a running restore", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-backup-concurrency-")); const backupRoot = join(root, "scheduled");
+    const root = await temporaryTestDirectory("stash-backup-concurrency-"); const backupRoot = join(root, "scheduled");
     const service = new InstanceBackupService(new FakeSource(), { masterKey }); await service.create(join(backupRoot, "release-ready"));
     const target = new FakeRestoreTarget(); let continueSnapshot!: () => void; let snapshotStarted!: () => void;
     const snapshotGate = new Promise<void>((resolve) => { continueSnapshot = resolve; });
@@ -230,7 +232,7 @@ describe("coordinated Instance Backup", () => {
   });
 
   it("never resumes traffic when Attachment failure and database rollback both fail", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-backup-double-failure-")); const backupRoot = join(root, "scheduled");
+    const root = await temporaryTestDirectory("stash-backup-double-failure-"); const backupRoot = join(root, "scheduled");
     const service = new InstanceBackupService(new FakeSource(), { masterKey }); await service.create(join(backupRoot, "release-ready"));
     const target = new FakeRestoreTarget(); target.commitFailure = new Error("attachment swap unavailable"); target.rollbackFailure = new Error("database rollback unavailable");
     const instance = await startInstance({ database: new Probe(), host: "127.0.0.1", port: 0, instanceAdminToken: "admin",
@@ -247,7 +249,7 @@ describe("coordinated Instance Backup", () => {
   });
 
   it("rejects unlisted files, symbolic links, and unlisted directories before restore", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-backup-inventory-"));
+    const root = await temporaryTestDirectory("stash-backup-inventory-");
     const service = new InstanceBackupService(new FakeSource(), { masterKey });
     for (const kind of ["file", "symlink", "directory"] as const) {
       const path = join(root, kind); await service.create(path);
@@ -259,7 +261,7 @@ describe("coordinated Instance Backup", () => {
   });
 
   it("publishes visible backup health only to the Instance Administrator", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-backup-health-"));
+    const root = await temporaryTestDirectory("stash-backup-health-");
     const backupRoot = join(root, "scheduled");
     const service = new InstanceBackupService(new FakeSource(), { masterKey, now: () => new Date("2026-08-23T10:00:00.000Z") });
     const firstBackup = join(backupRoot, "first"); await service.create(firstBackup);
@@ -289,7 +291,7 @@ describe("coordinated Instance Backup", () => {
   });
 
   it("lets only an Instance Administrator list, dry-run, and explicitly confirm a restore", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-backup-administration-"));
+    const root = await temporaryTestDirectory("stash-backup-administration-");
     const backupRoot = join(root, "scheduled");
     const service = new InstanceBackupService(new FakeSource(), { masterKey, now: () => new Date("2026-08-23T10:00:00.000Z") });
     await service.create(join(backupRoot, "release-ready"));
@@ -324,7 +326,7 @@ describe("coordinated Instance Backup", () => {
   });
 
   it("returns actionable restore diagnostics without accepting path traversal", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-backup-diagnostics-")); const backupRoot = join(root, "scheduled");
+    const root = await temporaryTestDirectory("stash-backup-diagnostics-"); const backupRoot = join(root, "scheduled");
     const service = new InstanceBackupService(new FakeSource(), { masterKey }); await service.create(join(backupRoot, "corrupt"));
     await mkdir(join(backupRoot, "missing-manifest"));
     await mkdir(join(backupRoot, "metadata-missing")); await writeFile(join(backupRoot, "metadata-missing", "manifest.json"), "{}");
@@ -349,7 +351,7 @@ describe("coordinated Instance Backup", () => {
   });
 
   it("does not publish a partial backup when capture fails", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-backup-failure-"));
+    const root = await temporaryTestDirectory("stash-backup-failure-");
     const source = new FakeSource(); source.fail = new Error("database snapshot unavailable");
     const service = new InstanceBackupService(source, { masterKey });
     await assert.rejects(service.create(join(root, "backup")), /database snapshot unavailable/);

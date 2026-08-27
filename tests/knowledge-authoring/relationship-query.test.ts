@@ -1,3 +1,5 @@
+import { temporaryTestDirectory } from "../support/temporary-directory.js";
+
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
@@ -162,7 +164,7 @@ describe("relationship query contracts", () => {
   });
 
   test("filters identities, edges, unresolved targets, and pagination metadata before returning a neighborhood", async () => {
-    const store = await EmbeddedInstanceStore.open(await mkdtemp(join(tmpdir(), "stash-relationships-")),
+    const store = await EmbeddedInstanceStore.open(await temporaryTestDirectory("stash-relationships-"),
       createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
     try {
       const ownerId = "44444444-4444-4444-8444-444444444444";
@@ -357,7 +359,7 @@ describe("relationship query contracts", () => {
         [guestId, "93939393-9393-4393-8393-939393939393", "94949494-9494-4494-8494-949494949494"]] as const) {
         const archive = await new PortableWorkspaceExportService(store.database.knowledgeAuthoringRepositories(), emptyAttachments).export(memberId, workspaceId);
         assert.equal(archive.status, "exported"); if (archive.status !== "exported") continue;
-        const destination = await EmbeddedInstanceStore.open(await mkdtemp(join(tmpdir(), "stash-relationship-import-")),
+        const destination = await EmbeddedInstanceStore.open(await temporaryTestDirectory("stash-relationship-import-"),
           createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
         try {
           await destination.database.createFirstOrganizationOwner({ organizationId: `${destinationOwnerId.slice(0, -1)}1`, organizationName: "Destination",

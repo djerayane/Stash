@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
@@ -153,6 +153,7 @@ async function main() {
   const archive = value("--archive"); const staged = value("--bundle-dir");
   if (Boolean(archive) === Boolean(staged)) throw new Error("usage: smoke-server-bundle --archive <path> | --bundle-dir <path>");
   const extraction = await mkdtemp(join(tmpdir(), "stash & bundle extract ")); let bundle = staged && resolve(staged);
+  try {
   if (archive) {
     if (archive.endsWith(".zip")) run("powershell", ["-NoProfile", "-Command", `Expand-Archive -LiteralPath '${resolve(archive)}' -DestinationPath '${extraction}'`]);
     else run("tar", ["-xzf", resolve(archive), "-C", extraction]);
@@ -207,6 +208,7 @@ async function main() {
   if (process.platform === "linux") { const traces = (await filesBelow(extraction)).filter((path) => basename(path).startsWith("syscalls-")); if (traces.length < 9) throw new Error(`Not every launcher invocation was syscall-traced (${traces.length})`);
     for (const trace of traces) { const content = await readFile(trace, "utf8"); if (/docker\.sock|\/var\/run\/docker|execve\([^\n]*(?:docker|podman)|connect\([^\n]*(?:docker|2375|2376)/i.test(content)) throw new Error(`Forbidden Docker execution or API access in ${trace}`); for (const secret of allForbidden) if (content.includes(secret)) throw new Error(`Secret leaked into syscall trace ${trace}`); } }
   for (const secret of ["standalone-acceptance-password", ...(value("--postgres-url") ? [] : [])]) if (stderr.includes(secret) || stdout.includes(secret)) throw new Error("Standalone logs contain forbidden secret material");
-  process.stdout.write("Standalone bundle boot, restart, lock, Attachment, backup, and restore smoke passed.\n");
+    process.stdout.write("Standalone bundle boot, restart, lock, Attachment, backup, and restore smoke passed.\n");
+  } finally { await rm(extraction, { recursive: true, force: true }); }
 }
 main().catch((error) => { process.stderr.write(`${error instanceof Error ? error.message : "Standalone smoke failed"}\n`); process.exitCode = 1; });

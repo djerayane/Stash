@@ -1,5 +1,7 @@
+import { temporaryTestDirectory } from "./support/temporary-directory.js";
+
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,7 +15,7 @@ async function workflow(name: string): Promise<string> {
 
 describe("container release contract", () => {
   it("excludes repository-local worktrees from the Docker build context", async () => {
-    const fixture = await mkdtemp(join(tmpdir(), "stash-docker-context-"));
+    const fixture = await temporaryTestDirectory("stash-docker-context-");
     const output = join(fixture, "output");
 
     try {

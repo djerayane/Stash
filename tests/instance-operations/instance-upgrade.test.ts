@@ -1,3 +1,5 @@
+import { temporaryTestDirectory } from "../support/temporary-directory.js";
+
 import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -30,7 +32,7 @@ describe("Instance upgrades", () => {
   afterEach(async () => Promise.all(instances.splice(0).map((instance) => instance.close())));
 
   it("preflights and refuses mutation when a requirement is unmet", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-upgrade-blocked-")); const target = new Target();
+    const root = await temporaryTestDirectory("stash-upgrade-blocked-"); const target = new Target();
     target.checks = [{ id: "disk", status: "fail", message: "Insufficient free space for a rollback-safe upgrade." }];
     const upgrades = new InstanceUpgradeService({ target, backups: new InstanceBackupService(new Source(), { masterKey }), backupRoot: root, targetVersion: "0.2.0" });
     const instance = await startInstance({ database: { async verifyConnection() {}, async close() {} }, host: "127.0.0.1", port: 0,
@@ -45,7 +47,7 @@ describe("Instance upgrades", () => {
   });
 
   it("creates a verified rollback point and restores it when migration fails", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-upgrade-rollback-")); const target = new Target();
+    const root = await temporaryTestDirectory("stash-upgrade-rollback-"); const target = new Target();
     const upgrades = new InstanceUpgradeService({ target, backups: new InstanceBackupService(new Source(), { masterKey }), backupRoot: root, targetVersion: "0.2.0",
       now: () => new Date("2026-08-23T12:00:00.000Z") });
     const instance = await startInstance({ database: { async verifyConnection() {}, async close() {} }, host: "127.0.0.1", port: 0,
@@ -57,7 +59,7 @@ describe("Instance upgrades", () => {
   });
 
   it("keeps readiness closed after a successful upgrade until restart", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-upgrade-success-")); const target = new Target(); target.fail = false;
+    const root = await temporaryTestDirectory("stash-upgrade-success-"); const target = new Target(); target.fail = false;
     const upgrades = new InstanceUpgradeService({ target, backups: new InstanceBackupService(new Source(), { masterKey }), backupRoot: root, targetVersion: "0.2.0" });
     const instance = await startInstance({ database: { async verifyConnection() {}, async close() {} }, host: "127.0.0.1", port: 0,
       instanceAdminToken: "admin", instanceUpgrades: upgrades }); instances.push(instance);
@@ -70,7 +72,7 @@ describe("Instance upgrades", () => {
   });
 
   it("claims the upgrade before asynchronous preflight so concurrent callers cannot both mutate", async () => {
-    const root = await mkdtemp(join(tmpdir(), "stash-upgrade-concurrent-")); const target = new Target(); target.fail = false; const source = new Source();
+    const root = await temporaryTestDirectory("stash-upgrade-concurrent-"); const target = new Target(); target.fail = false; const source = new Source();
     const upgrades = new InstanceUpgradeService({ target, backups: new InstanceBackupService(source, { masterKey }), backupRoot: root, targetVersion: "0.2.0" });
     const [first, second] = await Promise.allSettled([upgrades.upgrade(), upgrades.upgrade()]);
     assert.equal(first.status, "fulfilled"); assert.equal(second.status, "rejected");

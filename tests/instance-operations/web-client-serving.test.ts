@@ -1,5 +1,7 @@
+import { temporaryTestDirectory } from "../support/temporary-directory.js";
+
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, mkdir } from "node:fs/promises";
+import { writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -7,7 +9,7 @@ import test from "node:test";
 import { startInstance } from "../support/start-test-instance.js";
 
 test("the Instance serves the built web client and its SPA routes", async (context) => {
-  const webRoot = await mkdtemp(join(tmpdir(), "stash-web-client-"));
+  const webRoot = await temporaryTestDirectory("stash-web-client-");
   await mkdir(join(webRoot, "assets"));
   await writeFile(join(webRoot, "index.html"), "<!doctype html><title>Built Stash</title>");
   await writeFile(join(webRoot, "assets", "client.js"), "window.stash = true;");
