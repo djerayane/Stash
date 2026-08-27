@@ -126,7 +126,7 @@ describe("Note Tree HTTP", () => {
     assert.equal(privateResponse.status, 201);
     const privateNote = (await privateResponse.json() as any).node;
 
-    assert.equal((await new NoteService(store.database).triage(ownerId, workspaceId, root.id, {
+    assert.equal((await new NoteService(store.database.knowledgeAuthoringRepositories()).triage(ownerId, workspaceId, root.id, {
       action: "organize", projectId: project.project.id,
     })).status, "updated");
     await store.upgradeDatabase.query("INSERT INTO stash_project_guests(project_id,account_id) VALUES($1,$2)",

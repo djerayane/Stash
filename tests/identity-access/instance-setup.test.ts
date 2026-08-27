@@ -205,7 +205,7 @@ describe("fresh Instance setup", () => {
       passwordAuth,
       capabilities: createCapabilityRegistry([
         identityAccessCapability({ passwordAuth, instanceSetup: setup }),
-        knowledgeAuthoringCapability({ notes: new NoteService(store.database),
+        knowledgeAuthoringCapability({ notes: new NoteService(store.database.knowledgeAuthoringRepositories()),
           noteTree: new NoteTreeService(store.database.noteTreeRepository(), store.database.tutorialContributionRepository()),
           starterTutorials: new TutorialContributionService(store.database.tutorialContributionRepository()), memberAccess: passwordAuth }),
         workPlanningCapability({ tasks: new TaskService(store.database, store.database), memberAccess: passwordAuth,

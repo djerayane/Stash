@@ -123,12 +123,12 @@ describe("Note Tree", () => {
     assert.equal(project.status, "created"); assert.equal(strategy.status, "created"); assert.equal(review.status, "created");
     if (project.status !== "created" || strategy.status !== "created" || review.status !== "created") return;
     launchProjectId = project.project.id; strategyProjectId = strategy.project.id;
-    const organized = await new NoteService(store.database).triage(ownerId, workspaceId, roadmapId, {
+    const organized = await new NoteService(store.database.knowledgeAuthoringRepositories()).triage(ownerId, workspaceId, roadmapId, {
       action: "organize",
       projectId: project.project.id,
     });
     assert.equal(organized.status, "updated");
-    assert.equal((await new NoteService(store.database).triage(ownerId, workspaceId, questionsId, {
+    assert.equal((await new NoteService(store.database.knowledgeAuthoringRepositories()).triage(ownerId, workspaceId, questionsId, {
       action: "organize", projectId: review.project.id,
     })).status, "updated");
 
@@ -169,7 +169,7 @@ describe("Note Tree", () => {
 
     const strategyRoot = await service.create(ownerId, workspaceId, { title: "Strategy home" });
     assert.equal(strategyRoot.status, "created"); if (strategyRoot.status !== "created") return;
-    assert.equal((await new NoteService(store.database).triage(ownerId, workspaceId, strategyRoot.node.id, {
+    assert.equal((await new NoteService(store.database.knowledgeAuthoringRepositories()).triage(ownerId, workspaceId, strategyRoot.node.id, {
       action: "organize", projectId: strategy.project.id,
     })).status, "updated");
     const inherited = await service.preview(ownerId, roadmapId, { action: "move", parentId: strategyRoot.node.id });

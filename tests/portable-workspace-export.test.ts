@@ -213,7 +213,7 @@ describe("PostgreSQL readable export wiring", { skip: postgresUrl ? false : "STA
       const uploaded = await attachments.create(ownerId, createdWorkspace.workspace.id,
         { filename: "proof.bin", contentType: "application/octet-stream", source: "upload", content: Buffer.from([9, 8, 7, 6]) });
       assert.equal(uploaded.status, "created"); if (uploaded.status !== "created") return;
-      const notes = new NoteService(database);
+      const notes = new NoteService(database.knowledgeAuthoringRepositories());
       const visibleNote = await notes.capture(ownerId, createdWorkspace.workspace.id, { projectId: firstProject.project.id,
         content: `[proof.bin](<${portableAttachmentHref(uploaded.record.relativePath)}>)` });
       const privateNote = await notes.capture(ownerId, createdWorkspace.workspace.id, { projectId: secondProject.project.id, content: "Private roadmap" });

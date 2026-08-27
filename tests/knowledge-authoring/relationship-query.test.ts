@@ -190,9 +190,9 @@ describe("relationship query contracts", () => {
       assert.equal(visibleChild.status, "created"); assert.equal(privateNote.status, "created"); assert.equal(orphan.status, "created");
       assert.equal(visibleIsolated.status, "created");
       if (visibleChild.status !== "created" || privateNote.status !== "created" || orphan.status !== "created" || visibleIsolated.status !== "created") return;
-      assert.equal((await new NoteService(store.database).triage(ownerId, workspaceId, visibleRoot.node.id,
+      assert.equal((await new NoteService(store.database.knowledgeAuthoringRepositories()).triage(ownerId, workspaceId, visibleRoot.node.id,
         { action: "organize", projectId: project.project.id })).status, "updated");
-      assert.equal((await new NoteService(store.database).triage(ownerId, workspaceId, visibleIsolated.node.id,
+      assert.equal((await new NoteService(store.database.knowledgeAuthoringRepositories()).triage(ownerId, workspaceId, visibleIsolated.node.id,
         { action: "organize", projectId: project.project.id })).status, "updated");
       await store.upgradeDatabase.query("INSERT INTO stash_project_guests(project_id,account_id) VALUES($1,$2)", [project.project.id, guestId]);
       assert.equal((await notes.createContextLink(ownerId, visibleRoot.node.id,
