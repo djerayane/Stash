@@ -1,10 +1,10 @@
 import { json, readJson, type HttpRoute } from "../http-routing.js";
 import type { MemberAccessResolver } from "../workspaces-projects.js";
-import { InvalidStarterTutorialInput, type StarterTutorialService } from "./starter-tutorial.js";
+import { InvalidTutorialContributionInput, type TutorialContributionService } from "./collections.js";
 
 const tutorialPath = /^\/api\/notes\/([^/]+)\/starter-tutorial(?:\/(collection|view))?$/;
 
-export function starterTutorialRoutes(service: StarterTutorialService, memberAccess: MemberAccessResolver): HttpRoute {
+export function starterTutorialRoutes(service: TutorialContributionService, memberAccess: MemberAccessResolver): HttpRoute {
   return {
     matches(_request, url) { return tutorialPath.test(url.pathname); },
     async handle(request, response, url) {
@@ -32,15 +32,12 @@ export function starterTutorialRoutes(service: StarterTutorialService, memberAcc
               : request.method === "DELETE" && !operation
                 ? await service.remove(member.accountId, rootNoteId, await readJson(request))
                 : undefined;
-        if (tutorial === "removed") {
-          json(response, 200, { removed: true });
-        } else if (!tutorial || tutorial === "not_found") {
-          json(response, 404, { error: "tutorial_not_found", message: "That starter tutorial is not available." });
-        } else {
-          json(response, 200, { tutorial });
-        }
+        if (tutorial === "removed") json(response, 200, { removed: true });
+        else if (!tutorial || tutorial === "not_found") json(response, 404,
+          { error: "tutorial_not_found", message: "That starter tutorial is not available." });
+        else json(response, 200, { tutorial });
       } catch (error) {
-        if (error instanceof InvalidStarterTutorialInput) {
+        if (error instanceof InvalidTutorialContributionInput) {
           json(response, 422, { error: "invalid_input", message: "The starter tutorial value must be valid." });
         } else if (error instanceof SyntaxError) {
           json(response, 400, { error: "invalid_json", message: "Request body must be valid JSON." });

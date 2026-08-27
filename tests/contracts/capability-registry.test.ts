@@ -84,7 +84,7 @@ describe("capability registry", () => {
         passwordAuth: memberAccess as never,
         instanceAdminToken: "capability-contract-admin",
       }),
-      knowledgeAuthoringCapability({ notes: {} as never, memberAccess }),
+      knowledgeAuthoringCapability({ notes: {} as never, starterTutorials: {} as never, memberAccess }),
       workPlanningCapability({ tasks: {} as never, memberAccess }),
       developmentIntegrationCapability({
         memberAccess,
@@ -103,6 +103,8 @@ describe("capability registry", () => {
     assert.equal(owns("identity-access", "POST", "/api/instance/organizations/bootstrap"), true);
     assert.equal(owns("instance-operations", "POST", "/api/instance/organizations/bootstrap"), false);
     assert.equal(owns("instance-operations", "GET", "/api/diagnostics/schema"), true);
+    assert.equal(owns("knowledge-authoring", "GET", "/api/notes/capability-contract-note/starter-tutorial"), true);
+    assert.equal(owns("identity-access", "GET", "/api/notes/capability-contract-note/starter-tutorial"), false);
 
     const instance = await startInstance({
       database: { verifyConnection: async () => undefined, close: async () => undefined },
@@ -119,6 +121,7 @@ describe("capability registry", () => {
 
       for (const pathname of [
         "/api/notes/capability-contract-note",
+        "/api/notes/capability-contract-note/starter-tutorial",
         "/api/projects/capability-contract-project/tasks/STASH-167",
         "/api/organizations/capability-contract-organization/repository-connections",
       ]) {

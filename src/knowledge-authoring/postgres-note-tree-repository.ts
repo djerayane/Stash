@@ -8,7 +8,7 @@ import type { NoteTreeAccessChange, NoteTreeNode, NoteTreeRepository } from "./n
 
 type PrepareNotes = (client: PostgresQueryable) => Promise<void>;
 export interface NoteTreeBranchLifecycle {
-  trashed(client: PostgresQueryable, rootNoteId: string): Promise<void>;
+  beforeRemove(client: PostgresQueryable, noteIds: readonly string[]): Promise<"allowed" | "collection_owner_requires_relocation">;
 }
 
 const workspaceMember = (workspace: "workspace" | "stash_workspaces", member = "$2") =>
@@ -292,6 +292,12 @@ export class PostgresNoteTreeRepository implements NoteTreeRepository {
       if (!preliminary.rows[0]) return { status: "note_not_found" as const };
       await client.query("SELECT id FROM stash_workspaces WHERE id=$1 FOR UPDATE", [preliminary.rows[0].workspace_id]);
       if (!(await client.query("SELECT 1 FROM stash_notes WHERE id=$1 FOR UPDATE", [noteId])).rowCount) return { status: "note_not_found" as const };
+      const branch = await client.query<{ id: string }>(`WITH RECURSIVE branch AS (
+        SELECT id,tree_position,ARRAY[tree_position] AS ordering FROM stash_notes WHERE id=$1
+        UNION ALL SELECT child.id,child.tree_position,branch.ordering || child.tree_position FROM stash_notes child JOIN branch ON child.parent_id=branch.id
+      ) SELECT id FROM branch ORDER BY ordering,id`, [noteId]);
+      const permitted = await this.lifecycle?.beforeRemove(client, branch.rows.map(({ id }) => id));
+      if (permitted === "collection_owner_requires_relocation") return { status: "collection_owner_requires_relocation" as const };
       const column = state === "archived" ? "archived_at" : "trashed_at";
       const rows = await client.query<any>(`WITH RECURSIVE branch AS (
         SELECT id,tree_position,ARRAY[tree_position] AS ordering FROM stash_notes WHERE id=$1
@@ -299,7 +305,6 @@ export class PostgresNoteTreeRepository implements NoteTreeRepository {
       ), updated AS (UPDATE stash_notes SET ${column}=CURRENT_TIMESTAMP,location_revision=location_revision+1
         WHERE id IN (SELECT id FROM branch) RETURNING *) SELECT updated.* FROM updated JOIN branch USING(id) ORDER BY branch.ordering,updated.id`, [noteId]);
       for (const row of rows.rows) await this.#recordLocation(client, row);
-      if (state === "trashed") await this.lifecycle?.trashed(client, noteId);
       return { status: "updated" as const, affectedIds: rows.rows.map(({ id }: any) => id) };
     });
   }

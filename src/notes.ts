@@ -51,9 +51,10 @@ export interface PortableTaskProjection {
 }
 
 /** A canonical Workspace Task is intentionally not forced into a Project identity. */
-export interface PortableWorkspaceTaskProjection extends Omit<PortableTaskProjection, "projectId" | "key"> {
+export interface PortableWorkspaceTaskProjection extends Omit<PortableTaskProjection, "projectId" | "key" | "status"> {
   projectId?: never;
   key?: never;
+  status: { id: string; name: string; category: "unstarted" | "started" | "completed" | "canceled" };
 }
 
 export type PortableExportTaskProjection = PortableTaskProjection | PortableWorkspaceTaskProjection;

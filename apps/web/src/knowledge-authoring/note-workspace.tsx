@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router";
 
 import { ContextDrawer, type NoteContextData } from "./context-drawer";
@@ -13,6 +13,8 @@ export function NoteWorkspace({ noteId, token, children, fetcher = globalThis.fe
   const [removedState, setRemovedState] = useState<"archived" | "trashed">();
   const [permanentlyRemoved, setPermanentlyRemoved] = useState(false);
   const toggleRef = useRef<HTMLButtonElement>(null);
+  const removalStatusRef = useRef<HTMLParagraphElement>(null);
+  useEffect(() => { if (permanentlyRemoved) removalStatusRef.current?.focus(); }, [permanentlyRemoved]);
   const client = useQueryClient();
   const context = useQuery({ queryKey: ["note-context", noteId], retry: false, queryFn: async () => {
     const response = await fetcher(`/api/notes/${encodeURIComponent(noteId)}/context`, { headers: { authorization: `Bearer ${token}` } });
@@ -51,7 +53,7 @@ export function NoteWorkspace({ noteId, token, children, fetcher = globalThis.fe
         <button ref={toggleRef} aria-expanded={drawerOpen} aria-label={drawerOpen ? "Close Note context" : "Open Note context"} type="button"
           onClick={() => drawerOpen ? close() : setDrawerOpen(true)}>{drawerOpen ? "Close context" : "Context"}</button></div>
     </section>
-    {permanentlyRemoved ? <p className={styles.branchStatus} role="status">The starter tutorial and its sample Tasks were permanently removed.</p>
+    {permanentlyRemoved ? <p className={styles.branchStatus} ref={removalStatusRef} role="status" tabIndex={-1}>The starter tutorial and its sample Tasks were permanently removed.</p>
       : removedState ? <p className={styles.branchStatus} role="status">This Note branch is {removedState}. Restore it to return it to the Note Tree.</p> : branchAction.isError || restore.isError ? <p className={styles.branchError} role="alert">{branchAction.error?.message ?? restore.error?.message}</p> : null}
     {!permanentlyRemoved ? <div className={styles.editorSlot}>{children}</div> : null}
     {!removedState && !permanentlyRemoved ? <StarterTutorialPanel fetcher={fetcher} noteId={noteId} token={token}

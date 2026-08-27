@@ -178,6 +178,28 @@ describe("Portable Workspace import", () => {
     assert.deepEqual(repository.committed?.state.noteLocations[1], source.noteLocations[1]);
     assert.deepEqual(repository.committed?.state.noteLinks[0], source.noteLinks[0]);
   });
+  it("round-trips a canceled Workspace Task through its canonical Workspace Workflow", async () => {
+    const workflowId = "41414141-4141-4141-8141-414141414141";
+    const statusId = "42424242-4242-4242-8242-424242424242";
+    const taskId = "43434343-4343-4343-8343-434343434343";
+    const source: PortableWorkspaceExportSnapshot = { ...snapshot, attachments: [],
+      tasks: [{ schema: "stash.task.v1", id: taskId, workspaceId, title: "Canceled starter task",
+        status: { id: statusId, name: "Canceled", category: "canceled" }, sourceNoteIds: [noteId],
+        createdAt: "2026-01-03T00:00:00.000Z", createdBy: actor }],
+      durableObjects: [{ kind: "WorkspaceWorkflow", id: workflowId, schema: "stash.workspace-workflow.v1",
+        payload: { schema: "stash.workspace-workflow.v1", id: workflowId, workspaceId,
+          statuses: [{ id: statusId, name: "Canceled", category: "canceled", position: 1 }] } }],
+    };
+    const first = new ImportMemory();
+    await new PortableWorkspaceImportService(first, { async put() {}, async get() { return Buffer.alloc(0); }, async delete() {} })
+      .import(randomUUID(), actor.localAccountId, await archiveFor(source));
+    assert.equal(first.committed?.state.tasks[0]?.status.category, "canceled");
+    const second = new ImportMemory();
+    await new PortableWorkspaceImportService(second, { async put() {}, async get() { return Buffer.alloc(0); }, async delete() {} })
+      .import(randomUUID(), actor.localAccountId, await archiveFor({ ...first.committed!.state, attachments: [] }));
+    assert.equal(second.committed?.state.tasks[0]?.status.category, "canceled");
+    assert.equal((second.committed?.state.durableObjects[0]?.payload as any).statuses[0].category, "canceled");
+  });
   it("round-trips canonical semantics and Attachment bytes through a running Instance, preserving missing people as Identity Stubs", async () => {
     const repository = new ImportMemory(); const database = { async verifyConnection() {}, async close() {} };
     const instance = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin",

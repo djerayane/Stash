@@ -258,7 +258,9 @@ export class PostgresDatabase implements
   constructor(connectionString: string, authenticationSecrets: AuthenticationSecretCodec, options: PostgresDatabaseOptions = {}) {
     this.#kernel = new PostgresKernel(connectionString, options);
     this.#authenticationSecrets = authenticationSecrets;
-    this.#noteTreeRepository = new PostgresNoteTreeRepository(this.#kernel, (client) => this.#ensureNoteSchema(client));
+    this.#noteTreeRepository = new PostgresNoteTreeRepository(this.#kernel, (client) => this.#ensureNoteSchema(client), {
+      beforeRemove: (client, noteIds) => this.#tutorialContributionRepository.beforeRemove(client, noteIds),
+    });
     this.#tutorialContributionRepository = new PostgresTutorialContributionRepository(this.#kernel,
       (client) => this.#noteTreeRepository.prepare(client));
     this.#instanceSetupRepository = new PostgresInstanceSetupRepository(this.#kernel, authenticationSecrets, async (client) => {

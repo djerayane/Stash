@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { AuthenticationSecretCodec } from "../authentication-secrets.js";
-import type { TutorialContributionRepository } from "../knowledge-authoring/collections.js";
+import type { StarterKnowledgeSeeder } from "../knowledge-authoring/collections.js";
 import type { PostgresKernel, PostgresQueryable } from "../instance-operations/storage/postgres-kernel.js";
 import { paragraphDocument } from "../rich-text.js";
 import type { FirstPersonalInstanceSetup, InstanceSetupRepository } from "./instance-setup.js";
@@ -11,7 +11,7 @@ type PrepareBase = (client: PostgresQueryable) => Promise<void>;
 /** Identity-access-owned atomic first-run aggregate over focused capability adapters. */
 export class PostgresInstanceSetupRepository implements InstanceSetupRepository {
   constructor(private readonly kernel: PostgresKernel, private readonly secrets: AuthenticationSecretCodec,
-    private readonly prepareBase: PrepareBase, private readonly tutorial: TutorialContributionRepository) {}
+    private readonly prepareBase: PrepareBase, private readonly tutorial: StarterKnowledgeSeeder) {}
 
   async prepare(client: PostgresQueryable): Promise<void> {
     await this.prepareBase(client);

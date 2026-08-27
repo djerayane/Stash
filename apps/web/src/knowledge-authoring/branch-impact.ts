@@ -2,6 +2,7 @@ export interface BranchImpact {
   descendantCount: number;
   descendants: Array<{ noteId: string; title: string }>;
   collectionCount: number;
+  collectionRelocationRequired?: boolean;
   externalLinks: Array<{ noteId: string; title: string; direction: "incoming" | "outgoing" }>;
   projectAccessChanges: Array<{
     noteId: string;
@@ -19,6 +20,7 @@ export function branchImpactConfirmation(heading: string, impact: BranchImpact):
     heading,
     `Descendants (${impact.descendantCount}): ${listed(impact.descendants.map(({ title }) => title))}`,
     `Collections (${impact.collectionCount})`,
+    ...(impact.collectionRelocationRequired ? ["Collection owner: relocate or remove the Collection before removing only this branch."] : []),
     `External links (${impact.externalLinks.length}): ${listed(impact.externalLinks.map(({ direction, title }) => `${direction} ${title}`))}`,
     `Project access changes (${impact.projectAccessChanges.length}): ${listed(impact.projectAccessChanges.map(({ noteTitle, projectName, effect }) =>
       `${noteTitle} ${effect === "gained" ? "gains" : "loses"} ${projectName}`))}`,

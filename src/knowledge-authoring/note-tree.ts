@@ -23,11 +23,12 @@ export interface NoteBranchImpact {
   descendantCount: number;
   descendants: Array<{ noteId: string; title: string }>;
   collectionCount: number;
+  collectionRelocationRequired: boolean;
   externalLinks: Array<{ noteId: string; title: string; direction: "incoming" | "outgoing" }>;
   projectAccessChanges: NoteTreeAccessChange[];
 }
 
-export interface NoteBranchRepositoryImpact extends Omit<NoteBranchImpact, "collectionCount"> {
+export interface NoteBranchRepositoryImpact extends Omit<NoteBranchImpact, "collectionCount" | "collectionRelocationRequired"> {
   affectedNoteIds: string[];
 }
 
@@ -40,7 +41,10 @@ export interface RemovedNoteBranch {
 }
 
 export interface NoteTreeImpactInspector {
-  inspect(memberId: string, noteIds: readonly string[]): Promise<{ collectionCount: number }>;
+  inspect(memberId: string, noteIds: readonly string[]): Promise<{
+    collectionCount: number;
+    collectionRelocationRequired?: boolean;
+  }>;
 }
 
 /** Used by deployments that have no Collection impact provider registered. */
@@ -113,7 +117,8 @@ export interface NoteTreeRepository {
     { status: "found"; branches: RemovedNoteBranch[] } | { status: "workspace_forbidden" }
   >;
   setNoteBranchState(memberId: string, noteId: string, state: "archived" | "trashed"): Promise<
-    { status: "updated"; affectedIds: string[] } | { status: "note_not_found" }
+    { status: "updated"; affectedIds: string[] }
+    | { status: "note_not_found" | "collection_owner_requires_relocation" }
   >;
   restoreNoteBranch(memberId: string, noteId: string): Promise<
     { status: "restored"; restoredIds: string[]; parentRestored: boolean } | { status: "note_not_found" }
@@ -199,7 +204,8 @@ export class NoteTreeService {
     if (result.status !== "found") return result;
     const { affectedNoteIds, ...impact } = result.impact;
     const inspected = await this.impactInspector.inspect(memberId, affectedNoteIds);
-    return { status: "found" as const, impact: { ...impact, collectionCount: inspected.collectionCount } };
+    return { status: "found" as const, impact: { ...impact, collectionCount: inspected.collectionCount,
+      collectionRelocationRequired: inspected.collectionRelocationRequired === true } };
   }
 
   async removed(memberId: string, workspaceId: string) {
