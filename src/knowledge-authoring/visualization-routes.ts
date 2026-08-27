@@ -29,13 +29,15 @@ export function visualizationRoutes(visualizations: VisualizationBlockService, a
           if (result.status === "found") json(response, 200, { block: result.block });
           else json(response, 404, { error: result.status, message: "This Visualization Block is unavailable." });
         } else if (request.method === "PUT") {
-          const body = await readJson(request) as { definition?: unknown; expectedRevision?: number };
+          const body = await readJson(request) as { definition?: unknown; expectedRevision?: number; idempotencyKey?: unknown };
           if (!body.definition || typeof body.definition !== "object" || Array.isArray(body.definition)
             || (body.definition as { id?: unknown }).id !== blockId) throw new InvalidVisualizationBlock();
-          const result = await visualizations.save(member.accountId, noteId, body.definition, body.expectedRevision);
+          const result = await visualizations.save(member.accountId, noteId, body.definition, body.expectedRevision, body.idempotencyKey);
           if (result.status === "saved") json(response, 200, { block: result.block });
           else if (result.status === "changed") json(response, 409, { error: result.status, block: result.block,
             message: "This Visualization Block changed. Review the latest saved view." });
+          else if (result.status === "idempotency_conflict") json(response, 409, { error: result.status,
+            message: "This saved-view command key was already used for another change." });
           else json(response, 404, { error: result.status, message: "This Note is unavailable." });
         } else { response.setHeader("allow", "GET, PUT"); json(response, 405, { error: "method_not_allowed", message: "Use GET or PUT for a Visualization Block." }); }
       } catch (error) {

@@ -169,10 +169,10 @@ describe("Note Tree HTTP", () => {
       filters: { relationTypes: [], direction: "both" }, layout: { kind: "focused", positions: {} },
       viewEdges: [{ id: "guest-visible-edge", sourceNoteId: child.id, targetNoteId: root.id }] };
     assert.equal((await request(`/api/notes/${child.id}/visualizations/${guestBlockId}`, { method: "PUT",
-      body: JSON.stringify({ definition: guestDefinition }) })).status, 200);
+      body: JSON.stringify({ definition: guestDefinition, idempotencyKey: "36363636-3636-4636-8636-363636363636" }) })).status, 200);
     assert.equal((await guestRequest(`/api/notes/${child.id}/visualizations/${guestBlockId}`)).status, 200);
     assert.equal((await guestRequest(`/api/notes/${child.id}/visualizations/${guestBlockId}`, { method: "PUT",
-      body: JSON.stringify({ definition: guestDefinition }) })).status, 404);
+      body: JSON.stringify({ definition: guestDefinition, idempotencyKey: "37373737-3737-4737-8737-373737373737" }) })).status, 404);
     assert.equal((await guestRequest(`/api/notes/${child.id}/visualizations/${guestBlockId}/view-edges/guest-visible-edge/promote`, { method: "POST",
       body: JSON.stringify({ idempotencyKey: "35353535-3535-4535-8535-353535353535" }) })).status, 404);
   });
@@ -201,11 +201,13 @@ describe("Note Tree HTTP", () => {
       filters: { relationTypes: [], direction: "both" }, layout: { kind: "focused", positions: {} },
       viewEdges: [{ id: "http-view-edge", sourceNoteId: child.id, targetNoteId: root.id, relationshipType: "questions" }] };
     const saved = await request(`/api/notes/${root.id}/visualizations/${blockId}`, { method: "PUT",
-      body: JSON.stringify({ definition }) });
+      body: JSON.stringify({ definition, idempotencyKey: "38383838-3838-4838-8838-383838383838" }) });
     assert.equal(saved.status, 200);
     assert.equal((await saved.json() as any).block.revision, 1);
-    assert.equal((await request(`/api/notes/${root.id}/visualizations/79797979-7979-4979-8979-797979797979`, { method: "PUT",
+    assert.equal((await request(`/api/notes/${root.id}/visualizations/${blockId}`, { method: "PUT",
       body: JSON.stringify({ definition }) })).status, 422);
+    assert.equal((await request(`/api/notes/${root.id}/visualizations/79797979-7979-4979-8979-797979797979`, { method: "PUT",
+      body: JSON.stringify({ definition, idempotencyKey: "39393939-3939-4939-8939-393939393939" }) })).status, 422);
     assert.equal((await request(`/api/notes/${root.id}/visualizations/${blockId}`)).status, 200);
     const promoted = await request(`/api/notes/${root.id}/visualizations/${blockId}/view-edges/http-view-edge/promote`, { method: "POST",
       body: JSON.stringify({ idempotencyKey: "89898989-8989-4989-8989-898989898989" }) });

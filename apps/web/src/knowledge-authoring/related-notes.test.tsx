@@ -91,3 +91,42 @@ it("increases the node budget for wide neighborhoods and focuses the first newly
   expect(fetcher).toHaveBeenCalledWith(expect.stringContaining("limit=48"), expect.anything());
   expect(within(region).queryByRole("button", { name: "Expand related Notes" })).not.toBeInTheDocument();
 });
+
+it("loads orphan and broken-link pages independently and focuses the first appended maintenance item", async () => {
+  const lateLinkId = "77777777-7777-4777-8777-777777777777";
+  const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+    const path = String(input); const url = new URL(path, "http://stash.test");
+    if (path.includes("/relationships?")) return Response.json({ rootId: noteId, depth: 1, limit: 24, direction: "both",
+      hasMore: false, nodes: [{ id: noteId, title: "Research", depth: 0 }], edges: [], outline: [{ id: noteId, title: "Research", depth: 0 }] });
+    if (path.includes("/relationships/maintenance")) {
+      if (url.searchParams.get("brokenCursor") === "24") return Response.json({ orphans: [], brokenLinks: [{ id: lateLinkId,
+        sourceNoteId: noteId, sourceTitle: "Research", label: "Late broken source", revision: 1,
+        candidates: [{ id: childId, title: "Evidence" }] }], nextCursors: { orphans: "24" } });
+      if (url.searchParams.get("orphanCursor") === "24") return Response.json({ orphans: [{ id: deeperId, title: "Late orphan" }],
+        brokenLinks: [], nextCursors: { brokenLinks: "24" } });
+      return Response.json({ orphans: [{ id: childId, title: "First orphan" }], brokenLinks: [{ id: alternateId,
+        sourceNoteId: noteId, sourceTitle: "Research", label: "First broken source", revision: 1, candidates: [] }],
+      nextCursors: { orphans: "24", brokenLinks: "24" } });
+    }
+    if (init?.method === "PUT") return Response.json({ link: { id: lateLinkId } });
+    return new Response(null, { status: 404 });
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  render(<QueryClientProvider client={client}><MemoryRouter><RelatedNotes access="edit" fetcher={fetcher}
+    noteId={noteId} token="member" workspaceId={workspaceId} /></MemoryRouter></QueryClientProvider>);
+  const region = await screen.findByRole("region", { name: "Related Notes" });
+  fireEvent.click(within(region).getByRole("button", { name: "Review relationship maintenance" }));
+  await within(region).findByText("First broken source");
+
+  fireEvent.click(within(region).getByRole("button", { name: "Load more broken links" }));
+  const lateRepair = await within(region).findByRole("button", { name: "Repair Late broken source" });
+  await waitFor(() => expect(lateRepair.closest("li")).toHaveFocus());
+  expect(within(region).getByRole("button", { name: "Load more orphan Notes" })).toBeVisible();
+  fireEvent.click(lateRepair);
+  await waitFor(() => expect(fetcher).toHaveBeenCalledWith(expect.stringContaining(`/links/${lateLinkId}/repair`),
+    expect.objectContaining({ method: "PUT" })));
+
+  fireEvent.click(within(region).getByRole("button", { name: "Load more orphan Notes" }));
+  const lateOrphan = await within(region).findByRole("link", { name: "Late orphan" });
+  await waitFor(() => expect(lateOrphan.closest("li")).toHaveFocus());
+});

@@ -250,9 +250,12 @@ if (seededChild.status !== "created") throw new Error("browser_note_tree_child_s
 await browserTreeStore.upgradeDatabase.query("UPDATE stash_notes SET project_id=$2 WHERE id=$1", [noteId, projectId]);
 await browserTreeStore.upgradeDatabase.query("INSERT INTO stash_project_guests(project_id,account_id) VALUES($1,$2)", [projectId, browserGuestId]);
 const browserNoteLinks = new NoteLinkService(browserTreeStore.database);
-const unresolvedBrowserLink = await browserNoteLinks.importUnresolved(browserMemberId, noteId,
-  { targetPath: "notes/missing-browser.md", candidateNoteIds: [secondNoteId], label: "Missing browser evidence" });
-if (unresolvedBrowserLink.status !== "created") throw new Error("browser_unresolved_link_seed_failed");
+for (let index = 1; index <= 25; index += 1) {
+  const suffix = String(index).padStart(2, "0");
+  const unresolvedBrowserLink = await browserNoteLinks.importUnresolved(browserMemberId, noteId,
+    { targetPath: `notes/missing-browser-${suffix}.md`, candidateNoteIds: [secondNoteId], label: `Missing browser evidence ${suffix}` });
+  if (unresolvedBrowserLink.status !== "created") throw new Error("browser_unresolved_link_seed_failed");
+}
 
 const browserNoteTreeRepository = new Proxy({} as NoteTreeRepository, {
   get(_target, property) {

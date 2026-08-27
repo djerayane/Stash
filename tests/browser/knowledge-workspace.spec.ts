@@ -4,6 +4,7 @@ import { expect, test, type Page } from "@playwright/test";
 const workspaceId = "88888888-8888-4888-8888-888888888888";
 const roadmapId = "99999999-9999-4999-8999-999999999999";
 const evidenceId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const deeperId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const memberSession = JSON.stringify({ token: "browser-acceptance-member-token" });
 const durableSession = JSON.stringify({ token: "browser-acceptance-durable-token" });
 const guestSession = JSON.stringify({ token: "browser-acceptance-guest-token" });
@@ -52,10 +53,13 @@ async function mockKnowledgeApi(page: Page) {
     const depth = new URL(route.request().url()).searchParams.get("depth") === "2" ? 2 : 1;
     await route.fulfill({ json: { rootId: roadmapId, depth, limit: 24, direction: "both", hasMore: depth === 1,
       nodes: [{ id: roadmapId, title: "Release collaboration plan", depth: 0 },
-        { id: evidenceId, title: "Authoritative second Note", depth: 1 }],
-      edges: [{ id: "link-1", sourceNoteId: roadmapId, targetNoteId: evidenceId, kind: "note-link", relationshipType: "supports" }],
+        { id: evidenceId, title: "Authoritative second Note", depth: 1 },
+        ...(depth === 2 ? [{ id: deeperId, title: "Newly expanded decision", depth: 2 }] : [])],
+      edges: [{ id: "link-1", sourceNoteId: roadmapId, targetNoteId: evidenceId, kind: "note-link", relationshipType: "supports" },
+        ...(depth === 2 ? [{ id: "link-2", sourceNoteId: evidenceId, targetNoteId: deeperId, kind: "note-link", relationshipType: "supports" }] : [])],
       outline: [{ id: roadmapId, title: "Release collaboration plan", depth: 0 },
-        { id: evidenceId, title: "Authoritative second Note", depth: 1 }] } });
+        { id: evidenceId, title: "Authoritative second Note", depth: 1 },
+        ...(depth === 2 ? [{ id: deeperId, title: "Newly expanded decision", depth: 2 }] : [])] } });
   });
   await page.route("**/api/workspaces/*/relationships/maintenance", (route) => route.fulfill({ json: {
     orphans: [{ id: evidenceId, title: "Authoritative second Note" }], brokenLinks: [],
@@ -87,7 +91,9 @@ test("authors and recovers knowledge through the keyboard-accessible Note worksp
   await expect(related.getByRole("list", { name: "Related Notes outline" })).toBeVisible();
   await expect(related.getByRole("link", { name: "Authoritative second Note" })).toBeVisible();
   await expect(related.getByTestId("relationship-visual")).toHaveAttribute("aria-hidden", "true");
-  await related.getByRole("button", { name: "Expand related Notes" }).click();
+  const expand = related.getByRole("button", { name: "Expand related Notes" });
+  await expand.focus(); await page.keyboard.press("Enter");
+  await expect(related.getByRole("link", { name: "Newly expanded decision" })).toBeFocused();
   await expect(related.getByRole("button", { name: "Expand related Notes" })).toHaveCount(0);
   await related.getByRole("button", { name: "Review relationship maintenance" }).click();
   await expect(related.getByRole("heading", { name: "Orphan Notes" })).toBeVisible();
@@ -119,7 +125,7 @@ test("related Note navigation has no automatically detectable accessibility viol
   expect((await new AxeBuilder({ page }).include('[aria-label="Related Notes"]').analyze()).violations).toEqual([]);
 });
 
-test("repairs a real unresolved Note link with PUT through the acceptance Instance", async ({ page }) => {
+test("loads a second maintenance page and repairs its real unresolved link from the keyboard", async ({ page }) => {
   await authenticate(page);
   const repairRequest = page.waitForRequest((request) => /\/api\/notes\/[^/]+\/links\/[^/]+\/repair$/.test(new URL(request.url()).pathname)
     && request.method() === "PUT");
@@ -129,11 +135,16 @@ test("repairs a real unresolved Note link with PUT through the acceptance Instan
   await page.getByRole("button", { name: "Open Note context" }).click();
   const related = page.getByRole("region", { name: "Related Notes" });
   await related.getByRole("button", { name: "Review relationship maintenance" }).click();
-  await expect(related.getByText("Missing browser evidence", { exact: true })).toBeVisible();
-  await related.getByRole("button", { name: "Repair Missing browser evidence" }).click();
+  await expect(related.getByText("Missing browser evidence 25", { exact: true })).toHaveCount(0);
+  const loadMore = related.getByRole("button", { name: "Load more broken links" });
+  await loadMore.focus(); await page.keyboard.press("Enter");
+  const appended = related.locator("li").filter({ hasText: "Missing browser evidence 25" });
+  await expect(appended).toBeFocused();
+  const repair = related.getByRole("button", { name: "Repair Missing browser evidence 25" });
+  await repair.focus(); await page.keyboard.press("Space");
   expect((await repairRequest).method()).toBe("PUT");
   expect((await repairResponse).status()).toBe(200);
-  await expect(related.getByText("Missing browser evidence", { exact: true })).toHaveCount(0);
+  await expect(related.getByText("Missing browser evidence 25", { exact: true })).toHaveCount(0);
   const links = await page.request.get(`/api/notes/${roadmapId}/links`,
     { headers: { authorization: "Bearer browser-acceptance-member-token" } });
   expect(links.status()).toBe(200);

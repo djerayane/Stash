@@ -11,6 +11,14 @@ const MAX_EDGE_FACTOR = 4;
 export class PostgresRelationshipQueryRepository implements RelationshipQueryRepository {
   constructor(private readonly kernel: PostgresKernel, private readonly prepareNotes: PrepareNotes) {}
 
+  async #prepare(client: PostgresQueryable): Promise<void> {
+    await this.prepareNotes(client);
+    await client.query(`CREATE INDEX IF NOT EXISTS stash_note_links_incoming_active_idx
+      ON stash_note_links(target_note_id,source_note_id) WHERE target_note_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS stash_note_links_workspace_unresolved_idx
+      ON stash_note_links(workspace_id,source_note_id,id) WHERE target_note_id IS NULL;`);
+  }
+
   async #neighbors(client: PostgresQueryable, workspaceId: string, memberId: string, frontier: readonly string[],
     excluded: readonly string[], query: RelationshipQuery, rowLimit: number): Promise<VisibleNote[]> {
     if (!frontier.length || rowLimit < 1) return [];
@@ -43,7 +51,7 @@ export class PostgresRelationshipQueryRepository implements RelationshipQueryRep
 
   async query(memberId: string, query: RelationshipQuery) {
     return this.kernel.withSession(async (client) => {
-      await this.prepareNotes(client);
+      await this.#prepare(client);
       const root = await client.query<VisibleNote & { workspace_id: string }>(`SELECT note.id,note.title,note.parent_id,note.workspace_id
         FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id=note.workspace_id WHERE note.id=$1
         AND note.archived_at IS NULL AND note.trashed_at IS NULL AND ${effectiveNoteReadSql("note", "workspace", "$2")}`, [query.rootId, memberId]);
@@ -81,7 +89,7 @@ export class PostgresRelationshipQueryRepository implements RelationshipQueryRep
 
   async maintenance(memberId: string, workspaceId: string, page: RelationshipMaintenanceQuery) {
     return this.kernel.withSession(async (client) => {
-      await this.prepareNotes(client);
+      await this.#prepare(client);
       const access = await client.query<{ workspace_access: boolean; project_access: boolean }>(`SELECT
         ${workspaceMemberSql("stash_workspaces", "$2")} AS workspace_access,
         EXISTS(SELECT 1 FROM stash_projects project JOIN stash_project_guests guest ON guest.project_id=project.id
@@ -99,21 +107,23 @@ export class PostgresRelationshipQueryRepository implements RelationshipQueryRep
               AND other.archived_at IS NULL AND other.trashed_at IS NULL AND ${effectiveNoteReadSql("other", "other_workspace", "$2")})
           AND NOT (${workspaceMemberSql("workspace", "$2")} AND EXISTS (SELECT 1 FROM stash_note_links unresolved
             WHERE unresolved.source_note_id=note.id AND unresolved.target_note_id IS NULL))
-        ORDER BY note.title,note.id LIMIT $3 OFFSET $4`, [workspaceId, memberId, page.limit + 1, page.offset]);
+        ORDER BY note.title,note.id LIMIT $3 OFFSET $4`, [workspaceId, memberId, page.limit + 1, page.orphanOffset]);
       const broken = permission.workspace_access ? await client.query<{ id: string; source_note_id: string; source_title: string;
         target_path: string | null; label: string; revision: number; candidates: Array<{ id: string; title: string }> }>(`SELECT link.id,link.source_note_id,
           source.title AS source_title,link.target_path,link.label,link.revision,COALESCE((SELECT json_agg(candidate_row ORDER BY candidate_row.title,candidate_row.id)
             FROM (SELECT candidate.id,candidate.title FROM stash_notes candidate WHERE candidate.id=ANY(link.candidate_note_ids)
               AND candidate.workspace_id=$1 AND candidate.archived_at IS NULL AND candidate.trashed_at IS NULL LIMIT 100) candidate_row),'[]'::json) AS candidates
         FROM stash_note_links link JOIN stash_notes source ON source.id=link.source_note_id
-        WHERE link.workspace_id=$1 AND link.target_note_id IS NULL ORDER BY source.title,link.id LIMIT $2 OFFSET $3`,
-      [workspaceId, page.limit + 1, page.offset]) : { rows: [] };
-      const more = orphans.rows.length > page.limit || broken.rows.length > page.limit;
+        WHERE link.workspace_id=$1 AND link.target_note_id IS NULL AND source.archived_at IS NULL AND source.trashed_at IS NULL
+        ORDER BY source.title,link.label,link.id LIMIT $2 OFFSET $3`,
+      [workspaceId, page.limit + 1, page.brokenOffset]) : { rows: [] };
+      const orphanMore = orphans.rows.length > page.limit; const brokenMore = broken.rows.length > page.limit;
       const brokenLinks: Array<RelationshipMaintenance["brokenLinks"][number]> = broken.rows.slice(0, page.limit).map((link) => ({ id: link.id,
         sourceNoteId: link.source_note_id, sourceTitle: link.source_title, label: link.label,
         ...(link.target_path ? { targetPath: link.target_path } : {}), revision: Number(link.revision), candidates: link.candidates }));
       return { status: "found" as const, orphans: orphans.rows.slice(0, page.limit), brokenLinks,
-        ...(more ? { nextCursor: String(page.offset + page.limit) } : {}) };
+        ...(orphanMore || brokenMore ? { nextCursors: { ...(orphanMore ? { orphans: String(page.orphanOffset + page.limit) } : {}),
+          ...(brokenMore ? { brokenLinks: String(page.brokenOffset + page.limit) } : {}) } } : {}) };
     });
   }
 }
