@@ -76,6 +76,8 @@ export function ContextDrawer({ context, onClose, token, fetcher = globalThis.fe
           <Link to={`/app/projects/${project.id}/boards`}>Review {project.name} Project access</Link></li>)}</ul> : <p>This Note is not currently visible through a Project.</p>}</section>
       <section {...panel("discussions")} hidden={tab !== "discussions"} role="tabpanel"><h3>Discussions</h3>
         <DiscussionPanel canWrite={context.access === "edit"} enabled={tab === "discussions"} fetcher={fetcher}
+          classes={{ empty: styles.discussionEmpty, failure: styles.discussionFailure, list: styles.discussionList,
+            loading: styles.discussionLoading, primary: styles.discussionPrimary, reply: styles.discussionComposer }}
           target={{ kind: "note", noteId: context.noteId }} token={token} /></section>
     </div>
   </aside>;

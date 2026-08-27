@@ -315,7 +315,7 @@ function NoteEditorDocument({ noteId, memberId, fetcher = globalThis.fetch, toke
     {createTask.isError ? <p role="alert">{createTask.error.message}</p> : null}</form> : null;
   return <main id="workspace-content" ref={layoutRef} className={`${styles.layout} ${contextVisible || taskComposerOpen ? "" : styles.contextHidden}`} aria-busy={!editor || !note.data || !collaboration.data}>
     <article className={styles.document}>
-      <header className={styles.header}><p className={styles.kicker}>Collaborative Note</p><h1 className={styles.title}>{note.data?.content.split("\n")[0] || "Untitled Note"}</h1></header>
+      <header className={styles.header}><p className={styles.kicker}>Workspace Note</p><h1 className={styles.title}>{note.data?.content.split("\n")[0] || "Untitled Note"}</h1></header>
       <Tabs.Root className={styles.mode} value={editorMode} activationMode="manual">
         <Tabs.List className={styles.modeList} aria-label="Note editing mode">
           <Tabs.Trigger className={styles.modeTrigger} disabled={!documentReady} value="rich" onClick={() => changeEditorMode("rich")}>Rich text</Tabs.Trigger>

@@ -78,8 +78,8 @@ export function NoteWorkspace({ noteId, token, children, fetcher = globalThis.fe
         : (branchAction.isError && branchActionCurrent) || (restore.isError && restoreCurrent)
           ? <p className={styles.branchError} role="alert">{branchActionCurrent ? branchAction.error?.message : restore.error?.message}</p> : null}
     {!permanentlyRemoved ? <div className={styles.editorSlot}>{children}</div> : null}
-    {!removedState && !permanentlyRemoved ? <CollectionWorkspace editable={context.data?.access === "edit"} fetcher={fetcher}
-      noteId={noteId} token={token} /> : null}
+    {!removedState && !permanentlyRemoved ? <div className={styles.collectionSlot}><CollectionWorkspace editable={context.data?.access === "edit"} fetcher={fetcher}
+      noteId={noteId} token={token} /></div> : null}
     {!removedState && !permanentlyRemoved ? <StarterTutorialPanel fetcher={fetcher} noteId={noteId} token={token}
       onRemoved={(originNoteId) => { if (activeNoteIdRef.current === originNoteId) setPermanentlyRemoved(true); }} /> : null}
     {drawerOpen && context.data ? <ContextDrawer context={context.data} fetcher={fetcher} onClose={close} token={token} /> : null}

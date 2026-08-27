@@ -52,38 +52,53 @@ test("offers link, callout, and Workspace Attachment authoring controls", async 
 test("preserves every checklist item and callout paragraph with stable identities", async ({ page }) => {
   await page.goto(`/app/notes/${richNoteId}`);
   const editor = page.getByRole("textbox", { name: "Note content" });
-  await editor.click(); await page.keyboard.press("ControlOrMeta+End"); await page.keyboard.press("Enter");
+  await expect(editor).toContainText("Rich structure seed");
+  await expect(page.getByRole("status")).toHaveText("All changes saved");
+  const seedParagraph = editor.locator("p").last();
+  await seedParagraph.evaluate((paragraph) => {
+    const range = document.createRange();
+    range.selectNodeContents(paragraph); range.collapse(false);
+    const selection = window.getSelection(); selection?.removeAllRanges(); selection?.addRange(range);
+    (paragraph.parentElement?.closest("[contenteditable='true']") as HTMLElement | null)?.focus();
+  });
+  await page.keyboard.press("Enter");
+  const trailingParagraph = editor.locator("p").last();
+  await expect(trailingParagraph).toHaveText("");
+  await trailingParagraph.click();
   await page.getByRole("button", { name: "Checklist" }).click();
-  await page.keyboard.type("First acceptance item"); await page.keyboard.press("Enter"); await page.keyboard.type("Second acceptance item");
-  await page.keyboard.press("Enter"); await page.keyboard.type("Nested acceptance item"); await page.keyboard.press("Tab");
+  const firstChecklistItem = editor.locator("li[data-block-key]").last();
+  await expect(firstChecklistItem).toBeVisible();
+  await firstChecklistItem.locator("p").click();
+  await page.keyboard.insertText("First acceptance item");
+  await expect(editor.getByText("First acceptance item", { exact: true })).toBeVisible();
+  await page.keyboard.press("Enter"); await page.keyboard.insertText("Second acceptance item");
+  await expect(editor.getByText("Second acceptance item", { exact: true })).toBeVisible();
+  await page.keyboard.press("Enter"); await page.keyboard.insertText("Nested acceptance item");
+  await expect(editor.getByText("Nested acceptance item", { exact: true })).toBeVisible();
+  await page.keyboard.press("Tab");
   await expect(editor.locator("li li").filter({ hasText: "Nested acceptance item" })).toBeVisible();
   await expect.poll(() => page.evaluate(async (id) => (await fetch(`/api/notes/${id}`, { headers: { authorization: "Bearer browser-acceptance-member-token" } })).json()
     .then((note: { content: string }) => note.content), richNoteId)).toContain("Nested acceptance item");
-  await page.keyboard.press("ControlOrMeta+End"); await page.keyboard.press("Enter"); await page.keyboard.press("Enter"); await page.keyboard.press("Enter");
-  await page.getByRole("button", { name: "Insert callout" }).click();
-  const insertedCalloutParagraph = editor.locator("[data-callout] p").filter({ hasText: "Callout" });
-  await expect(insertedCalloutParagraph).toHaveCount(1);
-  await insertedCalloutParagraph.click();
-  await page.keyboard.press("End"); await page.keyboard.press("Enter"); await page.keyboard.type("Second callout paragraph");
-  await page.keyboard.type(".");
-  const finalSaveStarted = page.waitForRequest((request) => request.method() === "POST"
-    && request.url().includes(`/api/notes/${richNoteId}/collaboration`));
-  await expect(editor.getByText("Second callout paragraph.", { exact: true })).toBeVisible();
-  const finalSave = await finalSaveStarted;
-  const finalSaveResponse = await finalSave.response();
-  expect(finalSaveResponse?.ok()).toBe(true);
-  await expect(page.getByRole("status")).toHaveText("All changes saved");
   const authoredItems = ["First acceptance item", "Second acceptance item", "Nested acceptance item"].map((content) =>
     editor.getByText(content, { exact: true }).locator("xpath=ancestor::li[@data-block-key][1]"));
   await Promise.all(authoredItems.map((item) => expect(item).toHaveCount(1)));
   const itemKeys = await Promise.all(authoredItems.map((item) => item.getAttribute("data-block-key")));
   expect(itemKeys).toHaveLength(3); expect(new Set(itemKeys).size).toBe(3);
+  await page.keyboard.press("ControlOrMeta+End"); await page.keyboard.press("Enter"); await page.keyboard.press("Enter"); await page.keyboard.press("Enter");
+  await page.getByRole("button", { name: "Insert callout" }).click();
+  const insertedCalloutParagraph = editor.locator("[data-callout] p").filter({ hasText: "Callout" });
+  await expect(insertedCalloutParagraph).toHaveCount(1);
+  await insertedCalloutParagraph.click();
+  await page.keyboard.press("End"); await page.keyboard.press("Enter");
+  await page.keyboard.insertText("Second callout paragraph.");
+  await expect(editor.getByText("Second callout paragraph.", { exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(async (id) => (await fetch(`/api/notes/${id}`, { headers: { authorization: "Bearer browser-acceptance-member-token" } })).json()
+    .then((note: { content: string }) => note.content), richNoteId)).toContain("Second callout paragraph.");
+  await expect(page.getByRole("status")).toHaveText("All changes saved");
   const calloutParagraphs = editor.locator("[data-callout] p[data-block-key]");
   await expect(calloutParagraphs).toHaveCount(2);
   const calloutParagraphKeys = await calloutParagraphs.evaluateAll((items) => items.map((item) => item.getAttribute("data-block-key")));
   expect(calloutParagraphKeys).toHaveLength(2); expect(new Set(calloutParagraphKeys).size).toBe(2);
-  await expect.poll(() => page.evaluate(async (id) => (await fetch(`/api/notes/${id}`, { headers: { authorization: "Bearer browser-acceptance-member-token" } })).json()
-    .then((note: { content: string }) => note.content), richNoteId)).toContain("Second callout paragraph.");
   const canonical = await page.evaluate(async (id) => (await fetch(`/api/notes/${id}`, { headers: { authorization: "Bearer browser-acceptance-member-token" } })).json(), richNoteId) as {
     content: string; document: { blocks: Array<{ type: string; children?: unknown[]; paragraphs?: unknown[] }> };
   };
@@ -91,6 +106,9 @@ test("preserves every checklist item and callout paragraph with stable identitie
   await expect(page.getByRole("textbox", { name: "Note content" })).toContainText("First acceptance item");
   await expect(page.getByRole("textbox", { name: "Note content" })).toContainText("Second acceptance item");
   await expect(page.getByRole("textbox", { name: "Note content" }).locator("li li").filter({ hasText: "Nested acceptance item" })).toBeVisible();
+  const restoredItemKeys = await Promise.all(["First acceptance item", "Second acceptance item", "Nested acceptance item"].map((content) =>
+    page.getByRole("textbox", { name: "Note content" }).getByText(content, { exact: true }).locator("xpath=ancestor::li[@data-block-key][1]").getAttribute("data-block-key")));
+  expect(restoredItemKeys).toEqual(itemKeys);
   await expect(page.getByRole("textbox", { name: "Note content" })).toContainText("Second callout paragraph");
   const restoredCallout = page.getByRole("textbox", { name: "Note content" }).locator("[data-callout]");
   await expect(restoredCallout.locator("p")).toHaveCount(2);
