@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 
-import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
+import { startInstance, type DatabaseProbe, type RunningInstance } from "../../src/instance.js";
 import {
   NoteLinkService,
   type NoteLinkRecord,
@@ -9,8 +9,8 @@ import {
   type NoteLocationRecord,
   type PortableNoteLinkStateProjection,
   type PortableNoteLocationProjection,
-} from "../src/note-links.js";
-import type { MemberAccessResolver } from "../src/workspaces-projects.js";
+} from "../../src/note-links.js";
+import type { MemberAccessResolver } from "../../src/workspaces-projects.js";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const sourceId = "22222222-2222-4222-8222-222222222222";
