@@ -13,13 +13,19 @@ export function developmentIntegrationCapability(options: {
   githubArtifacts?: GitHubArtifactService;
   githubSignals?: GitHubSignalService;
 }): CapabilityModule {
+  const publicRoutes = () => [
+    ...(options.repositoryConnections ? [repositoryConnectionRoutes(options.repositoryConnections, options.memberAccess)] : []),
+    ...(options.githubArtifacts ? [githubArtifactRoutes(options.githubArtifacts, options.memberAccess)] : []),
+    ...(options.githubSignals ? [githubSignalRoutes(options.githubSignals, options.memberAccess)] : []),
+  ];
   return {
     name: "development-integration",
+    owns: [...(options.repositoryConnections ? ["repository-connections"] : []),
+      ...(options.githubArtifacts ? ["github-artifacts"] : []), ...(options.githubSignals ? ["github-signals"] : [])],
     routes: () => [
       ...(options.githubSignals ? [githubWebhookRoute(options.githubSignals)] : []),
-      ...(options.repositoryConnections ? [repositoryConnectionRoutes(options.repositoryConnections, options.memberAccess)] : []),
-      ...(options.githubArtifacts ? [githubArtifactRoutes(options.githubArtifacts, options.memberAccess)] : []),
-      ...(options.githubSignals ? [githubSignalRoutes(options.githubSignals, options.memberAccess)] : []),
+      ...publicRoutes(),
     ],
+    publicRoutes,
   };
 }

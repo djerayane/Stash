@@ -32,7 +32,7 @@ import { initialWorkflowStatus, type ProjectWorkflow, type ProjectWorkflowReposi
 import type { PortableWorkspaceExportRepository, PortableWorkspaceExportSnapshot } from "./portable-workspace-export.js";
 import type { ImportTransformation, PortableWorkspaceImportBundle, PortableWorkspaceImportReport, PortableWorkspaceImportRepository } from "./portable-workspace-import.js";
 import type { Board, BoardRepository, BoardTask } from "./boards.js";
-import type { NoteLinkRecord, NoteLocationRecord, PortableNoteLinkStateProjection, PortableNoteLocationProjection } from "./note-links.js";
+import type { NoteLinkRecord, NoteLinkRepository, NoteLocationRecord, PortableNoteLinkStateProjection, PortableNoteLocationProjection } from "./note-links.js";
 import type { ActivityCause, ActivityRecord, ActivityRepository, NoteHistoryRevision } from "./activity.js";
 import type { DevelopmentArtifact, GitHubArtifactRepository } from "./github-artifacts.js";
 import type { GitHubSignal, GitHubSignalRepository, SignalCandidate } from "./github-signals.js";
@@ -73,6 +73,18 @@ import {
 export type { IdlePostgresClientFailure } from "./instance-operations/storage/postgres-kernel.js";
 
 export interface PostgresDatabaseOptions extends PostgresKernelOptions {}
+
+export type IdentityAccessPostgresRepositories = PasswordAuthRepository & AccountRegistrationRepository
+  & OidcAuthRepository & AccountRecoveryRepository & OrganizationRoleRepository & InvitationRepository
+  & MemberLocalizationRepository & WorkspaceProjectRepository;
+export type KnowledgeAuthoringPostgresRepositories = NoteRepository & NoteCollaborationRepository
+  & NoteLinkRepository & DiscussionRepository & WorkspaceSearchRepository & AttachmentRepository & ActivityRepository
+  & PortableWorkspaceExportRepository & PortableWorkspaceImportRepository & MobileCaptureRepository;
+export type WorkPlanningPostgresRepositories = TaskFromBlockRepository & TaskPlanningRepository
+  & StructuredTaskEditRepository & TaskMoveRepository & ProjectWorkflowRepository & BoardRepository
+  & NotificationRepository & AutomationRepository;
+export type DevelopmentIntegrationPostgresRepositories = RepositoryConnectionRepository
+  & GitHubArtifactRepository & GitHubSignalRepository;
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
@@ -231,39 +243,7 @@ export function validatedRichTextFromCollaborativeDocument(document: Y.Doc): imp
   return materialized;
 }
 
-export class PostgresDatabase implements
-  DatabaseProbe,
-  InstanceSetupRepository,
-  OwnerBootstrapRepository,
-  PasswordAuthRepository,
-  AccountRegistrationRepository,
-  WorkspaceProjectRepository,
-  NoteRepository,
-  OidcAuthRepository,
-  AccountRecoveryRepository,
-  OrganizationRoleRepository,
-  MemberLocalizationRepository,
-  InvitationRepository,
-  RepositoryConnectionRepository,
-  GitHubArtifactRepository,
-  GitHubSignalRepository,
-  TaskFromBlockRepository,
-  TaskPlanningRepository,
-  StructuredTaskEditRepository,
-  TaskMoveRepository,
-  AttachmentRepository,
-  MobileCaptureRepository,
-  DiscussionRepository,
-  ProjectWorkflowRepository,
-  PortableWorkspaceExportRepository,
-  PortableWorkspaceImportRepository,
-  BoardRepository,
-  ActivityRepository,
-  NotificationRepository,
-  AutomationRepository,
-  NoteCollaborationRepository
-  , WorkspaceSearchRepository
-{
+export class PostgresDatabase implements DatabaseProbe {
   readonly #kernel: PostgresKernel;
   readonly #noteTreeRepository: PostgresNoteTreeRepository;
   readonly #instanceSetupRepository: PostgresInstanceSetupRepository;
@@ -342,6 +322,22 @@ export class PostgresDatabase implements
 
   canonicalTaskRepository(): CanonicalTaskRepository {
     return this.#canonicalTaskRepository;
+  }
+
+  identityAccessRepositories(): IdentityAccessPostgresRepositories {
+    return this;
+  }
+
+  knowledgeAuthoringRepositories(): KnowledgeAuthoringPostgresRepositories {
+    return this;
+  }
+
+  workPlanningRepositories(): WorkPlanningPostgresRepositories {
+    return this;
+  }
+
+  developmentIntegrationRepositories(): DevelopmentIntegrationPostgresRepositories {
+    return this;
   }
 
   async verifyConnection(): Promise<void> {
@@ -3787,7 +3783,7 @@ export class PostgresDatabase implements
   }
 
   async #ensureAutomationSchema(client: PostgresQueryable, dependenciesPrepared = false): Promise<void> {
-    await this.#ensureNoteSchema(client);
+    await this.#instanceSetupRepository.prepare(client);
     if (!dependenciesPrepared) await this.#ensureGitHubSignalSchema(client);
     await client.query(`
       CREATE TABLE IF NOT EXISTS stash_automation_recipes (

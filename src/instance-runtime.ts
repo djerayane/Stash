@@ -84,6 +84,10 @@ export async function composeInstanceRuntime(environment: NodeJS.ProcessEnv): Pr
   const database = embeddedStore?.database ?? new PostgresDatabase(databaseUrl!, authenticationSecrets);
   await database.verifyConnection();
   if (embeddedStore) await database.prepareInstanceStore();
+  const identityAccessRepositories = database.identityAccessRepositories();
+  const knowledgeAuthoringRepositories = database.knowledgeAuthoringRepositories();
+  const workPlanningRepositories = database.workPlanningRepositories();
+  const developmentIntegrationRepositories = database.developmentIntegrationRepositories();
 
   let redis: RunningRedisAcceleration | undefined;
   const redisUrl = environment.REDIS_URL?.trim();
@@ -92,9 +96,9 @@ export async function composeInstanceRuntime(environment: NodeJS.ProcessEnv): Pr
   if (!Number.isInteger(port) || port < 0 || port > 65_535) throw new Error("PORT must be an integer between 0 and 65535");
   const host = environment.HOST ?? "0.0.0.0";
   const publicOrigin = required(environment, "PUBLIC_ORIGIN");
-  const passwordAuth = new PasswordAuthService(database);
-  const notifications = new NotificationService(database);
-  const automations = new AutomationService(database, notifications);
+  const passwordAuth = new PasswordAuthService(identityAccessRepositories);
+  const notifications = new NotificationService(workPlanningRepositories);
+  const automations = new AutomationService(workPlanningRepositories, notifications);
   const attachmentStoragePath = embeddedStore?.paths.attachments ?? (environment.ATTACHMENT_STORAGE_PATH?.trim() || "/var/lib/stash/attachments");
   if (embeddedStore && environment.ATTACHMENT_STORAGE_PATH?.trim()) throw new Error("Embedded Instance Attachments must remain beneath STASH_DATA_DIR");
   const s3AttachmentStorage = s3AttachmentStorageFromEnvironment(environment);
@@ -134,25 +138,38 @@ export async function composeInstanceRuntime(environment: NodeJS.ProcessEnv): Pr
     instanceVersion: "0.1.0",
     transport: { async submit() { throw new Error("No diagnostic transport is configured"); } },
   });
-  const accountRegistration = openRegistrationFromEnvironment(environment) ? new AccountRegistrationService(database) : undefined;
-  const notes = new NoteService(database);
-  const tasks = new TaskService(database, database);
-  const workspaceProjects = new WorkspaceProjectService(database);
+  const accountRegistration = openRegistrationFromEnvironment(environment) ? new AccountRegistrationService(identityAccessRepositories) : undefined;
+  const notes = new NoteService(knowledgeAuthoringRepositories);
+  const tasks = new TaskService(workPlanningRepositories, identityAccessRepositories);
+  const workspaceProjects = new WorkspaceProjectService(identityAccessRepositories);
   const starterTutorials = new TutorialContributionService(database.tutorialContributionRepository());
   const collections = new CollectionService(database.collectionRepository());
   const projectlessTasks = new ProjectlessTaskService(database.projectlessTaskRepository());
   const canonicalTasks = new CanonicalTaskService(database.canonicalTaskRepository());
-  const repositoryConnections = githubApp ? new RepositoryConnectionService(database, githubApp) : undefined;
-  const githubArtifacts = githubApp ? new GitHubArtifactService(database, githubApp) : undefined;
-  const githubSignals = githubWebhookSecret ? new GitHubSignalService(database, githubWebhookSecret, automations) : undefined;
+  const noteCollaboration = new NoteCollaborationService(knowledgeAuthoringRepositories);
+  const noteLinks = new NoteLinkService(knowledgeAuthoringRepositories);
+  const projectWorkflows = new ProjectWorkflowService(workPlanningRepositories);
+  const boards = new BoardService(workPlanningRepositories);
+  const attachments = new AttachmentService(knowledgeAuthoringRepositories, attachmentStorage);
+  const portableWorkspaceExports = new PortableWorkspaceExportService(knowledgeAuthoringRepositories, attachmentStorage);
+  const portableWorkspaceImports = new PortableWorkspaceImportService(knowledgeAuthoringRepositories, attachmentStorage);
+  const mobileCaptures = new MobileCaptureService(knowledgeAuthoringRepositories);
+  const discussions = new DiscussionService(knowledgeAuthoringRepositories);
+  const activities = new ActivityService(knowledgeAuthoringRepositories);
+  const searches = new WorkspaceSearchService(knowledgeAuthoringRepositories);
+  const repositoryConnections = githubApp ? new RepositoryConnectionService(developmentIntegrationRepositories, githubApp) : undefined;
+  const githubArtifacts = githubApp ? new GitHubArtifactService(developmentIntegrationRepositories, githubApp) : undefined;
+  const githubSignals = githubWebhookSecret ? new GitHubSignalService(developmentIntegrationRepositories, githubWebhookSecret, automations) : undefined;
   const capabilities = createCapabilityRegistry([
     identityAccessCapability({ passwordAuth, instanceAdminToken, instanceSetup,
       ...(accountRegistration ? { accountRegistration } : {}), reportAuthenticationFailure }),
     knowledgeAuthoringCapability({ notes, noteTree: new NoteTreeService(database.noteTreeRepository(),
       database.tutorialContributionRepository()), starterTutorials, collections,
       relationships: new RelationshipQueryService(database.relationshipQueryRepository()),
-      visualizations: new VisualizationBlockService(database.visualizationBlockRepository()), memberAccess: passwordAuth }),
-    workPlanningCapability({ tasks, workspaceProjects, projectlessTasks, canonicalTasks, memberAccess: passwordAuth }),
+      visualizations: new VisualizationBlockService(database.visualizationBlockRepository()), noteCollaboration, noteLinks,
+      attachments, discussions, activities, searches, portableWorkspaceExports, portableWorkspaceImports, mobileCaptures, memberAccess: passwordAuth }),
+    workPlanningCapability({ tasks, workspaceProjects, projectlessTasks, canonicalTasks, projectWorkflows, boards,
+      notifications, automations, memberAccess: passwordAuth }),
     developmentIntegrationCapability({ memberAccess: passwordAuth,
       ...(repositoryConnections ? { repositoryConnections } : {}), ...(githubArtifacts ? { githubArtifacts } : {}),
       ...(githubSignals ? { githubSignals } : {}) }),
@@ -162,22 +179,20 @@ export async function composeInstanceRuntime(environment: NodeJS.ProcessEnv): Pr
     instanceAdminToken, capabilities, diagnostics,
     webClientRoot: environment.WEB_CLIENT_ROOT?.trim() || fileURLToPath(new URL("../apps/web/dist", import.meta.url)),
     passwordAuth, ...(accountRegistration ? { accountRegistration } : {}), reportAuthenticationFailure,
-    organizationRoles: new OrganizationRoleService(database), invitations: new InvitationService(database),
+    organizationRoles: new OrganizationRoleService(identityAccessRepositories), invitations: new InvitationService(identityAccessRepositories),
     ...(repositoryConnections ? { repositoryConnections } : {}), ...(githubArtifacts ? { githubArtifacts } : {}),
     ...(githubSignals ? { githubSignals } : {}), automations,
-    notes, noteCollaboration: new NoteCollaborationService(database), agentGrants: new AgentGrantService(database),
-    mcpEnabled: environment.MCP_ENABLED?.trim().toLowerCase() === "true", noteLinks: new NoteLinkService(database), tasks,
-    projectWorkflows: new ProjectWorkflowService(database), boards: new BoardService(database), attachments: new AttachmentService(database, attachmentStorage),
-    portableWorkspaceExports: new PortableWorkspaceExportService(database, attachmentStorage), portableWorkspaceImports: new PortableWorkspaceImportService(database, attachmentStorage),
-    importedIdentityAdministration: database, mobileCaptures: new MobileCaptureService(database), discussions: new DiscussionService(database),
-    activities: new ActivityService(database), searches: new WorkspaceSearchService(database), instanceBackups, instanceBackupRestoreTarget: restoreTarget,
+    notes, noteCollaboration, agentGrants: new AgentGrantService(database),
+    mcpEnabled: environment.MCP_ENABLED?.trim().toLowerCase() === "true", noteLinks, tasks,
+    projectWorkflows, boards, attachments, portableWorkspaceExports, portableWorkspaceImports,
+    importedIdentityAdministration: database, mobileCaptures, discussions, activities, searches, instanceBackups, instanceBackupRestoreTarget: restoreTarget,
     ...(instanceBackupRoot ? { instanceBackupRoot } : {}), ...(upgrades ? { instanceUpgrades: upgrades } : {}), notifications,
-    memberLocalization: new MemberLocalizationService(database), oidcAuth: new OidcAuthService(database), oidcManagement: new OidcManagementService(database),
+    memberLocalization: new MemberLocalizationService(identityAccessRepositories), oidcAuth: new OidcAuthService(identityAccessRepositories), oidcManagement: new OidcManagementService(identityAccessRepositories),
     oidcCallbackOrigin: publicOrigin, accountRecovery: new AccountRecoveryService(database, passwordAuth, {
       passkeys: new WebAuthnPasskeyVerifier(resolveWebAuthnConfiguration(publicOrigin, {
         ...(environment.WEBAUTHN_RP_ID ? { rpId: environment.WEBAUTHN_RP_ID } : {}), ...(environment.WEBAUTHN_RP_NAME ? { rpName: environment.WEBAUTHN_RP_NAME } : {}) })),
       secrets: authenticationSecrets, ...(recoveryEmail ? { email: recoveryEmail } : {}) }), ...(redis ? { acceleration: redis.acceleration } : {}) });
-  const emailRecoveryWorker = recoveryEmail ? new EmailRecoveryWorker(database, authenticationSecrets, recoveryEmail) : undefined;
+  const emailRecoveryWorker = recoveryEmail ? new EmailRecoveryWorker(identityAccessRepositories, authenticationSecrets, recoveryEmail) : undefined;
   const emailRecoveryTimer = emailRecoveryWorker ? setInterval(() => {
     void emailRecoveryWorker.processNext()
       .then((status) => { if (status === "retry_scheduled") console.warn("Email recovery delivery failed; a retry was scheduled."); })

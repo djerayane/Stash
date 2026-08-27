@@ -121,6 +121,7 @@ function NoteEditorDocument({ noteId, memberId, fetcher = globalThis.fetch, toke
   const [markdownDraft, setMarkdownDraft] = useState("");
   const [markdownError, setMarkdownError] = useState("");
   const [markdownDraftStored, setMarkdownDraftStored] = useState(true);
+  const [documentReady, setDocumentReady] = useState(false);
   const [taskTitle, setTaskTitle] = useState(""); const [taskProjectId, setTaskProjectId] = useState(""); const [taskComposerOpen, setTaskComposerOpen] = useState(false);
   const queryClient = useQueryClient();
   const [, refreshToolbar] = useState(0);
@@ -190,6 +191,7 @@ function NoteEditorDocument({ noteId, memberId, fetcher = globalThis.fetch, toke
     if (shouldSeedCanonicalDocument.current) { shouldSeedCanonicalDocument.current = false; editor.commands.setContent(toTiptap(note.data.document)); }
     editor.setEditable(canEdit);
     editor.view.dom.setAttribute("aria-readonly", String(!canEdit));
+    setDocumentReady(true);
     setStatus(canEdit ? restoredPendingUpdate.current ? "Restoring changes from this device" : "All changes saved" : "Read-only Note"); setError("");
   }, [canEdit, editor, note.data, collaboration.data, ydoc]);
 
@@ -314,8 +316,8 @@ function NoteEditorDocument({ noteId, memberId, fetcher = globalThis.fetch, toke
       <header className={styles.header}><p className={styles.kicker}>Collaborative Note</p><h1 className={styles.title}>{note.data?.content.split("\n")[0] || "Untitled Note"}</h1></header>
       <Tabs.Root className={styles.mode} value={editorMode} activationMode="manual">
         <Tabs.List className={styles.modeList} aria-label="Note editing mode">
-          <Tabs.Trigger className={styles.modeTrigger} value="rich" onClick={() => changeEditorMode("rich")}>Rich text</Tabs.Trigger>
-          <Tabs.Trigger className={styles.modeTrigger} value="markdown" onClick={() => changeEditorMode("markdown")}>Markdown source</Tabs.Trigger>
+          <Tabs.Trigger className={styles.modeTrigger} disabled={!documentReady} value="rich" onClick={() => changeEditorMode("rich")}>Rich text</Tabs.Trigger>
+          <Tabs.Trigger className={styles.modeTrigger} disabled={!documentReady} value="markdown" onClick={() => changeEditorMode("markdown")}>Markdown source</Tabs.Trigger>
         </Tabs.List>
       <Tabs.Content value="rich"><div ref={toolbarRef} className={styles.toolbar} role="toolbar" aria-label="Text formatting">
         <button disabled={!canEdit} type="button" aria-label="Bold" aria-pressed={editor?.isActive("bold") ?? false} onClick={() => editor?.chain().focus().toggleBold().run()}>B</button>

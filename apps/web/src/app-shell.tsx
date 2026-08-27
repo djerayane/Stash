@@ -7,19 +7,17 @@ import { Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate } from
 import styles from "./app-shell.module.css";
 import { DevelopmentSignalsRoute } from "./development-signals";
 import { NoteEditor } from "./note-editor";
-import { TaskDetailPage } from "./task-detail";
 import { MemberAdministrationPage, type OrganizationAdministration } from "./member-administration";
-import { ProjectNotificationsPage } from "./project-notifications";
 import { ImportedIdentitiesPage } from "./imported-identities";
 import { MemberSettingsPage, OrganizationSettingsPage, WorkspaceDataPage } from "./product-settings";
-import { ActivityPage, BoardsPage, DiscussionsPage, InboxPage, NoteHistoryPage, NotificationsPage, SearchPage } from "./core-workflows";
 import { AgentGrantsPage } from "./agent-grants";
 import { NoteTree } from "./knowledge-authoring/note-tree";
 import { NoteWorkspace } from "./knowledge-authoring/note-workspace";
+import { knowledgeAuthoringWebCapability } from "./knowledge-authoring/web-capability";
 import { SetupPage } from "./identity-access/setup-page";
 import type { InstanceSetupState } from "./identity-access/setup-state";
-import { ProjectBrowser } from "./work-planning/project-browser";
-import { TasksPage } from "./work-planning/tasks-page";
+import { workPlanningWebCapability } from "./work-planning/web-capability";
+import { createWebCapabilityRegistry, navigationFromCapabilities, routesFromWebCapabilities } from "./capability-registry";
 
 export type SessionState =
   | { readonly status: "loading" }
@@ -47,13 +45,9 @@ export function completeOidcBrowserCallback(fragment: string, returnTo: string |
   return resolveReturnTo(new URLSearchParams({ returnTo: returnTo ?? "/app" }).toString());
 }
 
-const navigation = [
-  { to: "/app/inbox", label: "Inbox", icon: "inbox" },
-  { to: "/app/notes", label: "Note Tree", icon: "note" },
-  { to: "/app/search", label: "Search", icon: "search" },
-  { to: "/app/projects", label: "Projects", icon: "projects" },
-  { to: "/app/tasks", label: "Tasks", icon: "task" },
-] as const;
+const productCapabilities = createWebCapabilityRegistry([knowledgeAuthoringWebCapability, workPlanningWebCapability]);
+const primaryNavigation = navigationFromCapabilities(productCapabilities, "primary");
+const contextualNavigation = navigationFromCapabilities(productCapabilities, "contextual");
 
 interface ContextStorage { getItem(key: string): string | null; setItem(key: string, value: string): void }
 const defaultContext = "/app/notes";
@@ -221,7 +215,7 @@ function EmptyHome() {
 function PlaceholderPage({ workspaceName, title, description, action, actionTo }: { readonly workspaceName: string; readonly title: string; readonly description: string; readonly action: string; readonly actionTo?: string }) {
   return <div className={styles.page}>
     <header className={styles.pageHeader}><div><p className={styles.kicker}>{workspaceName}</p><h1>{title}</h1><p className={styles.lede}>{description}</p></div>{actionTo ? <Link className={styles.primaryButton} to={actionTo}><Icon name="plus" />{action}</Link> : <span className={styles.actionHint}><Icon name="plus" />{action}</span>}</header>
-    <section className={styles.placeholder} aria-label={`${title} empty state`}><span className={styles.placeholderRule} /><h2>Your {title.toLowerCase()} will live here.</h2><p>The shell is ready for the focused product flow that follows this migration foundation.</p></section>
+    <section className={styles.placeholder} aria-label={`${title} empty state`}><span className={styles.placeholderRule} /><h2>{title}</h2><p>{description}</p></section>
   </div>;
 }
 
@@ -235,6 +229,13 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
   const workspaceName = displayLabel(activeWorkspace.name, "Personal workspace");
   const memberName = displayLabel(session.member.name, displayLabel(session.member.email, "Member"));
   const memberEmail = displayLabel(session.member.email, "Signed in");
+  const capabilityRoutes = routesFromWebCapabilities(productCapabilities, {
+    workspaceId: activeWorkspace.id ?? "", memberId: session.member.id, token: session.token ?? "",
+    ...(session.activeOrganizationId ? { activeOrganizationId: session.activeOrganizationId } : {}),
+    hasOrganizationAdministration: Boolean(session.organizationAdministrations?.length),
+    openProject: (projectId) => navigate(`/app/projects/${encodeURIComponent(projectId)}/boards`),
+    openWorkspace: (workspaceId) => { setActiveWorkspace({ id: workspaceId, name: "Imported Workspace" }); navigate("/app/notes"); },
+  });
   const activeNoteId = /^\/app\/notes\/[^/]+$/.test(location.pathname) && location.pathname !== "/app/notes/new"
     ? decodeURIComponent(location.pathname.split("/")[3]!) : undefined;
   useGSAP(() => {
@@ -256,8 +257,11 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
     <aside className={styles.sidebar} aria-label="Application navigation">
       <Link className={styles.brand} to="/app" aria-label="Stash home"><span className={styles.brandMark}>S</span><span>Stash</span></Link>
       <NavigationMenu.Root className={styles.navigationRoot} orientation="vertical" aria-label="Workspace"><NavigationMenu.List className={styles.navigation}>
-        {navigation.map((item) => <NavigationMenu.Item key={item.to}><NavigationMenu.Link asChild><NavLink className={styles.navLink}
+        {primaryNavigation.map((item) => <NavigationMenu.Item key={item.to}><NavigationMenu.Link asChild><NavLink className={styles.navLink}
           end={item.to === "/app/inbox" || item.to === "/app/search"} to={item.to}><Icon name={item.icon} />{item.label}</NavLink></NavigationMenu.Link></NavigationMenu.Item>)}
+        <NavigationMenu.Item className={styles.contextualDivider} aria-hidden="true" />
+        {contextualNavigation.map((item) => <NavigationMenu.Item key={item.to}><NavigationMenu.Link asChild><NavLink className={`${styles.navLink} ${styles.contextualNavLink}`}
+          to={item.to}><Icon name={item.icon} />{item.label}</NavLink></NavigationMenu.Link></NavigationMenu.Item>)}
         <NavigationMenu.Item><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings"><Icon name="settings" />Settings</NavLink></NavigationMenu.Link></NavigationMenu.Item>
         {session.activeOrganizationId ? <NavigationMenu.Item><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/agents"><Icon name="agents" />Agents</NavLink></NavigationMenu.Link></NavigationMenu.Item> : null}
         {session.organizationAdministrations?.length ? <><NavigationMenu.Item><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/organization"><Icon name="settings" />Organization</NavLink></NavigationMenu.Link></NavigationMenu.Item><NavigationMenu.Item><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/members"><Icon name="members" />Members</NavLink></NavigationMenu.Link></NavigationMenu.Item><NavigationMenu.Item><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/imported-identities"><Icon name="import" />Imported identities</NavLink></NavigationMenu.Link></NavigationMenu.Item></> : null}
@@ -272,28 +276,14 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
         : <main id="workspace-content" className={styles.content} ref={mainRef} tabIndex={-1}>
         <Routes>
           <Route path="/app" element={<Navigate replace to={restoreLastActiveContext(activeWorkspace.id ?? workspaceName)} />} />
-          <Route path="/app/inbox" element={<InboxPage workspaceId={activeWorkspace.id ?? ""} token={session.token ?? ""} />} />
-          <Route path="/app/notes" element={<NoteTree token={session.token ?? ""} variant="page" workspaceId={activeWorkspace.id ?? ""} />} />
           <Route path="/app/notes/new" element={<Navigate replace to="/app/notes" />} />
-          <Route path="/app/notes/:noteId/history" element={<NoteHistoryPage token={session.token ?? ""} />} />
-          <Route path="/app/tasks" element={<TasksPage workspaceId={activeWorkspace.id ?? ""} memberId={session.member.id} token={session.token ?? ""} />} />
-          <Route path="/app/projects" element={<ProjectBrowser token={session.token ?? ""} onOpenProject={(projectId) => navigate(`/app/projects/${encodeURIComponent(projectId)}/boards`)} />} />
-          <Route path="/app/projects/:projectId/boards" element={<BoardsPage token={session.token ?? ""} />} />
-          <Route path="/app/projects/:projectId/boards/:boardId" element={<BoardsPage token={session.token ?? ""} />} />
-          <Route path="/app/notes/:targetId/discussions" element={<DiscussionsPage targetKind="note" token={session.token ?? ""} />} />
-          <Route path="/app/tasks/:targetId/discussions" element={<DiscussionsPage targetKind="task" token={session.token ?? ""} />} />
-          <Route path="/app/notes/:targetId/blocks/:blockKey/discussions" element={<DiscussionsPage targetKind="block" token={session.token ?? ""} />} />
+          {capabilityRoutes.map((route) => <Route element={route.element} key={route.path} path={route.path} />)}
           <Route path="/app/projects/:projectId/tasks/:taskKey/development" element={<DevelopmentSignalsRoute />} />
-          <Route path="/app/projects/:projectId/tasks/:taskKey" element={<TaskDetailPage memberId={session.member.id} token={session.token} />} />
-          <Route path="/app/projects/:projectId/notifications" element={<ProjectNotificationsPage token={session.token} />} />
           <Route path="/app/settings/members" element={<MemberAdministrationPage administrations={session.organizationAdministrations} activeOrganizationId={session.activeOrganizationId} currentMemberId={session.member.id} token={session.token} />} />
           <Route path="/app/settings" element={<MemberSettingsPage token={session.token ?? ""} />} />
           <Route path="/app/settings/data" element={<WorkspaceDataPage token={session.token ?? ""} workspaceId={activeWorkspace.id ?? ""} memberId={session.member.id} onOpenWorkspace={(workspaceId)=>{setActiveWorkspace({id:workspaceId,name:"Imported Workspace"});navigate("/app/notes");}} />} />
           <Route path="/app/settings/organization" element={session.organizationAdministrations?.length ? <OrganizationSettingsPage token={session.token ?? ""} administrations={session.organizationAdministrations} activeOrganizationId={session.activeOrganizationId} /> : <Navigate replace to="/app/settings" />} />
           <Route path="/app/settings/imported-identities" element={<ImportedIdentitiesPage administrations={session.organizationAdministrations} currentMember={session.member} token={session.token} />} />
-          <Route path="/app/activity" element={<ActivityPage workspaceId={activeWorkspace.id ?? ""} token={session.token ?? ""} />} />
-          <Route path="/app/notifications" element={<NotificationsPage token={session.token ?? ""} />} />
-          <Route path="/app/search" element={<SearchPage workspaceId={activeWorkspace.id ?? ""} token={session.token ?? ""} />} />
           <Route path="/app/settings/agents" element={<AgentGrantsPage organizationId={session.activeOrganizationId} token={session.token} />} />
           <Route path="*" element={<PlaceholderPage workspaceName={workspaceName} title="Not found" description="This Workspace route does not exist." action="Go home" actionTo="/app" />} />
         </Routes>

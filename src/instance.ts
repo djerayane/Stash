@@ -74,7 +74,7 @@ import { instanceUpgradeRoute } from "./instance-upgrade-routes.js";
 import type { InstanceUpgradeService } from "./instance-upgrade.js";
 import { accountRegistrationRoute, type AuthenticationFailureReporter } from "./account-registration-routes.js";
 import type { AccountRegistrationService } from "./account-registration.js";
-import { routesFromCapabilities, type CapabilityRegistry } from "./capability-registry.js";
+import { publicRoutesFromCapabilities, routesFromCapabilities, type CapabilityRegistry } from "./capability-registry.js";
 
 export interface DatabaseProbe {
   verifyConnection(): Promise<void>;
@@ -213,40 +213,45 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
   diagnostics.record({ kind: "instance_started", occurredAt: new Date().toISOString() });
   const acceleration = options.acceleration ?? createOptionalRedisAcceleration();
   const memberAccess = options.memberAccess ?? options.passwordAuth;
-  const publicDomainRoutes = memberAccess ? [
+  const capabilityRegistry = options.capabilities ?? { modules: [] };
+  const capabilityRouteOwnership = new Set(capabilityRegistry.modules.flatMap(({ owns }) => [...(owns ?? [])]));
+  const ownsRoute = (feature: string) => capabilityRouteOwnership.has(feature);
+  const capabilityPublicDomainRoutes = publicRoutesFromCapabilities(capabilityRegistry);
+  const legacyPublicDomainRoutes = memberAccess ? [
     ...(options.memberLocalization ? [memberLocalizationRoutes(options.memberLocalization, memberAccess)] : []),
-    ...(options.workspaceProjects ? [workspaceProjectRoutes(options.workspaceProjects, memberAccess)] : []),
+    ...(!ownsRoute("workspace-projects") && options.workspaceProjects ? [workspaceProjectRoutes(options.workspaceProjects, memberAccess)] : []),
     ...(options.organizationRoles ? [organizationRoleRoutes(options.organizationRoles, memberAccess)] : []),
     ...(options.invitations ? [invitationRoutes(options.invitations, memberAccess)] : []),
-    ...(options.notes ? [noteRoutes(options.notes, memberAccess)] : []),
-    ...(options.noteCollaboration ? [noteCollaborationRoutes(options.noteCollaboration, memberAccess)] : []),
-    ...(options.noteLinks ? [noteLinkRoutes(options.noteLinks, memberAccess)] : []),
-    ...(options.tasks ? [taskRoutes(options.tasks, memberAccess)] : []),
-    ...(options.projectWorkflows ? [projectWorkflowRoutes(options.projectWorkflows, memberAccess)] : []),
-    ...(options.boards ? [boardRoutes(options.boards, memberAccess)] : []),
-    ...(options.attachments ? [attachmentRoutes(options.attachments, memberAccess)] : []),
-    ...(options.discussions ? [discussionRoutes(options.discussions, memberAccess)] : []),
-    ...(options.portableWorkspaceExports ? [portableWorkspaceExportRoute(options.portableWorkspaceExports, memberAccess)] : []),
-    ...(options.portableWorkspaceImports ? [markdownWorkspaceImportRoute(options.portableWorkspaceImports,memberAccess)] : []),
-    ...(options.activities ? [activityRoutes(options.activities, memberAccess)] : []),
-    ...(options.notifications ? [notificationRoutes(options.notifications, memberAccess)] : []),
-    ...(options.repositoryConnections ? [repositoryConnectionRoutes(options.repositoryConnections, memberAccess)] : []),
-    ...(options.githubArtifacts ? [githubArtifactRoutes(options.githubArtifacts, memberAccess)] : []),
-    ...(options.githubSignals ? [githubSignalRoutes(options.githubSignals, memberAccess)] : []),
-    ...(options.automations ? [automationRoutes(options.automations, memberAccess)] : []),
+    ...(!ownsRoute("notes") && options.notes ? [noteRoutes(options.notes, memberAccess)] : []),
+    ...(!ownsRoute("note-collaboration") && options.noteCollaboration ? [noteCollaborationRoutes(options.noteCollaboration, memberAccess)] : []),
+    ...(!ownsRoute("note-links") && options.noteLinks ? [noteLinkRoutes(options.noteLinks, memberAccess)] : []),
+    ...(!ownsRoute("tasks") && options.tasks ? [taskRoutes(options.tasks, memberAccess)] : []),
+    ...(!ownsRoute("project-workflows") && options.projectWorkflows ? [projectWorkflowRoutes(options.projectWorkflows, memberAccess)] : []),
+    ...(!ownsRoute("boards") && options.boards ? [boardRoutes(options.boards, memberAccess)] : []),
+    ...(!ownsRoute("attachments") && options.attachments ? [attachmentRoutes(options.attachments, memberAccess)] : []),
+    ...(!ownsRoute("discussions") && options.discussions ? [discussionRoutes(options.discussions, memberAccess)] : []),
+    ...(!ownsRoute("portable-export") && options.portableWorkspaceExports ? [portableWorkspaceExportRoute(options.portableWorkspaceExports, memberAccess)] : []),
+    ...(!ownsRoute("markdown-import") && options.portableWorkspaceImports ? [markdownWorkspaceImportRoute(options.portableWorkspaceImports,memberAccess)] : []),
+    ...(!ownsRoute("activities") && options.activities ? [activityRoutes(options.activities, memberAccess)] : []),
+    ...(!ownsRoute("notifications") && options.notifications ? [notificationRoutes(options.notifications, memberAccess)] : []),
+    ...(!ownsRoute("repository-connections") && options.repositoryConnections ? [repositoryConnectionRoutes(options.repositoryConnections, memberAccess)] : []),
+    ...(!ownsRoute("github-artifacts") && options.githubArtifacts ? [githubArtifactRoutes(options.githubArtifacts, memberAccess)] : []),
+    ...(!ownsRoute("github-signals") && options.githubSignals ? [githubSignalRoutes(options.githubSignals, memberAccess)] : []),
+    ...(!ownsRoute("automations") && options.automations ? [automationRoutes(options.automations, memberAccess)] : []),
     ...(options.importedIdentityAdministration ? [importedIdentityAdministrationRoutes(options.importedIdentityAdministration, memberAccess)] : []),
     ...(options.searches ? [workspaceSearchRoutes(options.searches, memberAccess)] : []),
     ...(options.agentGrants ? [agentGrantRoutes(options.agentGrants, memberAccess,
       { ...(options.notes ? { notes: options.notes } : {}), ...(options.tasks ? { tasks: options.tasks } : {}) })] : []),
   ] : [];
+  const publicDomainRoutes = [...capabilityPublicDomainRoutes, ...legacyPublicDomainRoutes];
   const applicationRoutes = [
     ...(options.oidcManagement && options.passwordAuth ? [oidcManagementRoute(options.oidcManagement, options.passwordAuth)] : []),
     ...(options.oidcAuth && oidcCallbackOrigin ? [oidcAuthRoute(options.oidcAuth, oidcCallbackOrigin)] : []),
     ...(options.accountRecovery && options.passwordAuth ? [accountRecoveryRoute(options.accountRecovery, {
       resolve: (authorization) => options.passwordAuth!.authenticateBearer(authorization),
     })] : []),
-    accountRegistrationRoute(options.accountRegistration, options.reportAuthenticationFailure),
-    ...(options.passwordAuth ? [passwordAuthRoute(options.passwordAuth, options.reportAuthenticationFailure)] : []),
+    ...(!ownsRoute("account-registration") ? [accountRegistrationRoute(options.accountRegistration, options.reportAuthenticationFailure)] : []),
+    ...(!ownsRoute("password-auth") && options.passwordAuth ? [passwordAuthRoute(options.passwordAuth, options.reportAuthenticationFailure)] : []),
     diagnosticsSchemaRoute(diagnostics),
     requireInstanceAdministrator(options.instanceAdminToken, diagnosticsAdminRoute(diagnostics)),
     requireInstanceAdministrator(options.instanceAdminToken, instanceAdminRoute(acceleration)),
@@ -258,14 +263,14 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
     ),
     ...(options.portableWorkspaceImports
       ? [requireInstanceAdministrator(options.instanceAdminToken, portableWorkspaceImportRoute(options.portableWorkspaceImports))] : []),
-    ...publicDomainRoutes,
-    ...(options.mobileCaptures && (options.memberAccess ?? options.passwordAuth)
+    ...legacyPublicDomainRoutes,
+    ...(!ownsRoute("mobile-capture") && options.mobileCaptures && (options.memberAccess ?? options.passwordAuth)
       ? [mobileCaptureRoutes(options.mobileCaptures, (options.memberAccess ?? options.passwordAuth)!)]
       : []),
   ];
   const routes = [
-    ...routesFromCapabilities(options.capabilities ?? { modules: [] }),
-    ...(options.githubSignals ? [githubWebhookRoute(options.githubSignals)] : []),
+    ...routesFromCapabilities(capabilityRegistry),
+    ...(!ownsRoute("github-signals") && options.githubSignals ? [githubWebhookRoute(options.githubSignals)] : []),
     ...(options.agentGrants ? [mcpRoute(options.agentGrants, options.mcpEnabled === true,
       { ...(options.notes ? { notes: options.notes } : {}), ...(options.tasks ? { tasks: options.tasks } : {}) })] : []),
     publicDomainApiRoute(publicDomainRoutes), ...applicationRoutes,
