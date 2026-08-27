@@ -63,14 +63,19 @@ export function ProjectBrowser({ token, workspaceId, fetcher = fetch, onOpenProj
   const keepDialogFocus = (event: React.KeyboardEvent<HTMLElement>) => {
     if (event.key === "Escape") { event.preventDefault(); close(); return; }
     if (event.key !== "Tab") return;
-    if (event.shiftKey && event.target === nameRef.current) { event.preventDefault(); submitRef.current?.focus(); }
-    else if (!event.shiftKey && event.target === submitRef.current) { event.preventDefault(); nameRef.current?.focus(); }
+    const focusable = [...(dialogRef.current?.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ) ?? [])].filter((element) => !element.hidden);
+    const first = focusable[0]; const last = focusable.at(-1);
+    if (!first || !last) { event.preventDefault(); dialogRef.current?.focus(); }
+    else if (event.shiftKey && event.target === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && event.target === last) { event.preventDefault(); first.focus(); }
   };
 
   return <section className={styles.page} aria-labelledby="projects-title">
     <header className={styles.header}>
       <div><p>Work planning</p><h1 id="projects-title">Projects</h1></div>
-      <p>Give related Tasks one durable home, then shape the Workflow around the work.</p>
+      <p>Add a Project when related Tasks need an optional execution context and shared Workflow.</p>
     </header>
     {workspaces.isPending ? <p className={styles.state} aria-live="polite">Loading Projects…</p>
       : workspaces.isError ? <div className={styles.state} role="alert"><strong>Projects are unavailable.</strong><p>{workspaces.error.message}</p><button type="button" onClick={() => void workspaces.refetch()}>Try again</button></div>
@@ -91,7 +96,7 @@ export function ProjectBrowser({ token, workspaceId, fetcher = fetch, onOpenProj
       })}</div> : <p className={styles.state}>No accessible Workspaces.</p>}
     {creatingIn ? <div className={styles.backdrop} onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}>
       <section aria-describedby="create-project-description" aria-labelledby="create-project-title" aria-modal="true" className={styles.dialog}
-        onKeyDown={keepDialogFocus} ref={dialogRef} role="dialog">
+        onKeyDown={keepDialogFocus} ref={dialogRef} role="dialog" tabIndex={-1}>
         <p className={styles.eyebrow}>{creatingIn.name}</p><h2 id="create-project-title">Create a Project</h2>
         <p id="create-project-description">Name the work and choose a short key for Tasks, such as STASH-12.</p>
         <form onSubmit={(event) => { event.preventDefault(); create.mutate(); }}>

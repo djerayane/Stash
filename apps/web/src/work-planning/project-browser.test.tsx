@@ -78,3 +78,22 @@ test("traps dialog focus, closes with Escape, and restores the exact create trig
   await waitFor(() => expect(trigger).toHaveFocus());
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });
+
+test("keeps focus trapped while Project creation is pending and actions are disabled", async () => {
+  let finish!: (response: Response) => void;
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(Response.json({ workspaces: [{
+    id: "personal", name: "Personal", projectCreation: { allowed: true }, projects: [],
+  }] })).mockImplementationOnce(() => new Promise<Response>((resolve) => { finish = resolve; }));
+  renderBrowser(fetcher);
+  fireEvent.click(await screen.findByRole("button", { name: "Create a Project in Personal" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "Project name" }), { target: { value: "Launch" } });
+  const key = screen.getByRole("textbox", { name: "Project key" });
+  fireEvent.change(key, { target: { value: "LAUNCH" } });
+  fireEvent.click(screen.getByRole("button", { name: "Create Project" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Creating…" })).toBeDisabled());
+  key.focus(); fireEvent.keyDown(key, { key: "Tab" });
+  expect(screen.getByRole("textbox", { name: "Project name" })).toHaveFocus();
+  fireEvent.keyDown(screen.getByRole("textbox", { name: "Project name" }), { key: "Tab", shiftKey: true });
+  expect(key).toHaveFocus();
+  finish(Response.json({ id: "new-project" }, { status: 201 }));
+});

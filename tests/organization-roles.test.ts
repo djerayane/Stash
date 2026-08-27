@@ -35,6 +35,7 @@ class ProtocolCompatibleDatabase implements DatabaseProbe, OrganizationRoleRepos
     ["personal-github-connection", { owner: linusId, state: "active" }],
   ]);
   readonly operatorAudit: Array<{ actorId: string; memberId: string; action: string }> = [];
+  readonly customRoles = new Map<string, { id: string; name: string; immutable: false; permissions: Array<"create_project">; memberIds: string[] }>();
 
   async verifyConnection() {}
   async close() {}
@@ -72,6 +73,7 @@ class ProtocolCompatibleDatabase implements DatabaseProbe, OrganizationRoleRepos
     }
     if (members.get(actorId) === "Admin" && members.get(accountId) === "Owner") return "forbidden" as const;
     members.delete(accountId);
+    for (const role of this.customRoles.values()) role.memberIds = role.memberIds.filter((id) => id !== accountId);
     this.activeSessions.delete(accountId);
     this.personalTokens.delete(accountId);
     const revokedAgentGrants = this.activeAgentGrants.delete(accountId) ? 1 : 0;
@@ -93,6 +95,30 @@ class ProtocolCompatibleDatabase implements DatabaseProbe, OrganizationRoleRepos
       departure: { memberId: accountId, affectedTaskIds, revokedSessions: 1, revokedCredentials: 1, revokedAgentGrants,
         degradedRepositoryConnectionIds },
     };
+  }
+
+  async listCustomRoles() { return [...this.customRoles.values()]; }
+  async createCustomRole(orgId: string, actorId: string, role: { id: string; name: string; immutable: false; permissions: Array<"create_project">; memberIds: string[] }) {
+    if (this.memberships.get(orgId)?.get(actorId) !== "Owner") return "forbidden" as const;
+    if ([...this.customRoles.values()].some(({ name }) => name === role.name)) return "name_conflict" as const;
+    this.customRoles.set(role.id, role); return "created" as const;
+  }
+  async updateCustomRole(orgId: string, actorId: string, roleId: string, input: { name: string; permissions: Array<"create_project"> }) {
+    if (this.memberships.get(orgId)?.get(actorId) !== "Owner") return "forbidden" as const;
+    const role = this.customRoles.get(roleId); if (!role) return "role_not_found" as const;
+    Object.assign(role, input); return "updated" as const;
+  }
+  async assignCustomRole(orgId: string, actorId: string, roleId: string, memberId: string) {
+    if (this.memberships.get(orgId)?.get(actorId) !== "Owner") return "forbidden" as const;
+    const role = this.customRoles.get(roleId); if (!role) return "role_not_found" as const;
+    if (!this.memberships.get(orgId)?.has(memberId)) return "member_not_found" as const;
+    if (!role.memberIds.includes(memberId)) role.memberIds.push(memberId); return "updated" as const;
+  }
+  async revokeCustomRole(orgId: string, actorId: string, roleId: string, memberId: string) {
+    if (this.memberships.get(orgId)?.get(actorId) !== "Owner") return "forbidden" as const;
+    const role = this.customRoles.get(roleId); if (!role) return "role_not_found" as const;
+    if (!this.memberships.get(orgId)?.has(memberId)) return "member_not_found" as const;
+    role.memberIds = role.memberIds.filter((id) => id !== memberId); return "updated" as const;
   }
 }
 
@@ -172,6 +198,35 @@ describe("managing built-in Organization Roles", () => {
     assert.equal(promoted.status, 200);
     assert.deepEqual(await promoted.json(), { organizationId, memberId: linusId, role: "Admin" });
     assert.equal(database.memberships.get(organizationId)?.get(linusId), "Admin");
+  });
+
+  it("creates, edits, grants, and revokes custom Project creation authority only for Organization Members", async () => {
+    const { baseUrl } = await run();
+    const created = await request(baseUrl, `/api/organizations/${organizationId}/roles`, `member-${adaId}`, {
+      method: "POST", body: JSON.stringify({ name: "Project lead", permissions: ["create_project"] }),
+    });
+    assert.equal(created.status, 201);
+    const role = (await created.json() as { role: { id: string } }).role;
+    assert.match(role.id, /^[0-9a-f-]{36}$/);
+    const assigned = await request(baseUrl, `/api/organizations/${organizationId}/roles/${role.id}/members/${linusId}`,
+      `member-${adaId}`, { method: "PUT" });
+    assert.equal(assigned.status, 200);
+    const listed = await request(baseUrl, `/api/organizations/${organizationId}/roles`, `member-${adaId}`);
+    assert.deepEqual((await listed.json() as any).roles.at(-1), {
+      id: role.id, name: "Project lead", immutable: false, permissions: ["create_project"], memberIds: [linusId],
+    });
+    const revokedPermission = await request(baseUrl, `/api/organizations/${organizationId}/roles/${role.id}`,
+      `member-${adaId}`, { method: "PUT", body: JSON.stringify({ name: "Project coordinator", permissions: [] }) });
+    assert.equal(revokedPermission.status, 200);
+    assert.deepEqual((await (await request(baseUrl, `/api/organizations/${organizationId}/roles`, `member-${adaId}`)).json() as any).roles.at(-1), {
+      id: role.id, name: "Project coordinator", immutable: false, permissions: [], memberIds: [linusId],
+    });
+    assert.equal((await request(baseUrl, `/api/organizations/${organizationId}/roles/${role.id}/members/${missingMemberId}`,
+      `member-${adaId}`, { method: "PUT" })).status, 404);
+    assert.equal((await request(baseUrl, `/api/organizations/${organizationId}/roles/${role.id}/members/${linusId}`,
+      `member-${graceId}`, { method: "DELETE" })).status, 403);
+    assert.equal((await request(baseUrl, `/api/organizations/${organizationId}/roles/${role.id}/members/${linusId}`,
+      `member-${adaId}`, { method: "DELETE" })).status, 200);
   });
 
   it("protects the final Owner until ownership transfers", async () => {

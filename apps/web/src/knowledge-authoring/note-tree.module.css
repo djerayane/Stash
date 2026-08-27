@@ -45,6 +45,24 @@
 .branchStatus, .branchError { grid-column: 1 / -1; margin: 0; padding: .55rem clamp(1rem, 3vw, 2rem); color: var(--stash-color-muted); background: var(--stash-color-surface); border-bottom: 1px solid var(--stash-border-subtle); font-size: .75rem; }
 .branchError { color: var(--stash-color-error); }
 .editorSlot { min-width: 0; grid-row: 3; }
+.starterTutorial { grid-column: 1; grid-row: 4; width: min(100% - 2rem, 68rem); display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; margin: 0 auto 3rem; border: 1px solid var(--stash-border-subtle); background: var(--stash-border-subtle); }
+.starterTutorial > header { grid-column: 1 / -1; padding: 1.4rem; background: var(--stash-color-surface); }
+.starterTutorial > header p { margin: 0 0 .4rem; color: var(--stash-color-accent); font-size: .68rem; font-weight: 760; letter-spacing: .1em; text-transform: uppercase; }
+.starterTutorial h2 { margin: 0; font: 500 1.55rem/1.05 var(--stash-font-display); letter-spacing: -.035em; }
+.starterTutorial > header span, .starterTutorial section > p { color: var(--stash-color-muted); font-size: .76rem; line-height: 1.5; }
+.starterTutorial section { min-width: 0; padding: 1.2rem; background: var(--stash-color-surface); }
+.starterTutorial h3 { margin: 0 0 .9rem; font-size: .76rem; letter-spacing: .04em; text-transform: uppercase; }
+.starterTutorial ul { display: grid; gap: .45rem; margin: 0; padding: 0; list-style: none; }
+.starterTutorial li a, .starterTutorial section:last-child li { display: flex; justify-content: space-between; gap: .75rem; color: var(--stash-color-ink); text-decoration: none; }
+.starterTutorial li a { display: grid; padding: .55rem; border: 1px solid var(--stash-border-subtle); }
+.starterTutorial li span { color: var(--stash-color-muted); font-size: .7rem; }
+.tutorialLink { display: flex; justify-content: space-between; gap: .5rem; margin: .75rem 0 0; }
+.starterTutorial form, .starterTutorial label { display: grid; gap: .45rem; }
+.starterTutorial label { color: var(--stash-color-muted); font-size: .7rem; font-weight: 700; }
+.starterTutorial input, .starterTutorial button { min-height: 2.35rem; padding: .45rem .6rem; border: 1px solid var(--stash-border-strong); background: var(--stash-color-canvas); color: var(--stash-color-ink); }
+.starterTutorial button { justify-self: start; font-weight: 700; }
+.starterTutorial table { width: 100%; margin-top: .8rem; border-collapse: collapse; font-size: .74rem; }
+.starterTutorial th, .starterTutorial td { padding: .5rem; border: 1px solid var(--stash-border-subtle); text-align: left; }
 .drawer { grid-column: 2; grid-row: 3; min-width: 0; border-left: 1px solid var(--stash-border-subtle); background: var(--stash-color-surface); }
 .drawer header { display: flex; align-items: center; justify-content: space-between; padding: var(--stash-space-5); border-bottom: 1px solid var(--stash-border-subtle); }
 .drawer header p { color: var(--stash-color-accent); }
@@ -68,5 +86,7 @@
   .treePanel:not(.treePage) { display: none; }
   .noteWorkspace.drawerIsOpen { grid-template-columns: 1fr; }
   .drawer { position: fixed; z-index: 18; inset: 4rem 0 4.5rem; overflow: auto; grid-column: 1; background: var(--stash-color-surface); border-left: 0; }
+  .starterTutorial { grid-template-columns: 1fr; }
+  .starterTutorial > header { grid-column: 1; }
 }
 @media (prefers-reduced-motion: reduce) { .treeItem, .itemActions { transition: none; } }

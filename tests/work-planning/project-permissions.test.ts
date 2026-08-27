@@ -8,7 +8,7 @@ import { afterEach, describe, it } from "node:test";
 import { startInstance, type DatabaseProbe, type RunningInstance } from "../../src/instance.js";
 import { createAuthenticationSecretCodec } from "../../src/authentication-secrets.js";
 import { EmbeddedInstanceStore } from "../../src/embedded-instance-store.js";
-import { builtInProjectCreationPermissions } from "../../src/organization-roles.js";
+import { builtInProjectCreationPermissions, OrganizationRoleService } from "../../src/organization-roles.js";
 import {
   WorkspaceProjectService,
   type MemberAccessResolver,
@@ -117,14 +117,21 @@ describe("Project creation permission", () => {
     assert.equal(await service.canCreateProject(ownerId, workspaceId), true);
     assert.equal(await service.canCreateProject(adminId, workspaceId), true);
     assert.equal(await service.canCreateProject(memberId, workspaceId), false);
-    const customRoleId = randomUUID();
-    await store.upgradeDatabase.query("INSERT INTO stash_organization_custom_roles(id,organization_id,name) VALUES($1,$2,'Project lead')",
-      [customRoleId, organizationId]);
-    await store.upgradeDatabase.query("INSERT INTO stash_organization_custom_role_permissions(role_id,permission) VALUES($1,'create_project')",
-      [customRoleId]);
-    await store.upgradeDatabase.query("INSERT INTO stash_organization_custom_role_assignments(role_id,account_id) VALUES($1,$2)",
-      [customRoleId, customId]);
+    const roles = new OrganizationRoleService(store.database);
+    const created = await roles.createCustom(organizationId, ownerId, { name: "Project lead", permissions: ["create_project"] });
+    assert.equal(created.result, "created");
+    const customRoleId = created.role.id;
+    assert.equal(await roles.assignCustom(organizationId, ownerId, customRoleId, customId), "updated");
     assert.equal(await service.canCreateProject(customId, workspaceId), true);
+    assert.equal(await roles.updateCustom(organizationId, ownerId, customRoleId,
+      { name: "Project lead", permissions: [] }), "updated");
+    assert.equal(await service.canCreateProject(customId, workspaceId), false);
+    assert.equal(await roles.updateCustom(organizationId, ownerId, customRoleId,
+      { name: "Project lead", permissions: ["create_project"] }), "updated");
+    assert.equal(await roles.assignCustom(organizationId, ownerId, customRoleId, randomUUID()), "member_not_found");
+    await store.upgradeDatabase.query("DELETE FROM stash_organization_memberships WHERE organization_id=$1 AND account_id=$2",
+      [organizationId, customId]);
+    assert.equal(await service.canCreateProject(customId, workspaceId), false, "an orphan assignment cannot grant access");
     await store.close();
   });
 

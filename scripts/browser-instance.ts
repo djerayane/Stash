@@ -30,6 +30,12 @@ import { EmbeddedInstanceStore } from "../src/embedded-instance-store.js";
 import { createAuthenticationSecretCodec } from "../src/authentication-secrets.js";
 import { DiscussionService } from "../src/discussions.js";
 import { json, type HttpRoute } from "../src/http-routing.js";
+import { identityAccessCapability } from "../src/identity-access/index.js";
+import { StarterTutorialService } from "../src/identity-access/starter-tutorial.js";
+import { knowledgeAuthoringCapability } from "../src/knowledge-authoring/index.js";
+import { workPlanningCapability } from "../src/work-planning/index.js";
+import { ProjectlessTaskService } from "../src/work-planning/projectless-tasks.js";
+import { NoteService } from "../src/notes.js";
 
 const noteId = "99999999-9999-4999-8999-999999999999";
 const secondNoteId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -167,6 +173,11 @@ const organizationRoleRepository = {
     return requestedOrganizationId === organizationId ? memberships.get(accountId) : undefined;
   },
   async assignBuiltInRole() { return "forbidden" as const; },
+  async listCustomRoles() { return []; },
+  async createCustomRole() { return "forbidden" as const; },
+  async updateCustomRole() { return "forbidden" as const; },
+  async assignCustomRole() { return "forbidden" as const; },
+  async revokeCustomRole() { return "forbidden" as const; },
   async removeOrganizationMember(requestedOrganizationId: string, actorId: string, accountId: string) {
     if (requestedOrganizationId !== organizationId || !["Owner", "Admin"].includes(memberships.get(actorId)!)) return "forbidden" as const;
     if (!memberships.has(accountId)) return "member_not_found" as const;
@@ -399,11 +410,64 @@ const instance = await startInstance({
 
 console.log(`Browser acceptance Instance listening on ${instance.url}`);
 
+const firstRunDirectory = await mkdtemp(join(tmpdir(), "stash-browser-first-run-"));
+const firstRunCodec = createAuthenticationSecretCodec(randomBytes(32).toString("base64"));
+const firstRunStore = await EmbeddedInstanceStore.open(firstRunDirectory, firstRunCodec);
+const firstRunAuth = new PasswordAuthService(firstRunStore.database);
+const firstRunSetupRepository = firstRunStore.database.instanceSetupRepository();
+const firstRunSetup = new InstanceSetupService(firstRunSetupRepository,
+  { boundHost: "0.0.0.0", code: "STASH-ONE", output() {} });
+const firstRunNotes = new NoteService(firstRunStore.database);
+const firstRunTasks = new TaskService(firstRunStore.database, firstRunStore.database);
+const firstRunProjects = new WorkspaceProjectService(firstRunStore.database);
+const firstRunInstance = await startInstance({ database: firstRunStore.database, host: "0.0.0.0", port: Number.parseInt(process.env.STASH_BROWSER_FIRST_RUN_PORT ?? "4174", 10),
+  instanceAdminToken: "first-run-admin", passwordAuth: firstRunAuth, memberAccess: firstRunAuth, notes: firstRunNotes,
+  noteCollaboration: new NoteCollaborationService(firstRunStore.database), tasks: firstRunTasks, workspaceProjects: firstRunProjects,
+  capabilities: createCapabilityRegistry([
+    identityAccessCapability({ passwordAuth: firstRunAuth, instanceSetup: firstRunSetup,
+      starterTutorials: new StarterTutorialService(firstRunSetupRepository), memberAccess: firstRunAuth }),
+    knowledgeAuthoringCapability({ notes: firstRunNotes, noteTree: new NoteTreeService(firstRunStore.database.noteTreeRepository(), firstRunSetupRepository), memberAccess: firstRunAuth }),
+    workPlanningCapability({ tasks: firstRunTasks, workspaceProjects: firstRunProjects, memberAccess: firstRunAuth,
+      projectlessTasks: new ProjectlessTaskService(firstRunStore.database.projectlessTaskRepository()) }),
+  ]), webClientRoot: fileURLToPath(new URL("../apps/web/dist", import.meta.url)) });
+console.log(`Fresh browser setup Instance listening on ${firstRunInstance.url}`);
+
+const roleDirectory = await mkdtemp(join(tmpdir(), "stash-browser-role-"));
+const roleCodec = createAuthenticationSecretCodec(randomBytes(32).toString("base64"));
+const roleStore = await EmbeddedInstanceStore.open(roleDirectory, roleCodec);
+const roleOrganizationId = "91919191-9191-4191-8191-919191919191";
+const roleOwnerId = "92929292-9292-4292-8292-929292929292";
+const roleMemberId = "93939393-9393-4393-8393-939393939393";
+const roleWorkspaceId = "94949494-9494-4494-8494-949494949494";
+await roleStore.database.createFirstOrganizationOwner({ organizationId: roleOrganizationId, organizationName: "Browser Organization",
+  ownerId: roleOwnerId, ownerName: "Role Owner", ownerEmail: "role-owner@stash.test",
+  passwordHash: await hashPassword("owner correct horse battery"), role: "Owner", workspaceId: roleWorkspaceId, workspaceName: "Organization Workspace" });
+await roleStore.upgradeDatabase.query("INSERT INTO stash_accounts(id,name,email,password_hash) VALUES($1,$2,$3,$4)",
+  [roleMemberId, "Role Member", "role-member@stash.test", roleCodec.encrypt(await hashPassword("member correct horse battery"))]);
+await roleStore.upgradeDatabase.query("INSERT INTO stash_organization_memberships(organization_id,account_id,role) VALUES($1,$2,'Member')",
+  [roleOrganizationId, roleMemberId]);
+const roleAuth = new PasswordAuthService(roleStore.database);
+const roleTasks = new TaskService(roleStore.database, roleStore.database);
+const roleProjects = new WorkspaceProjectService(roleStore.database);
+const roleService = new OrganizationRoleService(roleStore.database);
+const completedRoleSetup = new InstanceSetupService(roleStore.database.instanceSetupRepository(), { boundHost: "127.0.0.1", output() {} });
+const roleInstance = await startInstance({ database: roleStore.database, host: "127.0.0.1", port: Number.parseInt(process.env.STASH_BROWSER_ROLE_PORT ?? "4175", 10),
+  instanceAdminToken: "role-admin", passwordAuth: roleAuth, memberAccess: roleAuth, organizationRoles: roleService,
+  workspaceProjects: roleProjects, tasks: roleTasks,
+  capabilities: createCapabilityRegistry([identityAccessCapability({ passwordAuth: roleAuth, instanceSetup: completedRoleSetup }),
+    workPlanningCapability({ tasks: roleTasks, workspaceProjects: roleProjects, memberAccess: roleAuth })]),
+  webClientRoot: fileURLToPath(new URL("../apps/web/dist", import.meta.url)) });
+console.log(`Custom Role browser Instance listening on ${roleInstance.url}`);
+
 let closing = false;
 async function close() {
   if (closing) return;
   closing = true;
   await instance.close();
+  await firstRunInstance.close();
+  await firstRunStore.close();
+  await roleInstance.close();
+  await roleStore.close();
   await browserTreeStore.close();
   process.exit(0);
 }
