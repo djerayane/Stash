@@ -8,6 +8,9 @@ test("the production composition root injects capability-scoped persistence port
     "identityAccessRepositories", "knowledgeAuthoringRepositories", "workPlanningRepositories", "developmentIntegrationRepositories",
   ]) assert.match(runtime, new RegExp(`database\\.${port}\\(\\)`));
 
+  const productionStart = runtime.slice(runtime.indexOf("const instance = await startInstance"));
+  assert.doesNotMatch(productionStart, /\b(?:notes|tasks|boards|discussions|searches|automations|repositoryConnections):?\s*(?:,|})/);
+
   assert.doesNotMatch(runtime, /new (?:PasswordAuth|AccountRegistration|Note|NoteCollaboration|Task|WorkspaceProject|ProjectWorkflow|Board|Attachment|Discussion|WorkspaceSearch|RepositoryConnection|GitHubArtifact|GitHubSignal)Service\(database[,)]/);
 });
 
@@ -18,6 +21,8 @@ test("redesigned capability persistence remains implemented by focused kernel ad
     "PostgresCollectionRepository", "PostgresRelationshipQueryRepository", "PostgresVisualizationBlockRepository",
     "PostgresProjectlessTaskRepository", "PostgresCanonicalTaskRepository", "PostgresProjectPermissionRepository",
   ]) assert.match(database, new RegExp(`#\\w+Repository: ${adapter}`));
+  assert.match(database, /FocusedPostgresCapabilityAdapter/);
+  assert.doesNotMatch(database, /Repositories\(\)[^{]*\{\s*return this;\s*\}/s);
 });
 
 test("the Instance exposes capability-owned public routes without registering legacy duplicates", async () => {

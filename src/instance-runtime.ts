@@ -160,9 +160,21 @@ export async function composeInstanceRuntime(environment: NodeJS.ProcessEnv): Pr
   const repositoryConnections = githubApp ? new RepositoryConnectionService(developmentIntegrationRepositories, githubApp) : undefined;
   const githubArtifacts = githubApp ? new GitHubArtifactService(developmentIntegrationRepositories, githubApp) : undefined;
   const githubSignals = githubWebhookSecret ? new GitHubSignalService(developmentIntegrationRepositories, githubWebhookSecret, automations) : undefined;
+  const organizationRoles = new OrganizationRoleService(identityAccessRepositories);
+  const invitations = new InvitationService(identityAccessRepositories);
+  const memberLocalization = new MemberLocalizationService(identityAccessRepositories);
+  const oidcAuth = new OidcAuthService(identityAccessRepositories);
+  const oidcManagement = new OidcManagementService(identityAccessRepositories);
+  const agentGrants = new AgentGrantService(identityAccessRepositories);
+  const accountRecovery = new AccountRecoveryService(identityAccessRepositories, passwordAuth, {
+    passkeys: new WebAuthnPasskeyVerifier(resolveWebAuthnConfiguration(publicOrigin, {
+      ...(environment.WEBAUTHN_RP_ID ? { rpId: environment.WEBAUTHN_RP_ID } : {}), ...(environment.WEBAUTHN_RP_NAME ? { rpName: environment.WEBAUTHN_RP_NAME } : {}) })),
+    secrets: authenticationSecrets, ...(recoveryEmail ? { email: recoveryEmail } : {}) });
   const capabilities = createCapabilityRegistry([
     identityAccessCapability({ passwordAuth, instanceAdminToken, instanceSetup,
-      ...(accountRegistration ? { accountRegistration } : {}), reportAuthenticationFailure }),
+      ...(accountRegistration ? { accountRegistration } : {}), reportAuthenticationFailure, memberAccess: passwordAuth,
+      organizationRoles, invitations, memberLocalization, importedIdentityAdministration: identityAccessRepositories,
+      accountRecovery, oidcAuth, oidcManagement, oidcCallbackOrigin: publicOrigin }),
     knowledgeAuthoringCapability({ notes, noteTree: new NoteTreeService(database.noteTreeRepository(),
       database.tutorialContributionRepository()), starterTutorials, collections,
       relationships: new RelationshipQueryService(database.relationshipQueryRepository()),
@@ -173,25 +185,15 @@ export async function composeInstanceRuntime(environment: NodeJS.ProcessEnv): Pr
     developmentIntegrationCapability({ memberAccess: passwordAuth,
       ...(repositoryConnections ? { repositoryConnections } : {}), ...(githubArtifacts ? { githubArtifacts } : {}),
       ...(githubSignals ? { githubSignals } : {}) }),
-    instanceOperationsCapability({ instanceAdminToken, diagnostics }),
+    instanceOperationsCapability({ instanceAdminToken, diagnostics, memberAccess: passwordAuth, agentGrants, notes, tasks,
+      mcpEnabled: environment.MCP_ENABLED?.trim().toLowerCase() === "true", instanceBackups,
+      instanceBackupRestoreTarget: restoreTarget, ...(instanceBackupRoot ? { instanceBackupRoot } : {}),
+      ...(upgrades ? { instanceUpgrades: upgrades } : {}), portableWorkspaceImports }),
   ]);
   const instance = await startInstance({ database, host, port,
     instanceAdminToken, capabilities, diagnostics,
     webClientRoot: environment.WEB_CLIENT_ROOT?.trim() || fileURLToPath(new URL("../apps/web/dist", import.meta.url)),
-    passwordAuth, ...(accountRegistration ? { accountRegistration } : {}), reportAuthenticationFailure,
-    organizationRoles: new OrganizationRoleService(identityAccessRepositories), invitations: new InvitationService(identityAccessRepositories),
-    ...(repositoryConnections ? { repositoryConnections } : {}), ...(githubArtifacts ? { githubArtifacts } : {}),
-    ...(githubSignals ? { githubSignals } : {}), automations,
-    notes, noteCollaboration, agentGrants: new AgentGrantService(database),
-    mcpEnabled: environment.MCP_ENABLED?.trim().toLowerCase() === "true", noteLinks, tasks,
-    projectWorkflows, boards, attachments, portableWorkspaceExports, portableWorkspaceImports,
-    importedIdentityAdministration: database, mobileCaptures, discussions, activities, searches, instanceBackups, instanceBackupRestoreTarget: restoreTarget,
-    ...(instanceBackupRoot ? { instanceBackupRoot } : {}), ...(upgrades ? { instanceUpgrades: upgrades } : {}), notifications,
-    memberLocalization: new MemberLocalizationService(identityAccessRepositories), oidcAuth: new OidcAuthService(identityAccessRepositories), oidcManagement: new OidcManagementService(identityAccessRepositories),
-    oidcCallbackOrigin: publicOrigin, accountRecovery: new AccountRecoveryService(database, passwordAuth, {
-      passkeys: new WebAuthnPasskeyVerifier(resolveWebAuthnConfiguration(publicOrigin, {
-        ...(environment.WEBAUTHN_RP_ID ? { rpId: environment.WEBAUTHN_RP_ID } : {}), ...(environment.WEBAUTHN_RP_NAME ? { rpName: environment.WEBAUTHN_RP_NAME } : {}) })),
-      secrets: authenticationSecrets, ...(recoveryEmail ? { email: recoveryEmail } : {}) }), ...(redis ? { acceleration: redis.acceleration } : {}) });
+    ...(redis ? { acceleration: redis.acceleration } : {}) });
   const emailRecoveryWorker = recoveryEmail ? new EmailRecoveryWorker(identityAccessRepositories, authenticationSecrets, recoveryEmail) : undefined;
   const emailRecoveryTimer = emailRecoveryWorker ? setInterval(() => {
     void emailRecoveryWorker.processNext()

@@ -4,7 +4,7 @@ import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import gsap from "gsap";
 
-import { ActivityPage, DiscussionsPage, InboxPage, NoteHistoryPage, NotificationsPage, SearchPage } from "./core-workflows";
+import { ActivityPage, DiscussionsPage, InboxPage, NoteHistoryPage, NotificationsPage, SearchPage } from "./workspace-pages";
 
 function renderWorkflow(node: React.ReactNode) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });

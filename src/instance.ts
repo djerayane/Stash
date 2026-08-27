@@ -239,29 +239,29 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
     ...(!ownsRoute("github-signals") && options.githubSignals ? [githubSignalRoutes(options.githubSignals, memberAccess)] : []),
     ...(!ownsRoute("automations") && options.automations ? [automationRoutes(options.automations, memberAccess)] : []),
     ...(options.importedIdentityAdministration ? [importedIdentityAdministrationRoutes(options.importedIdentityAdministration, memberAccess)] : []),
-    ...(options.searches ? [workspaceSearchRoutes(options.searches, memberAccess)] : []),
+    ...(!ownsRoute("search") && options.searches ? [workspaceSearchRoutes(options.searches, memberAccess)] : []),
     ...(options.agentGrants ? [agentGrantRoutes(options.agentGrants, memberAccess,
       { ...(options.notes ? { notes: options.notes } : {}), ...(options.tasks ? { tasks: options.tasks } : {}) })] : []),
   ] : [];
   const publicDomainRoutes = [...capabilityPublicDomainRoutes, ...legacyPublicDomainRoutes];
   const applicationRoutes = [
-    ...(options.oidcManagement && options.passwordAuth ? [oidcManagementRoute(options.oidcManagement, options.passwordAuth)] : []),
-    ...(options.oidcAuth && oidcCallbackOrigin ? [oidcAuthRoute(options.oidcAuth, oidcCallbackOrigin)] : []),
-    ...(options.accountRecovery && options.passwordAuth ? [accountRecoveryRoute(options.accountRecovery, {
+    ...(!ownsRoute("oidc-management") && options.oidcManagement && options.passwordAuth ? [oidcManagementRoute(options.oidcManagement, options.passwordAuth)] : []),
+    ...(!ownsRoute("oidc-auth") && options.oidcAuth && oidcCallbackOrigin ? [oidcAuthRoute(options.oidcAuth, oidcCallbackOrigin)] : []),
+    ...(!ownsRoute("account-recovery") && options.accountRecovery && options.passwordAuth ? [accountRecoveryRoute(options.accountRecovery, {
       resolve: (authorization) => options.passwordAuth!.authenticateBearer(authorization),
     })] : []),
     ...(!ownsRoute("account-registration") ? [accountRegistrationRoute(options.accountRegistration, options.reportAuthenticationFailure)] : []),
     ...(!ownsRoute("password-auth") && options.passwordAuth ? [passwordAuthRoute(options.passwordAuth, options.reportAuthenticationFailure)] : []),
-    diagnosticsSchemaRoute(diagnostics),
-    requireInstanceAdministrator(options.instanceAdminToken, diagnosticsAdminRoute(diagnostics)),
+    ...(!ownsRoute("diagnostics") ? [diagnosticsSchemaRoute(diagnostics),
+      requireInstanceAdministrator(options.instanceAdminToken, diagnosticsAdminRoute(diagnostics))] : []),
     requireInstanceAdministrator(options.instanceAdminToken, instanceAdminRoute(acceleration)),
-    ...(options.instanceBackups ? [requireInstanceAdministrator(options.instanceAdminToken, instanceBackupRoute(options.instanceBackups, options.instanceBackupRoot, options.instanceBackupRestoreTarget))] : []),
-    ...(options.instanceUpgrades ? [requireInstanceAdministrator(options.instanceAdminToken, instanceUpgradeRoute(options.instanceUpgrades))] : []),
-    requireInstanceAdministrator(
+    ...(!ownsRoute("instance-backups") && options.instanceBackups ? [requireInstanceAdministrator(options.instanceAdminToken, instanceBackupRoute(options.instanceBackups, options.instanceBackupRoot, options.instanceBackupRestoreTarget))] : []),
+    ...(!ownsRoute("instance-upgrades") && options.instanceUpgrades ? [requireInstanceAdministrator(options.instanceAdminToken, instanceUpgradeRoute(options.instanceUpgrades))] : []),
+    ...(!ownsRoute("owner-bootstrap") ? [requireInstanceAdministrator(
       options.instanceAdminToken,
       ownerBootstrapRoute(options.ownerBootstrap),
-    ),
-    ...(options.portableWorkspaceImports
+    )] : []),
+    ...(!ownsRoute("portable-import") && options.portableWorkspaceImports
       ? [requireInstanceAdministrator(options.instanceAdminToken, portableWorkspaceImportRoute(options.portableWorkspaceImports))] : []),
     ...legacyPublicDomainRoutes,
     ...(!ownsRoute("mobile-capture") && options.mobileCaptures && (options.memberAccess ?? options.passwordAuth)
@@ -271,7 +271,7 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
   const routes = [
     ...routesFromCapabilities(capabilityRegistry),
     ...(!ownsRoute("github-signals") && options.githubSignals ? [githubWebhookRoute(options.githubSignals)] : []),
-    ...(options.agentGrants ? [mcpRoute(options.agentGrants, options.mcpEnabled === true,
+    ...(!ownsRoute("mcp") && options.agentGrants ? [mcpRoute(options.agentGrants, options.mcpEnabled === true,
       { ...(options.notes ? { notes: options.notes } : {}), ...(options.tasks ? { tasks: options.tasks } : {}) })] : []),
     publicDomainApiRoute(publicDomainRoutes), ...applicationRoutes,
   ];

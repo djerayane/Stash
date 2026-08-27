@@ -44,7 +44,8 @@ import { Schema } from "prosemirror-model";
 import { InvalidCollaborationUpdate, type CollaborationSnapshot, type NoteCollaborationRepository } from "./note-collaboration.js";
 import type { WorkspaceSearchFacet, WorkspaceSearchKind, WorkspaceSearchQuery, WorkspaceSearchRepository, WorkspaceSearchResult } from "./workspace-search.js";
 import { proseMirrorToRichText, richTextToProseMirror } from "@stash/rich-text";
-import type { AgentGrant, AgentGrantOption, AgentProposal, StoredAgentGrant } from "./agent-grants.js";
+import type { AgentGrant, AgentGrantOption, AgentGrantRepository, AgentProposal, StoredAgentGrant } from "./agent-grants.js";
+import type { ImportedIdentityAdministration } from "./imported-identity-administration-routes.js";
 import type { NoteTreeRepository } from "./knowledge-authoring/note-tree.js";
 import { PostgresNoteTreeRepository } from "./knowledge-authoring/postgres-note-tree-repository.js";
 import type { FirstPersonalInstanceSetup, InstanceSetupRepository } from "./identity-access/instance-setup.js";
@@ -57,7 +58,7 @@ import { PostgresRelationshipQueryRepository } from "./knowledge-authoring/postg
 import type { RelationshipQueryRepository } from "./knowledge-authoring/relationship-query.js";
 import { PostgresVisualizationBlockRepository } from "./knowledge-authoring/postgres-visualization-block-repository.js";
 import type { VisualizationBlockRepository } from "./knowledge-authoring/visualization-block.js";
-import { effectiveNoteReadSql } from "./knowledge-authoring/postgres-note-access.js";
+import { effectiveNoteReadSql, workspaceMemberSql } from "./knowledge-authoring/postgres-note-access.js";
 import type { PostgresPortableProjectionContributor } from "./instance-operations/storage/portable-projection-contributor.js";
 import { PostgresProjectlessTaskRepository } from "./work-planning/postgres-projectless-task-repository.js";
 import { PostgresProjectPermissionRepository } from "./work-planning/postgres-project-permission-repository.js";
@@ -76,7 +77,7 @@ export interface PostgresDatabaseOptions extends PostgresKernelOptions {}
 
 export type IdentityAccessPostgresRepositories = PasswordAuthRepository & AccountRegistrationRepository
   & OidcAuthRepository & AccountRecoveryRepository & OrganizationRoleRepository & InvitationRepository
-  & MemberLocalizationRepository & WorkspaceProjectRepository;
+  & MemberLocalizationRepository & WorkspaceProjectRepository & AgentGrantRepository & ImportedIdentityAdministration;
 export type KnowledgeAuthoringPostgresRepositories = NoteRepository & NoteCollaborationRepository
   & NoteLinkRepository & DiscussionRepository & WorkspaceSearchRepository & AttachmentRepository & ActivityRepository
   & PortableWorkspaceExportRepository & PortableWorkspaceImportRepository & MobileCaptureRepository;
@@ -85,6 +86,19 @@ export type WorkPlanningPostgresRepositories = TaskFromBlockRepository & TaskPla
   & NotificationRepository & AutomationRepository;
 export type DevelopmentIntegrationPostgresRepositories = RepositoryConnectionRepository
   & GitHubArtifactRepository & GitHubSignalRepository;
+
+class FocusedPostgresCapabilityAdapter<T extends object> {
+  readonly port: T;
+
+  constructor(kernel: object) {
+    this.port = new Proxy({} as T, {
+      get(_target, property) {
+        const value = Reflect.get(kernel, property, kernel) as unknown;
+        return typeof value === "function" ? value.bind(kernel) : value;
+      },
+    });
+  }
+}
 
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
@@ -257,6 +271,10 @@ export class PostgresDatabase implements DatabaseProbe {
   readonly #visualizationBlockRepository: PostgresVisualizationBlockRepository;
   readonly #portableProjectionContributors: readonly PostgresPortableProjectionContributor[];
   readonly #authenticationSecrets: AuthenticationSecretCodec;
+  readonly #identityAccessAdapter = new FocusedPostgresCapabilityAdapter<IdentityAccessPostgresRepositories>(this);
+  readonly #knowledgeAuthoringAdapter = new FocusedPostgresCapabilityAdapter<KnowledgeAuthoringPostgresRepositories>(this);
+  readonly #workPlanningAdapter = new FocusedPostgresCapabilityAdapter<WorkPlanningPostgresRepositories>(this);
+  readonly #developmentIntegrationAdapter = new FocusedPostgresCapabilityAdapter<DevelopmentIntegrationPostgresRepositories>(this);
 
   constructor(connectionString: string, authenticationSecrets: AuthenticationSecretCodec, options: PostgresDatabaseOptions = {}) {
     this.#kernel = new PostgresKernel(connectionString, options);
@@ -325,19 +343,19 @@ export class PostgresDatabase implements DatabaseProbe {
   }
 
   identityAccessRepositories(): IdentityAccessPostgresRepositories {
-    return this;
+    return this.#identityAccessAdapter.port;
   }
 
   knowledgeAuthoringRepositories(): KnowledgeAuthoringPostgresRepositories {
-    return this;
+    return this.#knowledgeAuthoringAdapter.port;
   }
 
   workPlanningRepositories(): WorkPlanningPostgresRepositories {
-    return this;
+    return this.#workPlanningAdapter.port;
   }
 
   developmentIntegrationRepositories(): DevelopmentIntegrationPostgresRepositories {
-    return this;
+    return this.#developmentIntegrationAdapter.port;
   }
 
   async verifyConnection(): Promise<void> {
@@ -5505,7 +5523,11 @@ export class PostgresDatabase implements DatabaseProbe {
   }
 
   async #authorizeNote(client: PostgresQueryable, memberId: string, noteId: string): Promise<"edit" | "read" | "none"> {
-    return this.#noteTreeRepository.authorizeNote(client, memberId, noteId);
+    const result = await client.query<{ can_edit: boolean; can_read: boolean }>(`SELECT
+      ${workspaceMemberSql("workspace", "$2")} AS can_edit,
+      ${effectiveNoteReadSql("note", "workspace", "$2")} AS can_read
+      FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id=note.workspace_id WHERE note.id=$1`, [noteId, memberId]);
+    return result.rows[0]?.can_edit ? "edit" : result.rows[0]?.can_read ? "read" : "none";
   }
 
   async #seedNoteCollaboration(client: PostgresQueryable, noteId: string): Promise<any> {
