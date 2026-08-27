@@ -26,7 +26,8 @@ describe("mobile workspace synchronization", () => {
       if (path.endsWith("/note-tree")) return Response.json({ nodes: [{ id: noteId, workspaceId, title: "Inbox", position: "a", childCount: 0 }] });
       if (path.endsWith("/canonical-tasks")) return Response.json({ tasks: [{ schema: "stash.task.v1", id: taskId, workspaceId, title: "Review", description: "", revision: 2,
         status: { id: memberId, name: "Todo", category: "unstarted", position: 1 }, assigneeIds: [], projectKeys: [], sourceNoteIds: [] }],
-        workflow: { schema: "stash.workspace-workflow.v1", workspaceId, statuses: [] } });
+        workflow: { schema: "stash.workspace-workflow.v1", workspaceId,
+          statuses: [{ id: memberId, name: "Todo", category: "unstarted", position: 1 }] } });
       if (path === `/api/notes/${noteId}`) return Response.json({ note: { id: noteId, workspaceId, title: "Inbox", content: "Offline", revision: 1 } });
       if (path.endsWith("/collections")) return Response.json({ collections: [], views: [] });
       throw new TypeError("offline");
@@ -57,7 +58,30 @@ describe("mobile workspace synchronization", () => {
     const client = new MobileCaptureClient(store(state), request);
     await client.queueCanonicalTaskEdit(taskId, 2, { title: "Reviewed" }, "55555555-5555-4555-8555-555555555555");
     await expect(client.sync()).resolves.toEqual({ status: "synced", count: 1 });
-    expect(request).toHaveBeenCalledWith(`https://stash.example/api/canonical-tasks/${taskId}`, expect.objectContaining({ method: "PATCH" }));
+    expect(request).toHaveBeenCalledWith(`https://stash.example/api/canonical-tasks/${taskId}`, expect.objectContaining({ method: "PATCH",
+      body: JSON.stringify({ operationId: "55555555-5555-4555-8555-555555555555", baseRevision: 2, changes: { title: "Reviewed" } }) }));
     expect(state.mutations).toEqual([]);
+  });
+
+  it("does not cache a malformed remote snapshot", async () => {
+    const state: { snapshot?: MobileWorkspaceSnapshot; mutations: MobileSyncMutation[] } = { mutations: [] };
+    const client = new MobileCaptureClient(store(state), async (input) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith("/note-tree")) return Response.json({ nodes: [{ id: "bad", workspaceId, title: "Inbox", position: "a", childCount: 0 }] });
+      if (path.endsWith("/canonical-tasks")) return Response.json({ tasks: [], workflow: { schema: "stash.workspace-workflow.v1", workspaceId, statuses: [] } });
+      if (path.endsWith("/collections")) return Response.json({ collections: [], views: [] });
+      return Response.json({ note: { id: "bad", workspaceId, title: "Inbox", content: "Bad", revision: 1 } });
+    });
+    await expect(client.refreshWorkspace()).rejects.toThrow("invalid_mobile_workspace_snapshot");
+    expect(state.snapshot).toBeUndefined();
+  });
+
+  it("keeps a changed canonical Task contribution visible and pending", async () => {
+    const state: { snapshot?: MobileWorkspaceSnapshot; mutations: MobileSyncMutation[] } = { mutations: [] };
+    const client = new MobileCaptureClient(store(state), async () => Response.json({ error: "canonical_task_changed",
+      message: "The Task changed." }, { status: 409 }));
+    await client.queueCanonicalTaskEdit(taskId, 2, { title: "Reviewed" }, "55555555-5555-4555-8555-555555555555");
+    await expect(client.sync()).resolves.toEqual({ status: "attention_required", count: 0, error: "canonical_task_changed" });
+    await expect(client.pendingMutations()).resolves.toMatchObject([{ kind: "canonical_task_edit", lastError: "The Task changed." }]);
   });
 });

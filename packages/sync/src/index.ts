@@ -4,6 +4,7 @@ import type {
   MobileSyncResult, NoteEditOperation, TaskPlanningUpdate,
   MobileWorkspaceSnapshot,
 } from "@stash/domain-types";
+import { normalizeMobileWorkspaceSnapshot } from "@stash/domain-types";
 import { canonicalUuid, isUuid, validMobilePairingOrigin, validPortableFilename } from "@stash/validation";
 
 export type {
@@ -288,16 +289,21 @@ export class MobileCaptureClient {
       const noteTree = requiredArray(treeBody.nodes, "Note Tree");
       const noteBodies = await Promise.all(noteTree.map(async (node: any) => responseJson(await protocol.note(String(node.id), controller.signal))));
       const collectionBodies = await Promise.all(noteTree.map(async (node: any) => responseJson(await protocol.noteCollections(String(node.id), controller.signal))));
-      const notes = noteBodies.map((body: any) => body.note ?? body);
+      const notes = noteBodies.map((body: any) => { const note = body.note ?? body; return { id: note.id, workspaceId: note.workspaceId,
+        title: note.title ?? note.content?.split("\n")[0] ?? "Untitled", content: note.content, revision: note.revision,
+        ...(note.document ? { document: note.document } : {}) }; });
       const collections = collectionBodies.flatMap((body: any) => requiredArray(body.collections, "Collections"));
       const viewBlocks = collectionBodies.flatMap((body: any) => requiredArray(body.views, "View Blocks"));
-      const tasks = requiredArray(taskBody.tasks, "Tasks"); const workflow = taskBody.workflow;
+      const tasks = requiredArray(taskBody.tasks, "Tasks").map((task: any) => ({ schema: task.schema, id: task.id,
+        workspaceId: task.workspaceId, title: task.title, description: task.description ?? "", status: task.status,
+        assigneeIds: task.assigneeIds ?? [], projectKeys: task.projectKeys ?? [], sourceNoteIds: task.sourceNoteIds ?? [],
+        ...(task.revision === undefined ? {} : { revision: task.revision }) })); const workflow = taskBody.workflow;
       if (!workflow || typeof workflow !== "object") throw new Error("Workspace refresh returned an invalid Workflow.");
-      const snapshot: MobileWorkspaceSnapshot = { schema: "stash.mobile-workspace.v1", workspaceId: pairing.workspaceId,
+      const snapshot = normalizeMobileWorkspaceSnapshot({ schema: "stash.mobile-workspace.v1", workspaceId: pairing.workspaceId,
         refreshedAt: new Date(this.#now()).toISOString(), noteTree, notes, tasks, workflow, collections, viewBlocks,
         search: [...notes.map((note: any) => ({ id: String(note.id), kind: "note" as const, title: String(note.title ?? note.content?.split("\n")[0] ?? "Untitled"), excerpt: String(note.content ?? "").slice(0, 240) })),
           ...tasks.map((task: any) => ({ id: String(task.id), kind: "task" as const, title: String(task.title), excerpt: String(task.description ?? "").slice(0, 240) })),
-          ...collections.map((collection: any) => ({ id: String(collection.id), kind: "collection" as const, title: String(collection.title) }))] };
+          ...collections.map((collection: any) => ({ id: String(collection.id), kind: "collection" as const, title: String(collection.title) }))] });
       await this.#store.saveWorkspaceSnapshot(pairingScope(pairing), snapshot); return snapshot;
     } finally { this.#refreshControllers.delete(controller); }
   }
@@ -403,7 +409,8 @@ export class MobileCaptureClient {
           ? await protocol.applyNoteEdit(mutation.noteId,
             { baseRevision: mutation.baseRevision, operations: mutation.operations }, controller.signal)
           : mutation.kind === "canonical_task_edit"
-            ? await protocol.applyCanonicalTaskEdit(mutation.taskId, mutation.changes, controller.signal)
+            ? await protocol.applyCanonicalTaskEdit(mutation.taskId,
+              { operationId: mutation.id, baseRevision: mutation.baseRevision, changes: mutation.changes }, controller.signal)
           : await protocol.applyTaskEdit(mutation.projectId, mutation.taskKey,
             { operationId: mutation.id, baseRevision: mutation.baseRevision, changes: mutation.changes }, controller.signal);
       } catch {

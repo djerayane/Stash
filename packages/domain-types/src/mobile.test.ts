@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { MobileCapture, MobileCaptureOptions, MobileSyncMutation, MobileWorkspaceSnapshot } from "./index.js";
+import { normalizeMobileWorkspaceSnapshot, type MobileCapture, type MobileCaptureOptions, type MobileSyncMutation, type MobileWorkspaceSnapshot } from "./index.js";
 
 describe("mobile domain contracts", () => {
   it("describe captures, cached options, and loss-preserving mutations without a client framework", () => {
@@ -32,5 +32,11 @@ describe("mobile domain contracts", () => {
     expect([snapshot.schema, mutation.kind, mutation.taskId]).toEqual([
       "stash.mobile-workspace.v1", "canonical_task_edit", snapshot.tasks[0]!.id,
     ]);
+  });
+
+  it("rejects malformed nested remote identities before they become offline state", () => {
+    expect(() => normalizeMobileWorkspaceSnapshot({ schema: "stash.mobile-workspace.v1", workspaceId: "not-an-id",
+      refreshedAt: "yesterday", noteTree: [], notes: [], tasks: [], workflow: {}, collections: [], viewBlocks: [], search: [] }))
+      .toThrow("invalid_mobile_workspace_snapshot");
   });
 });
