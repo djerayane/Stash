@@ -200,8 +200,13 @@ describe("fresh Instance setup", () => {
     const passwordAuth = new PasswordAuthService(store.database.identityAccessRepositories());
     const setupRepository = store.database.instanceSetupRepository();
     const setup = new InstanceSetupService(setupRepository, { boundHost: "127.0.0.1", output() {} });
+    const identityRepositories = store.database.identityAccessRepositories();
     instance = await startInstance({
-      database: store.database, host: "127.0.0.1", port: 0, instanceAdminToken: "test-admin-token",
+      database: {
+        verifyConnection: () => store.database.verifyConnection(),
+        close: () => store.database.close(),
+        resolveClientSessionPrincipal: (accountId) => identityRepositories.resolveClientSessionPrincipal(accountId),
+      }, host: "127.0.0.1", port: 0, instanceAdminToken: "test-admin-token",
       passwordAuth,
       capabilities: createCapabilityRegistry([
         identityAccessCapability({ passwordAuth, instanceSetup: setup }),

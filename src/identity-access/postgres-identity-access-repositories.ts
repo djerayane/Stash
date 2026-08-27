@@ -28,6 +28,7 @@ export class PostgresIdentityAccessRepositories implements PasswordAuthRepositor
     private readonly kernel: PostgresKernel,
     private readonly secrets: AuthenticationSecretCodec,
     private readonly dependencies: {
+      prepareProjections(client: PostgresQueryable): Promise<void>;
       recordWorkspaceProjection(client: PostgresQueryable, record: RegistrationRecord): Promise<void>;
       recordProjection(client: PostgresQueryable, kind: "Workspace" | "Project" | "GuestProjectAccess", id: string,
         schema: "stash.workspace.v1" | "stash.project.v1" | "stash.guest-project-access.v1", payload: object): Promise<void>;
@@ -536,7 +537,7 @@ export class PostgresIdentityAccessRepositories implements PasswordAuthRepositor
     ALTER TABLE stash_projects ADD COLUMN IF NOT EXISTS next_task_number INTEGER NOT NULL DEFAULT 1 CHECK (next_task_number > 0);
     ALTER TABLE stash_projects ADD COLUMN IF NOT EXISTS workflow_revision INTEGER NOT NULL DEFAULT 0 CHECK (workflow_revision >= 0);
     ALTER TABLE stash_projects ADD COLUMN IF NOT EXISTS parent_project_id UUID REFERENCES stash_projects(id) ON DELETE SET NULL;
-  `);}
+  `);await this.dependencies.prepareProjections(client);}
   async prepareWorkspaceProjects(client:PostgresQueryable):Promise<void>{await this.prepareRegistration(client);}
   async prepareLocalization(client:PostgresQueryable):Promise<void>{await this.prepareWorkspaceProjects(client);await client.query(`CREATE TABLE IF NOT EXISTS stash_member_localization_preferences
     (account_id UUID PRIMARY KEY REFERENCES stash_accounts(id) ON DELETE CASCADE,locale TEXT NOT NULL,time_zone TEXT NOT NULL,date_format TEXT NOT NULL CHECK(date_format IN ('short','medium','long')),

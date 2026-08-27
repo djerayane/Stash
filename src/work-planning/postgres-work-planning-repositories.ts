@@ -473,6 +473,7 @@ export class PostgresWorkPlanningRepositories implements TaskFromBlockRepository
   }
 
   async ensureDefaultWorkflow(client: PostgresQueryable, projectId: string) {
+    await this.hooks.prepare(client);
     const statuses = [[randomUUID(),projectId,"Backlog","unstarted",0],[randomUUID(),projectId,"Ready","unstarted",1],
       [randomUUID(),projectId,"In Progress","started",2],[randomUUID(),projectId,"In Review","started",3],[randomUUID(),projectId,"Done","completed",4]] as const;
     await client.query(`INSERT INTO stash_workflow_statuses (id,project_id,name,category,position) VALUES
