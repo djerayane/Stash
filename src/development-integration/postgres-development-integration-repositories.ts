@@ -3,6 +3,14 @@ import type { GitHubSignalRepository } from "../github-signals.js";
 import type { RepositoryConnectionRecord, RepositoryConnectionRepository } from "../repository-connections.js";
 import type { BuiltInOrganizationRole } from "../organization-roles.js";
 import type { PostgresKernel, PostgresQueryable } from "../instance-operations/storage/postgres-kernel.js";
+import type { ActivityCause } from "../activity.js";
+import {
+  postgresTaskPlanningSelect,
+  postgresTaskPlanningSelectById,
+  taskPlanningReadModelFromPostgresRow,
+  taskProjectionFromPostgresRow,
+  type PostgresWorkPlanningRepositories,
+} from "../work-planning/postgres-work-planning-repositories.js";
 
 export type DevelopmentIntegrationPostgresRepositories = RepositoryConnectionRepository
   & GitHubArtifactRepository & GitHubSignalRepository;
@@ -21,10 +29,9 @@ export class PostgresDevelopmentIntegrationRepositories implements DevelopmentIn
         status: string;
         task?: { id: string; key: string; title: string; developmentLinks?: Array<{ url: string }> };
       }>;
-      linkArtifact(memberId: string, projectId: string, taskKey: string, artifact: DevelopmentArtifact): Promise<"linked" | "forbidden">;
-      linkSignalArtifact(client: PostgresQueryable, taskId: string, signal: import("../github-signals.js").GitHubSignal,
-        confirmingMemberId?: string, organizationId?: string): Promise<void>;
     },
+    private readonly taskPersistence: Pick<PostgresWorkPlanningRepositories,
+      "prepare" | "recordTaskActivity" | "recordTaskProjection">,
   ) {}
 
   organizationRole(...args: Parameters<RepositoryConnectionRepository["organizationRole"]>) { return this.dependencies.organizationRole(...args); }
@@ -130,9 +137,50 @@ export class PostgresDevelopmentIntegrationRepositories implements DevelopmentIn
     const row=result.rows[0]; return row?{installationId:Number(row.installation_id),repositoryId:row.repository_id,repositoryUrl:row.repository_url}:undefined;
   }
   async canLinkArtifact(memberId: string, projectId: string, taskKey: string) { return (await this.dependencies.resolveTask(memberId,projectId,taskKey)).status==="found"; }
-  linkArtifact(...args: Parameters<GitHubArtifactRepository["linkArtifact"]>) { return this.dependencies.linkArtifact(...args); }
+  async linkArtifact(memberId: string, projectId: string, taskKey: string, artifact: DevelopmentArtifact) {
+    return this.kernel.transaction(async (client) => {
+      await this.taskPersistence.prepare(client);
+      const current = await client.query<any>(`${postgresTaskPlanningSelect} FOR UPDATE OF task`, [projectId, taskKey, memberId]);
+      const row = current.rows[0]; if (!row) return "forbidden" as const;
+      const writable = await client.query(`SELECT 1 FROM stash_workspaces workspace WHERE workspace.id = $1
+        AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2)
+          OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+            WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2))) FOR UPDATE`,
+        [row.workspace_id, memberId]);
+      if (!writable.rowCount) return "forbidden" as const;
+      await this.persistTaskDevelopmentArtifact(client, row, memberId, artifact, "task_planning_updated", { kind: "member" });
+      return "linked" as const;
+    });
+  }
   async listArtifacts(memberId: string, projectId: string, taskKey: string) { const result=await this.dependencies.resolveTask(memberId,projectId,taskKey);
     if(result.status!=="found"||!result.task) return undefined; return (result.task.developmentLinks??[]).flatMap(({url})=>developmentArtifactFromUrl(url)); }
+
+  async linkSignalArtifact(client: PostgresQueryable, taskId: string, signal: import("../github-signals.js").GitHubSignal,
+    confirmingMemberId?: string, organizationId?: string): Promise<void> {
+    await this.taskPersistence.prepare(client);
+    const actor = confirmingMemberId ? { id: confirmingMemberId }
+      : (await client.query<{ id: string }>(`SELECT membership.account_id AS id FROM stash_organization_memberships membership
+        WHERE membership.organization_id=$1 AND membership.role='Owner' ORDER BY membership.account_id LIMIT 1`, [organizationId])).rows[0];
+    if (!actor) return;
+    const task = await client.query<any>(`${postgresTaskPlanningSelectById} FOR UPDATE OF task`, [taskId, actor.id]);
+    const row = task.rows[0]; if (!row) return;
+    await this.persistTaskDevelopmentArtifact(client, row, actor.id, signal, "task_development_signal_linked",
+      confirmingMemberId ? { kind: "member" } : { kind: "signal", signalId: signal.id });
+  }
+
+  private async persistTaskDevelopmentArtifact(client: PostgresQueryable, row: any, actorId: string,
+    artifact: Pick<DevelopmentArtifact, "kind" | "url">, action: string, cause: ActivityCause): Promise<void> {
+    const before = taskPlanningReadModelFromPostgresRow(row); const links = before.developmentLinks ?? [];
+    if (links.some(({ url }) => url === artifact.url)) return;
+    const revision = Number(row.revision) + 1;
+    await client.query(`UPDATE stash_tasks SET development_links=$2::jsonb, revision=$3,
+      field_revisions=jsonb_set(field_revisions,'{developmentLinks}',to_jsonb($3::int),true) WHERE id=$1`,
+      [row.id, JSON.stringify([...links, { provider: "github", kind: artifact.kind, url: artifact.url }]), revision]);
+    const saved = await client.query<any>(postgresTaskPlanningSelectById, [row.id, actorId]);
+    const after = taskPlanningReadModelFromPostgresRow(saved.rows[0]);
+    await this.taskPersistence.recordTaskProjection(client, taskProjectionFromPostgresRow(saved.rows[0]));
+    await this.taskPersistence.recordTaskActivity(client, actorId, after.workspaceId, after.id, action, before, after, cause);
+  }
 
   async matchingTasks(installationId: number, repositoryId: string, keys: string[]) {
     await this.dependencies.prepareSignals();
@@ -162,7 +210,7 @@ export class PostgresDevelopmentIntegrationRepositories implements DevelopmentIn
         await client.query(`INSERT INTO stash_github_signal_suggestions
           (id,signal_id,task_id,project_id,organization_id,task_key,task_title,matched_key,status)
           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [candidate.id,signal.id,candidate.taskId,candidate.projectId,candidate.organizationId,candidate.taskKey,candidate.taskTitle,candidate.matchedKey,candidate.status]);
-        if (candidate.status === "confirmed") await this.dependencies.linkSignalArtifact(client,candidate.taskId,signal,undefined,candidate.organizationId);
+        if (candidate.status === "confirmed") await this.linkSignalArtifact(client,candidate.taskId,signal,undefined,candidate.organizationId);
       }
     });
   }
@@ -192,7 +240,7 @@ export class PostgresDevelopmentIntegrationRepositories implements DevelopmentIn
         OR EXISTS(SELECT 1 FROM stash_task_key_aliases a WHERE a.task_id=task.id AND a.project_id=$2 AND a.task_key=$3)) FOR UPDATE OF suggestion`, [suggestionId,projectId,taskKey]);
       const row=result.rows[0]; if(!row) return "not_found" as const;
       await client.query("UPDATE stash_github_signal_suggestions SET status='confirmed',confirmed_by_account_id=$2,confirmed_at=NOW() WHERE id=$1",[suggestionId,memberId]);
-      await this.dependencies.linkSignalArtifact(client,row.task_id,signalFromRow(row),memberId); return "confirmed" as const; });
+      await this.linkSignalArtifact(client,row.task_id,signalFromRow(row),memberId); return "confirmed" as const; });
   }
 }
 

@@ -7,12 +7,13 @@ import { initialWorkflowStatus, type ProjectWorkflow, type ProjectWorkflowReposi
 import { taskEditDigest, type StructuredTaskEditRepository, type TaskEditBatch, type TaskEditConflict, type TaskMoveActivity,
   type CreateTaskFromBlockDraft, type CreateTaskFromBlockOutcome, type CreateWorkspaceTaskFromBlockOutcome, type TaskFromBlockRepository,
   type TaskMoveRepository, type TaskPlanningReadModel, type TaskPlanningRepository, type TaskPlanningUpdate, type TaskSourceBlockReference } from "../tasks.js";
-import type { NotificationDelivery, NotificationPreferences, NotificationRepository } from "../notifications.js";
+import { assignmentNotificationInputs, notificationDeliveryMode, type NotificationDelivery, type NotificationPreferences,
+  type NotificationRepository } from "../notifications.js";
 import { PostgresKernel, type PostgresQueryable } from "../instance-operations/storage/postgres-kernel.js";
 import type { WorkspaceWorkflow } from "./canonical-tasks.js";
 import { richTextToMarkdown } from "../rich-text.js";
 
-const taskPlanningSelect = `SELECT task.*, COALESCE(workspace_status.name,status.name) AS status_name,
+export const postgresTaskPlanningSelect = `SELECT task.*, COALESCE(workspace_status.name,status.name) AS status_name,
   COALESCE(workspace_status.category,status.category) AS status_category, creator.name AS created_by_name,
   ARRAY(SELECT source.note_id FROM stash_task_note_sources source WHERE source.task_id = task.id ORDER BY source.note_id) AS source_note_ids,
   COALESCE((SELECT jsonb_agg(jsonb_build_object('noteId', source.note_id, 'blockId', source.block_id) ORDER BY source.note_id, source.block_id)
@@ -42,13 +43,15 @@ const taskPlanningSelect = `SELECT task.*, COALESCE(workspace_status.name,status
         WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $3))
       OR EXISTS (SELECT 1 FROM stash_project_guests guest JOIN stash_task_projects association ON association.project_id=guest.project_id
         WHERE association.task_id=task.id AND guest.account_id=$3))`;
-const taskPlanningSelectById = taskPlanningSelect
+export const postgresTaskPlanningSelectById = postgresTaskPlanningSelect
   .replace(/\(task\.project_id = \$1[\s\S]*?alias\.task_key = \$2\)\)/, "task.id = $1").replaceAll("$3", "$2");
+const taskPlanningSelect = postgresTaskPlanningSelect;
+const taskPlanningSelectById = postgresTaskPlanningSelectById;
 export const workflowTemporaryRenameSql = `UPDATE stash_workflow_statuses
   SET position = -position - 1, name = repeat('__stash_workflow_transition__', 4) || id::text
   WHERE project_id = $1`;
 
-function projection(row: any): PortableExportTaskProjection {
+export function taskProjectionFromPostgresRow(row: any): PortableExportTaskProjection {
   return { schema: "stash.task.v1", id: row.id, workspaceId: row.workspace_id, ...(row.project_id ? { projectId: row.project_id } : {}),
     ...(row.task_key ? { key: row.task_key } : {}), ...(row.project_keys?.length ? { projectKeys: row.project_keys,
       projectAssociations: row.project_keys.map((entry: any) => entry.projectId) } : {}),
@@ -62,9 +65,11 @@ function projection(row: any): PortableExportTaskProjection {
     ...(row.source_blocks?.length ? { sourceBlocks: row.source_blocks } : {}), createdAt: new Date(row.created_at).toISOString(),
     createdBy: { localAccountId: row.created_by_account_id, displayName: row.created_by_name } };
 }
-function readModel(row: any): TaskPlanningReadModel {
-  return { ...projection(row), revision: Number(row.revision), dependencyWarnings: row.dependency_warnings ?? [] } as TaskPlanningReadModel;
+export function taskPlanningReadModelFromPostgresRow(row: any): TaskPlanningReadModel {
+  return { ...taskProjectionFromPostgresRow(row), revision: Number(row.revision), dependencyWarnings: row.dependency_warnings ?? [] } as TaskPlanningReadModel;
 }
+const projection = taskProjectionFromPostgresRow;
+const readModel = taskPlanningReadModelFromPostgresRow;
 function boardFromRow(row: any): Board {
   return { schema: "stash.board.v1", id: row.id, projectId: row.project_id, name: row.name,
     groupBy: row.group_by, createdAt: new Date(row.created_at).toISOString() };
@@ -93,24 +98,13 @@ export interface WorkPlanningPersistenceHooks {
   recordProjection(client: PostgresQueryable, task: PortableExportTaskProjection): Promise<void>;
   recordWorkflowProjection(client: PostgresQueryable, workflow: ProjectWorkflow): Promise<void>;
   recordBoardProjection(client: PostgresQueryable, board: Board): Promise<void>;
-  recordBoardTaskActivity(client: PostgresQueryable, memberId: string, workspaceId: string, taskId: string,
-    before: TaskPlanningReadModel, after: TaskPlanningReadModel): Promise<ActivityRecord>;
-  recordActivity(client: PostgresQueryable, memberId: string, workspaceId: string, taskId: string,
-    before: TaskPlanningReadModel, after: TaskPlanningReadModel, cause: ActivityCause): Promise<ActivityRecord>;
   recordAgentAudit(client: PostgresQueryable, memberId: string, workspaceId: string, taskId: string,
     cause: Extract<ActivityCause, { kind: "agent" }>): Promise<void>;
-  recordAssignmentNotifications(client: PostgresQueryable, projectId: string, activity: ActivityRecord,
-    before: TaskPlanningReadModel, after: TaskPlanningReadModel): Promise<void>;
   prepareAutomationDependencies(client: PostgresQueryable): Promise<void>;
-  recordAutomationActivity(client: PostgresQueryable, memberId: string, workspaceId: string, taskId: string,
-    action: string, before: TaskPlanningReadModel, after: TaskPlanningReadModel, cause: ActivityCause): Promise<ActivityRecord>;
-  persistAutomationFailureActivity(client: PostgresQueryable, activity: ActivityRecord): Promise<void>;
-  recordTaskActivity(client: PostgresQueryable, memberId: string, workspaceId: string, taskId: string, action: string,
-    before: TaskPlanningReadModel, after: TaskPlanningReadModel, cause?: ActivityCause): Promise<ActivityRecord>;
   recordStructuredAgentAudit(client: PostgresQueryable, memberId: string, workspaceId: string, taskId: string,
     cause: Extract<ActivityCause, { kind: "agent" }>): Promise<void>;
   recordActivityProjection(client: PostgresQueryable, activity: ActivityRecord): Promise<void>;
-  recordProjectActivityNotifications(client: PostgresQueryable, activity: ActivityRecord): Promise<void>;
+  prepareDiscussionScope(client: PostgresQueryable): Promise<void>;
   recordIdentifiedNoteBlock(client: PostgresQueryable, memberId: string, beforeRow: any, afterRow: any,
     projection: PortableNoteProjection): Promise<void>;
   recordTaskSourceActivity(client: PostgresQueryable, memberId: string, workspaceId: string,
@@ -127,6 +121,142 @@ export class PostgresWorkPlanningRepositories implements TaskFromBlockRepository
   ProjectWorkflowRepository, BoardRepository, NotificationRepository, AutomationRepository {
   constructor(private readonly kernel: PostgresKernel, private readonly hooks: WorkPlanningPersistenceHooks) {}
 
+  prepare(client: PostgresQueryable): Promise<void> { return this.hooks.prepare(client); }
+  recordTaskProjection(client: PostgresQueryable, task: PortableExportTaskProjection): Promise<void> {
+    return this.hooks.recordProjection(client, task);
+  }
+
+  async prepareNotifications(client: PostgresQueryable): Promise<void> {
+    await this.hooks.prepare(client);
+    await client.query(`CREATE TABLE IF NOT EXISTS stash_notification_preferences (
+      member_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
+      project_id UUID NOT NULL REFERENCES stash_projects(id) ON DELETE CASCADE,
+      activity TEXT NOT NULL CHECK (activity IN ('all','followed','muted')),
+      digest TEXT NOT NULL CHECK (digest IN ('off','daily','weekly')),
+      quiet_start TEXT, quiet_end TEXT, quiet_time_zone TEXT,
+      CHECK ((quiet_start IS NULL AND quiet_end IS NULL AND quiet_time_zone IS NULL) OR
+        (quiet_start IS NOT NULL AND quiet_end IS NOT NULL AND quiet_time_zone IS NOT NULL)),
+      PRIMARY KEY (member_id,project_id)
+    );
+    CREATE TABLE IF NOT EXISTS stash_project_follows (
+      member_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
+      project_id UUID NOT NULL REFERENCES stash_projects(id) ON DELETE CASCADE,
+      followed_at TIMESTAMPTZ NOT NULL,
+      PRIMARY KEY (member_id,project_id)
+    );
+    CREATE TABLE IF NOT EXISTS stash_notifications (
+      id UUID PRIMARY KEY,
+      member_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
+      workspace_id UUID NOT NULL REFERENCES stash_workspaces(id) ON DELETE CASCADE,
+      project_id UUID NOT NULL REFERENCES stash_projects(id) ON DELETE CASCADE,
+      trigger TEXT NOT NULL CHECK (trigger IN ('direct_mention','assignment','requested_review','automation_failure','followed_change')),
+      summary TEXT NOT NULL,
+      activity JSONB NOT NULL,
+      activity_id TEXT GENERATED ALWAYS AS (activity->>'id') STORED,
+      created_at TIMESTAMPTZ NOT NULL,
+      delivery TEXT NOT NULL CHECK (delivery IN ('immediate','quiet_hours')),
+      read_at TIMESTAMPTZ,
+      digested_at TIMESTAMPTZ,
+      UNIQUE (member_id,activity_id,trigger)
+    );
+    ALTER TABLE stash_notifications ADD COLUMN IF NOT EXISTS digested_at TIMESTAMPTZ;
+    ALTER TABLE stash_notifications ALTER COLUMN project_id DROP NOT NULL;
+    CREATE INDEX IF NOT EXISTS stash_notifications_member_created_idx ON stash_notifications(member_id,created_at DESC)`);
+  }
+
+  async recordTaskActivity(client: PostgresQueryable, memberId: string, workspaceId: string, taskId: string,
+    action: string, before: TaskPlanningReadModel, after: TaskPlanningReadModel,
+    cause: ActivityCause = { kind: "member" }): Promise<ActivityRecord> {
+    const actor = await client.query<{ name: string }>("SELECT name FROM stash_accounts WHERE id=$1", [memberId]);
+    if (!actor.rows[0]) throw new Error("member_identity_unavailable");
+    const activity: ActivityRecord = { schema: "stash.activity.v1", id: randomUUID(), workspaceId,
+      object: { kind: "Task", id: taskId }, action, actor: { localAccountId: memberId, displayName: actor.rows[0].name },
+      cause, occurredAt: new Date().toISOString(), before: { ...before }, after: { ...after } };
+    await this.persistTaskActivity(client, activity);
+    return activity;
+  }
+
+  async persistTaskActivity(client: PostgresQueryable, activity: ActivityRecord): Promise<void> {
+    if (activity.object.kind !== "Task") throw new Error("task_activity_object_required");
+    await client.query(`INSERT INTO stash_workspace_activity
+      (id,workspace_id,object_kind,object_id,action,actor_account_id,cause,occurred_at,before_state,after_state)
+      VALUES ($1,$2,'Task',$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb)`, [activity.id, activity.workspaceId, activity.object.id,
+      activity.action, activity.actor.localAccountId, JSON.stringify(activity.cause), activity.occurredAt,
+      JSON.stringify(activity.before), JSON.stringify(activity.after)]);
+    await this.hooks.recordActivityProjection(client, activity);
+    if (activity.action !== "automation_execution_failed" && JSON.stringify(activity.before) !== JSON.stringify(activity.after))
+      await this.recordProjectActivityNotifications(client, activity);
+  }
+
+  async recordProjectActivityNotifications(client: PostgresQueryable, activity: ActivityRecord): Promise<void> {
+    await this.hooks.prepare(client);
+    await this.hooks.prepareDiscussionScope(client);
+    await this.prepareNotifications(client);
+    const scope = await client.query<any>(`WITH activity_scope AS (
+      SELECT COALESCE(task.project_id, note.project_id, location_note.project_id, link_note.project_id,
+        discussion_task.project_id, discussion_note.project_id) AS project_id
+      FROM (SELECT 1) seed
+      LEFT JOIN stash_tasks task ON $2='Task' AND task.id=$1
+      LEFT JOIN stash_notes note ON $2='Note' AND note.id=$1
+      LEFT JOIN stash_notes location_note ON $2='NoteLocation' AND location_note.id=$1
+      LEFT JOIN stash_note_links link ON $2='NoteLink' AND link.id=$1
+      LEFT JOIN stash_notes link_note ON link_note.id=link.source_note_id
+      LEFT JOIN stash_discussions discussion ON $2='Discussion' AND discussion.id=$1
+      LEFT JOIN stash_tasks discussion_task ON discussion_task.id=discussion.task_id
+      LEFT JOIN stash_notes discussion_note ON discussion_note.id=discussion.note_id
+    ) SELECT scope.project_id, account.id AS member_id,
+      COALESCE(preference.activity,'followed') AS activity_preference, COALESCE(preference.digest,'off') AS digest,
+      preference.quiet_start, preference.quiet_end, preference.quiet_time_zone
+      FROM activity_scope scope JOIN stash_projects project ON project.id=scope.project_id
+      JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
+      JOIN stash_accounts account ON (workspace.owner_type='personal' AND account.id=workspace.personal_owner_id) OR
+        (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=account.id))
+      LEFT JOIN stash_notification_preferences preference ON preference.project_id=project.id AND preference.member_id=account.id
+      LEFT JOIN stash_project_follows follow ON follow.project_id=project.id AND follow.member_id=account.id
+      WHERE account.id<>$3 AND COALESCE(preference.activity,'followed')<>'muted'
+        AND (COALESCE(preference.activity,'followed')='all' OR follow.member_id IS NOT NULL)
+      ORDER BY account.id`, [activity.object.id, activity.object.kind, activity.actor.localAccountId]);
+    for (const recipient of scope.rows) {
+      const preferences: NotificationPreferences = { activity: recipient.activity_preference, digest: recipient.digest,
+        ...(recipient.quiet_start ? { quietHours: { start: recipient.quiet_start, end: recipient.quiet_end, timeZone: recipient.quiet_time_zone } } : {}) };
+      await client.query(`INSERT INTO stash_notifications
+        (id,member_id,workspace_id,project_id,trigger,summary,activity,created_at,delivery)
+        VALUES($1,$2,$3,$4,'followed_change',$5,$6::jsonb,$7,$8)
+        ON CONFLICT(member_id,activity_id,trigger) DO NOTHING`, [randomUUID(), recipient.member_id, activity.workspaceId,
+        recipient.project_id, `${activity.actor.displayName} changed ${activity.object.kind === "Note" ? "a Note" : activity.object.kind === "Task" ? "a Task" : "Project content"}`,
+        JSON.stringify(activity), activity.occurredAt, notificationDeliveryMode(new Date(activity.occurredAt), preferences)]);
+    }
+  }
+
+  async recordAssignmentNotifications(client: PostgresQueryable, projectId: string, activity: ActivityRecord,
+    before: { assigneeIds?: string[] }, after: { assigneeIds?: string[]; key?: string; title?: string }): Promise<void> {
+    const inputs = assignmentNotificationInputs(activity, projectId, before, after);
+    if (!inputs.length) return;
+    await this.prepareNotifications(client);
+    for (const input of inputs) {
+      await client.query("DELETE FROM stash_notifications WHERE member_id=$1 AND activity_id=$2 AND trigger='followed_change'",
+        [input.memberId, activity.id]);
+      const settings = await client.query<any>(`SELECT preference.* FROM stash_projects project
+        JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
+        LEFT JOIN stash_notification_preferences preference ON preference.project_id=project.id AND preference.member_id=$1
+        WHERE project.id=$2 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$1) OR
+          (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+            WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$1)))`, [input.memberId, projectId]);
+      if (!settings.rowCount) throw new Error("notification_recipient_forbidden");
+      const row = settings.rows[0];
+      const preferences: NotificationPreferences = row.member_id ? { activity: row.activity, digest: row.digest,
+        ...(row.quiet_start ? { quietHours: { start: row.quiet_start, end: row.quiet_end, timeZone: row.quiet_time_zone } } : {}) }
+        : { activity: "followed", digest: "off" };
+      await client.query(`INSERT INTO stash_notifications
+        (id,member_id,workspace_id,project_id,trigger,summary,activity,created_at,delivery)
+        VALUES ($1,$2,$3,$4,'assignment',$5,$6::jsonb,$7,$8)
+        ON CONFLICT (member_id,activity_id,trigger) DO NOTHING`, [randomUUID(), input.memberId, activity.workspaceId,
+        projectId, input.summary, JSON.stringify(activity), activity.occurredAt,
+        notificationDeliveryMode(new Date(activity.occurredAt), preferences)]);
+    }
+  }
+
   async markFormerAssignments(client:PostgresQueryable,organizationId:string,accountId:string,actorId:string):Promise<string[]>{
     const table=await client.query<{exists:boolean}>("SELECT to_regclass('stash_tasks') IS NOT NULL AS exists");if(!table.rows[0]?.exists)return [];
     await client.query("ALTER TABLE stash_tasks ADD COLUMN IF NOT EXISTS former_assignee_ids JSONB NOT NULL DEFAULT '[]'::jsonb CHECK(jsonb_typeof(former_assignee_ids)='array')");
@@ -139,7 +269,7 @@ export class PostgresWorkPlanningRepositories implements TaskFromBlockRepository
       AND workspace.owner_type='organization' AND workspace.organization_owner_id=$1 AND task.assignee_ids ? $2`,[organizationId,accountId]);
     const ids=affected.rows.map(({id})=>id).sort();for(const taskId of ids){const refreshed=await client.query<any>(taskPlanningSelectById,[taskId,actorId]);
       if(!refreshed.rows[0])continue;const taskProjection=projection(refreshed.rows[0]);await this.hooks.recordProjection(client,taskProjection);
-      const previous=before.get(taskId);if(previous)await this.hooks.recordTaskActivity(client,actorId,taskProjection.workspaceId,taskId,
+      const previous=before.get(taskId);if(previous)await this.recordTaskActivity(client,actorId,taskProjection.workspaceId,taskId,
         "task_departed_assignee_marked",previous,readModel(refreshed.rows[0]));}return ids;
   }
 
@@ -339,15 +469,16 @@ export class PostgresWorkPlanningRepositories implements TaskFromBlockRepository
         JSON.stringify([...new Set(next.linkedNoteIds ?? [])]), JSON.stringify(next.developmentLinks ?? []), revision, JSON.stringify(fieldRevisions), JSON.stringify(formerAssigneeIds)]);
       const saved = (await client.query<any>(taskPlanningSelect, [projectId, taskKey, memberId])).rows[0]; const task = readModel(saved);
       await this.hooks.recordProjection(client, projection(saved)); const before = readModel(row);
-      const activity = await this.hooks.recordActivity(client, memberId, task.workspaceId, task.id, before, task, cause);
+      const activity = await this.recordTaskActivity(client, memberId, task.workspaceId, task.id, "task_planning_updated", before, task, cause);
       if (cause.kind === "agent") await this.hooks.recordAgentAudit(client, memberId, task.workspaceId, task.id, cause);
-      await this.hooks.recordAssignmentNotifications(client, projectId, activity, before, task);
+      await this.recordAssignmentNotifications(client, projectId, activity, before, task);
       for (const affectedId of (row.affected_dependency_task_ids ?? []).filter((id: string) => id !== task.id)) {
         const affectedBefore = (await client.query<any>(taskPlanningSelectById, [affectedId, memberId])).rows[0];
         await client.query("UPDATE stash_tasks SET revision=revision+1,field_revisions=jsonb_set(field_revisions,'{dependencies}',to_jsonb(revision+1),true) WHERE id=$1", [affectedId]);
         const affected = (await client.query<any>(taskPlanningSelectById, [affectedId, memberId])).rows[0];
         if (affected) { await this.hooks.recordProjection(client, projection(affected)); if (affectedBefore)
-          await this.hooks.recordActivity(client, memberId, task.workspaceId, affectedId, readModel(affectedBefore), readModel(affected), cause); }
+          await this.recordTaskActivity(client, memberId, task.workspaceId, affectedId, "task_planning_updated",
+            readModel(affectedBefore), readModel(affected), cause); }
       }
       return { status: "updated" as const, task };
     });
@@ -452,7 +583,7 @@ export class PostgresWorkPlanningRepositories implements TaskFromBlockRepository
         assigneeIds: row.assignee_ids, priority: row.priority, labelNames: row.label_names };
       const afterRow = (await client.query<any>(taskPlanningSelectById, [task.id, memberId])).rows[0];
       if (afterRow) { const after = readModel(afterRow); await this.hooks.recordProjection(client, projection(afterRow));
-        await this.hooks.recordBoardTaskActivity(client, memberId, after.workspaceId, task.id, readModel(beforeRow), after); }
+        await this.recordTaskActivity(client, memberId, after.workspaceId, task.id, "task_status_changed", readModel(beforeRow), after); }
       return { status: "moved" as const, task }; });
   }
 
@@ -569,10 +700,10 @@ export class PostgresWorkPlanningRepositories implements TaskFromBlockRepository
         const saved = await client.query<any>(taskPlanningSelectById, [row.id, memberId]);
         if (saved.rows[0]) {
           const afterTask = readModel(saved.rows[0]);
-          const activity = await this.hooks.recordTaskActivity(client, memberId, row.workspace_id, row.id,
+          const activity = await this.recordTaskActivity(client, memberId, row.workspace_id, row.id,
             "task_structured_edit_applied", beforeTask, afterTask, batch.cause);
           if (batch.cause?.kind === "agent") await this.hooks.recordStructuredAgentAudit(client, memberId, row.workspace_id, row.id, batch.cause);
-          await this.hooks.recordAssignmentNotifications(client, projectId, activity, beforeTask, afterTask);
+          await this.recordAssignmentNotifications(client, projectId, activity, beforeTask, afterTask);
         }
       }
       await client.query("INSERT INTO stash_task_edit_operations (task_id,operation_id,digest,outcome) VALUES ($1,$2,$3,$4::jsonb)",
@@ -640,8 +771,8 @@ export class PostgresWorkPlanningRepositories implements TaskFromBlockRepository
         activity.action, memberId, occurredAt, JSON.stringify(activity.before), JSON.stringify(activity.after)]);
       await this.hooks.recordProjection(client, projection(saved.rows[0]));
       await this.hooks.recordActivityProjection(client, activity);
-      await this.hooks.recordProjectActivityNotifications(client, activity);
-      if (resolution === "apply_contribution") await this.hooks.recordAssignmentNotifications(client, projectId, activity, before as TaskPlanningReadModel, task);
+      await this.recordProjectActivityNotifications(client, activity);
+      if (resolution === "apply_contribution") await this.recordAssignmentNotifications(client, projectId, activity, before as TaskPlanningReadModel, task);
       return { status: "resolved" as const, task, revision: row.revision, activity };
     });
   }
@@ -668,7 +799,7 @@ export class PostgresWorkPlanningRepositories implements TaskFromBlockRepository
           field_revisions=jsonb_set(field_revisions,'{dependencies}',to_jsonb(revision+1),true) WHERE id=$1`,[affectedId]);
         const affected=await client.query<any>(taskPlanningSelectById,[affectedId,memberId]);
         if(affected.rows[0]) { const affectedProjection=projection(affected.rows[0]); await this.hooks.recordProjection(client,affectedProjection);
-          if(beforeAffected.rows[0]) await this.hooks.recordTaskActivity(client,memberId,row.workspace_id,affectedId,
+          if(beforeAffected.rows[0]) await this.recordTaskActivity(client,memberId,row.workspace_id,affectedId,
             "task_dependency_relationship_updated",readModel(beforeAffected.rows[0]),readModel(affected.rows[0])); }
       }
     }
@@ -726,7 +857,7 @@ export class PostgresWorkPlanningRepositories implements TaskFromBlockRepository
         VALUES ($1,$2,'Task',$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb)`, [activity.id, activity.workspaceId, task.id,
         activity.action, memberId, activity.cause.kind, activity.occurredAt, JSON.stringify(activity.before), JSON.stringify(activity.after)]);
       await this.hooks.recordActivityProjection(client, activity);
-      await this.hooks.recordProjectActivityNotifications(client, activity);
+      await this.recordProjectActivityNotifications(client, activity);
       return { status: "moved" as const, task, activity };
     });
   }
@@ -745,7 +876,7 @@ export class PostgresWorkPlanningRepositories implements TaskFromBlockRepository
 
   async saveNotification(delivery: NotificationDelivery) {
     return this.kernel.withSession(async (client) => {
-      await this.hooks.prepare(client);
+      await this.prepareNotifications(client);
       const result = await client.query<any>(`INSERT INTO stash_notifications
         (id,member_id,workspace_id,project_id,trigger,summary,activity,created_at,delivery)
         SELECT $1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9 FROM stash_projects project
@@ -769,7 +900,7 @@ export class PostgresWorkPlanningRepositories implements TaskFromBlockRepository
   }
 
   async listNotifications(memberId: string) {
-    return this.kernel.withSession(async (client) => { await this.hooks.prepare(client);
+    return this.kernel.withSession(async (client) => { await this.prepareNotifications(client);
       const result = await client.query<any>(`SELECT notification.* FROM stash_notifications notification
         JOIN stash_workspaces workspace ON workspace.id=notification.workspace_id
         WHERE notification.member_id=$1 AND (
@@ -781,7 +912,7 @@ export class PostgresWorkPlanningRepositories implements TaskFromBlockRepository
   }
 
   async markNotificationRead(memberId: string, id: string, readAt: string) {
-    return this.kernel.withSession(async (client) => { await this.hooks.prepare(client);
+    return this.kernel.withSession(async (client) => { await this.prepareNotifications(client);
       const result = await client.query<any>(`UPDATE stash_notifications notification SET read_at=$3
         FROM stash_workspaces workspace WHERE notification.id=$1 AND notification.member_id=$2
         AND workspace.id=notification.workspace_id AND (
@@ -793,7 +924,7 @@ export class PostgresWorkPlanningRepositories implements TaskFromBlockRepository
   }
 
   async getNotificationPreferences(memberId: string, projectId: string) {
-    return this.kernel.withSession(async (client) => { await this.hooks.prepare(client);
+    return this.kernel.withSession(async (client) => { await this.prepareNotifications(client);
       const visibility = await client.query<any>(`SELECT settings.* FROM stash_projects project
         JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
         LEFT JOIN stash_notification_preferences settings ON settings.project_id=project.id AND settings.member_id=$1
@@ -809,7 +940,7 @@ export class PostgresWorkPlanningRepositories implements TaskFromBlockRepository
   }
 
   async saveNotificationPreferences(memberId: string, projectId: string, preferences: NotificationPreferences) {
-    return this.kernel.withSession(async (client) => { await this.hooks.prepare(client);
+    return this.kernel.withSession(async (client) => { await this.prepareNotifications(client);
       const result = await client.query(`INSERT INTO stash_notification_preferences
         (member_id,project_id,activity,digest,quiet_start,quiet_end,quiet_time_zone)
         SELECT $1,$2,$3,$4,$5,$6,$7 FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
@@ -824,7 +955,7 @@ export class PostgresWorkPlanningRepositories implements TaskFromBlockRepository
   }
 
   async getProjectFollow(memberId: string, projectId: string) {
-    return this.kernel.withSession(async (client) => { await this.hooks.prepare(client);
+    return this.kernel.withSession(async (client) => { await this.prepareNotifications(client);
       const result = await client.query<{ followed: boolean }>(`SELECT EXISTS (
         SELECT 1 FROM stash_project_follows follow WHERE follow.member_id=$1 AND follow.project_id=project.id
       ) AS followed FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
@@ -835,7 +966,7 @@ export class PostgresWorkPlanningRepositories implements TaskFromBlockRepository
   }
 
   async saveProjectFollow(memberId: string, projectId: string, followed: boolean) {
-    return this.kernel.withSession(async (client) => { await this.hooks.prepare(client);
+    return this.kernel.withSession(async (client) => { await this.prepareNotifications(client);
       const visible = await client.query(`SELECT 1 FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
         WHERE project.id=$2 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$1) OR
           (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
@@ -848,7 +979,7 @@ export class PostgresWorkPlanningRepositories implements TaskFromBlockRepository
   }
 
   async listProjectNotificationAudience(projectId: string, actorId: string) {
-    return this.kernel.withSession(async (client) => { await this.hooks.prepare(client);
+    return this.kernel.withSession(async (client) => { await this.prepareNotifications(client);
       const result = await client.query<{ member_id: string; followed: boolean }>(`SELECT account.id AS member_id,
         (follow.member_id IS NOT NULL) AS followed FROM stash_projects project
         JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
@@ -861,7 +992,7 @@ export class PostgresWorkPlanningRepositories implements TaskFromBlockRepository
   }
 
   async claimDigestNotifications(memberId: string, cadence: "daily" | "weekly", since: string, until: string, claimedAt: string) {
-    return this.kernel.withSession(async (client) => { await this.hooks.prepare(client);
+    return this.kernel.withSession(async (client) => { await this.prepareNotifications(client);
       const result = await client.query<any>(`UPDATE stash_notifications notification SET digested_at=$5
         FROM stash_notification_preferences preference, stash_projects project, stash_workspaces workspace
         WHERE notification.member_id=$1 AND notification.read_at IS NULL AND notification.digested_at IS NULL
@@ -976,7 +1107,7 @@ export class PostgresWorkPlanningRepositories implements TaskFromBlockRepository
       await client.query("UPDATE stash_automation_transitions SET reversed_at=$2,reversed_by_account_id=$3 WHERE id=$1", [transitionId, reversedAt, memberId]);
       const saved = (await client.query<any>(taskPlanningSelectById, [row.task_id, memberId])).rows[0]; const after = readModel(saved);
       await this.hooks.recordProjection(client, projection(saved));
-      await this.hooks.recordAutomationActivity(client, memberId, row.workspace_id, row.task_id, "automation_status_transition_reversed", readModel(before), after,
+      await this.recordTaskActivity(client, memberId, row.workspace_id, row.task_id, "automation_status_transition_reversed", readModel(before), after,
         { kind: "member", automationId: row.automation_id, signalId: row.signal_id });
       return { status: "reversed" as const, transition: automationTransitionFromRow({ ...row, reversed_at: reversedAt }) };
     });
@@ -1020,7 +1151,7 @@ export class PostgresWorkPlanningRepositories implements TaskFromBlockRepository
             field_revisions=jsonb_set(field_revisions,'{statusId}',to_jsonb(revision+1),true) WHERE id=$1`, [row.id, row.target_status_id, row.canonical_status]);
           const saved = (await client.query<any>(taskPlanningSelectById, [row.id, row.created_by_account_id])).rows[0]; const after = readModel(saved);
           await this.hooks.recordProjection(client, projection(saved));
-          await this.hooks.recordAutomationActivity(client, row.created_by_account_id, row.workspace_id, row.id, "task_status_automated", before, after,
+          await this.recordTaskActivity(client, row.created_by_account_id, row.workspace_id, row.id, "task_status_automated", before, after,
             { kind: "automation", automationId: row.automation_id, signalId: signal.id });
         });
       } catch (error) {
@@ -1046,7 +1177,7 @@ export class PostgresWorkPlanningRepositories implements TaskFromBlockRepository
         SELECT failure.activity,failure.recipient_member_id,failure.summary,FALSE AS created FROM stash_automation_failures failure
         WHERE failure.automation_id=$2 AND failure.signal_id=$3 AND failure.task_id=$4 AND NOT EXISTS(SELECT 1 FROM attempted)`,
       [activity.id, run.automationId, signalId, run.taskId, run.projectId, activity.occurredAt, JSON.stringify(activity), run.configuringMemberId, summary])).rows[0]!;
-      if (failure.created) await this.hooks.persistAutomationFailureActivity(client, failure.activity);
+      if (failure.created) await this.persistTaskActivity(client, failure.activity);
       return await this.canReceiveProjectNotification(client, failure.recipient_member_id, run.projectId, failure.activity.workspaceId)
         ? { activity: failure.activity, projectId: run.projectId, memberId: failure.recipient_member_id, summary: failure.summary } : undefined;
     });
