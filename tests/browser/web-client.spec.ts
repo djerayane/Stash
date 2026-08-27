@@ -23,7 +23,7 @@ test("@a11y @stable-knowledge-journey carries a fresh personal Instance through 
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto("http://127.0.0.1:4174/sign-in");
 
-  await expect(page.getByRole("heading", { name: "Make Stash yours." })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Keep the thread." })).toBeVisible();
   await expect(page.getByRole("textbox", { name: "Setup code" })).toHaveCount(0);
   await page.getByRole("textbox", { name: "Name" }).fill("Ada Lovelace");
   await page.getByRole("textbox", { name: "Email" }).fill("ada@example.test");
@@ -438,6 +438,7 @@ test("removes a Member, revokes authority, and keeps former assignment repair ac
   await page.getByRole("button", { name: "Remove Member" }).click();
   await expect(page.getByRole("heading", { name: "Departing Member no longer has access" })).toBeVisible();
   await page.getByRole("link", { name: "Note Tree" }).click();
+  await page.getByText("More", { exact: true }).click();
   await page.getByRole("link", { name: "Members" }).click();
   await expect(page.getByRole("heading", { name: "Member access" })).toBeVisible();
   await expect(page.getByText("Departing Member", { exact: true })).toHaveCount(0);

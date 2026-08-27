@@ -89,6 +89,7 @@ function Icon({ name }: { readonly name: string }) {
     plus: <path d="M12 5v14M5 12h14" />,
     search: <><circle cx="11" cy="11" r="6" /><path d="m16 16 4 4" /></>,
     inbox: <><path d="M4 5h16v14H4z"/><path d="M4 13h5l2 3h2l2-3h5"/></>,
+    bell: <><path d="M6 9a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6"/><path d="M10 19h4"/></>,
   };
   return <svg className={styles.icon} viewBox="0 0 24 24" aria-hidden="true">{paths[name]}</svg>;
 }
@@ -139,7 +140,7 @@ function SignIn({ returnTo }: { readonly returnTo: string }) {
     complete(body);
   } });
   return <main className={styles.signIn}>
-    <div className={styles.signInBrand}><span className={styles.brandMark}>S</span><span>Stash</span></div>
+    <div className={styles.signInBrand}><span aria-hidden="true" className={styles.brandMark}><span /><span /></span><span>Stash</span></div>
     <section className={styles.signInPanel} aria-labelledby="sign-in-title">
       <p className={styles.kicker}>Welcome back</p><h1 id="sign-in-title">Sign in to Stash</h1>
       <p>Your Instance manages access. Use the authentication method configured by your administrator.</p>
@@ -255,22 +256,22 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
   return <div className={styles.shell} ref={shellRef}>
     <a className={styles.skipLink} href="#workspace-content">Skip to content</a>
     <aside className={styles.sidebar} aria-label="Application navigation">
-      <Link className={styles.brand} to="/app" aria-label="Stash home"><span className={styles.brandMark}>S</span><span>Stash</span></Link>
+      <Link className={styles.brand} to="/app" aria-label="Stash home"><span aria-hidden="true" className={styles.brandMark}><span /><span /></span><span>Stash</span></Link>
       <NavigationMenu.Root className={styles.navigationRoot} orientation="vertical" aria-label="Workspace"><NavigationMenu.List className={styles.navigation}>
         {primaryNavigation.map((item) => <NavigationMenu.Item key={item.to}><NavigationMenu.Link asChild><NavLink className={styles.navLink}
           end={item.to === "/app/inbox" || item.to === "/app/search"} to={item.to}><Icon name={item.icon} />{item.label}</NavLink></NavigationMenu.Link></NavigationMenu.Item>)}
         <NavigationMenu.Item className={styles.contextualDivider} aria-hidden="true" />
-        {contextualNavigation.map((item) => <NavigationMenu.Item key={item.to}><NavigationMenu.Link asChild><NavLink className={`${styles.navLink} ${styles.contextualNavLink}`}
+        {contextualNavigation.map((item) => <NavigationMenu.Item className={styles.mobileSecondary} key={item.to}><NavigationMenu.Link asChild><NavLink className={`${styles.navLink} ${styles.contextualNavLink}`}
           to={item.to}><Icon name={item.icon} />{item.label}</NavLink></NavigationMenu.Link></NavigationMenu.Item>)}
-        <NavigationMenu.Item><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings"><Icon name="settings" />Settings</NavLink></NavigationMenu.Link></NavigationMenu.Item>
-        {session.activeOrganizationId ? <NavigationMenu.Item><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/agents"><Icon name="agents" />Agents</NavLink></NavigationMenu.Link></NavigationMenu.Item> : null}
-        {session.organizationAdministrations?.length ? <><NavigationMenu.Item><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/organization"><Icon name="settings" />Organization</NavLink></NavigationMenu.Link></NavigationMenu.Item><NavigationMenu.Item><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/members"><Icon name="members" />Members</NavLink></NavigationMenu.Link></NavigationMenu.Item><NavigationMenu.Item><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/imported-identities"><Icon name="import" />Imported identities</NavLink></NavigationMenu.Link></NavigationMenu.Item></> : null}
+        <NavigationMenu.Item className={styles.mobileSettings}><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings"><Icon name="settings" />Settings</NavLink></NavigationMenu.Link></NavigationMenu.Item>
+        {session.activeOrganizationId ? <NavigationMenu.Item className={styles.mobileSecondary}><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/agents"><Icon name="agents" />Agents</NavLink></NavigationMenu.Link></NavigationMenu.Item> : null}
+        {session.organizationAdministrations?.length ? <><NavigationMenu.Item className={styles.mobileSecondary}><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/organization"><Icon name="settings" />Organization</NavLink></NavigationMenu.Link></NavigationMenu.Item><NavigationMenu.Item className={styles.mobileSecondary}><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/members"><Icon name="members" />Members</NavLink></NavigationMenu.Link></NavigationMenu.Item><NavigationMenu.Item className={styles.mobileSecondary}><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/imported-identities"><Icon name="import" />Imported identities</NavLink></NavigationMenu.Link></NavigationMenu.Item></> : null}
       </NavigationMenu.List></NavigationMenu.Root>
       {activeWorkspace.id ? <NoteTree activeNoteId={activeNoteId} token={session.token ?? ""} workspaceId={activeWorkspace.id} /> : null}
       <div className={styles.sidebarFooter}><span className={styles.avatar} aria-hidden="true">{initials(memberName, "M")}</span><span><strong>{memberName}</strong><small>{memberEmail}</small></span></div>
     </aside>
     <div className={styles.workspace}>
-      <header className={styles.topbar}><form className={styles.searchPreview} role="search" onSubmit={(event: FormEvent) => { event.preventDefault(); if (search.trim()) navigate(`/app/search?q=${encodeURIComponent(search.trim())}`); }}><Icon name="search" /><input aria-label="Search Workspace" type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search Notes" /></form><Link aria-label="Notifications" className={styles.notificationLink} to="/app/notifications">Notifications</Link><Link className={styles.compactCreate} to="/app/inbox"><Icon name="plus" /><span>Capture</span></Link></header>
+      <header className={styles.topbar}><Link className={styles.mobileIdentity} to={activeNoteId ? "/app/notes" : "/app"}>{activeNoteId ? <><span aria-hidden="true">←</span><strong>Note Tree</strong></> : <><span aria-hidden="true" className={styles.brandMark}><span /><span /></span><strong>Stash</strong></>}</Link><details className={styles.mobileMenu}><summary>More</summary><nav aria-label="More Workspace destinations">{contextualNavigation.map((item) => <NavLink key={item.to} to={item.to}>{item.label}</NavLink>)}<NavLink to="/app/settings">Settings</NavLink>{session.activeOrganizationId ? <NavLink to="/app/settings/agents">Agents</NavLink> : null}{session.organizationAdministrations?.length ? <><NavLink to="/app/settings/organization">Organization</NavLink><NavLink to="/app/settings/members">Members</NavLink><NavLink to="/app/settings/imported-identities">Imported identities</NavLink></> : null}</nav></details><form className={styles.searchPreview} role="search" onSubmit={(event: FormEvent) => { event.preventDefault(); if (search.trim()) navigate(`/app/search?q=${encodeURIComponent(search.trim())}`); }}><Icon name="search" /><input aria-label="Search Workspace" type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search Notes" /></form><Link aria-label="Notifications" className={styles.notificationLink} to="/app/notifications"><Icon name="bell" /><span>Notifications</span></Link><Link className={styles.compactCreate} to="/app/inbox"><Icon name="plus" /><span>Capture</span></Link></header>
       {activeNoteId
         ? <NoteWorkspace noteId={activeNoteId} token={session.token ?? ""}><NoteEditor contextVisible={false} noteId={activeNoteId} memberId={session.member.id} token={session.token ?? ""} /></NoteWorkspace>
         : <main id="workspace-content" className={styles.content} ref={mainRef} tabIndex={-1}>

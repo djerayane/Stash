@@ -58,7 +58,7 @@ test("routes an empty Instance into browser-guided setup before sign-in", () => 
   render(<QueryClientProvider client={client}><MemoryRouter initialEntries={["/sign-in"]}>
     <AppShell session={{ status: "anonymous" }} setup={{ status: "ready", state: "code-required" }} />
   </MemoryRouter></QueryClientProvider>);
-  expect(screen.getByRole("heading", { name: "Make Stash yours." })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "Keep the thread." })).toBeInTheDocument();
   expect(screen.queryByRole("heading", { name: "Sign in to Stash" })).not.toBeInTheDocument();
 });
 
