@@ -1,6 +1,7 @@
 import type { PostgresKernel, PostgresQueryable } from "../instance-operations/storage/postgres-kernel.js";
 import { effectiveNoteReadSql } from "./postgres-note-access.js";
 import type { Collection as CanonicalCollection, CollectionImpact, CollectionRecord as CanonicalRecord, ViewBlock as CanonicalViewBlock, ViewDefinition } from "@stash/domain-types";
+import type { CollectionProperty as CanonicalProperty } from "@stash/domain-types";
 import type { CollectionRepository, CollectionViewResult } from "./collections.js";
 
 type PrepareNotes = (client: PostgresQueryable) => Promise<void>;
@@ -117,6 +118,26 @@ export class PostgresCollectionRepository implements CollectionRepository {
       const collection = await this.canonicalCollection(client, collectionId);
       await this.projection(client, "Collection", collectionId, collection.schema, collection);
       return { status: "updated" as const };
+    });
+  }
+
+  async createCollectionProperty(memberId: string, collectionId: string, property: CanonicalProperty): Promise<
+    { status: "created"; property: CanonicalProperty } | { status: "collection_not_found" | "property_conflict" }> {
+    return this.kernel.transaction(async (client) => {
+      await this.prepare(client);
+      if (!(await client.query(`SELECT collection.id FROM stash_collections collection JOIN stash_workspaces workspace
+        ON workspace.id=collection.workspace_id WHERE collection.id=$1 AND (${member}) FOR UPDATE OF collection`, [collectionId, memberId])).rowCount)
+        return { status: "collection_not_found" as const };
+      const configuration = property.type === "single_select" || property.type === "multi_select" ? { options: property.options }
+        : property.type === "relation" ? { target: property.target } : {};
+      try { await client.query(`INSERT INTO stash_collection_properties(id,collection_id,name,property_type,configuration,position)
+        VALUES($1,$2,$3,$4,$5::jsonb,$6)`, [property.id, collectionId, property.name, property.type,
+        JSON.stringify(configuration), property.position]); }
+      catch (error) { if (error && typeof error === "object" && "code" in error && error.code === "23505")
+        return { status: "property_conflict" as const }; throw error; }
+      const collection = await this.canonicalCollection(client, collectionId);
+      await this.projection(client, "Collection", collectionId, collection.schema, collection);
+      return { status: "created" as const, property };
     });
   }
 

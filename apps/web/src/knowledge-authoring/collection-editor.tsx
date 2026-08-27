@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
-import type { Collection, CollectionImpact, CollectionPropertyType, CollectionPropertyValue, ViewBlock, ViewDefinition, ViewPresentation } from "@stash/domain-types";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { Collection, CollectionImpact, CollectionProperty, CollectionPropertyType, CollectionPropertyValue, ViewBlock, ViewDefinition, ViewPresentation } from "@stash/domain-types";
 
 import { evaluateCollectionView, updateBoardGroup } from "./views/view-model";
 import { TableView } from "./views/table-view";
@@ -85,6 +85,8 @@ export function CollectionWorkspace({ noteId, token, editable = true, fetcher = 
       <option value="">Choose an accessible Collection</option>{query.data.availableCollections.map((entry) => <option key={entry.id} value={entry.id}>{entry.title}</option>)}</select></label>
       <button type="button" disabled={!viewSourceId || createView.isPending} onClick={() => createView.mutate()}>Add View Block</button></div> : null}
     {createView.isError ? <p role="alert">{createView.error.message}</p> : null}
+    {editable ? <div className={styles.authoring}>{collections.map((entry) => <CollectionAuthoring key={entry.id} collection={entry}
+      token={token} fetcher={fetcher} noteId={noteId} />)}</div> : null}
     <div className={styles.views}>{views.map((entry) => <SavedCollectionView key={entry.id} initialView={entry} token={token} fetcher={fetcher} />)}
       {!views.length && collections.map((entry) => <CollectionView key={entry.id} view={{ schema: "stash.view-block.v1", id: entry.id,
         workspaceId: entry.workspaceId, ownerNoteId: noteId, blockId: entry.id, title: entry.title,
@@ -112,6 +114,91 @@ export function CollectionWorkspace({ noteId, token, editable = true, fetcher = 
   </section>;
 }
 
+function propertyInput(property: CollectionProperty, raw: string | boolean | string[]): CollectionPropertyValue | undefined {
+  if (property.type === "checkbox") return Boolean(raw);
+  if (Array.isArray(raw)) return raw;
+  const value = String(raw).trim(); if (!value) return undefined;
+  if (property.type === "number") return Number(value);
+  if (property.type === "date_time") return { start: new Date(value).toISOString(), includeTime: true };
+  if (property.type === "person" || property.type === "attachment") return value.split(",").map((entry) => entry.trim()).filter(Boolean);
+  if (property.type === "relation") return value.split(",").map((entry) => { const [identity, ...fallback] = entry.split("|");
+    return { id: identity!.trim(), fallback: fallback.join("|").trim() || identity!.trim() }; });
+  return value;
+}
+
+function draftValue(property: CollectionProperty, value?: CollectionPropertyValue): string | boolean | string[] {
+  if (property.type === "checkbox") return value === true;
+  if (property.type === "multi_select") return Array.isArray(value) ? value.map(String) : [];
+  if (property.type === "date_time" && value && typeof value === "object" && !Array.isArray(value) && "start" in value)
+    return value.start.slice(0, 16);
+  if (property.type === "relation" && Array.isArray(value)) return value.map((entry) => typeof entry === "string" ? entry : `${entry.id} | ${entry.fallback}`).join(", ");
+  if ((property.type === "person" || property.type === "attachment") && Array.isArray(value)) return value.join(", ");
+  return value === undefined || value === null ? "" : String(value);
+}
+
+function TypedValueControl({ property, value, onChange, prefix = "", labelText }: { property: CollectionProperty; value: string | boolean | string[];
+  onChange: (value: string | boolean | string[]) => void; prefix?: string; labelText?: string }) {
+  const label = labelText ?? `${prefix}${property.name} value`;
+  if (property.type === "checkbox") return <label>{label}<input type="checkbox" checked={value === true} onChange={(event) => onChange(event.target.checked)} /></label>;
+  if (property.type === "single_select") return <label>{label}<select value={String(value)} onChange={(event) => onChange(event.target.value)}>
+    <option value="">No value</option>{property.options.map((option) => <option key={option.id} value={option.id}>{option.name}</option>)}</select></label>;
+  if (property.type === "multi_select") return <label>{label}<select multiple value={Array.isArray(value) ? value : []}
+    onChange={(event) => onChange(Array.from(event.target.selectedOptions).map(({ value: selected }) => selected))}>
+    {property.options.map((option) => <option key={option.id} value={option.id}>{option.name}</option>)}</select></label>;
+  const type = property.type === "number" ? "number" : property.type === "date_time" ? "datetime-local" : property.type === "url" ? "url" : "text";
+  const hint = property.type === "relation" ? "Identity | readable fallback, comma separated" : property.type === "person" || property.type === "attachment"
+    ? "Identities, comma separated" : undefined;
+  return <label>{label}<input type={type} value={String(value)} placeholder={hint} onChange={(event) => onChange(event.target.value)} /></label>;
+}
+
+function CollectionAuthoring({ collection, token, fetcher, noteId }: { collection: Collection; token: string; fetcher: typeof fetch; noteId: string }) {
+  const client = useQueryClient(); const [propertyOpen, setPropertyOpen] = useState(false); const [recordOpen, setRecordOpen] = useState(false);
+  const [newName, setNewName] = useState(""); const [newType, setNewType] = useState<CollectionPropertyType>("text");
+  const [options, setOptions] = useState(""); const [targetKind, setTargetKind] = useState<"collection_records" | "notes" | "tasks" | "projects">("notes");
+  const [targetCollection, setTargetCollection] = useState(""); const [editingRecord, setEditingRecord] = useState<string>();
+  const [values, setValues] = useState<Record<string, string | boolean | string[]>>({});
+  const invalidate = async () => { await Promise.all([client.invalidateQueries({ queryKey: ["note-collections", noteId] }),
+    client.invalidateQueries({ queryKey: ["collection-view"] })]); };
+  const addProperty = useMutation({ mutationFn: async () => { const base = { id: id(), name: newName.trim(), type: newType,
+    position: collection.properties.length + 1 }; const property = newType === "single_select" || newType === "multi_select"
+      ? { ...base, options: options.split(",").map((name, index) => ({ id: `option-${index + 1}`, name: name.trim() })).filter(({ name }) => name) }
+      : newType === "relation" ? { ...base, target: targetKind === "collection_records" ? { kind: targetKind, collectionId: targetCollection } : { kind: targetKind } } : base;
+    const response = await fetcher(`/api/collections/${encodeURIComponent(collection.id)}/properties`, { method: "POST",
+      headers: { ...auth(token), "content-type": "application/json" }, body: JSON.stringify(property) });
+    const body = await response.json() as { message?: string }; if (!response.ok) throw new Error(body.message || "The property could not be added."); },
+  onSuccess: async () => { setPropertyOpen(false); setNewName(""); await invalidate(); } });
+  const saveRecord = useMutation({ mutationFn: async () => { const payload = { values: Object.fromEntries(collection.properties.map((property) =>
+    [property.id, propertyInput(property, values[property.id] ?? draftValue(property))]).filter((entry) => entry[1] !== undefined)) };
+    const response = await fetcher(editingRecord ? `/api/collections/${encodeURIComponent(collection.id)}/records/${encodeURIComponent(editingRecord)}`
+      : `/api/collections/${encodeURIComponent(collection.id)}/records`, { method: editingRecord ? "PATCH" : "POST",
+      headers: { ...auth(token), "content-type": "application/json" }, body: JSON.stringify(editingRecord ? payload : { id: id(),
+        position: Math.max(0, ...collection.records.map(({ position }) => position)) + 1, ...payload }) });
+    const body = await response.json() as { message?: string }; if (!response.ok) throw new Error(body.message || "The record could not be saved."); },
+  onSuccess: async () => { setRecordOpen(false); setEditingRecord(undefined); setValues({}); await invalidate(); } });
+  const openRecord = (recordId?: string) => { const record = collection.records.find(({ id: found }) => found === recordId); setEditingRecord(recordId);
+    setValues(Object.fromEntries(collection.properties.map((property) => [property.id, draftValue(property, record?.values[property.id])]))); setRecordOpen(true); };
+  return <section className={styles.authoringLane} aria-label={`${collection.title} authoring`}><header><strong>{collection.title}</strong><div>
+    <button type="button" aria-label={`Add property to ${collection.title}`} onClick={() => setPropertyOpen((open) => !open)}>Add property</button>
+    <button type="button" aria-label={`Add record to ${collection.title}`} onClick={() => openRecord()}>Add record</button></div></header>
+    {propertyOpen ? <form className={styles.form} onSubmit={(event) => { event.preventDefault(); addProperty.mutate(); }}>
+      <label>New property name<input required value={newName} onChange={(event) => setNewName(event.target.value)} /></label>
+      <label>New property type<select value={newType} onChange={(event) => setNewType(event.target.value as CollectionPropertyType)}>
+        {propertyTypes.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}</select></label>
+      {newType === "single_select" || newType === "multi_select" ? <label>Options, comma separated<input required value={options} onChange={(event) => setOptions(event.target.value)} /></label> : null}
+      {newType === "relation" ? <><label>Relation target<select value={targetKind} onChange={(event) => setTargetKind(event.target.value as typeof targetKind)}>
+        <option value="notes">Notes</option><option value="tasks">Tasks</option><option value="projects">Projects</option><option value="collection_records">Collection records</option></select></label>
+        {targetKind === "collection_records" ? <label>Target Collection identity<input required value={targetCollection} onChange={(event) => setTargetCollection(event.target.value)} /></label> : null}</> : null}
+      <button disabled={addProperty.isPending}>Save property</button>{addProperty.isError ? <p role="alert">{addProperty.error.message}</p> : null}</form> : null}
+    {collection.records.length ? <div className={styles.recordActions}>{collection.records.map((record, index) => <button key={record.id} type="button"
+      onClick={() => openRecord(record.id)}>Edit record {index + 1}</button>)}</div> : null}
+    {recordOpen ? <form className={styles.form} onSubmit={(event) => { event.preventDefault(); saveRecord.mutate(); }}>
+      {collection.properties.map((property) => <TypedValueControl key={property.id} property={property} value={values[property.id] ?? draftValue(property)}
+        onChange={(value) => setValues((current) => ({ ...current, [property.id]: value }))} />)}
+      <button disabled={saveRecord.isPending}>{editingRecord ? "Save record changes" : "Save new record"}</button>
+      {saveRecord.isError ? <p role="alert">{saveRecord.error.message}</p> : null}</form> : null}
+  </section>;
+}
+
 function SavedCollectionView({ initialView, token, fetcher }: { initialView: ViewBlock; token: string; fetcher: typeof fetch }) {
   const query = useQuery({ queryKey: ["collection-view", initialView.id], retry: false, queryFn: async () => {
     const response = await fetcher(`/api/view-blocks/${encodeURIComponent(initialView.id)}`, { headers: auth(token) });
@@ -127,13 +214,15 @@ function SavedCollectionView({ initialView, token, fetcher }: { initialView: Vie
 function CollectionView({ view, collection, token, fetcher, persisted }: { view: ViewBlock; collection: Collection; token: string;
   fetcher: typeof fetch; persisted: boolean }) {
   const client = useQueryClient(); const [definition, setDefinition] = useState(view.definition);
+  const saveQueue = useRef<Promise<unknown>>(Promise.resolve());
   useEffect(() => { if (persisted) setDefinition(view.definition); }, [persisted, view.definition]);
   const evaluated = useMemo(() => evaluateCollectionView(collection, definition), [collection, definition]);
   const save = useMutation({ mutationFn: async (next: ViewDefinition) => { if (!persisted) return;
     const response = await fetcher(`/api/view-blocks/${encodeURIComponent(view.id)}`, { method: "PATCH", headers: { ...auth(token), "content-type": "application/json" }, body: JSON.stringify(next) });
     const body = await response.json() as { message?: string }; if (!response.ok) throw new Error(body.message || "The View could not be saved."); },
     onSuccess: async () => client.invalidateQueries({ queryKey: ["collection-view", view.id] }) });
-  const update = (next: ViewDefinition) => { setDefinition(next); save.mutate(next); };
+  const update = (next: ViewDefinition) => { setDefinition(next); if (persisted)
+    saveQueue.current = saveQueue.current.catch(() => undefined).then(() => save.mutateAsync(next)); };
   const move = useMutation({ mutationFn: async ({ recordId, value }: { recordId: string; value: CollectionPropertyValue }) => {
     const patch = updateBoardGroup(collection, definition, recordId, value);
     const response = await fetcher(`/api/collections/${encodeURIComponent(collection.id)}/records/${encodeURIComponent(recordId)}`, {
@@ -142,12 +231,24 @@ function CollectionView({ view, collection, token, fetcher, persisted }: { view:
     onSuccess: async () => { await Promise.all([client.invalidateQueries({ queryKey: ["collection-view", view.id] }),
       client.invalidateQueries({ queryKey: ["note-collections", view.ownerNoteId] })]); } });
   const focus = (recordId: string) => update({ ...definition, focused: { recordId } });
+  const filter = definition.filters[0]; const filterProperty = collection.properties.find(({ id: propertyId }) => propertyId === filter?.propertyId);
+  const setFilterProperty = (propertyId: string) => update({ ...definition, filters: propertyId
+    ? [{ propertyId, operator: "contains", value: "" }] : [] });
+  const setFilterOperator = (operator: ViewDefinition["filters"][number]["operator"]) => { if (!filter) return;
+    update({ ...definition, filters: [{ propertyId: filter.propertyId, operator,
+      ...(!["is_empty", "is_not_empty"].includes(operator) ? { value: filter.value ?? "" } : {}) }] }); };
+  const setFilterValue = (raw: string | boolean | string[]) => { if (!filter || !filterProperty) return; const value = propertyInput(filterProperty, raw);
+    update({ ...definition, filters: [{ propertyId: filter.propertyId, operator: filter.operator, value: value ?? "" }] }); };
   return <article className={styles.viewBlock} aria-labelledby={`view-${view.id}`}><header><div><h3 id={`view-${view.id}`}>{view.title}</h3></div>
     <label>Presentation<select value={definition.presentation} onChange={(event) => update({ ...definition, presentation: event.target.value as ViewPresentation })}>
       <option value="table">Table</option><option value="board">Board</option><option value="list">List</option><option value="calendar">Calendar</option></select></label></header>
-    <div className={styles.viewControls}><label>Filter by<select value={definition.filters[0]?.propertyId ?? ""} onChange={(event) => update({ ...definition,
-      filters: event.target.value ? [{ propertyId: event.target.value, operator: "contains", value: "" }] : [] })}><option value="">No filter</option>
+    <div className={styles.viewControls}><label>Filter by<select value={filter?.propertyId ?? ""} onChange={(event) => setFilterProperty(event.target.value)}><option value="">No filter</option>
       {collection.properties.map((property) => <option key={property.id} value={property.id}>{property.name}</option>)}</select></label>
+      <label>Filter operator<select disabled={!filter} value={filter?.operator ?? "contains"} onChange={(event) => setFilterOperator(event.target.value as typeof filter.operator)}>
+        <option value="contains">Contains</option><option value="equals">Equals</option><option value="not_equals">Does not equal</option>
+        <option value="is_empty">Is empty</option><option value="is_not_empty">Is not empty</option></select></label>
+      {filter && filterProperty && !["is_empty", "is_not_empty"].includes(filter.operator) ? <TypedValueControl property={filterProperty}
+        labelText="Filter value" value={draftValue(filterProperty, filter.value)} onChange={setFilterValue} /> : null}
       <label>Sort by<select value={definition.sorts[0]?.propertyId ?? ""} onChange={(event) => update({ ...definition,
         sorts: event.target.value ? [{ propertyId: event.target.value, direction: "ascending" }] : [] })}><option value="">Record order</option>
         {collection.properties.map((property) => <option key={property.id} value={property.id}>{property.name}</option>)}</select></label>

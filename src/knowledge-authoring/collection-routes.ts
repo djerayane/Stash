@@ -4,18 +4,28 @@ import { InvalidCollectionInput, type CollectionService } from "./collections.js
 
 const noteCollections = /^\/api\/notes\/([^/]+)\/collections(?:\/(impact|relocate|delete))?$/;
 const collection = /^\/api\/collections\/([^/]+)$/;
+const properties = /^\/api\/collections\/([^/]+)\/properties$/;
 const records = /^\/api\/collections\/([^/]+)\/records(?:\/([^/]+)(?:\/(move))?)?$/;
 const noteViews = /^\/api\/notes\/([^/]+)\/view-blocks$/;
 const view = /^\/api\/view-blocks\/([^/]+)$/;
 
 export function collectionRoutes(service: CollectionService, access: MemberAccessResolver): HttpRoute {
   return {
-    matches(_request, url) { return noteCollections.test(url.pathname) || collection.test(url.pathname) || records.test(url.pathname)
+    matches(_request, url) { return noteCollections.test(url.pathname) || collection.test(url.pathname) || properties.test(url.pathname) || records.test(url.pathname)
       || noteViews.test(url.pathname) || view.test(url.pathname); },
     async handle(request, response, url) {
       const member = await access.authenticateBearer(request.headers.authorization);
       if (!member) { json(response, 401, { error: "unauthorized", message: "A valid Member session is required." }); return true; }
       try {
+        const propertyMatch = properties.exec(url.pathname);
+        if (propertyMatch) {
+          if (request.method !== "POST") return method(response, "POST");
+          const result = await service.createProperty(member.accountId, decodeURIComponent(propertyMatch[1]!), await readJson(request));
+          if (result.status === "created") json(response, 201, { property: result.property });
+          else if (result.status === "property_conflict") json(response, 409, { error: result.status, message: "That property identity or position is already in use." });
+          else json(response, 404, { error: result.status, message: "This Collection is unavailable." });
+          return true;
+        }
         const noteMatch = noteCollections.exec(url.pathname);
         if (noteMatch) {
           const noteId = decodeURIComponent(noteMatch[1]!); const operation = noteMatch[2];

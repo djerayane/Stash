@@ -9,6 +9,11 @@
 .form label, .viewCreate label, .viewControls label, .impact label, .viewBlock > header label { min-width: 10rem; display: grid; gap: .3rem; color: var(--stash-color-muted); font-size: .7rem; font-weight: 720; }
 .viewControls label { color: var(--stash-color-ink); }
 .views { display: grid; gap: 1rem; }
+.authoring { display: grid; gap: .75rem; }
+.authoringLane { display: grid; gap: .75rem; padding: .8rem; border: 1px solid var(--stash-border-subtle); background: var(--stash-color-canvas-deep); }
+.authoringLane > header, .authoringLane > header div, .recordActions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem; }
+.authoringLane > header div, .recordActions { justify-content: flex-start; }
+.recordActions button { min-height: 2rem; padding: .35rem .55rem; font-size: .68rem; }
 .viewBlock { overflow: hidden; display: grid; gap: 0; border: 1px solid var(--stash-border-subtle); background: var(--stash-color-surface); }
 .viewBlock > header { padding: 1rem; }
 .viewControls { border-width: 1px 0; background: var(--stash-color-canvas-deep); }

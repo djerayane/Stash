@@ -108,4 +108,47 @@ describe("Collection workspace", () => {
     fireEvent.change(presentation, { target: { value: "calendar" } });
     expect(await screen.findByRole("region", { name: "Research lens calendar" })).toBeVisible();
   });
+
+  it("authors schema and records, then persists a meaningful filter", async () => {
+    const requests: Array<{ path: string; init?: RequestInit }> = [];
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => { const path = String(input); requests.push({ path, init });
+      if (path.endsWith("/collections")) return Response.json({ workspaceId: collection.workspaceId, collections: [collection],
+        availableCollections: [collection], views: [view] });
+      if (path.endsWith(`/view-blocks/${view.id}`) && !init?.method) return Response.json({ view, source: { kind: "collection", collection } });
+      return Response.json({ status: "created" }, { status: 201 });
+    }) as typeof fetch;
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={client}><CollectionWorkspace noteId={collection.ownerNoteId} token="member" fetcher={fetcher} /></QueryClientProvider>);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Add property to Research" }));
+    const propertyType = screen.getByRole("combobox", { name: "New property type" });
+    expect(Array.from((propertyType as HTMLSelectElement).options).map(({ value }) => value)).toEqual([
+      "text", "number", "checkbox", "date_time", "single_select", "multi_select", "person", "url", "attachment", "relation",
+    ]);
+    fireEvent.change(screen.getByRole("textbox", { name: "New property name" }), { target: { value: "Score" } });
+    fireEvent.change(propertyType, { target: { value: "number" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save property" }));
+    await waitFor(() => expect(requests.some(({ path, init }) => path.endsWith(`/collections/${collection.id}/properties`)
+      && init?.method === "POST" && JSON.parse(String(init.body)).type === "number")).toBe(true));
+
+    fireEvent.click(screen.getByRole("button", { name: "Add record to Research" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Idea value" }), { target: { value: "A typed idea" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Status value" }), { target: { value: "later" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save new record" }));
+    await waitFor(() => expect(requests.some(({ path, init }) => path.endsWith(`/collections/${collection.id}/records`)
+      && init?.method === "POST" && JSON.parse(String(init.body)).values[statusId] === "later")).toBe(true));
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit record 1" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Idea value" }), { target: { value: "Edited typed idea" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save record changes" }));
+    await waitFor(() => expect(requests.some(({ path, init }) => path.endsWith(`/records/${collection.records[0]!.id}`)
+      && init?.method === "PATCH" && JSON.parse(String(init.body)).values[titleId] === "Edited typed idea")).toBe(true));
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Filter by" }), { target: { value: titleId } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Filter operator" }), { target: { value: "equals" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Filter value" }), { target: { value: "Map constraints" } });
+    await waitFor(() => expect(requests.some(({ path, init }) => path.endsWith(`/view-blocks/${view.id}`) && init?.method === "PATCH"
+      && JSON.parse(String(init.body)).filters[0]?.operator === "equals"
+      && JSON.parse(String(init.body)).filters[0]?.value === "Map constraints")).toBe(true));
+  });
 });
