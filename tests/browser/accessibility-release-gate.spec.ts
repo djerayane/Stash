@@ -35,6 +35,7 @@ async function expectNoHorizontalPageScroll(page: Page, context: string) {
 }
 
 async function expectMinimumTargetSize(locator: Locator, context: string) {
+  await expect(locator.first(), `${context}: representative controls exist`).toBeVisible();
   const boxes = await locator.evaluateAll((elements) => elements.filter((element) => {
     const style = getComputedStyle(element);
     return style.visibility !== "hidden" && style.display !== "none";

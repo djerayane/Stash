@@ -6,10 +6,17 @@ Stash treats the running Instance as its release boundary. Before a stable relea
 pnpm run check
 pnpm test
 pnpm run build
+pnpm run test:browser
+pnpm run test:a11y
 pnpm run test:stable-release
+pnpm run smoke
 ```
 
 `test:stable-release` starts a disposable, embedded Instance and exercises the primary release story through HTTP: an Owner creates a Workspace and Project, a mobile capture becomes a Note, a stable Block becomes a Task, the Task moves on a board, a signed GitHub event becomes a Signal and applies an Automation, and the Portable Workspace Export imports into a clean Instance. It also verifies unauthenticated, invalid-input, and forged-provider failures remain visible. The test uses a protocol-compatible GitHub fake and makes no network request.
+
+The browser gate covers the knowledge-first journey at the member boundary: protected first-run claim, editable starter removal, Note nesting and links, Collection and View Block editing, Task creation and promotion, nested Project association and Project-specific keys, contextual Discussion, Search, Portable Workspace Export, logout/login, and durable restart. The accessibility subset repeats the critical shell and workspace states with keyboard-only interaction, reduced motion, visible focus, semantic feedback, contrast checks, and the non-visual outline for related Notes.
+
+The checked-in references in `docs/design/stash-web-direction/` must be regenerated from the built acceptance application whenever the shell or core journey changes. Their README maps each capture to shipped behavior and records the optional visualization boundary.
 
 ## Representative benchmark
 

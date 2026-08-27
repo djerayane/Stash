@@ -3,6 +3,7 @@ import { describe, test } from "node:test";
 
 import {
   createCapabilityRegistry,
+  publicRoutesFromCapabilities,
   routesFromCapabilities,
   type CapabilityModule,
 } from "../../src/capability-registry.js";
@@ -55,6 +56,7 @@ describe("capability registry", () => {
       routesFromCapabilities(registry).map((registered) => (registered as HttpRoute & { label: string }).label),
       ["identity", "note-read", "note-write", "task", "development", "operations"],
     );
+    assert.deepEqual(publicRoutesFromCapabilities(registry), []);
   });
 
   test("rejects duplicate capability names explicitly", () => {

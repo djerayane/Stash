@@ -19,6 +19,8 @@ export function identityAccessCapability(options: {
 }): CapabilityModule {
   return {
     name: "identity-access",
+    owns: ["password-auth", "account-registration", ...(options.instanceSetup ? ["instance-setup"] : []),
+      ...(options.ownerBootstrap ? ["owner-bootstrap"] : [])],
     routes: () => [
       ...(options.instanceSetup ? [instanceSetupRoutes(options.instanceSetup)] : []),
       accountRegistrationRoute(options.accountRegistration, options.reportAuthenticationFailure),
