@@ -53,7 +53,7 @@ describe("PostgreSQL structured Task collaboration", { skip: !databaseUrl }, () 
     const boardOverlapTask = await createTask("Board overlap");
     const reassignedTask = await createTask("Reassign departed Member");
     const conflictReassignedTask = await createTask("Resolve departed Member assignment conflict");
-    const workflowService = new ProjectWorkflowService(database); const workflowResult = await workflowService.find(owner.ownerId, project.project.id);
+    const workflowService = new ProjectWorkflowService(database.workPlanningRepositories()); const workflowResult = await workflowService.find(owner.ownerId, project.project.id);
     assert.equal(workflowResult.status, "found"); if (workflowResult.status !== "found") return;
     const archivedStatus = workflowResult.workflow.statuses.find(({ name }) => name === "Ready")!;
     const archived = await workflowService.replace(owner.ownerId, project.project.id, { expectedRevision: workflowResult.workflow.revision,
@@ -66,7 +66,7 @@ describe("PostgreSQL structured Task collaboration", { skip: !databaseUrl }, () 
       BEGIN PERFORM pg_sleep(0.08); RETURN NEW; END $$;
       CREATE TRIGGER stash_test_delay_task_receipt BEFORE INSERT ON stash_task_edit_operations
       FOR EACH ROW EXECUTE FUNCTION stash_test_delay_task_receipt()`); await setup.end();
-    const boardService = new BoardService(database);
+    const boardService = new BoardService(database.workPlanningRepositories());
     const boardResult = await boardService.create(owner.ownerId, project.project.id, { name: "Delivery", groupBy: "status" });
     assert.equal(boardResult.status, "created"); if (boardResult.status !== "created") return;
     instance = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin", tasks, boards: boardService,

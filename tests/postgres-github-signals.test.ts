@@ -41,7 +41,7 @@ describe("PostgreSQL GitHub Signal acceptance", { skip: databaseUrl ? false : "S
         { projectId: project.project.id, title: "Fail visibly" });
       assert.equal(created.status, "created"); if (created.status !== "created") throw new Error("task setup failed");
       const target = await sql.query<{ id: string }>("SELECT id FROM stash_workflow_statuses WHERE project_id=$1 AND category='started' ORDER BY position LIMIT 1", [project.project.id]);
-      const notifications = new NotificationService(database.workPlanningRepositories()); const automations = new AutomationService(database, notifications);
+      const notifications = new NotificationService(database.workPlanningRepositories()); const automations = new AutomationService(database.workPlanningRepositories(), notifications);
       await automations.enable(ownerId, project.project.id, { trigger: "branch_created", targetStatusId: target.rows[0]!.id });
       await automations.enable(configuringMemberId, project.project.id, { trigger: "branch_created", targetStatusId: target.rows[0]!.id });
       const github: GitHubApp = { async inspectRepository(input) { return { installationId: input.installationId, repositoryId: "987", repositoryUrl: "https://github.com/acme/stash" }; }, async verifyRepository() {} };
@@ -144,7 +144,7 @@ describe("PostgreSQL GitHub Signal acceptance", { skip: databaseUrl ? false : "S
       assert.equal(await connections.attachToProject(currentOwnerA, orgA, departedConnectionId, alpha.projectId), "not_found");
       const targetStatus = await sql.query<{ id: string }>(
         "SELECT id FROM stash_workflow_statuses WHERE project_id=$1 AND category='started' ORDER BY position LIMIT 1", [alpha.projectId]);
-      const automations = new AutomationService(database);
+      const automations = new AutomationService(database.workPlanningRepositories());
       const recipe = await automations.enable(currentOwnerA, alpha.projectId, { trigger: "branch_created",
         targetStatusId: targetStatus.rows[0]!.id });
       assert.equal(recipe.trigger, "branch_created");
