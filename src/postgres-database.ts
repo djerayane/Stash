@@ -345,7 +345,7 @@ export class PostgresDatabase implements DatabaseProbe {
       recordProjectActivityNotifications: (client, activity) => this.#recordProjectActivityNotifications(client, activity),
     });
     this.#developmentIntegrationAdapter = new PostgresDevelopmentIntegrationRepositories(this.#kernel, {
-      organizationRole: (organizationId, accountId) => this.organizationRole(organizationId, accountId),
+      organizationRole: (organizationId, accountId) => this.#identityAccessAdapter.organizationRole(organizationId, accountId),
       prepareConnections: (client) => this.#ensureRepositoryConnectionSchema(client),
       lockedMemberships: (client, organizationId) => this.#lockedOrganizationMemberships(client, organizationId),
       recordConnectionProjection: (client, record, revision) => this.#recordRepositoryConnectionProjection(client, record, revision),
@@ -396,9 +396,6 @@ export class PostgresDatabase implements DatabaseProbe {
 
   identityAccessRepositories(): IdentityAccessPostgresRepositories {
     return Object.assign(this.#identityAccessAdapter, {
-      findOidcIdentity: this.findOidcIdentity.bind(this), findOidcConfiguration: this.findOidcConfiguration.bind(this),
-      organizationRole: this.organizationRole.bind(this), saveOidcConfiguration: this.saveOidcConfiguration.bind(this),
-      linkOidcIdentity: this.linkOidcIdentity.bind(this),
       assignBuiltInRole: this.assignBuiltInRole.bind(this), removeOrganizationMember: this.removeOrganizationMember.bind(this),
       listCustomRoles: this.listCustomRoles.bind(this), createCustomRole: this.createCustomRole.bind(this),
       updateCustomRole: this.updateCustomRole.bind(this), assignCustomRole: this.assignCustomRole.bind(this),
@@ -443,7 +440,7 @@ export class PostgresDatabase implements DatabaseProbe {
   async prepareInstanceStore(transactionClient?: PostgresQueryable): Promise<void> {
     const prepare = async (client: PostgresQueryable) => {
       await this.#ensureBootstrapSchema(client); await this.#ensureWorkspaceProjectSchema(client);
-      await this.#ensureAuthSchema(client); await this.#ensureOidcSchema(client); await this.#ensureRecoverySchema(client);
+      await this.#ensureAuthSchema(client); await this.#identityAccessAdapter.prepareOidc(client); await this.#ensureRecoverySchema(client);
       await this.#ensureRepositoryConnectionSchema(client); await this.#ensureGitHubSignalSchema(client); await this.#ensureNotificationSchema(client);
       await this.#ensureMemberLocalizationSchema(client);
       await this.#ensureNoteSchema(client); await this.#noteTreeRepository.prepare(client);
@@ -569,43 +566,6 @@ export class PostgresDatabase implements DatabaseProbe {
         ...(organizationAdministrations.length ? { organizationAdministrations } : {}),
         ...(row.organization_id ? { activeOrganizationId: row.organization_id } : {}) };
     });
-  }
-
-  async findOidcIdentity(key: OidcIdentityKey): Promise<OidcIdentityRecord | undefined> {
-    await this.#ensureOidcSchema();
-    const result = await this.#kernel.query<OidcIdentityRow>(`
-      SELECT a.id, a.name, a.email, i.subject_secret
-      FROM stash_oidc_identities i
-      JOIN stash_accounts a ON a.id = i.account_id
-      JOIN stash_organization_memberships m ON m.account_id = a.id AND m.organization_id = i.organization_id
-      WHERE i.organization_id = $1 AND i.issuer = $2 AND i.subject_lookup = $3
-    `, [key.organizationId, key.issuer, this.#oidcIdentityLookup(key)]);
-    const row = result.rows[0];
-    if (!row || this.#authenticationSecrets.decrypt(row.subject_secret) !== key.subject) return undefined;
-    return { accountId: row.id, name: row.name, email: row.email };
-  }
-
-  async findOidcConfiguration(organizationId: string): Promise<OidcOrganizationConfiguration | undefined> {
-    await this.#ensureOidcSchema();
-    const result = await this.#kernel.query<OidcConfigurationRow>(
-      "SELECT organization_id, issuer, client_id, client_secret FROM stash_oidc_configurations WHERE organization_id = $1",
-      [organizationId],
-    );
-    const row = result.rows[0];
-    return row ? {
-      organizationId: row.organization_id,
-      issuer: row.issuer,
-      clientId: row.client_id,
-      clientSecret: this.#authenticationSecrets.decrypt(row.client_secret),
-    } : undefined;
-  }
-
-  async organizationRole(organizationId: string, accountId: string): Promise<BuiltInOrganizationRole | undefined> {
-    const result = await this.#kernel.query<{ role: BuiltInOrganizationRole }>(
-      "SELECT role FROM stash_organization_memberships WHERE organization_id = $1 AND account_id = $2",
-      [organizationId, accountId],
-    );
-    return result.rows[0]?.role;
   }
 
   async #linkDevelopmentArtifact(memberId: string, projectId: string, taskKey: string, artifact: DevelopmentArtifact) {
@@ -859,27 +819,6 @@ export class PostgresDatabase implements DatabaseProbe {
       && (membership.role === "Owner" || membership.role === "Admin"));
   }
 
-  async saveOidcConfiguration(configuration: OidcOrganizationConfiguration): Promise<void> {
-    await this.#ensureOidcSchema();
-    await this.#kernel.query(`
-      INSERT INTO stash_oidc_configurations (organization_id, issuer, client_id, client_secret)
-      VALUES ($1, $2, $3, $4)
-      ON CONFLICT (organization_id) DO UPDATE SET issuer = EXCLUDED.issuer, client_id = EXCLUDED.client_id, client_secret = EXCLUDED.client_secret
-    `, [configuration.organizationId, configuration.issuer, configuration.clientId, this.#authenticationSecrets.encrypt(configuration.clientSecret)]);
-  }
-
-  async linkOidcIdentity(key: OidcIdentityKey, accountId: string): Promise<boolean> {
-    await this.#ensureOidcSchema();
-    const result = await this.#kernel.query(`
-      INSERT INTO stash_oidc_identities (organization_id, issuer, subject_lookup, subject_secret, account_id)
-      SELECT $1, $3, $4, $5, account_id FROM stash_organization_memberships
-      WHERE organization_id = $1 AND account_id = $2
-      ON CONFLICT (organization_id, issuer, account_id) DO UPDATE
-      SET subject_lookup = EXCLUDED.subject_lookup, subject_secret = EXCLUDED.subject_secret
-    `, [key.organizationId, accountId, key.issuer, this.#oidcIdentityLookup(key), this.#authenticationSecrets.encrypt(key.subject)]);
-    return result.rowCount === 1;
-  }
-
   async savePasskey(record: PasskeyRecord): Promise<void> {
     await this.#ensureRecoverySchema();
     await this.#kernel.query(
@@ -1002,32 +941,6 @@ export class PostgresDatabase implements DatabaseProbe {
         user_agent TEXT
       )
     `);
-  }
-
-  async #ensureOidcSchema(client: PostgresQueryable = this.#kernel): Promise<void> {
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS stash_oidc_configurations (
-        organization_id UUID PRIMARY KEY REFERENCES stash_organizations(id) ON DELETE CASCADE,
-        issuer TEXT NOT NULL,
-        client_id TEXT NOT NULL,
-        client_secret TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS stash_oidc_identities (
-        organization_id UUID NOT NULL REFERENCES stash_organizations(id) ON DELETE CASCADE,
-        issuer TEXT NOT NULL,
-        subject_lookup TEXT NOT NULL,
-        subject_secret TEXT NOT NULL,
-        account_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
-        PRIMARY KEY (organization_id, issuer, subject_lookup),
-        UNIQUE (organization_id, issuer, account_id)
-      )
-    `);
-  }
-
-  #oidcIdentityLookup(key: OidcIdentityKey): string {
-    return this.#authenticationSecrets.blindIndex(
-      `oidc-identity-v1:${JSON.stringify([key.organizationId, key.issuer, key.subject])}`,
-    );
   }
 
   async #ensureRecoverySchema(client: PostgresQueryable = this.#kernel): Promise<void> {
