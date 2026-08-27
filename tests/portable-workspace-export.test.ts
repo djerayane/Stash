@@ -230,7 +230,7 @@ describe("PostgreSQL readable export wiring", { skip: postgresUrl ? false : "STA
       const discussionNote = await discussions.createWork(ownerId, discussion.discussion.id, { kind: "note",
         messageIds: [discussion.discussion.messages[0]!.id], idempotencyKey: randomUUID() });
       assert.equal(discussionNote.status, "created");
-      const noteLinks = new NoteLinkService(database);
+      const noteLinks = new NoteLinkService(database.knowledgeAuthoringRepositories());
       const linked = await noteLinks.create(ownerId, visibleNote.note.id, { targetNoteId: privateNote.note.id, label: "Private roadmap" });
       assert.equal(linked.status, "created");
       const moved = await noteLinks.move(ownerId, privateNote.note.id, { expectedRevision: 1, path: "private/roadmap.md" });

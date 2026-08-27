@@ -1,6 +1,7 @@
 import type { ActivityCause } from "../activity.js";
 import type { NoteRecord, NoteRepository, PortableNoteProjection } from "../notes.js";
 import type { AttachmentRecord, PortableAttachmentProjection } from "../attachments.js";
+import type { NoteLinkRecord, NoteLocationRecord, PortableNoteLinkStateProjection, PortableNoteLocationProjection } from "../note-links.js";
 import type { PostgresKernel, PostgresQueryable } from "../instance-operations/storage/postgres-kernel.js";
 
 interface PostgresKnowledgeAuthoringHooks {
@@ -8,7 +9,10 @@ interface PostgresKnowledgeAuthoringHooks {
   prepareInvitations(client: PostgresQueryable): Promise<void>;
   prepareAttachments(client: PostgresQueryable): Promise<void>;
   prepareWorkspaceProjects(client: PostgresQueryable): Promise<void>;
-  recordProjection(client: PostgresQueryable, kind: "Attachment", id: string, schema: PortableAttachmentProjection["schema"], projection: PortableAttachmentProjection): Promise<void>;
+  recordProjection(client: PostgresQueryable, kind: any, id: string, schema: any, projection: any): Promise<void>;
+  authorizeNote(client: PostgresQueryable, memberId: string, noteId: string): Promise<"edit" | "read" | "none">;
+  recordDomainActivity(client: PostgresQueryable, memberId: string, workspaceId: string, kind: any, objectId: string,
+    action: string, before: object, after: object): Promise<void>;
   recordCreatedNote(
     client: PostgresQueryable,
     memberId: string,
@@ -148,7 +152,7 @@ export class PostgresKnowledgeAuthoringRepositories {
         WHERE note.workspace_id=$1 AND note.archived_at IS NULL
         ${inbox ? "AND note.project_id IS NULL" : "AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2)) OR (note.project_id IS NOT NULL AND EXISTS (SELECT 1 FROM stash_project_guests guest WHERE guest.project_id=note.project_id AND guest.account_id=$2)))"}
         ${tag === undefined ? "" : "AND note.tags @> $3::jsonb"} ORDER BY note.created_at,note.id`,
-      tag === undefined ? [workspaceId, memberId] : [workspaceId, memberId, JSON.stringify([tag])]);
+      inbox ? [workspaceId] : tag === undefined ? [workspaceId, memberId] : [workspaceId, memberId, JSON.stringify([tag])]);
       return { status: "found" as const, notes: result.rows.map(noteFromRow) };
     });
   }
@@ -211,6 +215,160 @@ export class PostgresKnowledgeAuthoringRepositories {
         WHERE attachment.id=$1 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR EXISTS
         (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2))`, [attachmentId, memberId]);
       return result.rows[0] ? attachmentRecord(result.rows[0]) : undefined; });
+  }
+
+async findNoteForMember(memberId: string, noteId: string): Promise<NoteRecord | undefined> {
+    await this.hooks.prepare(this.kernel);
+    if (await this.hooks.authorizeNote(this.kernel, memberId, noteId) === "none") return undefined;
+    const result = await this.kernel.query<{
+      id: string; workspace_id: string; project_id: string | null; content: string; document: NoteRecord["document"];
+      revision: number; tags: string[]; reminder_at: Date | null; created_by_account_id: string; created_at: Date;
+    }>("SELECT * FROM stash_notes WHERE id=$1", [noteId]);
+    const row = result.rows[0];
+    return row ? {
+      id: row.id, workspaceId: row.workspace_id, content: row.content, document: row.document, revision: row.revision,
+      tags: row.tags, createdByMemberId: row.created_by_account_id, createdAt: row.created_at.toISOString(),
+      ...(row.project_id ? { projectId: row.project_id } : {}),
+      ...(row.reminder_at ? { reminder: { at: row.reminder_at.toISOString() } } : {}),
+    } : undefined;
+  }
+
+async moveNote(memberId: string, noteId: string, expectedRevision: number, path: string, _projection: PortableNoteLocationProjection) {
+    return this.kernel.transaction(async (client) => {
+      await this.hooks.prepare(client);
+      const found = await client.query<any>(`SELECT note.id, note.workspace_id, note.portable_path, note.location_revision,
+        ARRAY(SELECT alias.path FROM stash_note_path_aliases alias WHERE alias.note_id=note.id ORDER BY alias.created_at, alias.path) aliases
+        FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id=note.workspace_id WHERE note.id=$1 AND
+        ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR EXISTS
+          (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2))
+        FOR UPDATE OF note`, [noteId, memberId]);
+      const row = found.rows[0]; if (!row) return { status: "not_found" as const };
+      const current: NoteLocationRecord = { noteId: row.id, workspaceId: row.workspace_id, path: row.portable_path,
+        aliases: row.aliases ?? [], revision: row.location_revision };
+      if (current.revision !== expectedRevision) return { status: "changed" as const, location: current };
+      if (path === current.path) return { status: "unchanged" as const, location: current };
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`note-path:${current.workspaceId}`]);
+      const conflict = await client.query(`SELECT 1 FROM stash_notes WHERE workspace_id=$1 AND id<>$2 AND portable_path=$3
+        UNION ALL SELECT 1 FROM stash_note_path_aliases WHERE workspace_id=$1 AND note_id<>$2 AND path=$3 LIMIT 1`, [current.workspaceId, noteId, path]);
+      if (conflict.rowCount) return { status: "path_conflict" as const };
+      if (path !== current.path) await client.query(`INSERT INTO stash_note_path_aliases(workspace_id,note_id,path) VALUES($1,$2,$3)
+        ON CONFLICT(workspace_id,path) DO NOTHING`, [current.workspaceId, noteId, current.path]);
+      await client.query("DELETE FROM stash_note_path_aliases WHERE workspace_id=$1 AND note_id=$2 AND path=$3", [current.workspaceId, noteId, path]);
+      await client.query("UPDATE stash_notes SET portable_path=$2,location_revision=location_revision+1 WHERE id=$1", [noteId, path]);
+      const location: NoteLocationRecord = { ...current, path,
+        aliases: [...new Set([...current.aliases.filter((alias) => alias !== path), current.path])], revision: current.revision + 1 };
+      const projection: PortableNoteLocationProjection = { schema: "stash.note-location.v1", ...location };
+      await this.hooks.recordProjection(client, "NoteLocation", noteId, projection.schema, projection);
+      await this.hooks.recordDomainActivity(client,memberId,current.workspaceId,"NoteLocation",noteId,"note_moved",current,location);
+      return { status: "moved" as const, location };
+    });
+  }
+
+async createNoteLink(memberId: string, link: NoteLinkRecord, _projection: PortableNoteLinkStateProjection) {
+    return this.kernel.transaction(async (client) => {
+      await this.hooks.prepare(client);
+      const notes = await client.query<any>(`SELECT note.id,note.workspace_id,note.portable_path,
+        ((workspace.owner_type='personal' AND workspace.personal_owner_id=$3) OR EXISTS
+          (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$3)) accessible
+        FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id=note.workspace_id WHERE note.id IN($1,$2)`,
+      [link.sourceNoteId, link.targetNoteId, memberId]);
+      const source = notes.rows.find((row) => row.id === link.sourceNoteId && row.accessible);
+      if (!source) return { status: "source_not_found" as const };
+      const target = notes.rows.find((row) => row.id === link.targetNoteId && row.accessible && row.workspace_id === source.workspace_id);
+      if (!target) return { status: "target_not_found" as const };
+      const saved = { ...link, workspaceId: source.workspace_id };
+      const inserted = await client.query(`INSERT INTO stash_note_links(id,workspace_id,source_note_id,target_note_id,target_path,label,revision)
+        VALUES($1,$2,$3,$4,$5,$6,1) ON CONFLICT(source_note_id,target_note_id) DO NOTHING RETURNING id`,
+      [saved.id, saved.workspaceId, saved.sourceNoteId, saved.targetNoteId, target.portable_path, saved.label]);
+      if (!inserted.rowCount) return { status: "already_linked" as const };
+      const projection: PortableNoteLinkStateProjection = { schema: "stash.note-link.v2", ...saved };
+      await this.hooks.recordProjection(client, "NoteLink", saved.id, projection.schema, projection);
+      await this.hooks.recordDomainActivity(client,memberId,saved.workspaceId,"NoteLink",saved.id,"note_link_created",{},saved);
+      return { status: "created" as const, link: saved };
+    });
+  }
+
+async createImportedNoteLink(memberId: string, link: NoteLinkRecord, _projection: PortableNoteLinkStateProjection) {
+    return this.kernel.transaction(async (client) => {
+      await this.hooks.prepare(client);
+      const source = await client.query<any>(`SELECT note.workspace_id FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id=note.workspace_id
+        WHERE note.id=$1 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR EXISTS
+          (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2))`,
+      [link.sourceNoteId, memberId]);
+      if (!source.rows[0]) return { status: "source_not_found" as const };
+      const candidateIds = link.candidateNoteIds ?? [];
+      const candidates = candidateIds.length ? await client.query<{ id: string }>(
+        "SELECT id FROM stash_notes WHERE workspace_id=$1 AND id=ANY($2::uuid[]) ORDER BY id", [source.rows[0].workspace_id, candidateIds]) : { rows: [] };
+      if (candidates.rows.length !== candidateIds.length) return { status: "candidate_not_found" as const };
+      const saved: NoteLinkRecord = { ...link, workspaceId: source.rows[0].workspace_id };
+      await client.query(`INSERT INTO stash_note_links(id,workspace_id,source_note_id,target_note_id,target_path,candidate_note_ids,label,revision)
+        VALUES($1,$2,$3,NULL,$4,$5::uuid[],$6,1)`,
+      [saved.id, saved.workspaceId, saved.sourceNoteId, saved.targetPath, candidateIds, saved.label]);
+      const projection: PortableNoteLinkStateProjection = { schema: "stash.note-link.v2", ...saved };
+      await this.hooks.recordProjection(client, "NoteLink", saved.id, projection.schema, projection);
+      await this.hooks.recordDomainActivity(client,memberId,saved.workspaceId,"NoteLink",saved.id,"note_link_imported",{},saved);
+      return { status: "created" as const, link: saved };
+    });
+  }
+
+async listNoteLinks(memberId: string, sourceNoteId: string) {
+    return this.kernel.withSession(async (client) => {
+      await this.hooks.prepare(client);
+      const source = await client.query<any>(`SELECT note.workspace_id,note.portable_path,note.location_revision,
+        ARRAY(SELECT alias.path FROM stash_note_path_aliases alias WHERE alias.note_id=note.id ORDER BY alias.created_at,alias.path) aliases
+        FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id=note.workspace_id
+        WHERE note.id=$1 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR EXISTS
+          (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2))`, [sourceNoteId, memberId]);
+      if (!source.rows[0]) return { status: "not_found" as const };
+      const rows = await client.query<any>(`SELECT link.*,target.portable_path,target.location_revision,
+        ARRAY(SELECT alias.path FROM stash_note_path_aliases alias WHERE alias.note_id=target.id ORDER BY alias.created_at,alias.path) aliases
+        FROM stash_note_links link LEFT JOIN stash_notes target ON target.id=link.target_note_id WHERE link.source_note_id=$1 ORDER BY link.id`, [sourceNoteId]);
+      const links: any[] = [];
+      for (const row of rows.rows) {
+        const link: NoteLinkRecord = { id: row.id, workspaceId: row.workspace_id, sourceNoteId: row.source_note_id,
+          ...(row.target_note_id ? { targetNoteId: row.target_note_id } : {}), ...(row.target_path ? { targetPath: row.target_path } : {}),
+          ...(row.candidate_note_ids?.length ? { candidateNoteIds: row.candidate_note_ids } : {}), label: row.label,
+          ...(row.relationship_type ? { relationshipType: row.relationship_type } : {}), revision: row.revision };
+        if (row.target_note_id && row.portable_path) { links.push({ link, state: "resolved", target: { noteId: row.target_note_id,
+          workspaceId: row.workspace_id, path: row.portable_path, aliases: row.aliases ?? [], revision: row.location_revision } }); continue; }
+        const candidates = await client.query<any>(`SELECT DISTINCT note.id,note.workspace_id,note.portable_path,note.location_revision FROM stash_notes note
+          WHERE note.workspace_id=$1 AND note.id=ANY($2::uuid[])
+          AND ((EXISTS(SELECT 1 FROM stash_workspaces workspace WHERE workspace.id=note.workspace_id AND workspace.owner_type='personal' AND workspace.personal_owner_id=$3))
+            OR EXISTS(SELECT 1 FROM stash_workspaces workspace JOIN stash_organization_memberships membership ON membership.organization_id=workspace.organization_owner_id
+              WHERE workspace.id=note.workspace_id AND membership.account_id=$3))`, [row.workspace_id, row.candidate_note_ids ?? [], memberId]);
+        const visible = candidates.rows.map((candidate) => ({ noteId: candidate.id, workspaceId: candidate.workspace_id,
+          path: candidate.portable_path, aliases: [], revision: candidate.location_revision }));
+        links.push(visible.length ? { link, state: "ambiguous", candidates: visible } : { link, state: "broken" });
+      }
+      return { status: "found" as const, source: { noteId: sourceNoteId, workspaceId: source.rows[0].workspace_id,
+        path: source.rows[0].portable_path, aliases: source.rows[0].aliases ?? [], revision: source.rows[0].location_revision }, links };
+    });
+  }
+
+async repairNoteLink(memberId: string, sourceNoteId: string, linkId: string, targetNoteId: string, expectedRevision: number,
+    _projection: PortableNoteLinkStateProjection) {
+    return this.kernel.transaction(async (client) => {
+      await this.hooks.prepare(client);
+      const found = await client.query<any>(`SELECT link.* FROM stash_note_links link JOIN stash_notes source ON source.id=link.source_note_id
+        JOIN stash_workspaces workspace ON workspace.id=source.workspace_id WHERE link.id=$1 AND link.source_note_id=$2 AND
+        ((workspace.owner_type='personal' AND workspace.personal_owner_id=$3) OR EXISTS
+          (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$3))
+        FOR UPDATE OF link`, [linkId, sourceNoteId, memberId]);
+      const row = found.rows[0]; if (!row) return { status: "not_found" as const };
+      const current: NoteLinkRecord = { id: row.id, workspaceId: row.workspace_id, sourceNoteId: row.source_note_id,
+        ...(row.target_note_id ? { targetNoteId: row.target_note_id } : {}), ...(row.target_path ? { targetPath: row.target_path } : {}),
+        ...(row.candidate_note_ids?.length ? { candidateNoteIds: row.candidate_note_ids } : {}), label: row.label, revision: row.revision };
+      if (current.revision !== expectedRevision) return { status: "changed" as const, link: current };
+      const target = await client.query<any>(`SELECT portable_path FROM stash_notes WHERE id=$1 AND workspace_id=$2`, [targetNoteId, current.workspaceId]);
+      if (!target.rowCount) return { status: "target_not_found" as const };
+      const { targetPath: _, candidateNoteIds: __, ...stable } = current;
+      const repaired = { ...stable, targetNoteId, revision: current.revision + 1 };
+      await client.query("UPDATE stash_note_links SET target_note_id=$2,target_path=$3,candidate_note_ids='{}'::uuid[],revision=revision+1 WHERE id=$1", [linkId, targetNoteId, target.rows[0].portable_path]);
+      const projection: PortableNoteLinkStateProjection = { schema: "stash.note-link.v2", ...repaired };
+      await this.hooks.recordProjection(client, "NoteLink", linkId, projection.schema, projection);
+      await this.hooks.recordDomainActivity(client,memberId,current.workspaceId,"NoteLink",linkId,"note_link_repaired",current,repaired);
+      return { status: "repaired" as const, link: repaired };
+    });
   }
 }
 
