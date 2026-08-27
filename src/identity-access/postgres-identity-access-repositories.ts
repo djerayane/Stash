@@ -6,6 +6,8 @@ import type { PostgresKernel, PostgresQueryable } from "../instance-operations/s
 import type { OidcAuthRepository, OidcIdentityKey, OidcIdentityRecord, OidcOrganizationConfiguration } from "../oidc-auth.js";
 import type { BuiltInOrganizationRole, CustomOrganizationRole, OrganizationRoleRepository } from "../organization-roles.js";
 import type { InvitationRecord, InvitationRepository } from "../invitations.js";
+import type { AccountRecoveryRepository, ClaimedEmailRecoveryDelivery, EmailRecoveryDeliveryClaim,
+  EmailRecoveryDeliveryJob, EmailRecoveryRecord, PasskeyRecord, RecoveryCodeRecord } from "../account-recovery.js";
 import type { MemberLocalizationPreferences, MemberLocalizationRepository } from "../member-localization.js";
 import type { PortableIdentity, PortableProjectProjection, PortableWorkspaceProjection, WorkspaceProjectRecord,
   WorkspaceProjectRepository, WorkspaceRecord } from "../workspaces-projects.js";
@@ -15,7 +17,7 @@ interface SessionRow { id: string; account_id: string; token_hash: string; creat
 
 /** PostgreSQL persistence owned by the Identity Access capability. */
 export class PostgresIdentityAccessRepositories implements PasswordAuthRepository, AccountRegistrationRepository,
-  MemberLocalizationRepository, WorkspaceProjectRepository, OidcAuthRepository, InvitationRepository {
+  MemberLocalizationRepository, WorkspaceProjectRepository, OidcAuthRepository, InvitationRepository, AccountRecoveryRepository {
   constructor(
     private readonly kernel: PostgresKernel,
     private readonly secrets: AuthenticationSecretCodec,
@@ -284,6 +286,61 @@ export class PostgresIdentityAccessRepositories implements PasswordAuthRepositor
     "SELECT account_id,role FROM stash_organization_memberships WHERE organization_id=$1 FOR UPDATE",[organizationId])).rows;}
   private invitationTokenMatches(encryptedToken:string,candidate:string){try{const expected=Buffer.from(this.secrets.decrypt(encryptedToken,"invitation-v1"));
     const actual=Buffer.from(candidate);return expected.length===actual.length&&timingSafeEqual(expected,actual);}catch{return false;}}
+
+  async savePasskey(record:PasskeyRecord):Promise<void>{await this.prepareRecovery();await this.kernel.query(
+    "INSERT INTO stash_passkeys(credential_id,account_id,public_key,signature_counter,transports,created_at) VALUES($1,$2,$3,$4,$5,$6)",
+  [record.credentialId,record.accountId,this.secrets.encrypt(record.publicKey),record.counter,record.transports??null,record.createdAt]);}
+  async findPasskey(credentialId:string):Promise<PasskeyRecord|undefined>{await this.prepareRecovery();const row=(await this.kernel.query<{
+    credential_id:string;account_id:string;public_key:string;signature_counter:number;transports:string[]|null;created_at:Date|string}>(
+    "SELECT credential_id,account_id,public_key,signature_counter,transports,created_at FROM stash_passkeys WHERE credential_id=$1",[credentialId])).rows[0];
+    return row?{credentialId:row.credential_id,accountId:row.account_id,publicKey:this.secrets.decrypt(row.public_key),counter:row.signature_counter,
+      ...(row.transports?{transports:row.transports}:{}),createdAt:new Date(row.created_at).toISOString()}:undefined;}
+  async updatePasskeyCounterAndCreateSession(credentialId:string,previousCounter:number,newCounter:number,session:SessionRecord):Promise<boolean>{
+    await this.prepareRecovery();return this.kernel.controlledTransaction(async(client)=>{const result=await client.query(
+      "UPDATE stash_passkeys SET signature_counter=$3 WHERE credential_id=$1 AND signature_counter=$2",[credentialId,previousCounter,newCounter]);
+      if(result.rowCount!==1)return {commit:false,value:false};await this.insertSession(client,session);return {commit:true,value:true};});}
+  async replaceRecoveryCodes(accountId:string,records:RecoveryCodeRecord[]):Promise<void>{await this.prepareRecovery();await this.kernel.transaction(async(client)=>{
+    await client.query("DELETE FROM stash_recovery_codes WHERE account_id=$1",[accountId]);for(const record of records)await client.query(
+      "INSERT INTO stash_recovery_codes(account_id,code_lookup,protected_secret) VALUES($1,$2,$3)",[accountId,this.secrets.blindIndex(record.lookup),record.protectedSecret]);});}
+  async consumeRecoveryCodeAndCreateSession(accountId:string,lookup:string,session?:SessionRecord):Promise<boolean>{await this.prepareRecovery();
+    return this.kernel.controlledTransaction(async(client)=>{const result=await client.query(
+      "DELETE FROM stash_recovery_codes WHERE account_id=$1 AND code_lookup=$2",[accountId,this.secrets.blindIndex(lookup)]);
+      if(result.rowCount!==1||!session)return {commit:false,value:false};await this.insertSession(client,session);return {commit:true,value:true};});}
+  async enqueueEmailRecovery(job:EmailRecoveryDeliveryJob):Promise<void>{await this.prepareRecovery();await this.kernel.query(
+    "INSERT INTO stash_email_recovery_delivery_jobs(id,protected_delivery,created_at) VALUES($1,$2,$3)",[job.id,job.protectedDelivery,job.createdAt]);}
+  async findEmailRecoveryAccount(lookup:string,now:string):Promise<string|undefined>{await this.prepareRecovery();return (await this.kernel.query<{account_id:string}>(
+    "SELECT account_id FROM stash_email_recoveries WHERE token_lookup=$1 AND expires_at>$2",[this.secrets.blindIndex(lookup),now])).rows[0]?.account_id;}
+  async consumeEmailRecoveryAndCreateSession(lookup:string,now:string,session:SessionRecord):Promise<boolean>{await this.prepareRecovery();
+    return this.kernel.controlledTransaction(async(client)=>{const result=await client.query(
+      "DELETE FROM stash_email_recoveries WHERE token_lookup=$1 AND account_id=$2 AND expires_at>$3",[this.secrets.blindIndex(lookup),session.accountId,now]);
+      if(result.rowCount!==1)return {commit:false,value:false};await this.insertSession(client,session);return {commit:true,value:true};});}
+  async claimEmailRecoveryDelivery(owner:string,leaseUntil:string):Promise<ClaimedEmailRecoveryDelivery|undefined>{await this.prepareRecovery();
+    return this.kernel.controlledTransaction(async(client)=>{const row=(await client.query<{id:string;protected_delivery:string;created_at:Date|string;claim_version:number}>(
+      "SELECT id,protected_delivery,created_at,claim_version FROM stash_email_recovery_delivery_jobs WHERE available_at<=NOW() AND (lease_until IS NULL OR lease_until<=NOW()) ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED")).rows[0];
+      if(!row)return {commit:false,value:undefined};const version=Number(row.claim_version)+1;await client.query(
+        "UPDATE stash_email_recovery_delivery_jobs SET claim_owner=$2,claim_version=$3,lease_until=$4 WHERE id=$1",[row.id,owner,version,leaseUntil]);
+      return {commit:true,value:{job:{id:row.id,protectedDelivery:row.protected_delivery,createdAt:new Date(row.created_at).toISOString()},claim:{jobId:row.id,owner,version}}};});}
+  async renewEmailRecoveryDelivery(claim:EmailRecoveryDeliveryClaim,leaseUntil:string):Promise<boolean>{return (await this.kernel.query(
+    "UPDATE stash_email_recovery_delivery_jobs SET lease_until=$4 WHERE id=$1 AND claim_owner=$2 AND claim_version=$3",[claim.jobId,claim.owner,claim.version,leaseUntil])).rowCount===1;}
+  async completeEmailRecoveryDelivery(claim:EmailRecoveryDeliveryClaim,activation?:EmailRecoveryRecord):Promise<boolean>{await this.prepareRecovery();
+    return this.kernel.controlledTransaction(async(client)=>{const deleted=await client.query(
+      "DELETE FROM stash_email_recovery_delivery_jobs WHERE id=$1 AND claim_owner=$2 AND claim_version=$3",[claim.jobId,claim.owner,claim.version]);
+      if(deleted.rowCount!==1)return {commit:false,value:false};if(activation)await client.query(
+        "INSERT INTO stash_email_recoveries(token_lookup,account_id,protected_secret,expires_at) VALUES($1,$2,$3,$4)",
+      [this.secrets.blindIndex(activation.tokenLookup),activation.accountId,activation.protectedSecret,activation.expiresAt]);return {commit:true,value:true};});}
+  async retryEmailRecoveryDelivery(claim:EmailRecoveryDeliveryClaim,reason:string):Promise<boolean>{return (await this.kernel.query(
+    "UPDATE stash_email_recovery_delivery_jobs SET attempts=attempts+1,last_error=$4,available_at=NOW()+INTERVAL '1 minute',claim_owner=NULL,lease_until=NULL WHERE id=$1 AND claim_owner=$2 AND claim_version=$3",
+  [claim.jobId,claim.owner,claim.version,reason.slice(0,500)])).rowCount===1;}
+  async prepareRecovery(client:PostgresQueryable=this.kernel):Promise<void>{await this.dependencies.prepareRegistration(client);await client.query(`
+    CREATE TABLE IF NOT EXISTS stash_passkeys(credential_id TEXT PRIMARY KEY,account_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
+      public_key TEXT NOT NULL,signature_counter BIGINT NOT NULL,transports TEXT[],created_at TIMESTAMPTZ NOT NULL);
+    CREATE TABLE IF NOT EXISTS stash_recovery_codes(account_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,code_lookup TEXT NOT NULL,
+      protected_secret TEXT NOT NULL,PRIMARY KEY(account_id,code_lookup));
+    CREATE TABLE IF NOT EXISTS stash_email_recoveries(token_lookup TEXT PRIMARY KEY,account_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
+      protected_secret TEXT NOT NULL,expires_at TIMESTAMPTZ NOT NULL);
+    CREATE TABLE IF NOT EXISTS stash_email_recovery_delivery_jobs(id UUID PRIMARY KEY,protected_delivery TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL,
+      available_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),attempts INTEGER NOT NULL DEFAULT 0,last_error TEXT,claim_owner UUID,
+      claim_version BIGINT NOT NULL DEFAULT 0,lease_until TIMESTAMPTZ);`);}
 
   async prepareWorkspaceProjects(client:PostgresQueryable):Promise<void>{await this.dependencies.prepareRegistration(client);}
   async prepareLocalization(client:PostgresQueryable):Promise<void>{await this.prepareWorkspaceProjects(client);await client.query(`CREATE TABLE IF NOT EXISTS stash_member_localization_preferences

@@ -77,9 +77,9 @@ describe("embedded Instance store", () => {
       createdAt: "2026-08-24T10:00:00.000Z", createdBy: { localAccountId: ownerId, displayName: "Ada" } }), "created");
     const search = await database.knowledgeAuthoringRepositories().searchWorkspace(ownerId, workspaceId, { q: "release" });
     assert.equal(search.status, "found"); if (search.status === "found") assert.equal(search.results.some((result: WorkspaceSearchResult) => result.id === noteId), true);
-    const jobId = "10000000-0000-4000-8000-000000000006"; await database.enqueueEmailRecovery({ id: jobId, protectedDelivery: "protected", createdAt: "2026-08-24T10:00:00.000Z" });
-    const claimed = await database.claimEmailRecoveryDelivery("10000000-0000-4000-8000-000000000007", "2026-08-24T10:10:00.000Z");
-    assert.equal(claimed?.job.id, jobId); assert.equal(await database.completeEmailRecoveryDelivery(claimed!.claim), true);
+    const jobId = "10000000-0000-4000-8000-000000000006"; await database.identityAccessRepositories().enqueueEmailRecovery({ id: jobId, protectedDelivery: "protected", createdAt: "2026-08-24T10:00:00.000Z" });
+    const claimed = await database.identityAccessRepositories().claimEmailRecoveryDelivery("10000000-0000-4000-8000-000000000007", "2026-08-24T10:10:00.000Z");
+    assert.equal(claimed?.job.id, jobId); assert.equal(await database.identityAccessRepositories().completeEmailRecoveryDelivery(claimed!.claim), true);
     const snapshot = await store.semanticSnapshot();
     assert.equal(snapshot.find((table) => table.name === "stash_notes")?.rows.length, 1);
     assert.equal(snapshot.find((table) => table.name === "stash_workspace_activity")?.rows.length, 1);

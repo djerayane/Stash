@@ -274,11 +274,11 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
       assert.equal(attachment.status, "created");
       await writeFile(join(source.paths.configuration, "runtime.json"), `${JSON.stringify({ publicOrigin: "https://stash.example.test", registration: false })}\n`, { mode: 0o600 });
       const recoveryToken = "migration-recovery-token-with-enough-entropy"; const recoveryCode = "01234567-89abcdef"; const jobId = randomUUID(); const claimOwner = randomUUID();
-      await source.database.replaceRecoveryCodes(ownerId, [{ accountId: ownerId, lookup: recoveryCodeLookup(recoveryCode),
+      await source.database.identityAccessRepositories().replaceRecoveryCodes(ownerId, [{ accountId: ownerId, lookup: recoveryCodeLookup(recoveryCode),
         protectedSecret: createAuthenticationSecretCodec(sourceKey).encrypt(recoveryCode) }]);
-      await source.database.enqueueEmailRecovery({ id: jobId, protectedDelivery: createAuthenticationSecretCodec(sourceKey).encrypt("delivery"), createdAt: "2026-08-24T10:00:00.000Z" });
-      const claim = await source.database.claimEmailRecoveryDelivery(claimOwner, "2026-08-24T10:10:00.000Z");
-      await source.database.completeEmailRecoveryDelivery(claim!.claim, { accountId: ownerId, tokenLookup: deriveEmailRecoveryLookup(recoveryToken),
+      await source.database.identityAccessRepositories().enqueueEmailRecovery({ id: jobId, protectedDelivery: createAuthenticationSecretCodec(sourceKey).encrypt("delivery"), createdAt: "2026-08-24T10:00:00.000Z" });
+      const claim = await source.database.identityAccessRepositories().claimEmailRecoveryDelivery(claimOwner, "2026-08-24T10:10:00.000Z");
+      await source.database.identityAccessRepositories().completeEmailRecoveryDelivery(claim!.claim, { accountId: ownerId, tokenLookup: deriveEmailRecoveryLookup(recoveryToken),
         protectedSecret: createAuthenticationSecretCodec(sourceKey).encrypt(recoveryToken), expiresAt: "2030-08-24T10:00:00.000Z" });
       await mkdir(destinationAttachments, { recursive: true });
       await admin.query(`CREATE SCHEMA ${schema}`); const separator = postgresUrl!.includes("?") ? "&" : "?";
@@ -306,7 +306,7 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
         if (attachment.status === "created") assert.deepEqual((await new AttachmentService(migrated.knowledgeAuthoringRepositories(), new LocalAttachmentStorage(destinationAttachments))
           .get(ownerId, attachment.record.id))?.content, attachmentBytes);
         assert.deepEqual(JSON.parse(await readFile(join(destinationConfiguration, "runtime.json"), "utf8")), { publicOrigin: "https://stash.example.test", registration: false });
-        assert.equal(await migrated.findEmailRecoveryAccount(deriveEmailRecoveryLookup(recoveryToken), "2026-08-24T10:00:00.000Z"), ownerId);
+        assert.equal(await migrated.identityAccessRepositories().findEmailRecoveryAccount(deriveEmailRecoveryLookup(recoveryToken), "2026-08-24T10:00:00.000Z"), ownerId);
         const lookupRows = await admin.query(`SELECT code_lookup FROM ${schema}.stash_recovery_codes WHERE account_id=$1`, [ownerId]);
         assert.equal(lookupRows.rows[0]?.code_lookup, createAuthenticationSecretCodec(destinationKey).blindIndex(recoveryCodeLookup(recoveryCode))); }
       finally { await migrated.close(); }
