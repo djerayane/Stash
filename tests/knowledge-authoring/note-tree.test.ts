@@ -248,14 +248,21 @@ describe("Note Tree", () => {
     assert.match(locations.get(evidenceId)?.position ?? "", /^\d+$/);
   });
 
-  test("branch impact uses the focused inspector seam for future Collection contributions", async () => {
-    const inspected: string[][] = [];
-    const inspectedService = new NoteTreeService(store.database.noteTreeRepository(), { async inspect(_memberId, noteIds) {
-      inspected.push([...noteIds]); return { collectionCount: 3 };
+  test("branch impact passes the action through the focused Collection inspector seam", async () => {
+    const inspected: Array<{ noteIds: string[]; action: "archive" | "trash" | "move" }> = [];
+    const inspectedService = new NoteTreeService(store.database.noteTreeRepository(), { async inspect(_memberId: string,
+      noteIds: readonly string[], action: "archive" | "trash" | "move") {
+      inspected.push({ noteIds: [...noteIds], action });
+      return { collectionCount: 3, collectionRelocationRequired: action === "trash" };
     } });
-    const preview = await inspectedService.preview(ownerId, roadmapId, { action: "archive" });
-    assert.equal(preview.status, "found"); if (preview.status !== "found") return;
-    assert.equal(preview.impact.collectionCount, 3);
-    assert.deepEqual(inspected, [[roadmapId, evidenceId, questionsId]]);
+    for (const action of ["archive", "move", "trash"] as const) {
+      const preview = await inspectedService.preview(ownerId, roadmapId, { action });
+      assert.equal(preview.status, "found"); if (preview.status !== "found") return;
+      assert.equal(preview.impact.collectionCount, 3);
+      assert.equal(preview.impact.collectionRelocationRequired, action === "trash");
+    }
+    assert.deepEqual(inspected, (["archive", "move", "trash"] as const).map((action) => ({
+      noteIds: [roadmapId, evidenceId, questionsId], action,
+    })));
   });
 });

@@ -41,7 +41,7 @@ export interface RemovedNoteBranch {
 }
 
 export interface NoteTreeImpactInspector {
-  inspect(memberId: string, noteIds: readonly string[]): Promise<{
+  inspect(memberId: string, noteIds: readonly string[], action: "archive" | "trash" | "move"): Promise<{
     collectionCount: number;
     collectionRelocationRequired?: boolean;
   }>;
@@ -203,7 +203,7 @@ export class NoteTreeService {
     const result = await this.repository.previewNoteBranch(memberId, noteId, action, target);
     if (result.status !== "found") return result;
     const { affectedNoteIds, ...impact } = result.impact;
-    const inspected = await this.impactInspector.inspect(memberId, affectedNoteIds);
+    const inspected = await this.impactInspector.inspect(memberId, affectedNoteIds, action);
     return { status: "found" as const, impact: { ...impact, collectionCount: inspected.collectionCount,
       collectionRelocationRequired: inspected.collectionRelocationRequired === true } };
   }

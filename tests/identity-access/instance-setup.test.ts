@@ -268,14 +268,30 @@ describe("fresh Instance setup", () => {
       source: { kind: "tasks", workspaceId: result.workspaceId, project: "none" },
       definition: { query: { scope: "projectless", titleContains: "" }, layout: "list" },
     });
-    const childPreview = await fetch(`${instance.url}/api/notes/${linkedNode.id}/branch-preview`, {
+    const childTrashPreview = await fetch(`${instance.url}/api/notes/${linkedNode.id}/branch-preview`, {
       method: "POST", headers: { ...authorization, "content-type": "application/json" }, body: JSON.stringify({ action: "trash" }),
     });
-    assert.equal(childPreview.status, 200);
-    assert.equal((await childPreview.json() as any).impact.collectionRelocationRequired, true);
-    const rejectedChildArchive = await fetch(`${instance.url}/api/notes/${linkedNode.id}/archive`, { method: "POST", headers: authorization });
-    assert.equal(rejectedChildArchive.status, 409);
-    assert.equal((await rejectedChildArchive.json() as any).error, "collection_owner_requires_relocation");
+    assert.equal(childTrashPreview.status, 200);
+    assert.equal((await childTrashPreview.json() as any).impact.collectionRelocationRequired, true);
+    for (const action of ["archive", "move"] as const) {
+      const previewResponse: Response = await fetch(`${instance.url}/api/notes/${linkedNode.id}/branch-preview`, {
+        method: "POST", headers: { ...authorization, "content-type": "application/json" }, body: JSON.stringify({ action }),
+      });
+      assert.equal(previewResponse.status, 200);
+      assert.equal((await previewResponse.json() as any).impact.collectionRelocationRequired, false);
+    }
+    const archivedChild = await fetch(`${instance.url}/api/notes/${linkedNode.id}/archive`, { method: "POST", headers: authorization });
+    assert.equal(archivedChild.status, 200);
+    assert.equal((await fetch(`${instance.url}/api/notes/${result.starterNoteId}/starter-tutorial`, { headers: authorization })).status, 404);
+    assert.equal(((await (await fetch(`${instance.url}/api/workspaces/${result.workspaceId}/tasks?scope=projectless`,
+      { headers: authorization })).json()) as { tasks: unknown[] }).tasks.length, 2);
+    assert.equal((await fetch(`${instance.url}/api/notes/${linkedNode.id}/restore`, { method: "POST", headers: authorization })).status, 200);
+    const restoredAfterChildArchive = await fetch(`${instance.url}/api/notes/${result.starterNoteId}/starter-tutorial`, { headers: authorization });
+    assert.equal(restoredAfterChildArchive.status, 200);
+    const restoredAfterChildArchiveBody = (await restoredAfterChildArchive.json()) as any;
+    assert.equal(restoredAfterChildArchiveBody.tutorial.collection.id, tutorialBody.tutorial.collection.id);
+    assert.equal(restoredAfterChildArchiveBody.tutorial.collection.title, "Ideas to explore");
+    assert.equal(restoredAfterChildArchiveBody.tutorial.viewBlock.id, tutorialBody.tutorial.viewBlock.id);
     const rejectedChildTrash = await fetch(`${instance.url}/api/notes/${linkedNode.id}/trash`, { method: "POST", headers: authorization });
     assert.equal(rejectedChildTrash.status, 409);
     assert.deepEqual(await rejectedChildTrash.json(), { error: "collection_owner_requires_relocation",

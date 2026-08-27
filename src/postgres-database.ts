@@ -259,7 +259,7 @@ export class PostgresDatabase implements
     this.#kernel = new PostgresKernel(connectionString, options);
     this.#authenticationSecrets = authenticationSecrets;
     this.#noteTreeRepository = new PostgresNoteTreeRepository(this.#kernel, (client) => this.#ensureNoteSchema(client), {
-      beforeRemove: (client, noteIds) => this.#tutorialContributionRepository.beforeRemove(client, noteIds),
+      beforeStateChange: (client, noteIds, state) => this.#tutorialContributionRepository.beforeStateChange(client, noteIds, state),
     });
     this.#tutorialContributionRepository = new PostgresTutorialContributionRepository(this.#kernel,
       (client) => this.#noteTreeRepository.prepare(client));

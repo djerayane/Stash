@@ -128,7 +128,7 @@ export class PostgresTutorialContributionRepository implements TutorialContribut
     return "removed" as const;
   }); }
 
-  async inspect(memberId: string, noteIds: readonly string[]): Promise<{
+  async inspect(memberId: string, noteIds: readonly string[], action: "archive" | "trash" | "move"): Promise<{
     collectionCount: number;
     collectionRelocationRequired?: boolean;
   }> {
@@ -139,12 +139,14 @@ export class PostgresTutorialContributionRepository implements TutorialContribut
       FROM stash_collections collection JOIN stash_workspaces workspace ON workspace.id=collection.workspace_id
       LEFT JOIN stash_starter_tutorials tutorial ON tutorial.collection_id=collection.id
       WHERE collection.owner_note_id=ANY($1::uuid[]) AND (${member})`, [noteIds, memberId]); return {
-        collectionCount: result.rows[0]?.count ?? 0, collectionRelocationRequired: result.rows[0]?.relocation_required === true,
+        collectionCount: result.rows[0]?.count ?? 0,
+        collectionRelocationRequired: action === "trash" && result.rows[0]?.relocation_required === true,
       }; });
   }
 
-  async beforeRemove(client: PostgresQueryable, noteIds: readonly string[]): Promise<"allowed" | "collection_owner_requires_relocation"> {
-    if (!noteIds.length) return "allowed";
+  async beforeStateChange(client: PostgresQueryable, noteIds: readonly string[], state: "archived" | "trashed"):
+    Promise<"allowed" | "collection_owner_requires_relocation"> {
+    if (state === "archived" || !noteIds.length) return "allowed";
     const relations = await client.query<{ collections: string | null; tutorials: string | null }>(`SELECT
       to_regclass('stash_collections')::text collections, to_regclass('stash_starter_tutorials')::text tutorials`);
     if (!relations.rows[0]?.collections) return "allowed";
@@ -165,7 +167,9 @@ export class PostgresTutorialContributionRepository implements TutorialContribut
       UNION ALL SELECT child.id,child.title,child.content,child.parent_id,child.tree_position,branch.ordering||child.tree_position FROM stash_notes child JOIN branch ON child.parent_id=branch.id
       WHERE child.archived_at IS NULL AND child.trashed_at IS NULL)
       SELECT id,title,content,parent_id FROM branch ORDER BY ordering,id`, [metadata.root_note_id]);
-    const ids = notes.rows.map(({id}:any)=>id); const links = await client.query<any>(`SELECT id,source_note_id,target_note_id,label FROM stash_note_links
+    const ids = notes.rows.map(({id}:any)=>id);
+    if (!ids.includes(collection.ownerNoteId) || !ids.includes(viewBlock.ownerNoteId)) return undefined;
+    const links = await client.query<any>(`SELECT id,source_note_id,target_note_id,label FROM stash_note_links
       WHERE source_note_id=ANY($1::uuid[]) AND target_note_id=ANY($1::uuid[]) ORDER BY id`, [ids]);
     return { workspaceId: metadata.workspace_id, rootNoteId: metadata.root_note_id,
       notes: notes.rows.map(({id,title,content,parent_id}:any)=>({id,title,content,...(parent_id?{parentId:parent_id}:{})})),
