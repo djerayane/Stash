@@ -51,6 +51,7 @@ import { PostgresNoteTreeRepository } from "./knowledge-authoring/postgres-note-
 import type { FirstPersonalInstanceSetup, InstanceSetupRepository } from "./identity-access/instance-setup.js";
 import { PostgresInstanceSetupRepository } from "./identity-access/postgres-instance-setup-repository.js";
 import { PostgresOrganizationRoleRepository } from "./identity-access/postgres-organization-role-repository.js";
+import { PostgresIdentityAccessRepositories } from "./identity-access/postgres-identity-access-repositories.js";
 import type { CollectionRepository, TutorialContributionRepository } from "./knowledge-authoring/collections.js";
 import { PostgresTutorialContributionRepository } from "./knowledge-authoring/postgres-tutorial-contribution-repository.js";
 import { PostgresCollectionRepository } from "./knowledge-authoring/postgres-collection-repository.js";
@@ -263,7 +264,7 @@ export class PostgresDatabase implements DatabaseProbe {
   readonly #visualizationBlockRepository: PostgresVisualizationBlockRepository;
   readonly #portableProjectionContributors: readonly PostgresPortableProjectionContributor[];
   readonly #authenticationSecrets: AuthenticationSecretCodec;
-  readonly #identityAccessAdapter = this as IdentityAccessPostgresRepositories;
+  readonly #identityAccessAdapter: PostgresIdentityAccessRepositories;
   readonly #knowledgeAuthoringAdapter: PostgresKnowledgeAuthoringRepositories;
   readonly #workPlanningAdapter: PostgresWorkPlanningRepositories;
   readonly #developmentIntegrationAdapter: PostgresDevelopmentIntegrationRepositories;
@@ -281,6 +282,17 @@ export class PostgresDatabase implements DatabaseProbe {
       await this.#ensureAuthSchema(client);
       await this.#noteTreeRepository.prepare(client);
     }, this.#tutorialContributionRepository);
+    this.#identityAccessAdapter = new PostgresIdentityAccessRepositories(this.#kernel, authenticationSecrets, {
+      prepareRegistration: async (client) => {
+        await this.#ensureWorkspaceProjectSchema(client);
+        await this.#ensureAuthSchema(client);
+      },
+      recordWorkspaceProjection: (client, record) => this.#recordPortableProjection(client, "Workspace", record.workspace.id, "stash.workspace.v1", {
+        schema: "stash.workspace.v1", id: record.workspace.id, name: record.workspace.name,
+        owner: { type: "personal", identity: { localAccountId: record.account.id, displayName: record.account.name } },
+        createdBy: { localAccountId: record.account.id, displayName: record.account.name },
+      }),
+    });
     this.#projectlessTaskRepository = new PostgresProjectlessTaskRepository(this.#kernel,
       (client) => this.#instanceSetupRepository.prepare(client));
     this.#canonicalTaskRepository = new PostgresCanonicalTaskRepository(this.#kernel,
@@ -371,7 +383,38 @@ export class PostgresDatabase implements DatabaseProbe {
   }
 
   identityAccessRepositories(): IdentityAccessPostgresRepositories {
-    return this.#identityAccessAdapter;
+    return Object.assign(this.#identityAccessAdapter, {
+      findMemberLocalizationPreferences: this.findMemberLocalizationPreferences.bind(this),
+      saveMemberLocalizationPreferences: this.saveMemberLocalizationPreferences.bind(this),
+      createWorkspace: this.createWorkspace.bind(this), listAccessibleWorkspaces: this.listAccessibleWorkspaces.bind(this),
+      canCreateProject: this.canCreateProject.bind(this), createProject: this.createProject.bind(this),
+      findPortableMemberIdentity: this.findPortableMemberIdentity.bind(this),
+      findOidcIdentity: this.findOidcIdentity.bind(this), findOidcConfiguration: this.findOidcConfiguration.bind(this),
+      organizationRole: this.organizationRole.bind(this), saveOidcConfiguration: this.saveOidcConfiguration.bind(this),
+      linkOidcIdentity: this.linkOidcIdentity.bind(this),
+      assignBuiltInRole: this.assignBuiltInRole.bind(this), removeOrganizationMember: this.removeOrganizationMember.bind(this),
+      listCustomRoles: this.listCustomRoles.bind(this), createCustomRole: this.createCustomRole.bind(this),
+      updateCustomRole: this.updateCustomRole.bind(this), assignCustomRole: this.assignCustomRole.bind(this),
+      revokeCustomRole: this.revokeCustomRole.bind(this),
+      createInvitation: this.createInvitation.bind(this), acceptInvitation: this.acceptInvitation.bind(this),
+      readProject: this.readProject.bind(this), canWriteProject: this.canWriteProject.bind(this),
+      savePasskey: this.savePasskey.bind(this), findPasskey: this.findPasskey.bind(this),
+      updatePasskeyCounterAndCreateSession: this.updatePasskeyCounterAndCreateSession.bind(this),
+      replaceRecoveryCodes: this.replaceRecoveryCodes.bind(this),
+      consumeRecoveryCodeAndCreateSession: this.consumeRecoveryCodeAndCreateSession.bind(this),
+      enqueueEmailRecovery: this.enqueueEmailRecovery.bind(this), claimEmailRecoveryDelivery: this.claimEmailRecoveryDelivery.bind(this),
+      renewEmailRecoveryDelivery: this.renewEmailRecoveryDelivery.bind(this), completeEmailRecoveryDelivery: this.completeEmailRecoveryDelivery.bind(this),
+      retryEmailRecoveryDelivery: this.retryEmailRecoveryDelivery.bind(this), findEmailRecoveryAccount: this.findEmailRecoveryAccount.bind(this),
+      consumeEmailRecoveryAndCreateSession: this.consumeEmailRecoveryAndCreateSession.bind(this),
+      createAgentGrant: this.createAgentGrant.bind(this), listAgentGrants: this.listAgentGrants.bind(this),
+      revokeAgentGrant: this.revokeAgentGrant.bind(this), findActiveAgentGrant: this.findActiveAgentGrant.bind(this),
+      agentGrantOptions: this.agentGrantOptions.bind(this), createAgentProposal: this.createAgentProposal.bind(this),
+      listAgentProposals: this.listAgentProposals.bind(this), findAgentProposal: this.findAgentProposal.bind(this),
+      claimAgentProposal: this.claimAgentProposal.bind(this), finishAgentProposal: this.finishAgentProposal.bind(this),
+      releaseAgentProposal: this.releaseAgentProposal.bind(this), agentGrantTargetAllowed: this.agentGrantTargetAllowed.bind(this),
+      listPendingImportedIdentities: this.listPendingImportedIdentities.bind(this),
+      mapImportedIdentityAsMember: this.mapImportedIdentityAsMember.bind(this),
+    });
   }
 
   knowledgeAuthoringRepositories(): KnowledgeAuthoringPostgresRepositories {
@@ -511,33 +554,6 @@ export class PostgresDatabase implements DatabaseProbe {
 
   async createFirstPersonalInstance(setup: FirstPersonalInstanceSetup): Promise<boolean> {
     return this.#instanceSetupRepository.createFirstPersonalInstance(setup);
-  }
-
-  async createAccountWithPersonalWorkspaceAndSession(record: RegistrationRecord): Promise<boolean> {
-    return this.#withTransaction(async (client) => {
-      await this.#ensureWorkspaceProjectSchema(client);
-      await this.#ensureAuthSchema(client);
-      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`registration:${record.account.email}`]);
-      if ((await client.query("SELECT 1 FROM stash_accounts WHERE email=$1", [record.account.email])).rowCount) return false;
-      await client.query("INSERT INTO stash_accounts(id,name,email,password_hash) VALUES($1,$2,$3,$4)", [
-        record.account.id, record.account.name, record.account.email,
-        this.#authenticationSecrets.encrypt(record.account.passwordHash),
-      ]);
-      const createdAt = record.session.createdAt;
-      await client.query(
-        `INSERT INTO stash_workspaces
-          (id,name,owner_type,personal_owner_id,organization_owner_id,created_by_account_id,created_at)
-         VALUES($1,$2,'personal',$3,NULL,$3,$4)`,
-        [record.workspace.id, record.workspace.name, record.account.id, createdAt],
-      );
-      await this.#recordPortableProjection(client, "Workspace", record.workspace.id, "stash.workspace.v1", {
-        schema: "stash.workspace.v1", id: record.workspace.id, name: record.workspace.name,
-        owner: { type: "personal", identity: { localAccountId: record.account.id, displayName: record.account.name } },
-        createdBy: { localAccountId: record.account.id, displayName: record.account.name },
-      });
-      await this.#insertSession(client, record.session);
-      return true;
-    });
   }
 
   async findPortableMemberIdentity(memberId: string): Promise<PortableIdentity | undefined> {
@@ -2510,38 +2526,6 @@ export class PostgresDatabase implements DatabaseProbe {
     });
   }
 
-  async findAccountByEmail(email: string): Promise<AccountAuthenticationRecord | undefined> {
-    await this.#ensureAuthSchema();
-    const result = await this.#kernel.query<AccountRow>(
-      "SELECT id, name, email, password_hash FROM stash_accounts WHERE email = $1", [email],
-    );
-    return result.rows[0] ? this.#accountRecord(result.rows[0]) : undefined;
-  }
-
-  async findAccountById(id: string): Promise<AccountAuthenticationRecord | undefined> {
-    await this.#ensureAuthSchema();
-    const result = await this.#kernel.query<AccountRow>(
-      "SELECT id, name, email, password_hash FROM stash_accounts WHERE id = $1", [id],
-    );
-    return result.rows[0] ? this.#accountRecord(result.rows[0]) : undefined;
-  }
-
-  async createSession(session: SessionRecord): Promise<void> {
-    await this.#ensureAuthSchema();
-    await this.#kernel.query(
-      "INSERT INTO stash_sessions (id, account_id, token_lookup, token_hash, created_at, last_seen_at, user_agent) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-      [
-        session.id,
-        session.accountId,
-        this.#authenticationSecrets.blindIndex(session.tokenHash),
-        this.#authenticationSecrets.encrypt(session.tokenHash),
-        session.createdAt,
-        session.lastSeenAt,
-        session.userAgent ?? null,
-      ],
-    );
-  }
-
   async findOidcIdentity(key: OidcIdentityKey): Promise<OidcIdentityRecord | undefined> {
     await this.#ensureOidcSchema();
     const result = await this.#kernel.query<OidcIdentityRow>(`
@@ -3081,39 +3065,6 @@ export class PostgresDatabase implements DatabaseProbe {
       SET subject_lookup = EXCLUDED.subject_lookup, subject_secret = EXCLUDED.subject_secret
     `, [key.organizationId, accountId, key.issuer, this.#oidcIdentityLookup(key), this.#authenticationSecrets.encrypt(key.subject)]);
     return result.rowCount === 1;
-  }
-
-  async findSessionByTokenHash(hash: string): Promise<SessionRecord | undefined> {
-    await this.#ensureAuthSchema();
-    const result = await this.#kernel.query<SessionRow>(
-      "SELECT * FROM stash_sessions WHERE token_lookup = $1", [this.#authenticationSecrets.blindIndex(hash)],
-    );
-    return result.rows[0] ? this.#sessionRecord(result.rows[0]) : undefined;
-  }
-
-  async listSessions(accountId: string): Promise<SessionRecord[]> {
-    await this.#ensureAuthSchema();
-    const result = await this.#kernel.query<SessionRow>(
-      "SELECT * FROM stash_sessions WHERE account_id = $1 ORDER BY created_at", [accountId],
-    );
-    return result.rows.map((row) => this.#sessionRecord(row));
-  }
-
-  async deleteSession(accountId: string, sessionId: string): Promise<boolean> {
-    const result = await this.#kernel.query("DELETE FROM stash_sessions WHERE account_id = $1 AND id = $2", [accountId, sessionId]);
-    return result.rowCount === 1;
-  }
-
-  async changePasswordAndDeleteOtherSessions(
-    accountId: string, currentSessionId: string, passwordHash: string,
-  ): Promise<void> {
-    await this.#kernel.transaction(async (client) => {
-      await client.query(
-        "UPDATE stash_accounts SET password_hash = $2 WHERE id = $1",
-        [accountId, this.#authenticationSecrets.encrypt(passwordHash)],
-      );
-      await client.query("DELETE FROM stash_sessions WHERE account_id = $1 AND id <> $2", [accountId, currentSessionId]);
-    });
   }
 
   async savePasskey(record: PasskeyRecord): Promise<void> {

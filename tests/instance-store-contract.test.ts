@@ -52,7 +52,7 @@ function contract(adapter: ContractAdapter): void {
         await database.prepareInstanceStore();
         assert.equal(await database.createFirstOrganizationOwner({ organizationId, organizationName: "Parity", ownerId,
           ownerName: "Owner", ownerEmail: `${ownerId}@example.test`, passwordHash: "owner-hash", role: "Owner" }), true);
-        assert.equal(await database.createAccountWithPersonalWorkspaceAndSession({
+        assert.equal(await database.identityAccessRepositories().createAccountWithPersonalWorkspaceAndSession({
           account: { id: outsiderId, name: "Outsider", email: `${outsiderId}@example.test`, passwordHash: "outsider-hash" },
           workspace: { id: randomUUID(), name: "Outsider Workspace" },
           session: { id: randomUUID(), accountId: outsiderId, tokenHash: "token-hash", createdAt, lastSeenAt: createdAt },
@@ -144,7 +144,7 @@ function contract(adapter: ContractAdapter): void {
         assert.deepEqual(await harness.backup.restore(backupPath, harness.restoreTarget, { dryRun: true }), { status: "verified" });
         assert.deepEqual(await harness.backup.restore(backupPath, harness.restoreTarget, { dryRun: false }), { status: "restored" });
         const restored = await harness.reopen();
-        assert.equal((await restored.findAccountByEmail(`${ownerId}@example.test`))?.passwordHash, "backup-auth-hash");
+        assert.equal((await restored.identityAccessRepositories().findAccountByEmail(`${ownerId}@example.test`))?.passwordHash, "backup-auth-hash");
         assert.equal((await restored.listAccessibleWorkspaces(ownerId)).some((workspace: { id: string }) => workspace.id === workspaceId), true);
         assert.equal((await restored.listNoteHistory(ownerId, noteId)).status, "found");
         assert.equal((await restored.loadNoteCollaboration(ownerId, noteId))?.sequence, 1);
