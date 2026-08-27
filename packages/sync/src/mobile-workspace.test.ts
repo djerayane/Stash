@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { MobileCapturePairing, MobileSyncMutation, MobileWorkspaceSnapshot } from "@stash/domain-types";
+import type { MobileCapture, MobileCapturePairing, MobileSyncMutation, MobileWorkspaceSnapshot } from "@stash/domain-types";
 import { MobileCaptureClient, type EncryptedMobileCaptureStore } from "./index.js";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
@@ -7,10 +7,12 @@ const memberId = "22222222-2222-4222-8222-222222222222";
 const noteId = "33333333-3333-4333-8333-333333333333";
 const taskId = "44444444-4444-4444-8444-444444444444";
 
-function store(state: { snapshot?: MobileWorkspaceSnapshot; mutations: MobileSyncMutation[] }): EncryptedMobileCaptureStore {
+function store(state: { snapshot?: MobileWorkspaceSnapshot; mutations: MobileSyncMutation[]; captures?: MobileCapture[] }): EncryptedMobileCaptureStore {
   const pairing: MobileCapturePairing = { instanceUrl: "https://stash.example", memberToken: "secret", workspaceId, memberId };
   return {
-    async loadPairing() { return pairing; }, async savePairing() {}, async listCaptures() { return []; }, async saveCapture() {}, async removeCapture() {},
+    async loadPairing() { return pairing; }, async savePairing() {}, async listCaptures() { return structuredClone(state.captures ?? []); },
+    async saveCapture(value) { state.captures = [...(state.captures ?? []).filter(({ id }) => id !== value.id), structuredClone(value)]; },
+    async removeCapture(id) { state.captures = (state.captures ?? []).filter((capture) => capture.id !== id); },
     async listMutations() { return structuredClone(state.mutations); }, async saveMutation(value) { state.mutations = [...state.mutations.filter(({ id }) => id !== value.id), structuredClone(value)]; },
     async removeMutation(value) { state.mutations = state.mutations.filter(({ id }) => id !== value.id); }, async loadOptions() { return { projects: [], tags: [], reminders: [] }; }, async saveOptions() {},
     async stageIncomingShares(_fingerprint, deliveries) { return deliveries; }, async acknowledgeNativeShares() {}, async listIncomingShares() { return []; }, async removeIncomingShare() {}, async saveIncomingShare() {},
@@ -78,10 +80,36 @@ describe("mobile workspace synchronization", () => {
 
   it("keeps a changed canonical Task contribution visible and pending", async () => {
     const state: { snapshot?: MobileWorkspaceSnapshot; mutations: MobileSyncMutation[] } = { mutations: [] };
-    const client = new MobileCaptureClient(store(state), async () => Response.json({ error: "canonical_task_changed",
+    const client = new MobileCaptureClient(store(state), async () => Response.json({ error: "revision_conflict",
       message: "The Task changed." }, { status: 409 }));
     await client.queueCanonicalTaskEdit(taskId, 2, { title: "Reviewed" }, "55555555-5555-4555-8555-555555555555");
-    await expect(client.sync()).resolves.toEqual({ status: "attention_required", count: 0, error: "canonical_task_changed" });
+    await expect(client.sync()).resolves.toEqual({ status: "attention_required", count: 0, error: "revision_conflict" });
     await expect(client.pendingMutations()).resolves.toMatchObject([{ kind: "canonical_task_edit", lastError: "The Task changed." }]);
+  });
+
+  it("demonstrates offline capture, local canonical update, synchronization, and stable identity reconciliation", async () => {
+    const statusId = "66666666-6666-4666-8666-666666666666";
+    const snapshot: MobileWorkspaceSnapshot = { schema: "stash.mobile-workspace.v1", workspaceId,
+      refreshedAt: "2026-08-27T10:00:00.000Z", noteTree: [], notes: [], collections: [], viewBlocks: [], search: [],
+      workflow: { schema: "stash.workspace-workflow.v1", workspaceId, statuses: [{ id: statusId, name: "Done", category: "completed", position: 1 }] },
+      tasks: [{ schema: "stash.task.v1", id: taskId, workspaceId, title: "Ship mobile", description: "", revision: 3,
+        status: { id: memberId, name: "Todo", category: "unstarted", position: 1 }, assigneeIds: [],
+        projectKeys: [{ projectId: noteId, key: "MOB-7" }], sourceNoteIds: [] }] };
+    const state: { snapshot?: MobileWorkspaceSnapshot; mutations: MobileSyncMutation[]; captures?: MobileCapture[] } = { snapshot, mutations: [] };
+    const requests: Array<{ path: string; body?: any }> = [];
+    const client = new MobileCaptureClient(store(state), async (input, init) => {
+      const path = new URL(String(input)).pathname; requests.push({ path, ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}) });
+      return path.endsWith("/captures") ? Response.json({ status: "created", noteId }, { status: 201 })
+        : Response.json({ status: "updated", task: { ...snapshot.tasks[0], status: snapshot.workflow.statuses[0], revision: 4 } });
+    });
+    await client.captureText("Follow up from the train");
+    await client.queueCanonicalTaskEdit(taskId, 3, { statusId }, "55555555-5555-4555-8555-555555555555");
+    await expect(client.cachedWorkspace()).resolves.toMatchObject({ tasks: [{ id: taskId, status: { id: statusId }, projectKeys: [{ key: "MOB-7" }] }] });
+    await expect(client.sync()).resolves.toEqual({ status: "synced", count: 2 });
+    expect(requests).toEqual([
+      expect.objectContaining({ path: `/api/mobile/v1/workspaces/${workspaceId}/captures` }),
+      { path: `/api/canonical-tasks/${taskId}`, body: { operationId: "55555555-5555-4555-8555-555555555555", baseRevision: 3, changes: { statusId } } },
+    ]);
+    expect(state.captures).toEqual([]); expect(state.mutations).toEqual([]);
   });
 });
