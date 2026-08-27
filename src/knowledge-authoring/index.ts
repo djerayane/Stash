@@ -5,6 +5,9 @@ import type { MemberAccessResolver } from "../workspaces-projects.js";
 import type { NoteTreeService } from "./note-tree.js";
 import { noteTreeRoutes } from "./note-tree-routes.js";
 
+export type { Collection, CollectionProperty, CollectionRecord, TutorialContribution, ViewBlock } from "./collections.js";
+export { PostgresTutorialContributionRepository } from "./postgres-tutorial-contribution-repository.js";
+
 export function knowledgeAuthoringCapability(options: {
   notes: NoteService;
   noteTree?: NoteTreeService;

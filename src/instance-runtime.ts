@@ -135,7 +135,7 @@ export async function composeInstanceRuntime(environment: NodeJS.ProcessEnv): Pr
   const notes = new NoteService(database);
   const tasks = new TaskService(database, database);
   const workspaceProjects = new WorkspaceProjectService(database);
-  const starterTutorials = new StarterTutorialService(database.instanceSetupRepository());
+  const starterTutorials = new StarterTutorialService(database.tutorialContributionRepository());
   const projectlessTasks = new ProjectlessTaskService(database.projectlessTaskRepository());
   const repositoryConnections = githubApp ? new RepositoryConnectionService(database, githubApp) : undefined;
   const githubArtifacts = githubApp ? new GitHubArtifactService(database, githubApp) : undefined;
@@ -144,7 +144,7 @@ export async function composeInstanceRuntime(environment: NodeJS.ProcessEnv): Pr
     identityAccessCapability({ passwordAuth, instanceAdminToken, instanceSetup, starterTutorials, memberAccess: passwordAuth,
       ...(accountRegistration ? { accountRegistration } : {}), reportAuthenticationFailure }),
     knowledgeAuthoringCapability({ notes, noteTree: new NoteTreeService(database.noteTreeRepository(),
-      database.instanceSetupRepository()), memberAccess: passwordAuth }),
+      database.tutorialContributionRepository()), memberAccess: passwordAuth }),
     workPlanningCapability({ tasks, workspaceProjects, projectlessTasks, memberAccess: passwordAuth }),
     developmentIntegrationCapability({ memberAccess: passwordAuth,
       ...(repositoryConnections ? { repositoryConnections } : {}), ...(githubArtifacts ? { githubArtifacts } : {}),

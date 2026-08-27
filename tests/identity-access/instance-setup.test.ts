@@ -21,6 +21,8 @@ import { NoteTreeService } from "../../src/knowledge-authoring/note-tree.js";
 import { NoteService } from "../../src/notes.js";
 import { PasswordAuthService } from "../../src/password-auth.js";
 import { StarterTutorialService } from "../../src/identity-access/starter-tutorial.js";
+import { PortableWorkspaceExportService } from "../../src/portable-workspace-export.js";
+import { PortableWorkspaceImportService } from "../../src/portable-workspace-import.js";
 import { ProjectlessTaskService } from "../../src/work-planning/projectless-tasks.js";
 import { workPlanningCapability } from "../../src/work-planning/index.js";
 import { TaskService } from "../../src/tasks.js";
@@ -133,9 +135,9 @@ describe("fresh Instance setup", () => {
     assert.equal(repository.setup?.starter.notes.filter(({ parentId }) => parentId === body.starterNoteId).length, 2);
     assert.equal(repository.setup?.starter.links.length, 1);
     assert.equal(repository.setup?.starter.tasks.length, 2);
-    assert.equal(repository.setup?.starter.contribution.schema, "stash.starter-tutorial.v1");
-    assert.equal(repository.setup?.starter.contribution.collection.ownerNoteId, repository.setup?.starter.notes[1]?.id);
-    assert.deepEqual(repository.setup?.starter.contribution.taskView.source,
+    assert.equal(repository.setup?.starter.knowledge.collection.schema, "stash.collection.v1");
+    assert.equal(repository.setup?.starter.knowledge.collection.ownerNoteId, repository.setup?.starter.notes[1]?.id);
+    assert.deepEqual(repository.setup?.starter.knowledge.viewBlock.source,
       { kind: "tasks", workspaceId: body.workspaceId, project: "none" });
   });
 
@@ -203,9 +205,9 @@ describe("fresh Instance setup", () => {
       passwordAuth,
       capabilities: createCapabilityRegistry([
         identityAccessCapability({ passwordAuth, instanceSetup: setup,
-          starterTutorials: new StarterTutorialService(setupRepository), memberAccess: passwordAuth }),
+          starterTutorials: new StarterTutorialService(store.database.tutorialContributionRepository()), memberAccess: passwordAuth }),
         knowledgeAuthoringCapability({ notes: new NoteService(store.database),
-          noteTree: new NoteTreeService(store.database.noteTreeRepository(), setupRepository),
+          noteTree: new NoteTreeService(store.database.noteTreeRepository(), store.database.tutorialContributionRepository()),
           memberAccess: passwordAuth }),
         workPlanningCapability({ tasks: new TaskService(store.database, store.database), memberAccess: passwordAuth,
           projectlessTasks: new ProjectlessTaskService(store.database.projectlessTaskRepository()) }),
@@ -237,10 +239,9 @@ describe("fresh Instance setup", () => {
     assert.equal(context.status, 200);
     const contextBody = await context.json() as { outgoingLinks: Array<{ label: string }> };
     assert.deepEqual(contextBody.outgoingLinks.map(({ label }) => label), ["Continue planning"]);
-    const tutorial = await fetch(`${instance.url}/api/notes/${result.starterNoteId}/starter-tutorial`, { headers: authorization });
+    const tutorial = await fetch(`${instance.url}/api/notes/${linkedNode.id}/starter-tutorial`, { headers: authorization });
     assert.equal(tutorial.status, 200);
     const tutorialBody = await tutorial.json() as any;
-    assert.equal(tutorialBody.tutorial.schema, "stash.starter-tutorial.v1");
     assert.deepEqual(tutorialBody.tutorial.notes.map(({ title, parentId }: any) => ({ title, parentId: parentId ? "child" : undefined })), [
       { title: "Start here", parentId: undefined },
       { title: "Connect your thinking", parentId: "child" },
@@ -249,17 +250,24 @@ describe("fresh Instance setup", () => {
     assert.deepEqual(tutorialBody.tutorial.links.map(({ label }: any) => label), ["Continue planning"]);
     assert.deepEqual(tutorialBody.tutorial.collection, {
       id: tutorialBody.tutorial.collection.id,
+      schema: "stash.collection.v1",
+      workspaceId: result.workspaceId,
       ownerNoteId: linkedNode.id,
-      name: "Ideas to explore",
-      properties: [{ id: tutorialBody.tutorial.collection.properties[0].id, name: "Idea", type: "text" }],
-      records: [{ id: tutorialBody.tutorial.collection.records[0].id, values: { [tutorialBody.tutorial.collection.properties[0].id]: "Shape your first idea" } }],
+      title: "Ideas to explore",
+      properties: [{ id: tutorialBody.tutorial.collection.properties[0].id, name: "Idea", type: "text", position: 1 }],
+      records: [{ id: tutorialBody.tutorial.collection.records[0].id, position: 1,
+        values: { [tutorialBody.tutorial.collection.properties[0].id]: "Shape your first idea" } }],
     });
-    assert.deepEqual(tutorialBody.tutorial.taskView, {
-      id: tutorialBody.tutorial.taskView.id,
-      noteId: nodes.find(({ title }) => title === "Plan the next step")!.id,
-      name: "First moves",
+    const planningNode = nodes.find(({ title }) => title === "Plan the next step")!;
+    assert.deepEqual(tutorialBody.tutorial.viewBlock, {
+      schema: "stash.view-block.v1",
+      id: tutorialBody.tutorial.viewBlock.id,
+      workspaceId: result.workspaceId,
+      ownerNoteId: planningNode.id,
+      blockId: tutorialBody.tutorial.viewBlock.id,
+      title: "First moves",
       source: { kind: "tasks", workspaceId: result.workspaceId, project: "none" },
-      presentation: "list",
+      definition: { query: { scope: "projectless", titleContains: "" }, layout: "list" },
     });
     const projectlessTasks = await fetch(`${instance.url}/api/workspaces/${result.workspaceId}/tasks?scope=projectless`, { headers: authorization });
     assert.equal(projectlessTasks.status, 200);
@@ -269,11 +277,36 @@ describe("fresh Instance setup", () => {
       { title: "Turn one Note into action", status: { name: "Ready", category: "unstarted" } },
     ]);
     assert.ok(projectlessBody.tasks.every(({ status }) => /^[0-9a-f-]{36}$/.test(status.id)));
-    const renamed = await fetch(`${instance.url}/api/notes/${result.starterNoteId}/starter-tutorial/collection`, {
-      method: "PUT", headers: { ...authorization, "content-type": "application/json" }, body: JSON.stringify({ name: "Questions worth keeping" }),
+    const renamed = await fetch(`${instance.url}/api/notes/${linkedNode.id}/starter-tutorial/collection`, {
+      method: "PUT", headers: { ...authorization, "content-type": "application/json" },
+      body: JSON.stringify({ title: "Questions worth keeping", recordValue: "Shape a durable question" }),
     });
     assert.equal(renamed.status, 200);
-    assert.equal(((await renamed.json() as any).tutorial.collection.name), "Questions worth keeping");
+    const renamedBody = await renamed.json() as any;
+    assert.equal(renamedBody.tutorial.collection.title, "Questions worth keeping");
+    assert.deepEqual(Object.values(renamedBody.tutorial.collection.records[0].values), ["Shape a durable question"]);
+    const changedView = await fetch(`${instance.url}/api/notes/${planningNode.id}/starter-tutorial/view`, {
+      method: "PUT", headers: { ...authorization, "content-type": "application/json" },
+      body: JSON.stringify({ layout: "table", titleContains: "Shape" }),
+    });
+    assert.equal(changedView.status, 200);
+    assert.deepEqual((await changedView.json() as any).tutorial.viewBlock.definition,
+      { query: { scope: "projectless", titleContains: "Shape" }, layout: "table" });
+
+    const exported = await new PortableWorkspaceExportService(store.database, emptyAttachmentStorage)
+      .export(sessionBody.member.id, result.workspaceId);
+    assert.equal(exported.status, "exported");
+    if (exported.status !== "exported") throw new Error("fresh Workspace export failed");
+
+    const archived = await fetch(`${instance.url}/api/notes/${result.starterNoteId}/archive`, { method: "POST", headers: authorization });
+    assert.equal(archived.status, 200);
+    assert.equal((await fetch(`${instance.url}/api/notes/${linkedNode.id}/starter-tutorial`, { headers: authorization })).status, 404);
+    assert.equal(((await (await fetch(`${instance.url}/api/workspaces/${result.workspaceId}/tasks?scope=projectless`,
+      { headers: authorization })).json()) as { tasks: unknown[] }).tasks.length, 2);
+    assert.equal((await fetch(`${instance.url}/api/notes/${result.starterNoteId}/restore`, { method: "POST", headers: authorization })).status, 200);
+    assert.equal(((await (await fetch(`${instance.url}/api/notes/${planningNode.id}/starter-tutorial`,
+      { headers: authorization })).json()) as any).tutorial.collection.title, "Questions worth keeping");
+
     const removed = await fetch(`${instance.url}/api/notes/${result.starterNoteId}/trash`, {
       method: "POST", headers: authorization,
     });
@@ -283,16 +316,63 @@ describe("fresh Instance setup", () => {
     assert.deepEqual((await emptyTree.json() as { nodes: unknown[] }).nodes, []);
     assert.equal((await fetch(`${instance.url}/api/notes/${result.starterNoteId}/starter-tutorial`, { headers: authorization })).status, 404);
     const tasksAfterRemoval = await fetch(`${instance.url}/api/workspaces/${result.workspaceId}/tasks?scope=projectless`, { headers: authorization });
-    assert.deepEqual(await tasksAfterRemoval.json(), { tasks: [] });
+    assert.equal((await tasksAfterRemoval.json() as { tasks: unknown[] }).tasks.length, 2);
     assert.equal((await fetch(`${instance.url}/api/notes/${linkedNode.id}/context`, { headers: authorization })).status, 404);
-    const cleanup = await store.upgradeDatabase.query<{ tutorials: number; tasks: number; links: number; statuses: number }>(`SELECT
+    const restored = await fetch(`${instance.url}/api/notes/${result.starterNoteId}/restore`, { method: "POST", headers: authorization });
+    assert.equal(restored.status, 200);
+    const restoredTutorial = await fetch(`${instance.url}/api/notes/${linkedNode.id}/starter-tutorial`, { headers: authorization });
+    assert.equal(restoredTutorial.status, 200);
+    const restoredBody = await restoredTutorial.json() as any;
+    assert.equal(restoredBody.tutorial.collection.title, "Questions worth keeping");
+    assert.deepEqual(restoredBody.tutorial.viewBlock.definition,
+      { query: { scope: "projectless", titleContains: "Shape" }, layout: "table" });
+    assert.equal((await fetch(`${instance.url}/api/notes/${linkedNode.id}/context`, { headers: authorization })).status, 200);
+
+    const permanentlyRemoved = await fetch(`${instance.url}/api/notes/${planningNode.id}/starter-tutorial`, {
+      method: "DELETE", headers: { ...authorization, "content-type": "application/json" }, body: JSON.stringify({ confirmed: true }),
+    });
+    assert.equal(permanentlyRemoved.status, 200);
+    assert.deepEqual(await permanentlyRemoved.json(), { removed: true });
+    assert.equal((await fetch(`${instance.url}/api/notes/${result.starterNoteId}/restore`, { method: "POST", headers: authorization })).status, 404);
+    const cleanup = await store.upgradeDatabase.query<{ tutorials: number; tasks: number; links: number; statuses: number; collections: number; views: number; projections: number }>(`SELECT
       (SELECT COUNT(*)::int FROM stash_starter_tutorials WHERE workspace_id=$1) tutorials,
       (SELECT COUNT(*)::int FROM stash_tasks WHERE workspace_id=$1 AND project_id IS NULL) tasks,
       (SELECT COUNT(*)::int FROM stash_note_links WHERE workspace_id=$1) links,
-      (SELECT COUNT(*)::int FROM stash_workspace_workflow_statuses WHERE workspace_id=$1) statuses`, [result.workspaceId]);
-    assert.deepEqual(cleanup.rows[0], { tutorials: 0, tasks: 0, links: 0, statuses: 0 });
+      (SELECT COUNT(*)::int FROM stash_workspace_workflow_statuses WHERE workspace_id=$1) statuses,
+      (SELECT COUNT(*)::int FROM stash_collections WHERE workspace_id=$1) collections,
+      (SELECT COUNT(*)::int FROM stash_view_blocks WHERE workspace_id=$1) views,
+      (SELECT COUNT(*)::int FROM stash_portable_projection_outbox WHERE object_kind IN ('Collection','ViewBlock','WorkspaceWorkflow')) projections`, [result.workspaceId]);
+    assert.deepEqual(cleanup.rows[0], { tutorials: 0, tasks: 0, links: 0, statuses: 0, collections: 0, views: 0, projections: 0 });
+
+    const destinationDirectory = await mkdtemp(join(tmpdir(), "stash-setup-import-test-")); directories.push(destinationDirectory);
+    const destination = await EmbeddedInstanceStore.open(destinationDirectory,
+      createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
+    const destinationOwner = "53535353-5353-4353-8353-535353535353";
+    await destination.database.createFirstOrganizationOwner({ organizationId: "54545454-5454-4454-8454-545454545454",
+      organizationName: "Destination", ownerId: destinationOwner, ownerName: "Grace", ownerEmail: "grace@example.test",
+      passwordHash: "not-used", role: "Owner", workspaceId: "55555555-5555-4555-8555-555555555555", workspaceName: "Destination" });
+    const imported = await new PortableWorkspaceImportService(destination.database, emptyAttachmentStorage)
+      .import("56565656-5656-4656-8656-565656565656", destinationOwner, exported.archive);
+    assert.equal(imported.status, "imported");
+    const importedSnapshot = await destination.database.readExportSnapshot(destinationOwner, result.workspaceId);
+    assert.equal(importedSnapshot.status, "found");
+    if (importedSnapshot.status !== "found") throw new Error("round-trip Workspace missing");
+    assert.deepEqual(importedSnapshot.snapshot.tasks.map((task) => ({ projectId: task.projectId, key: task.key, status: task.status.name })), [
+      { projectId: undefined, key: undefined, status: "Ready" }, { projectId: undefined, key: undefined, status: "Ready" },
+    ]);
+    assert.deepEqual(importedSnapshot.snapshot.durableObjects?.map(({ kind }) => kind).sort(), ["Collection", "ViewBlock", "WorkspaceWorkflow"]);
+    assert.equal(importedSnapshot.snapshot.noteLinks.length, 1);
+    const importedOwnerDocument = await destination.upgradeDatabase.query<{ document: { blocks: Array<{ id?: string }> } }>(
+      "SELECT document FROM stash_notes WHERE id=$1", [planningNode.id]);
+    assert.ok(importedOwnerDocument.rows[0]?.document.blocks.some(({ id }) => id === tutorialBody.tutorial.viewBlock.blockId));
+    assert.equal((await new PortableWorkspaceExportService(destination.database, emptyAttachmentStorage)
+      .export(destinationOwner, result.workspaceId)).status, "exported");
   });
 });
+
+const emptyAttachmentStorage = {
+  async put() {}, async get() { return Buffer.alloc(0); }, async delete() {},
+};
 
 async function runSetupInstance(repository: SetupRepository, setup: InstanceSetupService, host: string) {
   return startInstance({ database: repository, host, port: 0, instanceAdminToken: "test-admin-token",

@@ -50,6 +50,14 @@ export interface PortableTaskProjection {
   developmentLinks?: Array<{ provider: string; url: string; kind: "branch" | "commit" | "pull_request" }>;
 }
 
+/** A canonical Workspace Task is intentionally not forced into a Project identity. */
+export interface PortableWorkspaceTaskProjection extends Omit<PortableTaskProjection, "projectId" | "key"> {
+  projectId?: never;
+  key?: never;
+}
+
+export type PortableExportTaskProjection = PortableTaskProjection | PortableWorkspaceTaskProjection;
+
 export type TaskCreation = Omit<PortableTaskProjection, "schema" | "key" | "status">;
 
 export type NoteTriageResult =

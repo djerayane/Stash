@@ -14,13 +14,7 @@ export interface CustomOrganizationRole {
   memberIds: string[];
 }
 
-export const builtInProjectCreationPermissions = {
-  Owner: ["create_project"],
-  Admin: ["create_project"],
-  Member: [],
-} as const;
-
-const builtInRoleDefinitions: ReadonlyArray<{
+export const builtInOrganizationRoleDefinitions: ReadonlyArray<{
   name: BuiltInOrganizationRole;
   immutable: true;
   permissions: readonly OrganizationPermission[];
@@ -46,6 +40,14 @@ const builtInRoleDefinitions: ReadonlyArray<{
     permissions: ["workspace.create"],
   },
 ];
+
+export const builtInProjectCreationPermissions = builtInOrganizationRoleDefinitions.reduce((permissions, role) => ({
+  ...permissions, [role.name]: role.permissions.includes("create_project") ? ["create_project"] : [],
+}), {} as Record<BuiltInOrganizationRole, readonly Extract<OrganizationPermission, "create_project">[]>);
+
+export function builtInRolesWithPermission(permission: OrganizationPermission): BuiltInOrganizationRole[] {
+  return builtInOrganizationRoleDefinitions.filter((role) => role.permissions.includes(permission)).map(({ name }) => name);
+}
 
 type MembershipMutationResult = "updated" | "member_not_found" | "final_owner";
 
@@ -99,7 +101,7 @@ export class OrganizationRoleService {
 
   async listRoles(organizationId: string) {
     if (!isUuid(organizationId)) throw new InvalidOrganizationRoleInput();
-    return [...builtInRoleDefinitions, ...await this.#repository.listCustomRoles(organizationId)];
+    return [...builtInOrganizationRoleDefinitions, ...await this.#repository.listCustomRoles(organizationId)];
   }
 
   async createCustom(organizationId: string, actorId: string, value: unknown) {

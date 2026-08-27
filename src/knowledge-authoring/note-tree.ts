@@ -43,10 +43,7 @@ export interface NoteTreeImpactInspector {
   inspect(memberId: string, noteIds: readonly string[]): Promise<{ collectionCount: number }>;
 }
 
-/**
- * Production contribution until Collections become a knowledge-authoring capability in #171.
- * Replace this explicit contribution there; zero is current product reality, not a domain default.
- */
+/** Used by deployments that have no Collection impact provider registered. */
 export class EmptyCollectionImpactInspector implements NoteTreeImpactInspector {
   async inspect(): Promise<{ collectionCount: number }> { return { collectionCount: 0 }; }
 }

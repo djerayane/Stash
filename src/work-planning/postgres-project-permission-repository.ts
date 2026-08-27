@@ -1,12 +1,15 @@
 import type { PostgresKernel, PostgresQueryable } from "../instance-operations/storage/postgres-kernel.js";
+import { builtInRolesWithPermission } from "../organization-roles.js";
 
 type PrepareProjects = (client: PostgresQueryable) => Promise<void>;
 
+const builtInProjectCreators = builtInRolesWithPermission("create_project")
+  .map((role) => `'${role.replaceAll("'", "''")}'`).join(",");
 const permission = (workspace: string, member = "$2") => `((${workspace}.owner_type='personal'
   AND ${workspace}.personal_owner_id=${member}) OR (${workspace}.owner_type='organization' AND EXISTS (
     SELECT 1 FROM stash_organization_memberships membership
     WHERE membership.organization_id=${workspace}.organization_owner_id AND membership.account_id=${member}
-      AND membership.role IN ('Owner','Admin')
+      AND membership.role IN (${builtInProjectCreators})
   )) OR (${workspace}.owner_type='organization' AND EXISTS (
     SELECT 1 FROM stash_organization_custom_role_assignments assignment
     JOIN stash_organization_custom_roles role ON role.id=assignment.role_id

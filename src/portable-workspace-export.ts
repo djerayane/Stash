@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { posix } from "node:path";
 
 import type { AttachmentStorage, PortableAttachmentProjection } from "./attachments.js";
-import type { PortableNoteProjection, PortableTaskProjection } from "./notes.js";
+import type { PortableExportTaskProjection, PortableNoteProjection } from "./notes.js";
 import type { PortableWorkspaceProjection } from "./workspaces-projects.js";
 import type { Board } from "./boards.js";
 import type { PortableNoteLinkProjection } from "./notes.js";
@@ -19,7 +19,7 @@ export interface PortableExportAttachment {
 export interface PortableWorkspaceExportSnapshot {
   workspace: PortableWorkspaceProjection;
   notes: PortableNoteProjection[];
-  tasks: PortableTaskProjection[];
+  tasks: PortableExportTaskProjection[];
   boards: Board[];
   attachments: PortableExportAttachment[];
   noteLocations: PortableNoteLocationProjection[];
@@ -80,8 +80,8 @@ function noteMarkdown(note: PortableNoteProjection, path: string,
   return `---\n${metadata(properties)}\n---\n\n${portableContent.trimEnd()}${readableLinks.length ? `\n\n## Linked Notes\n\n${readableLinks.join("\n")}` : ""}\n`;
 }
 
-function taskMarkdown(task: PortableTaskProjection): string {
-  return `---\n${metadata(task as unknown as Record<string, unknown>)}\n---\n\n# ${task.key} — ${task.title}\n`;
+function taskMarkdown(task: PortableExportTaskProjection): string {
+  return `---\n${metadata(task as unknown as Record<string, unknown>)}\n---\n\n# ${task.key ? `${task.key} — ` : ""}${task.title}\n`;
 }
 
 interface ArchiveEntry { path: string; content: Buffer }
@@ -131,7 +131,7 @@ function zip(entries: ArchiveEntry[]): Buffer {
 export interface PortableWorkspaceCanonicalState {
   workspace: PortableWorkspaceProjection;
   notes: PortableNoteProjection[];
-  tasks: PortableTaskProjection[];
+  tasks: PortableExportTaskProjection[];
   boards: Board[];
   attachments: PortableAttachmentProjection[];
   noteLocations: PortableNoteLocationProjection[];
@@ -182,7 +182,7 @@ export class PortableWorkspaceExportService {
     for (const link of snapshot.noteLinks) linksBySource.set(link.sourceNoteId, [...(linksBySource.get(link.sourceNoteId) ?? []), link]);
     const noteTexts = snapshot.notes.map((note) => ({ path: locationByNote.get(note.id)!.path,
       text: noteMarkdown(note, locationByNote.get(note.id)!.path, linksBySource.get(note.id) ?? [], locationByNote) }));
-    const taskTexts = snapshot.tasks.map((task) => ({ path: `tasks/${task.key}--${task.id}.md`, text: taskMarkdown(task) }));
+    const taskTexts = snapshot.tasks.map((task) => ({ path: `tasks/${task.key ?? "projectless"}--${task.id}.md`, text: taskMarkdown(task) }));
     const boardTexts = snapshot.boards.map((board) => ({ path: `boards/${board.id}.json`, text: stableJson(board) }));
     const relationshipTexts = [
       { path: "relationships/note-locations.json", text: stableJson(snapshot.noteLocations) },
