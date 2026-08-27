@@ -1,5 +1,9 @@
+import { randomUUID } from "node:crypto";
 import type { ActivityCause, ActivityRecord } from "../activity.js";
+import type { AutomationCandidate, AutomationFailureNotification, AutomationRecipe, AutomationRepository, AutomationState, AutomationTransition, AutomationTrigger } from "../automations.js";
+import type { Board, BoardRepository, BoardTask } from "../boards.js";
 import type { PortableExportTaskProjection } from "../notes.js";
+import type { ProjectWorkflow, ProjectWorkflowRepository, WorkflowStatus } from "../project-workflows.js";
 import type { TaskPlanningReadModel, TaskPlanningRepository, TaskPlanningUpdate } from "../tasks.js";
 import type { NotificationDelivery, NotificationPreferences, NotificationRepository } from "../notifications.js";
 import { PostgresKernel, type PostgresQueryable } from "../instance-operations/storage/postgres-kernel.js";
@@ -36,6 +40,9 @@ const taskPlanningSelect = `SELECT task.*, COALESCE(workspace_status.name,status
         WHERE association.task_id=task.id AND guest.account_id=$3))`;
 const taskPlanningSelectById = taskPlanningSelect
   .replace(/\(task\.project_id = \$1[\s\S]*?alias\.task_key = \$2\)\)/, "task.id = $1").replaceAll("$3", "$2");
+export const workflowTemporaryRenameSql = `UPDATE stash_workflow_statuses
+  SET position = -position - 1, name = repeat('__stash_workflow_transition__', 4) || id::text
+  WHERE project_id = $1`;
 
 function projection(row: any): PortableExportTaskProjection {
   return { schema: "stash.task.v1", id: row.id, workspaceId: row.workspace_id, ...(row.project_id ? { projectId: row.project_id } : {}),
@@ -54,6 +61,10 @@ function projection(row: any): PortableExportTaskProjection {
 function readModel(row: any): TaskPlanningReadModel {
   return { ...projection(row), revision: Number(row.revision), dependencyWarnings: row.dependency_warnings ?? [] } as TaskPlanningReadModel;
 }
+function boardFromRow(row: any): Board {
+  return { schema: "stash.board.v1", id: row.id, projectId: row.project_id, name: row.name,
+    groupBy: row.group_by, createdAt: new Date(row.created_at).toISOString() };
+}
 function hasCycle(taskIds: ReadonlySet<string>, edges: ReadonlyArray<{ dependent_task_id: string; prerequisite_task_id: string }>) {
   const outgoing = new Map([...taskIds].map((id) => [id, [] as string[]]));
   for (const edge of edges) outgoing.get(edge.dependent_task_id)?.push(edge.prerequisite_task_id);
@@ -66,21 +77,75 @@ function hasCycle(taskIds: ReadonlySet<string>, edges: ReadonlyArray<{ dependent
 export interface WorkPlanningPersistenceHooks {
   prepare(client: PostgresQueryable): Promise<void>;
   recordProjection(client: PostgresQueryable, task: PortableExportTaskProjection): Promise<void>;
+  recordWorkflowProjection(client: PostgresQueryable, workflow: ProjectWorkflow): Promise<void>;
+  recordBoardProjection(client: PostgresQueryable, board: Board): Promise<void>;
+  recordBoardTaskActivity(client: PostgresQueryable, memberId: string, workspaceId: string, taskId: string,
+    before: TaskPlanningReadModel, after: TaskPlanningReadModel): Promise<ActivityRecord>;
   recordActivity(client: PostgresQueryable, memberId: string, workspaceId: string, taskId: string,
     before: TaskPlanningReadModel, after: TaskPlanningReadModel, cause: ActivityCause): Promise<ActivityRecord>;
   recordAgentAudit(client: PostgresQueryable, memberId: string, workspaceId: string, taskId: string,
     cause: Extract<ActivityCause, { kind: "agent" }>): Promise<void>;
   recordAssignmentNotifications(client: PostgresQueryable, projectId: string, activity: ActivityRecord,
     before: TaskPlanningReadModel, after: TaskPlanningReadModel): Promise<void>;
+  prepareAutomationDependencies(client: PostgresQueryable): Promise<void>;
+  recordAutomationActivity(client: PostgresQueryable, memberId: string, workspaceId: string, taskId: string,
+    action: string, before: TaskPlanningReadModel, after: TaskPlanningReadModel, cause: ActivityCause): Promise<ActivityRecord>;
+  persistAutomationFailureActivity(client: PostgresQueryable, activity: ActivityRecord): Promise<void>;
 }
 
-export class PostgresWorkPlanningRepositories implements TaskPlanningRepository, NotificationRepository {
+interface FailedAutomationRun {
+  automationId: string; configuringMemberId: string; configuringMemberName: string; workspaceId: string;
+  projectId: string; taskId: string; taskKey: string; taskTitle: string;
+}
+
+export class PostgresWorkPlanningRepositories implements TaskPlanningRepository, ProjectWorkflowRepository, BoardRepository, NotificationRepository, AutomationRepository {
   constructor(private readonly kernel: PostgresKernel, private readonly hooks: WorkPlanningPersistenceHooks) {}
 
   async findTaskByKey(memberId: string, projectId: string, taskKey: string) {
     return this.kernel.withSession(async (client) => { await this.hooks.prepare(client);
       const row = (await client.query<any>(taskPlanningSelect, [projectId, taskKey, memberId])).rows[0];
       return row ? { status: "found" as const, task: readModel(row) } : { status: "not_found" as const }; });
+  }
+
+  async listTaskSourceBlocks(memberId: string, taskId: string) {
+    return this.kernel.withSession(async (client) => { await this.hooks.prepare(client);
+      const result = await client.query<any>(`SELECT source.note_id, source.block_id, note.document
+        FROM stash_tasks task JOIN stash_workspaces workspace ON workspace.id = task.workspace_id
+        LEFT JOIN stash_task_block_sources source ON source.task_id = task.id
+        LEFT JOIN stash_notes note ON note.id = source.note_id
+        WHERE task.id = $1 AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2)
+        OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)))
+        ORDER BY source.note_id NULLS FIRST, source.block_id NULLS FIRST`, [taskId, memberId]);
+      if (!result.rowCount) return { status: "task_not_found" as const };
+      return { status: "found" as const, sourceBlocks: result.rows.filter((row: any) => row.note_id !== null).map((row: any) => {
+        const matches = Array.isArray(row.document?.blocks) ? row.document.blocks.filter((block: any) => block.id === row.block_id).length : 0;
+        return { noteId: row.note_id, blockId: row.block_id,
+          state: matches === 1 ? "linked" as const : matches > 1 ? "ambiguous" as const : "broken" as const };
+      }) };
+    });
+  }
+
+  async listLinkedTasks(memberId: string, noteId: string) {
+    return this.kernel.withSession(async (client) => { await this.hooks.prepare(client);
+      const result = await client.query<any>(`SELECT task.id, task.task_key, task.title, status.id AS status_id,
+        status.name AS status_name, status.category, source.block_id, note.document
+        FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id = note.workspace_id
+        LEFT JOIN stash_task_block_sources source ON source.note_id = note.id
+        LEFT JOIN stash_tasks task ON task.id = source.task_id
+        LEFT JOIN stash_workflow_statuses status ON status.id = task.workflow_status_id
+        WHERE note.id = $1 AND note.archived_at IS NULL AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2)
+        OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)))
+        ORDER BY task.created_at NULLS FIRST, task.id NULLS FIRST`, [noteId, memberId]);
+      if (!result.rowCount) return { status: "note_not_found" as const };
+      return { status: "found" as const, tasks: result.rows.filter((row: any) => row.id !== null).map((row: any) => {
+        const matches = Array.isArray(row.document?.blocks) ? row.document.blocks.filter((block: any) => block.id === row.block_id).length : 0;
+        return { id: row.id, key: row.task_key, title: row.title,
+          status: { id: row.status_id, name: row.status_name, category: row.category }, sourceBlock: { noteId, blockId: row.block_id },
+          relationshipState: matches === 1 ? "linked" as const : matches > 1 ? "ambiguous" as const : "broken" as const };
+      }) };
+    });
   }
 
   async updateTaskByKey(memberId: string, projectId: string, taskKey: string, update: TaskPlanningUpdate,
@@ -150,6 +215,142 @@ export class PostgresWorkPlanningRepositories implements TaskPlanningRepository,
       }
       return { status: "updated" as const, task };
     });
+  }
+
+  async findWorkflow(memberId: string, projectId: string) {
+    return this.kernel.transaction(async (client) => {
+      await this.hooks.prepare(client);
+      const access = await this.findProjectWorkflowAccess(client, memberId, projectId, true);
+      if (access !== "member") return { status: access };
+      await this.ensureDefaultWorkflow(client, projectId);
+      return { status: "found" as const, workflow: await this.loadWorkflow(client, projectId) };
+    });
+  }
+
+  async replaceWorkflow(memberId: string, projectId: string, expectedRevision: number, statuses: WorkflowStatus[], newStatusIds: ReadonlySet<string>) {
+    return this.kernel.transaction(async (client) => {
+      await this.hooks.prepare(client);
+      const access = await this.findProjectWorkflowAccess(client, memberId, projectId, true);
+      if (access !== "member") return { status: access };
+      await this.ensureDefaultWorkflow(client, projectId);
+      const currentRevision = await client.query<{ workflow_revision: number }>("SELECT workflow_revision FROM stash_projects WHERE id = $1", [projectId]);
+      if (currentRevision.rows[0]!.workflow_revision !== expectedRevision) return { status: "stale_status" as const };
+      const current = await client.query<{ id: string }>("SELECT id FROM stash_workflow_statuses WHERE project_id = $1 ORDER BY position FOR UPDATE", [projectId]);
+      const currentIds = new Set(current.rows.map(({ id }) => id));
+      if (statuses.filter(({ id }) => currentIds.has(id)).length !== currentIds.size
+        || statuses.some(({ id }) => !currentIds.has(id) && !newStatusIds.has(id))) return { status: "stale_status" as const };
+      const currentWorkflow = await this.loadWorkflow(client, projectId);
+      if (JSON.stringify(currentWorkflow.statuses) === JSON.stringify(statuses)) return { status: "updated" as const, workflow: currentWorkflow };
+      const previousStatuses = new Map(currentWorkflow.statuses.map((status) => [status.id, status]));
+      const taskVisibleStatusChanges = statuses.filter((status) => { const previous = previousStatuses.get(status.id);
+        return previous && (previous.name !== status.name || previous.category !== status.category || previous.archived !== status.archived); }).map(({ id }) => id);
+      const collision = await client.query("SELECT 1 FROM stash_workflow_statuses WHERE id = ANY($1::uuid[]) AND project_id <> $2 LIMIT 1", [statuses.map(({ id }) => id), projectId]);
+      if (collision.rowCount) return { status: "stale_status" as const };
+      await client.query(workflowTemporaryRenameSql, [projectId]);
+      for (const status of statuses) await client.query(`INSERT INTO stash_workflow_statuses (id, project_id, name, category, position, archived)
+        VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name,category=EXCLUDED.category,
+        position=EXCLUDED.position,archived=EXCLUDED.archived WHERE stash_workflow_statuses.project_id=EXCLUDED.project_id`,
+      [status.id, projectId, status.name, status.category, status.position, status.archived]);
+      await client.query("UPDATE stash_projects SET workflow_revision = workflow_revision + 1 WHERE id = $1", [projectId]);
+      if (taskVisibleStatusChanges.length) {
+        const assigned = await client.query<{ id: string }>(`SELECT id FROM stash_tasks WHERE project_id=$1 AND workflow_status_id=ANY($2::uuid[]) ORDER BY id FOR UPDATE`, [projectId, taskVisibleStatusChanges]);
+        for (const { id } of assigned.rows) await client.query(`UPDATE stash_tasks SET revision=revision+1,
+          field_revisions=jsonb_set(field_revisions,'{statusId}',to_jsonb(revision+1),true) WHERE id=$1`, [id]);
+      }
+      const workflow = await this.loadWorkflow(client, projectId);
+      await this.hooks.recordWorkflowProjection(client, workflow);
+      const affectedTasks = await client.query<{ id: string }>("SELECT id FROM stash_tasks WHERE project_id = $1 ORDER BY id", [projectId]);
+      for (const { id } of affectedTasks.rows) {
+        const taskRow = await client.query<any>(taskPlanningSelectById, [id, memberId]);
+        if (taskRow.rows[0]) await this.hooks.recordProjection(client, projection(taskRow.rows[0]));
+      }
+      return { status: "updated" as const, workflow };
+    });
+  }
+
+  async listBoards(memberId: string, projectId: string) {
+    return this.kernel.withSession(async (client) => { await this.prepareBoards(client);
+      if (await this.findProjectWorkflowAccess(client, memberId, projectId) === "not_found") return { status: "not_found" as const };
+      const result = await client.query<any>("SELECT id, project_id, name, group_by, created_at FROM stash_boards WHERE project_id = $1 ORDER BY created_at, id", [projectId]);
+      return { status: "found" as const, boards: result.rows.map((row: any) => boardFromRow(row)) }; });
+  }
+
+  async createBoard(memberId: string, board: Board) {
+    return this.kernel.transaction(async (client) => { await this.prepareBoards(client);
+      const access = await this.findProjectWorkflowAccess(client, memberId, board.projectId, true);
+      if (access !== "member") return { status: access };
+      await client.query("INSERT INTO stash_boards (id, project_id, name, group_by, created_at) VALUES ($1,$2,$3,$4,$5)", [board.id, board.projectId, board.name, board.groupBy, board.createdAt]);
+      await this.hooks.recordBoardProjection(client, board);
+      return { status: "created" as const, board }; });
+  }
+
+  async readBoard(memberId: string, projectId: string, boardId: string) {
+    return this.kernel.withSession(async (client) => { await this.prepareBoards(client);
+      if (await this.findProjectWorkflowAccess(client, memberId, projectId) === "not_found") return { status: "not_found" as const };
+      const found = await client.query<any>("SELECT id, project_id, name, group_by, created_at FROM stash_boards WHERE id = $1 AND project_id = $2", [boardId, projectId]);
+      if (!found.rowCount) return { status: "not_found" as const };
+      const rows = await client.query<any>(`SELECT task.id, task.task_key, task.title, task.assignee_ids, task.priority, task.label_names,
+        status.id AS status_id, status.name AS status_name, status.category FROM stash_tasks task JOIN stash_workflow_statuses status
+        ON status.id=task.workflow_status_id WHERE task.project_id=$1 ORDER BY task.task_key,task.id`, [projectId]);
+      const tasks: BoardTask[] = rows.rows.map((row: any) => ({ id: row.id, key: row.task_key, title: row.title,
+        status: { id: row.status_id, name: row.status_name, category: row.category }, assigneeIds: row.assignee_ids, priority: row.priority, labelNames: row.label_names }));
+      return { status: "found" as const, board: boardFromRow(found.rows[0]), tasks, statuses: (await this.loadWorkflow(client, projectId)).statuses }; });
+  }
+
+  async moveTaskOnBoard(memberId: string, projectId: string, boardId: string, taskKey: string, statusId: string) {
+    return this.kernel.transaction(async (client) => { await this.prepareBoards(client);
+      const access = await this.findProjectWorkflowAccess(client, memberId, projectId, true);
+      if (access !== "member") return { status: access };
+      const board = await client.query<{ group_by: string }>("SELECT group_by FROM stash_boards WHERE id=$1 AND project_id=$2", [boardId, projectId]);
+      if (!board.rowCount) return { status: "not_found" as const };
+      if (board.rows[0]!.group_by !== "status") return { status: "unsupported_group" as const };
+      const status = await client.query<any>("SELECT id,name,category FROM stash_workflow_statuses WHERE id=$1 AND project_id=$2 AND archived=FALSE", [statusId, projectId]);
+      if (!status.rowCount) return { status: "invalid_status" as const };
+      const beforeRow = (await client.query<any>(taskPlanningSelect, [projectId, taskKey, memberId])).rows[0];
+      if (!beforeRow) return { status: "not_found" as const };
+      const changed = await client.query<any>(`UPDATE stash_tasks SET workflow_status_id=$3,revision=revision+1,
+        field_revisions=jsonb_set(field_revisions,'{statusId}',to_jsonb(revision+1),true) WHERE project_id=$1 AND task_key=$2
+        RETURNING id,task_key,title,assignee_ids,priority,label_names`, [projectId, taskKey, statusId]);
+      if (!changed.rowCount) return { status: "not_found" as const };
+      const row = changed.rows[0]; const task: BoardTask = { id: row.id, key: row.task_key, title: row.title, status: status.rows[0],
+        assigneeIds: row.assignee_ids, priority: row.priority, labelNames: row.label_names };
+      const afterRow = (await client.query<any>(taskPlanningSelectById, [task.id, memberId])).rows[0];
+      if (afterRow) { const after = readModel(afterRow); await this.hooks.recordProjection(client, projection(afterRow));
+        await this.hooks.recordBoardTaskActivity(client, memberId, after.workspaceId, task.id, readModel(beforeRow), after); }
+      return { status: "moved" as const, task }; });
+  }
+
+  async findProjectWorkflowAccess(client: PostgresQueryable, memberId: string, projectId: string, lock = false) {
+    const result = await client.query<{ member: boolean; guest: boolean }>(`SELECT
+      ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR (workspace.owner_type='organization' AND EXISTS
+        (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2))) AS member,
+      EXISTS (SELECT 1 FROM stash_project_guests guest WHERE guest.project_id=project.id AND guest.account_id=$2) AS guest
+      FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id=project.workspace_id WHERE project.id=$1
+      ${lock ? "FOR UPDATE OF project" : ""}`, [projectId, memberId]);
+    const row = result.rows[0]; return !row ? "not_found" as const : row.member ? "member" as const : row.guest ? "forbidden" as const : "not_found" as const;
+  }
+
+  async loadWorkflow(client: PostgresQueryable, projectId: string): Promise<ProjectWorkflow> {
+    const project = await client.query<{ workflow_revision: number }>("SELECT workflow_revision FROM stash_projects WHERE id=$1", [projectId]);
+    const statuses = await client.query<WorkflowStatus>("SELECT id,name,category,position,archived FROM stash_workflow_statuses WHERE project_id=$1 ORDER BY position,id", [projectId]);
+    return { schema: "stash.workflow.v1", projectId, revision: project.rows[0]!.workflow_revision, statuses: statuses.rows };
+  }
+
+  private async ensureDefaultWorkflow(client: PostgresQueryable, projectId: string) {
+    const statuses = [[randomUUID(),projectId,"Backlog","unstarted",0],[randomUUID(),projectId,"Ready","unstarted",1],
+      [randomUUID(),projectId,"In Progress","started",2],[randomUUID(),projectId,"In Review","started",3],[randomUUID(),projectId,"Done","completed",4]] as const;
+    await client.query(`INSERT INTO stash_workflow_statuses (id,project_id,name,category,position) VALUES
+      ${statuses.map((_, index) => `($${index*5+1},$${index*5+2},$${index*5+3},$${index*5+4},$${index*5+5})`).join(", ")} ON CONFLICT DO NOTHING`, statuses.flat());
+    const initialized = await client.query("UPDATE stash_projects SET workflow_revision=1 WHERE id=$1 AND workflow_revision=0 RETURNING id", [projectId]);
+    if (initialized.rowCount) await this.hooks.recordWorkflowProjection(client, await this.loadWorkflow(client, projectId));
+  }
+
+  async prepareBoards(client: PostgresQueryable) {
+    await this.hooks.prepare(client);
+    await client.query(`CREATE TABLE IF NOT EXISTS stash_boards (
+      id UUID PRIMARY KEY, project_id UUID NOT NULL REFERENCES stash_projects(id) ON DELETE CASCADE,
+      name TEXT NOT NULL CHECK (char_length(name) BETWEEN 1 AND 100), group_by TEXT NOT NULL CHECK (group_by IN ('status','priority')),
+      created_at TIMESTAMPTZ NOT NULL, UNIQUE (project_id, name))`);
   }
 
   async saveNotification(delivery: NotificationDelivery) {
@@ -283,6 +484,221 @@ export class PostgresWorkPlanningRepositories implements TaskPlanningRepository,
         RETURNING notification.*`, [memberId, cadence, since, until, claimedAt]);
       return result.rows.map(notificationFromRow); });
   }
+
+  async prepareAutomations(client: PostgresQueryable): Promise<void> {
+    await this.hooks.prepareAutomationDependencies(client);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS stash_automation_recipes (
+        id UUID PRIMARY KEY, project_id UUID NOT NULL REFERENCES stash_projects(id) ON DELETE CASCADE,
+        trigger TEXT NOT NULL CHECK(trigger IN ('branch_created','pull_request_completed')),
+        target_status_id UUID REFERENCES stash_workflow_statuses(id), enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id), created_at TIMESTAMPTZ NOT NULL,
+        workspace_target_status_id UUID REFERENCES stash_workspace_workflow_statuses(id), UNIQUE(project_id,trigger)
+      );
+      CREATE TABLE IF NOT EXISTS stash_automation_transitions (
+        id UUID PRIMARY KEY, automation_id UUID NOT NULL REFERENCES stash_automation_recipes(id) ON DELETE CASCADE,
+        signal_id UUID NOT NULL REFERENCES stash_github_signals(id) ON DELETE CASCADE,
+        task_id UUID NOT NULL REFERENCES stash_tasks(id) ON DELETE CASCADE, project_id UUID NOT NULL REFERENCES stash_projects(id) ON DELETE CASCADE,
+        before_status_id UUID REFERENCES stash_workflow_statuses(id), after_status_id UUID REFERENCES stash_workflow_statuses(id),
+        workspace_before_status_id UUID REFERENCES stash_workspace_workflow_statuses(id), workspace_after_status_id UUID REFERENCES stash_workspace_workflow_statuses(id),
+        occurred_at TIMESTAMPTZ NOT NULL, reversed_at TIMESTAMPTZ, reversed_by_account_id UUID REFERENCES stash_accounts(id),
+        UNIQUE(automation_id,signal_id,task_id)
+      );
+      CREATE TABLE IF NOT EXISTS stash_automation_failures (
+        id UUID PRIMARY KEY, automation_id UUID NOT NULL REFERENCES stash_automation_recipes(id) ON DELETE CASCADE,
+        signal_id UUID NOT NULL REFERENCES stash_github_signals(id) ON DELETE CASCADE,
+        task_id UUID NOT NULL REFERENCES stash_tasks(id) ON DELETE CASCADE, project_id UUID NOT NULL REFERENCES stash_projects(id) ON DELETE CASCADE,
+        occurred_at TIMESTAMPTZ NOT NULL, activity JSONB NOT NULL, recipient_member_id UUID NOT NULL REFERENCES stash_accounts(id),
+        summary TEXT NOT NULL, UNIQUE(automation_id,signal_id,task_id)
+      );
+      ALTER TABLE stash_automation_recipes ALTER COLUMN target_status_id DROP NOT NULL;
+      ALTER TABLE stash_automation_recipes ADD COLUMN IF NOT EXISTS workspace_target_status_id UUID REFERENCES stash_workspace_workflow_statuses(id);
+      ALTER TABLE stash_automation_transitions ALTER COLUMN before_status_id DROP NOT NULL;
+      ALTER TABLE stash_automation_transitions ALTER COLUMN after_status_id DROP NOT NULL;
+      ALTER TABLE stash_automation_transitions ADD COLUMN IF NOT EXISTS workspace_before_status_id UUID REFERENCES stash_workspace_workflow_statuses(id);
+      ALTER TABLE stash_automation_transitions ADD COLUMN IF NOT EXISTS workspace_after_status_id UUID REFERENCES stash_workspace_workflow_statuses(id);
+    `);
+  }
+
+  async listAutomationState(memberId: string, projectId: string, taskKey: string): Promise<AutomationState | undefined> {
+    return this.kernel.transaction(async (client) => { await this.prepareAutomations(client);
+      const task = (await client.query<any>(taskPlanningSelect, [projectId, taskKey, memberId])).rows[0]; if (!task) return undefined;
+      const recipes = await client.query<any>(`SELECT recipe.*,COALESCE(workspace_status.id,legacy_status.id) target_status_id,
+        COALESCE(workspace_status.name,legacy_status.name) AS target_status_name FROM stash_automation_recipes recipe
+        LEFT JOIN stash_workflow_statuses legacy_status ON legacy_status.id=recipe.target_status_id
+        LEFT JOIN stash_workspace_workflow_statuses workspace_status ON workspace_status.id=recipe.workspace_target_status_id
+        WHERE recipe.project_id=$1 ORDER BY recipe.created_at,recipe.id`, [projectId]);
+      const transitions = await client.query<any>(`SELECT transition.*,
+        COALESCE(workspace_before.id,legacy_before.id) before_status_id,COALESCE(workspace_after.id,legacy_after.id) after_status_id,
+        COALESCE(workspace_before.name,legacy_before.name) before_status_name,COALESCE(workspace_after.name,legacy_after.name) after_status_name
+        FROM stash_automation_transitions transition LEFT JOIN stash_workflow_statuses legacy_before ON legacy_before.id=transition.before_status_id
+        LEFT JOIN stash_workflow_statuses legacy_after ON legacy_after.id=transition.after_status_id
+        LEFT JOIN stash_workspace_workflow_statuses workspace_before ON workspace_before.id=transition.workspace_before_status_id
+        LEFT JOIN stash_workspace_workflow_statuses workspace_after ON workspace_after.id=transition.workspace_after_status_id
+        WHERE transition.task_id=$1 ORDER BY transition.occurred_at DESC`, [task.id]);
+      const statuses = task.workspace_workflow_status_id
+        ? await client.query<{ id: string; name: string }>("SELECT id,name FROM stash_workspace_workflow_statuses WHERE workspace_id=$1 ORDER BY position", [task.workspace_id])
+        : await client.query<{ id: string; name: string }>("SELECT id,name FROM stash_workflow_statuses WHERE project_id=$1 AND archived=FALSE ORDER BY position", [projectId]);
+      return { recipes: recipes.rows.map(automationRecipeFromRow), transitions: transitions.rows.map(automationTransitionFromRow), availableStatuses: statuses.rows };
+    });
+  }
+
+  async enableAutomation(memberId: string, projectId: string, trigger: AutomationTrigger, targetStatusId: string) {
+    return this.kernel.transaction(async (client) => { await this.prepareAutomations(client);
+      const access = await this.projectWorkflowAccess(client, memberId, projectId, true); if (access !== "member") return access;
+      const status = await client.query<{ name: string; canonical: boolean }>(`SELECT status.name,FALSE canonical FROM stash_workflow_statuses status
+        WHERE status.id=$1 AND status.project_id=$2 AND status.archived=FALSE UNION ALL SELECT status.name,TRUE canonical
+        FROM stash_workspace_workflow_statuses status JOIN stash_projects project ON project.workspace_id=status.workspace_id
+        WHERE status.id=$1 AND project.id=$2`, [targetStatusId, projectId]);
+      if (!status.rowCount) return "invalid_status" as const;
+      const canonical = status.rows[0]!.canonical;
+      const result = await client.query<any>(`INSERT INTO stash_automation_recipes(id,project_id,trigger,target_status_id,workspace_target_status_id,created_by_account_id,created_at)
+        VALUES($1,$2,$3,$4,$5,$6,now()) ON CONFLICT(project_id,trigger) DO UPDATE SET target_status_id=EXCLUDED.target_status_id,
+        workspace_target_status_id=EXCLUDED.workspace_target_status_id,enabled=TRUE,created_by_account_id=EXCLUDED.created_by_account_id,
+        created_at=EXCLUDED.created_at RETURNING *`, [randomUUID(), projectId, trigger, canonical ? null : targetStatusId, canonical ? targetStatusId : null, memberId]);
+      return { status: "enabled" as const, recipe: automationRecipeFromRow({ ...result.rows[0], target_status_id: targetStatusId, target_status_name: status.rows[0]!.name }) };
+    });
+  }
+
+  async reverseAutomation(memberId: string, projectId: string, taskKey: string, transitionId: string) {
+    return this.kernel.transaction(async (client) => { await this.prepareAutomations(client);
+      const access = await this.projectWorkflowAccess(client, memberId, projectId, true); if (access !== "member") return access;
+      const row = (await client.query<any>(`SELECT transition.*,
+        COALESCE(workspace_before.id,legacy_before.id) before_status_id,COALESCE(workspace_after.id,legacy_after.id) after_status_id,
+        COALESCE(workspace_before.name,legacy_before.name) before_status_name,COALESCE(workspace_after.name,legacy_after.name) after_status_name,
+        task.workflow_status_id,task.workspace_workflow_status_id,task.workspace_id FROM stash_automation_transitions transition
+        JOIN stash_tasks task ON task.id=transition.task_id LEFT JOIN stash_workflow_statuses legacy_before ON legacy_before.id=transition.before_status_id
+        LEFT JOIN stash_workflow_statuses legacy_after ON legacy_after.id=transition.after_status_id
+        LEFT JOIN stash_workspace_workflow_statuses workspace_before ON workspace_before.id=transition.workspace_before_status_id
+        LEFT JOIN stash_workspace_workflow_statuses workspace_after ON workspace_after.id=transition.workspace_after_status_id
+        WHERE transition.id=$1 AND transition.project_id=$2 AND (task.task_key=$3 OR EXISTS(SELECT 1 FROM stash_task_projects association
+          WHERE association.task_id=task.id AND association.project_id=$2 AND association.task_key=$3) OR EXISTS(SELECT 1 FROM stash_task_key_aliases alias
+          WHERE alias.task_id=task.id AND alias.project_id=$2 AND alias.task_key=$3)) FOR UPDATE OF transition,task`, [transitionId, projectId, taskKey])).rows[0];
+      if (!row) return "not_found" as const;
+      if (row.reversed_at) return { status: "reversed" as const, transition: automationTransitionFromRow(row) };
+      const canonical = row.workspace_after_status_id !== null;
+      if ((row.workspace_workflow_status_id ?? row.workflow_status_id) !== row.after_status_id) return "conflict" as const;
+      const before = (await client.query<any>(taskPlanningSelectById, [row.task_id, memberId])).rows[0];
+      await client.query(`UPDATE stash_tasks SET workflow_status_id=CASE WHEN $3 THEN workflow_status_id ELSE $2 END,
+        workspace_workflow_status_id=CASE WHEN $3 THEN $2 ELSE workspace_workflow_status_id END,revision=revision+1,
+        field_revisions=jsonb_set(field_revisions,'{statusId}',to_jsonb(revision+1),true) WHERE id=$1`, [row.task_id, row.before_status_id, canonical]);
+      const reversedAt = new Date().toISOString();
+      await client.query("UPDATE stash_automation_transitions SET reversed_at=$2,reversed_by_account_id=$3 WHERE id=$1", [transitionId, reversedAt, memberId]);
+      const saved = (await client.query<any>(taskPlanningSelectById, [row.task_id, memberId])).rows[0]; const after = readModel(saved);
+      await this.hooks.recordProjection(client, projection(saved));
+      await this.hooks.recordAutomationActivity(client, memberId, row.workspace_id, row.task_id, "automation_status_transition_reversed", readModel(before), after,
+        { kind: "member", automationId: row.automation_id, signalId: row.signal_id });
+      return { status: "reversed" as const, transition: automationTransitionFromRow({ ...row, reversed_at: reversedAt }) };
+    });
+  }
+
+  async applySignalAutomations(signal: { id: string; trigger?: AutomationTrigger }, candidates: ReadonlyArray<AutomationCandidate>) {
+    if (!signal.trigger) return { failed: false, notifications: [] };
+    const notifications: AutomationFailureNotification[] = []; let failed = false;
+    for (const candidate of candidates.filter(({ status }) => status === "confirmed")) {
+      const existing = await this.existingSignalAutomationFailureNotifications(signal.id, candidate);
+      if (existing.found) { failed = true; notifications.push(...existing.notifications); continue; }
+      let failedRun: FailedAutomationRun | undefined;
+      try {
+        await this.kernel.transaction(async (client) => { await this.prepareAutomations(client);
+          const row = (await client.query<any>(`SELECT recipe.id AS automation_id,
+            COALESCE(recipe.workspace_target_status_id,recipe.target_status_id) target_status_id,
+            recipe.workspace_target_status_id IS NOT NULL canonical_status,recipe.created_by_account_id,
+            configurer.name AS created_by_name,task.*,COALESCE(current_workspace.name,current_legacy.name) status_name,
+            COALESCE(current_workspace.category,current_legacy.category) status_category FROM stash_automation_recipes recipe
+            JOIN stash_tasks task ON task.id=$1 AND (task.project_id=recipe.project_id OR EXISTS(SELECT 1 FROM stash_task_projects association
+              WHERE association.task_id=task.id AND association.project_id=recipe.project_id))
+            LEFT JOIN stash_workflow_statuses current_legacy ON current_legacy.id=task.workflow_status_id
+            LEFT JOIN stash_workspace_workflow_statuses current_workspace ON current_workspace.id=task.workspace_workflow_status_id
+            JOIN stash_accounts configurer ON configurer.id=recipe.created_by_account_id
+            WHERE recipe.project_id=$2 AND recipe.trigger=$3 AND recipe.enabled=TRUE FOR UPDATE OF task,recipe`,
+          [candidate.taskId, candidate.projectId, signal.trigger])).rows[0];
+          const currentStatusId = row?.workspace_workflow_status_id ?? row?.workflow_status_id;
+          if (!row || currentStatusId === row.target_status_id) return;
+          failedRun = { automationId: row.automation_id, configuringMemberId: row.created_by_account_id,
+            configuringMemberName: row.created_by_name, workspaceId: row.workspace_id, projectId: candidate.projectId,
+            taskId: row.id, taskKey: candidate.taskKey ?? candidate.matchedKey ?? row.task_key ?? "Task", taskTitle: row.title };
+          const inserted = await client.query(`INSERT INTO stash_automation_transitions(id,automation_id,signal_id,task_id,project_id,
+            before_status_id,after_status_id,workspace_before_status_id,workspace_after_status_id,occurred_at)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,now()) ON CONFLICT(automation_id,signal_id,task_id) DO NOTHING RETURNING id`,
+          [randomUUID(), row.automation_id, signal.id, row.id, candidate.projectId, row.canonical_status ? null : currentStatusId,
+            row.canonical_status ? null : row.target_status_id, row.canonical_status ? currentStatusId : null, row.canonical_status ? row.target_status_id : null]);
+          if (!inserted.rowCount) return;
+          const before = readModel(row);
+          await client.query(`UPDATE stash_tasks SET workflow_status_id=CASE WHEN $3 THEN workflow_status_id ELSE $2 END,
+            workspace_workflow_status_id=CASE WHEN $3 THEN $2 ELSE workspace_workflow_status_id END,revision=revision+1,
+            field_revisions=jsonb_set(field_revisions,'{statusId}',to_jsonb(revision+1),true) WHERE id=$1`, [row.id, row.target_status_id, row.canonical_status]);
+          const saved = (await client.query<any>(taskPlanningSelectById, [row.id, row.created_by_account_id])).rows[0]; const after = readModel(saved);
+          await this.hooks.recordProjection(client, projection(saved));
+          await this.hooks.recordAutomationActivity(client, row.created_by_account_id, row.workspace_id, row.id, "task_status_automated", before, after,
+            { kind: "automation", automationId: row.automation_id, signalId: signal.id });
+        });
+      } catch (error) {
+        if (!failedRun) throw error;
+        failed = true; const notification = await this.recordSignalAutomationFailure(signal.id, failedRun); if (notification) notifications.push(notification);
+      }
+    }
+    return { failed, notifications };
+  }
+
+  private async recordSignalAutomationFailure(signalId: string, run: FailedAutomationRun) {
+    return this.kernel.transaction(async (client) => { await this.prepareAutomations(client);
+      const activity: ActivityRecord = { schema: "stash.activity.v1", id: randomUUID(), workspaceId: run.workspaceId,
+        object: { kind: "Task", id: run.taskId }, action: "automation_execution_failed",
+        actor: { localAccountId: run.configuringMemberId, displayName: run.configuringMemberName },
+        cause: { kind: "automation", automationId: run.automationId, signalId }, occurredAt: new Date().toISOString(),
+        before: { status: "running" }, after: { status: "failed" } };
+      const summary = `Automation failed for ${run.taskKey}: ${run.taskTitle}`;
+      const failure = (await client.query<{ activity: ActivityRecord; recipient_member_id: string; summary: string; created: boolean }>(`WITH attempted AS (
+        INSERT INTO stash_automation_failures(id,automation_id,signal_id,task_id,project_id,occurred_at,activity,recipient_member_id,summary)
+        VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9) ON CONFLICT(automation_id,signal_id,task_id) DO NOTHING
+        RETURNING activity,recipient_member_id,summary,TRUE AS created) SELECT * FROM attempted UNION ALL
+        SELECT failure.activity,failure.recipient_member_id,failure.summary,FALSE AS created FROM stash_automation_failures failure
+        WHERE failure.automation_id=$2 AND failure.signal_id=$3 AND failure.task_id=$4 AND NOT EXISTS(SELECT 1 FROM attempted)`,
+      [activity.id, run.automationId, signalId, run.taskId, run.projectId, activity.occurredAt, JSON.stringify(activity), run.configuringMemberId, summary])).rows[0]!;
+      if (failure.created) await this.hooks.persistAutomationFailureActivity(client, failure.activity);
+      return await this.canReceiveProjectNotification(client, failure.recipient_member_id, run.projectId, failure.activity.workspaceId)
+        ? { activity: failure.activity, projectId: run.projectId, memberId: failure.recipient_member_id, summary: failure.summary } : undefined;
+    });
+  }
+
+  private async existingSignalAutomationFailureNotifications(signalId: string, candidate: AutomationCandidate) {
+    return this.kernel.transaction(async (client) => { await this.prepareAutomations(client);
+      const stored = await client.query<{ activity: ActivityRecord; recipient_member_id: string; summary: string }>(`SELECT activity,recipient_member_id,summary
+        FROM stash_automation_failures WHERE signal_id=$1 AND task_id=$2 AND project_id=$3`, [signalId, candidate.taskId, candidate.projectId]);
+      const notifications: AutomationFailureNotification[] = [];
+      for (const failure of stored.rows) if (await this.canReceiveProjectNotification(client, failure.recipient_member_id, candidate.projectId, failure.activity.workspaceId))
+        notifications.push({ activity: failure.activity, projectId: candidate.projectId, memberId: failure.recipient_member_id, summary: failure.summary });
+      return { found: Boolean(stored.rowCount), notifications };
+    });
+  }
+
+  private async projectWorkflowAccess(client: PostgresQueryable, memberId: string, projectId: string, lock: boolean) {
+    const project = await client.query<{ workspace_id: string }>(`SELECT project.workspace_id FROM stash_projects project WHERE project.id=$1${lock ? " FOR UPDATE" : ""}`, [projectId]);
+    if (!project.rowCount) return "not_found" as const;
+    const writable = await client.query(`SELECT 1 FROM stash_workspaces workspace WHERE workspace.id=$1 AND
+      ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR (workspace.owner_type='organization' AND EXISTS
+      (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2)))`,
+    [project.rows[0]!.workspace_id, memberId]);
+    return writable.rowCount ? "member" as const : "forbidden" as const;
+  }
+
+  private async canReceiveProjectNotification(client: PostgresQueryable, memberId: string, projectId: string, workspaceId: string) {
+    const access = await client.query(`SELECT 1 FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
+      WHERE project.id=$1 AND workspace.id=$2 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$3) OR
+        (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$3)))`, [projectId, workspaceId, memberId]);
+    return Boolean(access.rowCount);
+  }
+}
+
+function automationRecipeFromRow(row: any): AutomationRecipe {
+  return { id: row.id, trigger: row.trigger, targetStatus: { id: row.target_status_id, name: row.target_status_name }, enabled: row.enabled };
+}
+function automationTransitionFromRow(row: any): AutomationTransition {
+  return { id: row.id, automationId: row.automation_id, signalId: row.signal_id,
+    before: { id: row.before_status_id, name: row.before_status_name }, after: { id: row.after_status_id, name: row.after_status_name },
+    occurredAt: new Date(row.occurred_at).toISOString(), ...(row.reversed_at ? { reversedAt: new Date(row.reversed_at).toISOString() } : {}) };
 }
 
 function notificationFromRow(row: any): NotificationDelivery {

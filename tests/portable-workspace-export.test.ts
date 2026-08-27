@@ -237,14 +237,14 @@ describe("PostgreSQL readable export wiring", { skip: postgresUrl ? false : "STA
       assert.equal(moved.status, "moved");
       const samePath = await noteLinks.move(ownerId, privateNote.note.id, { expectedRevision: 2, path: "private/roadmap.md" });
       assert.equal(samePath.status, "unchanged"); assert.equal(samePath.location.revision, 2);
-      const tasks = new TaskService(database, database);
+      const tasks = new TaskService(database.workPlanningRepositories(), database);
       const visibleBlockKey = visibleNote.note.document.blocks[0]?.blockKey; const privateBlockKey = privateNote.note.document.blocks[0]?.blockKey;
       assert.ok(visibleBlockKey); assert.ok(privateBlockKey);
       await tasks.createFromBlock(ownerId, visibleNote.note.id, visibleBlockKey,
         { projectId: firstProject.project.id, title: "Visible Task" });
       await tasks.createFromBlock(ownerId, privateNote.note.id, privateBlockKey,
         { projectId: secondProject.project.id, title: "Private Task" });
-      const boards = new BoardService(database);
+      const boards = new BoardService(database.workPlanningRepositories());
       const visibleBoard = await boards.create(ownerId, firstProject.project.id, { name: "Visible board", groupBy: "status" });
       const privateBoard = await boards.create(ownerId, secondProject.project.id, { name: "Private board", groupBy: "priority" });
       assert.equal(visibleBoard.status, "created"); assert.equal(privateBoard.status, "created");

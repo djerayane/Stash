@@ -50,7 +50,7 @@ test("development adapters resolve canonical active keys and aliases and automat
 
     const workflow=await tasks.workflow(ownerId,workspace.workspace.id); assert.equal(workflow.status,"found"); if(workflow.status!=="found")return;
     const started=workflow.workflow.statuses.find(({category})=>category==="started")!;
-    const automations=new AutomationService(store.database);
+    const automations=new AutomationService(store.database.workPlanningRepositories());
     await automations.enable(ownerId,beta.project.id,{trigger:"branch_created",targetStatusId:started.id});
     const signal={id:"33333333-3333-4333-8333-333333333333",deliveryId:"canonical",installationId:42,repositoryId:"987",
       kind:"branch" as const,providerId:"branch",url:"https://github.com/acme/stash/tree/BET-1",label:betaKey,occurredAt:new Date().toISOString(),trigger:"branch_created" as const};

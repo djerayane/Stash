@@ -41,6 +41,14 @@ test("redesigned capability persistence remains implemented by focused kernel ad
   for (const method of ["triageNote", "applyTriageChange", "organizeInboxNote", "archiveInboxNote", "linkInboxNote", "createTaskFromInbox"])
     assert.match(knowledgeAuthoring, new RegExp(`\\b${method}\\(`));
   assert.doesNotMatch(database, /\b(?:triageNote|applyTriageChange|organizeInboxNote|archiveInboxNote|linkInboxNote|createTaskFromInbox)\(/);
+
+  const workPlanning = await readFile(new URL(
+    "../../src/work-planning/postgres-work-planning-repositories.ts",
+    import.meta.url,
+  ), "utf8");
+  for (const method of ["listAutomationState", "enableAutomation", "reverseAutomation", "applySignalAutomations"])
+    assert.match(workPlanning, new RegExp(`\\b${method}\\(`));
+  assert.doesNotMatch(database, /\b(?:listAutomationState|enableAutomation|reverseAutomation|applySignalAutomations)\(/);
 });
 
 test("the Instance exposes capability-owned public routes without registering legacy duplicates", async () => {

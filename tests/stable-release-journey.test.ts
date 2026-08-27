@@ -41,15 +41,15 @@ describe("first stable release journey through a running Instance", () => {
       ownerName: "Release Owner", ownerEmail: "owner@release.test", passwordHash: "fixture-only", role: "Owner" });
     const attachments = new LocalAttachmentStorage(store.paths.attachments);
     const notifications = new NotificationService(store.database.workPlanningRepositories());
-    const automations = new AutomationService(store.database, notifications);
+    const automations = new AutomationService(store.database.workPlanningRepositories(), notifications);
     const githubApp: GitHubApp = { async inspectRepository(input) { return { installationId: input.installationId,
       repositoryId: "987", repositoryUrl: "https://github.com/acme/stash" }; }, async verifyRepository() {} };
     const connections = new RepositoryConnectionService(store.database.developmentIntegrationRepositories(), githubApp);
     const instance = await startInstance({ database: store.database, host: "127.0.0.1", port: 0, instanceAdminToken: "operator",
       memberAccess: { async authenticateBearer(value) { return value === bearer ? { accountId: ownerId, sessionId: "release-session" } : undefined; } },
       workspaceProjects: new WorkspaceProjectService(store.database), notes: new NoteService(store.database.knowledgeAuthoringRepositories()),
-      mobileCaptures: new MobileCaptureService(store.database.knowledgeAuthoringRepositories()), tasks: new TaskService(store.database, store.database),
-      projectWorkflows: new ProjectWorkflowService(store.database), boards: new BoardService(store.database),
+      mobileCaptures: new MobileCaptureService(store.database.knowledgeAuthoringRepositories()), tasks: new TaskService(store.database.workPlanningRepositories(), store.database),
+      projectWorkflows: new ProjectWorkflowService(store.database.workPlanningRepositories()), boards: new BoardService(store.database.workPlanningRepositories()),
       repositoryConnections: connections, githubSignals: new GitHubSignalService(store.database.developmentIntegrationRepositories(), webhookSecret, automations),
       automations, activities: new ActivityService(store.database.knowledgeAuthoringRepositories()), portableWorkspaceExports: new PortableWorkspaceExportService(store.database.knowledgeAuthoringRepositories(), attachments) });
     cleanups.push(async () => { await instance.close(); await store.close(); await rm(root, { recursive: true, force: true }); });
