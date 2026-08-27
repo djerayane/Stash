@@ -117,7 +117,7 @@ describe("Project creation permission", () => {
     assert.equal(await service.canCreateProject(ownerId, workspaceId), true);
     assert.equal(await service.canCreateProject(adminId, workspaceId), true);
     assert.equal(await service.canCreateProject(memberId, workspaceId), false);
-    const roles = new OrganizationRoleService(store.database);
+    const roles = new OrganizationRoleService(store.database.identityAccessRepositories());
     const created = await roles.createCustom(organizationId, ownerId, { name: "Project lead", permissions: ["create_project"] });
     assert.equal(created.result, "created");
     const customRoleId = created.role.id;

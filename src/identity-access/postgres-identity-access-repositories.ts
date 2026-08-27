@@ -2,6 +2,8 @@ import type { AccountRegistrationRepository, RegistrationRecord } from "../accou
 import type { AuthenticationSecretCodec } from "../authentication-secrets.js";
 import type { AccountAuthenticationRecord, PasswordAuthRepository, SessionRecord } from "../password-auth.js";
 import type { PostgresKernel, PostgresQueryable } from "../instance-operations/storage/postgres-kernel.js";
+import type { OidcAuthRepository, OidcIdentityKey, OidcIdentityRecord, OidcOrganizationConfiguration } from "../oidc-auth.js";
+import type { BuiltInOrganizationRole } from "../organization-roles.js";
 import type { MemberLocalizationPreferences, MemberLocalizationRepository } from "../member-localization.js";
 import type { PortableIdentity, PortableProjectProjection, PortableWorkspaceProjection, WorkspaceProjectRecord,
   WorkspaceProjectRepository, WorkspaceRecord } from "../workspaces-projects.js";
@@ -11,7 +13,7 @@ interface SessionRow { id: string; account_id: string; token_hash: string; creat
 
 /** PostgreSQL persistence owned by the Identity Access capability. */
 export class PostgresIdentityAccessRepositories implements PasswordAuthRepository, AccountRegistrationRepository,
-  MemberLocalizationRepository, WorkspaceProjectRepository {
+  MemberLocalizationRepository, WorkspaceProjectRepository, OidcAuthRepository {
   constructor(
     private readonly kernel: PostgresKernel,
     private readonly secrets: AuthenticationSecretCodec,
@@ -157,6 +159,51 @@ export class PostgresIdentityAccessRepositories implements PasswordAuthRepositor
   findPortableMemberIdentity(memberId: string): Promise<PortableIdentity | undefined> {
     return this.dependencies.findPortableMemberIdentity(memberId);
   }
+
+  async findOidcIdentity(key: OidcIdentityKey): Promise<OidcIdentityRecord | undefined> {
+    await this.prepareOidc();
+    const result = await this.kernel.query<{ id:string;name:string;email:string;subject_secret:string }>(`
+      SELECT account.id,account.name,account.email,identity.subject_secret FROM stash_oidc_identities identity
+      JOIN stash_accounts account ON account.id=identity.account_id
+      JOIN stash_organization_memberships membership ON membership.account_id=account.id AND membership.organization_id=identity.organization_id
+      WHERE identity.organization_id=$1 AND identity.issuer=$2 AND identity.subject_lookup=$3`,
+    [key.organizationId,key.issuer,this.oidcIdentityLookup(key)]);
+    const row=result.rows[0];
+    if(!row||this.secrets.decrypt(row.subject_secret)!==key.subject)return undefined;
+    return {accountId:row.id,name:row.name,email:row.email};
+  }
+
+  async organizationRole(organizationId:string,accountId:string):Promise<BuiltInOrganizationRole|undefined>{
+    return (await this.kernel.query<{role:BuiltInOrganizationRole}>(
+      "SELECT role FROM stash_organization_memberships WHERE organization_id=$1 AND account_id=$2",[organizationId,accountId])).rows[0]?.role;
+  }
+
+  async findOidcConfiguration(organizationId:string):Promise<OidcOrganizationConfiguration|undefined>{
+    await this.prepareOidc();const row=(await this.kernel.query<{organization_id:string;issuer:string;client_id:string;client_secret:string}>(
+      "SELECT organization_id,issuer,client_id,client_secret FROM stash_oidc_configurations WHERE organization_id=$1",[organizationId])).rows[0];
+    return row?{organizationId:row.organization_id,issuer:row.issuer,clientId:row.client_id,clientSecret:this.secrets.decrypt(row.client_secret)}:undefined;
+  }
+
+  async saveOidcConfiguration(configuration:OidcOrganizationConfiguration):Promise<void>{await this.prepareOidc();await this.kernel.query(`
+    INSERT INTO stash_oidc_configurations(organization_id,issuer,client_id,client_secret) VALUES($1,$2,$3,$4)
+    ON CONFLICT(organization_id) DO UPDATE SET issuer=EXCLUDED.issuer,client_id=EXCLUDED.client_id,client_secret=EXCLUDED.client_secret`,
+  [configuration.organizationId,configuration.issuer,configuration.clientId,this.secrets.encrypt(configuration.clientSecret)]);}
+
+  async linkOidcIdentity(key:OidcIdentityKey,accountId:string):Promise<boolean>{await this.prepareOidc();const result=await this.kernel.query(`
+    INSERT INTO stash_oidc_identities(organization_id,issuer,subject_lookup,subject_secret,account_id)
+    SELECT $1,$3,$4,$5,account_id FROM stash_organization_memberships WHERE organization_id=$1 AND account_id=$2
+    ON CONFLICT(organization_id,issuer,account_id) DO UPDATE SET subject_lookup=EXCLUDED.subject_lookup,subject_secret=EXCLUDED.subject_secret`,
+  [key.organizationId,accountId,key.issuer,this.oidcIdentityLookup(key),this.secrets.encrypt(key.subject)]);return result.rowCount===1;}
+
+  async prepareOidc(client:PostgresQueryable=this.kernel):Promise<void>{await this.dependencies.prepareRegistration(client);await client.query(`
+    CREATE TABLE IF NOT EXISTS stash_oidc_configurations(organization_id UUID PRIMARY KEY REFERENCES stash_organizations(id) ON DELETE CASCADE,
+      issuer TEXT NOT NULL,client_id TEXT NOT NULL,client_secret TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS stash_oidc_identities(organization_id UUID NOT NULL REFERENCES stash_organizations(id) ON DELETE CASCADE,
+      issuer TEXT NOT NULL,subject_lookup TEXT NOT NULL,subject_secret TEXT NOT NULL,account_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
+      PRIMARY KEY(organization_id,issuer,subject_lookup),UNIQUE(organization_id,issuer,account_id))`);}
+
+  private oidcIdentityLookup(key:OidcIdentityKey):string{return this.secrets.blindIndex(
+    `oidc-identity-v1:${JSON.stringify([key.organizationId,key.issuer,key.subject])}`);}
 
   async prepareWorkspaceProjects(client:PostgresQueryable):Promise<void>{await this.dependencies.prepareRegistration(client);}
   async prepareLocalization(client:PostgresQueryable):Promise<void>{await this.prepareWorkspaceProjects(client);await client.query(`CREATE TABLE IF NOT EXISTS stash_member_localization_preferences

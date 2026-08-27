@@ -244,8 +244,8 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
         const invitation = await invitations.create(organizationId, ownerId, { kind: "member", role }); assert.equal(invitation.status, "created");
         if (invitation.status === "created") assert.equal((await invitations.accept(id, { token: invitation.token }) as { status: string }).status, "accepted");
       }
-      await source.database.saveOidcConfiguration({ organizationId, issuer: "https://identity.example.test", clientId: "stash-migration", clientSecret: "oidc-secret" });
-      assert.equal(await source.database.linkOidcIdentity({ organizationId, issuer: "https://identity.example.test", subject: "ada-subject" }, ownerId), true);
+      await source.database.identityAccessRepositories().saveOidcConfiguration({ organizationId, issuer: "https://identity.example.test", clientId: "stash-migration", clientSecret: "oidc-secret" });
+      assert.equal(await source.database.identityAccessRepositories().linkOidcIdentity({ organizationId, issuer: "https://identity.example.test", subject: "ada-subject" }, ownerId), true);
       const importedWorkspaceId = randomUUID(); const importedNoteId = randomUUID(); const importedAccountId = randomUUID(); const importId = randomUUID();
       const importedActor = { localAccountId: importedAccountId, displayName: "Imported Author" };
       const portable = await new PortableWorkspaceExportService({ async readExportSnapshot() { return { status: "found" as const, snapshot: {
@@ -296,10 +296,10 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
       try { await migrated.verifyConnection();
         for (const [email, id, role] of [["ada@example.test", ownerId, "Owner"], ["admin@example.test", adminId, "Admin"], ["member@example.test", memberId, "Member"]] as const) {
           assert.equal((await new PasswordAuthService(migrated.identityAccessRepositories()).signIn({ email, password })).member.id, id);
-          assert.equal(await migrated.organizationRole(organizationId, id), role);
+          assert.equal(await migrated.identityAccessRepositories().organizationRole(organizationId, id), role);
         }
-        assert.deepEqual(await migrated.findOidcConfiguration(organizationId), { organizationId, issuer: "https://identity.example.test", clientId: "stash-migration", clientSecret: "oidc-secret" });
-        assert.equal((await migrated.findOidcIdentity({ organizationId, issuer: "https://identity.example.test", subject: "ada-subject" }))?.accountId, ownerId);
+          assert.deepEqual(await migrated.identityAccessRepositories().findOidcConfiguration(organizationId), { organizationId, issuer: "https://identity.example.test", clientId: "stash-migration", clientSecret: "oidc-secret" });
+          assert.equal((await migrated.identityAccessRepositories().findOidcIdentity({ organizationId, issuer: "https://identity.example.test", subject: "ada-subject" }))?.accountId, ownerId);
         const pendingImported = await migrated.listPendingImportedIdentities(ownerId);
         assert.equal(pendingImported.some((identity) => identity.importId === importId && identity.sourceAccountId === importedAccountId), true);
         assert.equal((await migrated.knowledgeAuthoringRepositories().listNoteHistory(ownerId, noteId)).status, "found"); assert.equal((await migrated.knowledgeAuthoringRepositories().listWorkspaceActivity(ownerId, workspaceId)).status, "found");

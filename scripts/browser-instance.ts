@@ -515,7 +515,7 @@ const roleAuth = new PasswordAuthService(roleStore.database.identityAccessReposi
 const roleWorkPlanning = roleStore.database.workPlanningRepositories();
 const roleTasks = new TaskService(roleWorkPlanning, roleStore.database.identityAccessRepositories());
 const roleProjects = new WorkspaceProjectService(roleStore.database.identityAccessRepositories());
-const roleService = new OrganizationRoleService(roleStore.database);
+const roleService = new OrganizationRoleService(roleStore.database.identityAccessRepositories());
 const completedRoleSetup = new InstanceSetupService(roleStore.database.instanceSetupRepository(), { boundHost: "127.0.0.1", output() {} });
 const roleInstance = await startInstance({ database: roleStore.database, host: "127.0.0.1", port: Number.parseInt(process.env.STASH_BROWSER_ROLE_PORT ?? "4175", 10),
   instanceAdminToken: "role-admin", passwordAuth: roleAuth, memberAccess: roleAuth, organizationRoles: roleService,
