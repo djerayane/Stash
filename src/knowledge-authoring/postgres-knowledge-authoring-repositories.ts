@@ -1,5 +1,7 @@
 import type { ActivityCause } from "../activity.js";
-import type { NoteRecord, NoteRepository, PortableNoteProjection } from "../notes.js";
+import { randomUUID } from "node:crypto";
+import type { NoteRecord, NoteRepository, NoteTriageChange, NoteTriageResult, PortableNoteProjection, PortableTaskProjection, TaskCreation } from "../notes.js";
+import { initialWorkflowStatus, type ProjectWorkflow, type WorkflowStatus } from "../project-workflows.js";
 import type { AttachmentRecord, PortableAttachmentProjection } from "../attachments.js";
 import type { NoteLinkRecord, NoteLocationRecord, PortableNoteLinkStateProjection, PortableNoteLocationProjection } from "../note-links.js";
 import type { PostgresKernel, PostgresQueryable } from "../instance-operations/storage/postgres-kernel.js";
@@ -38,9 +40,118 @@ function noteFromRow(row: any): NoteRecord {
     ...(row.archived_at ? { archivedAt: new Date(row.archived_at).toISOString() } : {}) };
 }
 
+function triageObjectKind(result: NoteTriageResult): "Task" | "NoteLink" | "Note" {
+  if (result.kind === "task_created") return "Task";
+  if (result.kind === "linked") return "NoteLink";
+  return "Note";
+}
+
+function triageObjectId(result: NoteTriageResult, noteId: string): string {
+  if (result.kind === "task_created") return result.task.id;
+  if (result.kind === "linked") return result.link.id;
+  return noteId;
+}
+
 /** PostgreSQL implementation of the Knowledge Authoring persistence seam. */
 export class PostgresKnowledgeAuthoringRepositories {
   constructor(private readonly kernel: PostgresKernel, private readonly hooks: PostgresKnowledgeAuthoringHooks) {}
+
+  async triageNote(memberId: string, workspaceId: string, noteId: string, change: NoteTriageChange) {
+    return this.kernel.transaction(async (client) => {
+      await this.hooks.prepare(client);
+      const source = await client.query(`SELECT 1 FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id = note.workspace_id
+        WHERE note.id = $1 AND note.workspace_id = $2 AND note.project_id IS NULL AND note.archived_at IS NULL
+        AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $3)
+        OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $3))) FOR UPDATE`, [noteId, workspaceId, memberId]);
+      if (!source.rowCount) return { status: "note_not_found" as const };
+      const applied = await this.applyTriageChange(client, memberId, workspaceId, noteId, change);
+      if ("status" in applied) return applied;
+      for (const projection of applied.result.projections) await this.hooks.recordProjection(client,
+        triageObjectKind(applied.result), triageObjectId(applied.result, noteId), projection.schema, projection);
+      return { status: "updated" as const, result: applied.result };
+    });
+  }
+
+  private async applyTriageChange(client: PostgresQueryable, memberId: string, workspaceId: string, noteId: string,
+    change: NoteTriageChange): Promise<{ result: NoteTriageResult } | { status: "project_forbidden" | "target_note_not_found" }> {
+    switch (change.kind) {
+      case "organized": return this.organizeInboxNote(client, memberId, workspaceId, noteId, change);
+      case "archived": return this.archiveInboxNote(client, memberId, workspaceId, noteId, change);
+      case "linked": return this.linkInboxNote(client, memberId, workspaceId, noteId, change);
+      case "task_created": return this.createTaskFromInbox(client, memberId, workspaceId, noteId, change);
+    }
+  }
+
+  private async organizeInboxNote(client: PostgresQueryable, memberId: string, workspaceId: string, noteId: string,
+    change: Extract<NoteTriageChange, { kind: "organized" }>) {
+    if (!(await client.query("SELECT 1 FROM stash_projects WHERE id=$1 AND workspace_id=$2", [change.note.projectId, workspaceId])).rowCount)
+      return { status: "project_forbidden" as const };
+    const before = await client.query<any>("SELECT project_id,tags FROM stash_notes WHERE id=$1", [noteId]);
+    await client.query("UPDATE stash_notes SET project_id=$2,tags=$3::jsonb WHERE id=$1", [noteId, change.note.projectId, JSON.stringify(change.note.tags)]);
+    await this.hooks.recordDomainActivity(client, memberId, workspaceId, "Note", noteId, "note_organized",
+      { projectId: before.rows[0]?.project_id ?? null, tags: before.rows[0]?.tags ?? [] }, { projectId: change.note.projectId, tags: change.note.tags });
+    return { result: change };
+  }
+
+  private async archiveInboxNote(client: PostgresQueryable, memberId: string, workspaceId: string, noteId: string,
+    change: Extract<NoteTriageChange, { kind: "archived" }>) {
+    await client.query("UPDATE stash_notes SET archived_at=$2 WHERE id=$1", [noteId, change.note.archivedAt]);
+    await this.hooks.recordDomainActivity(client, memberId, workspaceId, "Note", noteId, "note_archived", { archivedAt: null }, { archivedAt: change.note.archivedAt });
+    return { result: change };
+  }
+
+  private async linkInboxNote(client: PostgresQueryable, memberId: string, workspaceId: string, noteId: string,
+    change: Extract<NoteTriageChange, { kind: "linked" }>) {
+    if (!(await client.query("SELECT 1 FROM stash_notes WHERE id=$1 AND workspace_id=$2", [change.link.targetNoteId, workspaceId])).rowCount)
+      return { status: "target_note_not_found" as const };
+    await client.query("INSERT INTO stash_note_links (id,workspace_id,source_note_id,target_note_id) VALUES ($1,$2,$3,$4)",
+      [change.link.id, workspaceId, noteId, change.link.targetNoteId]);
+    await this.hooks.recordDomainActivity(client, memberId, workspaceId, "NoteLink", change.link.id, "note_link_created", {}, change.link);
+    return { result: change };
+  }
+
+  private async createTaskFromInbox(client: PostgresQueryable, memberId: string, workspaceId: string, noteId: string,
+    change: Extract<NoteTriageChange, { kind: "task_created" }>) {
+    if (!(await client.query("SELECT 1 FROM stash_projects WHERE id=$1 AND workspace_id=$2", [change.task.projectId, workspaceId])).rowCount)
+      return { status: "project_forbidden" as const };
+    const task = await this.createTask(client, change.task);
+    await client.query("INSERT INTO stash_tasks (id,workspace_id,project_id,task_key,workflow_status_id,title,created_by_account_id,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+      [task.id, workspaceId, task.projectId, task.key, task.status.id, task.title, memberId, task.createdAt]);
+    await client.query("INSERT INTO stash_task_note_sources (task_id,note_id) VALUES ($1,$2)", [change.task.id, noteId]);
+    await this.hooks.recordDomainActivity(client, memberId, workspaceId, "Task", task.id, "task_created_from_inbox", {}, task);
+    return { result: { kind: "task_created" as const, task, projections: [task] as [PortableTaskProjection] } };
+  }
+
+  private async createTask(client: PostgresQueryable, draft: TaskCreation): Promise<PortableTaskProjection> {
+    await client.query("SELECT id FROM stash_projects WHERE id=$1 FOR UPDATE", [draft.projectId]);
+    await this.ensureDefaultWorkflow(client, draft.projectId);
+    const status = initialWorkflowStatus(await this.loadWorkflow(client, draft.projectId));
+    const allocation = await client.query<{ project_key: string; task_number: number }>(
+      "UPDATE stash_projects SET next_task_number=next_task_number+1 WHERE id=$1 RETURNING project_key,next_task_number-1 AS task_number", [draft.projectId]);
+    const key = allocation.rows[0]; if (!key) throw new Error("task_project_unavailable");
+    return { schema: "stash.task.v1", ...draft, key: `${key.project_key}-${key.task_number}`, status };
+  }
+
+  private async ensureDefaultWorkflow(client: PostgresQueryable, projectId: string): Promise<void> {
+    const statuses = [[randomUUID(), projectId, "Backlog", "unstarted", 0], [randomUUID(), projectId, "Ready", "unstarted", 1],
+      [randomUUID(), projectId, "In Progress", "started", 2], [randomUUID(), projectId, "In Review", "started", 3],
+      [randomUUID(), projectId, "Done", "completed", 4]] as const;
+    await client.query(`INSERT INTO stash_workflow_statuses (id,project_id,name,category,position) VALUES
+      ${statuses.map((_, index) => `($${index * 5 + 1},$${index * 5 + 2},$${index * 5 + 3},$${index * 5 + 4},$${index * 5 + 5})`).join(",")}
+      ON CONFLICT DO NOTHING`, statuses.flat());
+    if ((await client.query("UPDATE stash_projects SET workflow_revision=1 WHERE id=$1 AND workflow_revision=0 RETURNING id", [projectId])).rowCount) {
+      const workflow = await this.loadWorkflow(client, projectId);
+      await this.hooks.recordProjection(client, "Workflow", projectId, workflow.schema, workflow);
+    }
+  }
+
+  private async loadWorkflow(client: PostgresQueryable, projectId: string): Promise<ProjectWorkflow> {
+    const project = await client.query<{ workflow_revision: number }>("SELECT workflow_revision FROM stash_projects WHERE id=$1", [projectId]);
+    const statuses = await client.query<{ id:string; name:string; category:WorkflowStatus["category"]; position:number; archived:boolean }>(
+      "SELECT id,name,category,position,archived FROM stash_workflow_statuses WHERE project_id=$1 ORDER BY position,id", [projectId]);
+    return { schema: "stash.workflow.v1", projectId, revision: project.rows[0]!.workflow_revision, statuses: statuses.rows };
+  }
 
   async createNote(
     memberId: string,
