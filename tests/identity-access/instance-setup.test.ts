@@ -331,7 +331,7 @@ describe("fresh Instance setup", () => {
       { source: { kind: "tasks", workspaceId: result.workspaceId }, presentation: "table",
         filters: [{ propertyId: "task:title", operator: "contains", value: "Shape" }], sorts: [], layout: {} });
 
-    const exported = await new PortableWorkspaceExportService(store.database, emptyAttachmentStorage)
+    const exported = await new PortableWorkspaceExportService(store.database.knowledgeAuthoringRepositories(), emptyAttachmentStorage)
       .export(sessionBody.member.id, result.workspaceId);
     assert.equal(exported.status, "exported");
     if (exported.status !== "exported") throw new Error("fresh Workspace export failed");
@@ -390,10 +390,10 @@ describe("fresh Instance setup", () => {
     await destination.database.createFirstOrganizationOwner({ organizationId: "54545454-5454-4454-8454-545454545454",
       organizationName: "Destination", ownerId: destinationOwner, ownerName: "Grace", ownerEmail: "grace@example.test",
       passwordHash: "not-used", role: "Owner", workspaceId: "55555555-5555-4555-8555-555555555555", workspaceName: "Destination" });
-    const imported = await new PortableWorkspaceImportService(destination.database, emptyAttachmentStorage)
+    const imported = await new PortableWorkspaceImportService(destination.database.knowledgeAuthoringRepositories(), emptyAttachmentStorage)
       .import("56565656-5656-4656-8656-565656565656", destinationOwner, exported.archive);
     assert.equal(imported.status, "imported");
-    const importedSnapshot = await destination.database.readExportSnapshot(destinationOwner, result.workspaceId);
+    const importedSnapshot = await destination.database.knowledgeAuthoringRepositories().readExportSnapshot(destinationOwner, result.workspaceId);
     assert.equal(importedSnapshot.status, "found");
     if (importedSnapshot.status !== "found") throw new Error("round-trip Workspace missing");
     assert.deepEqual(importedSnapshot.snapshot.tasks.map((task) => ({ projectId: task.projectId, key: task.key, status: task.status.name })), [
@@ -404,7 +404,7 @@ describe("fresh Instance setup", () => {
     const importedOwnerDocument = await destination.upgradeDatabase.query<{ document: { blocks: Array<{ id?: string }> } }>(
       "SELECT document FROM stash_notes WHERE id=$1", [planningNode.id]);
     assert.ok(importedOwnerDocument.rows[0]?.document.blocks.some(({ id }) => id === tutorialBody.tutorial.viewBlock.blockId));
-    assert.equal((await new PortableWorkspaceExportService(destination.database, emptyAttachmentStorage)
+    assert.equal((await new PortableWorkspaceExportService(destination.database.knowledgeAuthoringRepositories(), emptyAttachmentStorage)
       .export(destinationOwner, result.workspaceId)).status, "exported");
   });
 });

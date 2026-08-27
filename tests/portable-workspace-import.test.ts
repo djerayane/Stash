@@ -414,7 +414,7 @@ describe("PostgreSQL Portable Workspace import", { skip: postgresUrl ? false : "
       instance = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin",
         memberAccess: { async authenticateBearer(value) { return value === "Bearer owner" ? { accountId: ownerId, sessionId: "owner" }
           : value === "Bearer local-guest" ? { accountId: localGuestId, sessionId: "local-guest" } : undefined; } },
-        portableWorkspaceImports: new PortableWorkspaceImportService(database, storage), portableWorkspaceExports: new PortableWorkspaceExportService(database, storage) });
+        portableWorkspaceImports: new PortableWorkspaceImportService(database.knowledgeAuthoringRepositories(), storage), portableWorkspaceExports: new PortableWorkspaceExportService(database.knowledgeAuthoringRepositories(), storage) });
       const projectId = "44444444-4444-4444-8444-444444444444"; const statusId = "55555555-5555-4555-8555-555555555555";
       const taskId = "66666666-6666-4666-8666-666666666666"; const boardId = "77777777-7777-4777-8777-777777777777";
       const departedTaskId = "12121212-1212-4212-8212-121212121212";

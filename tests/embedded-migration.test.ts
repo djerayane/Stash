@@ -258,7 +258,7 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
       } }; } }).export(ownerId, importedWorkspaceId);
       assert.equal(portable.status, "exported"); if (portable.status !== "exported") throw new Error("portable export failed");
       for (const secret of [sourceKey, destinationKey]) assert.equal(Buffer.from(portable.archive).includes(Buffer.from(secret)), false);
-      assert.equal((await new PortableWorkspaceImportService(source.database, new LocalAttachmentStorage(source.paths.attachments))
+      assert.equal((await new PortableWorkspaceImportService(source.database.knowledgeAuthoringRepositories(), new LocalAttachmentStorage(source.paths.attachments))
         .import(importId, ownerId, portable.archive)).status, "imported");
       assert.equal((await source.database.listPendingImportedIdentities(ownerId))[0]?.sourceAccountId, importedAccountId);
       const workspaceId = randomUUID(); const noteId = randomUUID();
@@ -269,7 +269,7 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
         tags: ["migration"], createdByMemberId: ownerId, createdAt: "2026-08-24T09:30:00.000Z" }, { schema: "stash.note.v1", id: noteId,
         workspaceId, content: "Migrated history", tags: ["migration"], createdAt: "2026-08-24T09:30:00.000Z", createdBy: { localAccountId: ownerId, displayName: "Ada" } });
       const attachmentBytes = Buffer.from([0, 1, 2, 253, 254, 255]);
-      const attachment = await new AttachmentService(source.database, new LocalAttachmentStorage(source.paths.attachments)).create(ownerId, workspaceId,
+      const attachment = await new AttachmentService(source.database.knowledgeAuthoringRepositories(), new LocalAttachmentStorage(source.paths.attachments)).create(ownerId, workspaceId,
         { filename: "migration.bin", contentType: "application/octet-stream", source: "upload", content: attachmentBytes });
       assert.equal(attachment.status, "created");
       await writeFile(join(source.paths.configuration, "runtime.json"), `${JSON.stringify({ publicOrigin: "https://stash.example.test", registration: false })}\n`, { mode: 0o600 });
@@ -303,7 +303,7 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
         const pendingImported = await migrated.listPendingImportedIdentities(ownerId);
         assert.equal(pendingImported.some((identity) => identity.importId === importId && identity.sourceAccountId === importedAccountId), true);
         assert.equal((await migrated.knowledgeAuthoringRepositories().listNoteHistory(ownerId, noteId)).status, "found"); assert.equal((await migrated.knowledgeAuthoringRepositories().listWorkspaceActivity(ownerId, workspaceId)).status, "found");
-        if (attachment.status === "created") assert.deepEqual((await new AttachmentService(migrated, new LocalAttachmentStorage(destinationAttachments))
+        if (attachment.status === "created") assert.deepEqual((await new AttachmentService(migrated.knowledgeAuthoringRepositories(), new LocalAttachmentStorage(destinationAttachments))
           .get(ownerId, attachment.record.id))?.content, attachmentBytes);
         assert.deepEqual(JSON.parse(await readFile(join(destinationConfiguration, "runtime.json"), "utf8")), { publicOrigin: "https://stash.example.test", registration: false });
         assert.equal(await migrated.findEmailRecoveryAccount(deriveEmailRecoveryLookup(recoveryToken), "2026-08-24T10:00:00.000Z"), ownerId);
@@ -505,7 +505,7 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
           organizationName: "CLI", ownerId, ownerName: "CLI Owner", ownerEmail: `${mode}@example.test`, passwordHash: "cli-password", role: "Owner" });
         await source.database.createWorkspace({ id: workspaceId, name: "CLI Workspace", owner: { type: "organization", id: organizationId }, createdByMemberId: ownerId },
           { localAccountId: ownerId, displayName: "CLI Owner" });
-        const portable = await new PortableWorkspaceExportService(source.database, new LocalAttachmentStorage(source.paths.attachments)).export(ownerId, workspaceId);
+        const portable = await new PortableWorkspaceExportService(source.database.knowledgeAuthoringRepositories(), new LocalAttachmentStorage(source.paths.attachments)).export(ownerId, workspaceId);
         assert.equal(portable.status, "exported"); if (portable.status === "exported") for (const secret of [sourceKey, destinationKey])
           assert.equal(Buffer.from(portable.archive).includes(Buffer.from(secret)), false);
         await writeFile(join(source.paths.attachments, "audit.txt"), "migration audit Attachment");

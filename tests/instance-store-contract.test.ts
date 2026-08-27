@@ -82,9 +82,9 @@ function contract(adapter: ContractAdapter): void {
         const jobId = randomUUID(); await database.enqueueEmailRecovery({ id: jobId, protectedDelivery: "protected", createdAt });
         const claimed = await database.claimEmailRecoveryDelivery(randomUUID(), "2026-08-24T10:10:00.000Z");
         assert.equal(claimed?.job.id, jobId); assert.equal(await database.completeEmailRecoveryDelivery(claimed!.claim), true);
-        const exported = await new PortableWorkspaceExportService(database).export(ownerId, workspaceId);
+        const exported = await new PortableWorkspaceExportService(database.knowledgeAuthoringRepositories()).export(ownerId, workspaceId);
         assert.equal(exported.status, "exported"); if (exported.status === "exported") assert.ok(exported.archive.byteLength > 0);
-        assert.equal((await new PortableWorkspaceExportService(database).export(outsiderId, workspaceId)).status, "workspace_forbidden");
+        assert.equal((await new PortableWorkspaceExportService(database.knowledgeAuthoringRepositories()).export(outsiderId, workspaceId)).status, "workspace_forbidden");
       } finally { await harness.close(); }
     });
 
@@ -132,7 +132,7 @@ function contract(adapter: ContractAdapter): void {
         await harness.database.knowledgeAuthoringRepositories().appendNoteCollaboration(ownerId, noteId, Y.encodeStateAsUpdate(collaboration)); collaboration.destroy();
         const jobId = randomUUID(); await harness.database.enqueueEmailRecovery({ id: jobId, protectedDelivery: "restored-job", createdAt });
         const attachmentBytes = Buffer.from("restored Attachment bytes");
-        const attachment = await new AttachmentService(harness.database, new LocalAttachmentStorage(harness.attachmentRoot))
+        const attachment = await new AttachmentService(harness.database.knowledgeAuthoringRepositories(), new LocalAttachmentStorage(harness.attachmentRoot))
           .create(ownerId, workspaceId, { filename: "parity.txt", contentType: "text/plain", source: "upload", content: attachmentBytes });
         assert.equal(attachment.status, "created"); if (attachment.status !== "created") return;
         const backupPath = join(harness.backupRoot, "contract");
@@ -150,7 +150,7 @@ function contract(adapter: ContractAdapter): void {
         assert.equal((await restored.knowledgeAuthoringRepositories().loadNoteCollaboration(ownerId, noteId))?.sequence, 1);
         assert.equal((await restored.knowledgeAuthoringRepositories().searchWorkspace(ownerId, workspaceId, { q: "Restored" })).status, "found");
         assert.equal((await restored.claimEmailRecoveryDelivery(randomUUID(), "2026-08-24T10:10:00.000Z"))?.job.id, jobId);
-        assert.deepEqual((await new AttachmentService(restored, new LocalAttachmentStorage(harness.attachmentRoot)).get(ownerId, attachment.record.id))?.content, attachmentBytes);
+        assert.deepEqual((await new AttachmentService(restored.knowledgeAuthoringRepositories(), new LocalAttachmentStorage(harness.attachmentRoot)).get(ownerId, attachment.record.id))?.content, attachmentBytes);
       } finally { await harness.close(); }
     });
 

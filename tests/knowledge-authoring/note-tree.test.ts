@@ -239,7 +239,7 @@ describe("Note Tree", () => {
     assert.equal(restored.nodes.find(({ id }) => id === evidenceId)?.parentId, roadmapId);
     assert.equal(restored.nodes.find(({ id }) => id === questionsId)?.parentId, roadmapId);
 
-    const exported = await store.database.readExportSnapshot(ownerId, workspaceId);
+    const exported = await store.database.knowledgeAuthoringRepositories().readExportSnapshot(ownerId, workspaceId);
     assert.equal(exported.status, "found");
     if (exported.status !== "found") return;
     const locations = new Map(exported.snapshot.noteLocations.map((location) => [location.noteId, location]));
