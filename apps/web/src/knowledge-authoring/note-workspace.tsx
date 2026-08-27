@@ -14,6 +14,7 @@ export function NoteWorkspace({ noteId, token, children, fetcher = globalThis.fe
   const [permanentlyRemoved, setPermanentlyRemoved] = useState(false);
   const toggleRef = useRef<HTMLButtonElement>(null);
   const removalStatusRef = useRef<HTMLParagraphElement>(null);
+  useEffect(() => { setRemovedState(undefined); setPermanentlyRemoved(false); }, [noteId]);
   useEffect(() => { if (permanentlyRemoved) removalStatusRef.current?.focus(); }, [permanentlyRemoved]);
   const client = useQueryClient();
   const context = useQuery({ queryKey: ["note-context", noteId], retry: false, queryFn: async () => {
@@ -81,7 +82,7 @@ function StarterTutorialPanel({ noteId, token, fetcher, onRemoved }: {
   const client = useQueryClient(); const headers = { authorization: `Bearer ${token}` };
   const tutorial = useQuery({ queryKey: ["starter-tutorial", noteId], retry: false, queryFn: async () => {
     const response = await fetcher(`/api/notes/${encodeURIComponent(noteId)}/starter-tutorial`, { headers });
-    if (response.status === 404) return undefined;
+    if (response.status === 404) return null;
     const body = await response.json() as { tutorial?: StarterTutorialData; message?: string };
     if (!response.ok || !body.tutorial) throw new Error(body.message || "The starter guide could not be loaded.");
     return body.tutorial;

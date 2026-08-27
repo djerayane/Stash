@@ -39,7 +39,7 @@ export interface TutorialContributionRepository {
   updateViewBlock(memberId: string, noteId: string,
     input: { layout: "list" | "table"; titleContains: string }): Promise<TutorialContribution | undefined>;
   remove(memberId: string, noteId: string): Promise<"removed" | "not_found">;
-  inspect(memberId: string, noteIds: readonly string[]): Promise<{
+  inspect(memberId: string, noteIds: readonly string[], action: "archive" | "trash" | "move"): Promise<{
     collectionCount: number;
     collectionRelocationRequired?: boolean;
   }>;

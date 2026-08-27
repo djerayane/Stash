@@ -86,6 +86,14 @@ test("@a11y completes protected first-run setup by keyboard and opens the starte
   await expect(page.getByRole("combobox", { name: "Layout" })).toHaveValue("table");
   await expect(page.getByRole("textbox", { name: "Task title contains" })).toHaveValue("Shape");
 
+  const independentNoteId = await page.evaluate(async () => {
+    const token = JSON.parse(localStorage.getItem("stash.member-session")!).token;
+    const session = await (await fetch("/api/client-session", { headers: { authorization: `Bearer ${token}` } })).json();
+    const response = await fetch(`/api/workspaces/${session.workspace.id}/note-tree`, { method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ title: "Independent Note" }) });
+    return ((await response.json()) as { node: { id: string } }).node.id;
+  });
+
   page.once("dialog", (dialog) => void dialog.accept());
   await page.getByRole("button", { name: "Remove tutorial" }).press("Enter");
   await expect(page.getByText("The starter tutorial and its sample Tasks were permanently removed.")).toBeFocused();
@@ -98,6 +106,12 @@ test("@a11y completes protected first-run setup by keyboard and opens the starte
     return { tutorialStatus: tutorial.status, tasks };
   }, { starterNoteId });
   expect(cleanup).toEqual({ tutorialStatus: 404, tasks: { tasks: [] } });
+  await page.goto(`http://127.0.0.1:4174/app/notes/${independentNoteId}`);
+  await expect(page.getByRole("textbox", { name: "Note content" })).toBeVisible();
+  await expect(page.getByText("The starter tutorial and its sample Tasks were permanently removed.")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Restore Note branch" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Open Note context" }).press("Enter");
+  await expect(page.getByRole("complementary", { name: "Note context" })).toBeVisible();
 });
 
 test("uses the real custom Role admin flow to grant Project creation and explains denial before it", async ({ page }) => {

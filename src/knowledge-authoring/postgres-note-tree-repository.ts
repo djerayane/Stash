@@ -8,7 +8,8 @@ import type { NoteTreeAccessChange, NoteTreeNode, NoteTreeRepository } from "./n
 
 type PrepareNotes = (client: PostgresQueryable) => Promise<void>;
 export interface NoteTreeBranchLifecycle {
-  beforeRemove(client: PostgresQueryable, noteIds: readonly string[]): Promise<"allowed" | "collection_owner_requires_relocation">;
+  beforeStateChange(client: PostgresQueryable, noteIds: readonly string[], state: "archived" | "trashed"):
+    Promise<"allowed" | "collection_owner_requires_relocation">;
 }
 
 const workspaceMember = (workspace: "workspace" | "stash_workspaces", member = "$2") =>
@@ -296,7 +297,7 @@ export class PostgresNoteTreeRepository implements NoteTreeRepository {
         SELECT id,tree_position,ARRAY[tree_position] AS ordering FROM stash_notes WHERE id=$1
         UNION ALL SELECT child.id,child.tree_position,branch.ordering || child.tree_position FROM stash_notes child JOIN branch ON child.parent_id=branch.id
       ) SELECT id FROM branch ORDER BY ordering,id`, [noteId]);
-      const permitted = await this.lifecycle?.beforeRemove(client, branch.rows.map(({ id }) => id));
+      const permitted = await this.lifecycle?.beforeStateChange(client, branch.rows.map(({ id }) => id), state);
       if (permitted === "collection_owner_requires_relocation") return { status: "collection_owner_requires_relocation" as const };
       const column = state === "archived" ? "archived_at" : "trashed_at";
       const rows = await client.query<any>(`WITH RECURSIVE branch AS (
