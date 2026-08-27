@@ -72,7 +72,7 @@ function contract(adapter: ContractAdapter): void {
         assert.equal((await database.listNoteHistory(ownerId, noteId)).status, "found");
         assert.equal((await database.listWorkspaceActivity(ownerId, workspaceId)).status, "found");
 
-        const collaboration = new NoteCollaborationService(database); const update = new Y.Doc(); update.getText("parity").insert(0, "shared");
+        const collaboration = new NoteCollaborationService(database.knowledgeAuthoringRepositories()); const update = new Y.Doc(); update.getText("parity").insert(0, "shared");
         assert.equal((await collaboration.apply(ownerId, noteId, Y.encodeStateAsUpdate(update)))?.sequence, 1); update.destroy();
         assert.equal(await collaboration.load(outsiderId, noteId), undefined);
         const search = await database.searchWorkspace(ownerId, workspaceId, { q: "Parity" });
@@ -129,7 +129,7 @@ function contract(adapter: ContractAdapter): void {
           tags: ["restored"], createdByMemberId: ownerId, createdAt }, { schema: "stash.note.v1", id: noteId, workspaceId,
           content: "Restored parity note", tags: ["restored"], createdAt, createdBy: { localAccountId: ownerId, displayName: "Backup Owner" } });
         const collaboration = new Y.Doc(); collaboration.getText("parity").insert(0, "restored collaboration");
-        await harness.database.appendNoteCollaboration(ownerId, noteId, Y.encodeStateAsUpdate(collaboration)); collaboration.destroy();
+        await harness.database.knowledgeAuthoringRepositories().appendNoteCollaboration(ownerId, noteId, Y.encodeStateAsUpdate(collaboration)); collaboration.destroy();
         const jobId = randomUUID(); await harness.database.enqueueEmailRecovery({ id: jobId, protectedDelivery: "restored-job", createdAt });
         const attachmentBytes = Buffer.from("restored Attachment bytes");
         const attachment = await new AttachmentService(harness.database, new LocalAttachmentStorage(harness.attachmentRoot))
@@ -147,7 +147,7 @@ function contract(adapter: ContractAdapter): void {
         assert.equal((await restored.identityAccessRepositories().findAccountByEmail(`${ownerId}@example.test`))?.passwordHash, "backup-auth-hash");
         assert.equal((await restored.listAccessibleWorkspaces(ownerId)).some((workspace: { id: string }) => workspace.id === workspaceId), true);
         assert.equal((await restored.listNoteHistory(ownerId, noteId)).status, "found");
-        assert.equal((await restored.loadNoteCollaboration(ownerId, noteId))?.sequence, 1);
+        assert.equal((await restored.knowledgeAuthoringRepositories().loadNoteCollaboration(ownerId, noteId))?.sequence, 1);
         assert.equal((await restored.searchWorkspace(ownerId, workspaceId, { q: "Restored" })).status, "found");
         assert.equal((await restored.claimEmailRecoveryDelivery(randomUUID(), "2026-08-24T10:10:00.000Z"))?.job.id, jobId);
         assert.deepEqual((await new AttachmentService(restored, new LocalAttachmentStorage(harness.attachmentRoot)).get(ownerId, attachment.record.id))?.content, attachmentBytes);
