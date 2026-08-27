@@ -11,6 +11,8 @@ import type { AccountRecoveryRepository, ClaimedEmailRecoveryDelivery, EmailReco
 import type { AgentGrant, AgentGrantOption, AgentProposal, StoredAgentGrant } from "../agent-grants.js";
 import type { ActivityRecord } from "../activity.js";
 import { notificationDeliveryMode, requestedReviewNotificationInput, type NotificationPreferences } from "../notifications.js";
+import type { ImportedIdentityAdministration } from "../imported-identity-administration-routes.js";
+import type { PortableWorkspaceImportReport } from "../portable-workspace-import.js";
 import type { MemberLocalizationPreferences, MemberLocalizationRepository } from "../member-localization.js";
 import type { PortableIdentity, PortableProjectProjection, PortableWorkspaceProjection, WorkspaceProjectRecord,
   WorkspaceProjectRepository, WorkspaceRecord } from "../workspaces-projects.js";
@@ -20,7 +22,8 @@ interface SessionRow { id: string; account_id: string; token_hash: string; creat
 
 /** PostgreSQL persistence owned by the Identity Access capability. */
 export class PostgresIdentityAccessRepositories implements PasswordAuthRepository, AccountRegistrationRepository,
-  MemberLocalizationRepository, WorkspaceProjectRepository, OidcAuthRepository, InvitationRepository, AccountRecoveryRepository {
+  MemberLocalizationRepository, WorkspaceProjectRepository, OidcAuthRepository, InvitationRepository, AccountRecoveryRepository,
+  ImportedIdentityAdministration {
   constructor(
     private readonly kernel: PostgresKernel,
     private readonly secrets: AuthenticationSecretCodec,
@@ -35,6 +38,9 @@ export class PostgresIdentityAccessRepositories implements PasswordAuthRepositor
       roles: Pick<OrganizationRoleRepository,"assignBuiltInRole"|"listCustomRoles"|"createCustomRole"|"updateCustomRole"|"assignCustomRole"|"revokeCustomRole">;
       prepareNotifications(client:PostgresQueryable):Promise<void>;
       recordActivityProjection(client:PostgresQueryable,activity:ActivityRecord):Promise<void>;
+      prepareWorkspaceImport(client:PostgresQueryable):Promise<void>;
+      mapImportedIdentity(input:{importId:string;sourceAccountId:string;localAccountId:string;idempotencyKey:string}):
+        ReturnType<ImportedIdentityAdministration["mapImportedIdentityAsMember"]>;
     },
   ) {}
 
@@ -463,6 +469,24 @@ export class PostgresIdentityAccessRepositories implements PasswordAuthRepositor
   async releaseAgentProposal(actorId:string,proposalId:string,operationId:string):Promise<void>{await this.kernel.query(
     "UPDATE stash_agent_proposals SET status=CASE WHEN conflict IS NULL THEN 'pending' ELSE 'conflict' END,operation_id=NULL WHERE id=$1 AND sponsoring_member_id=$2 AND operation_id=$3 AND status='applying'",
   [proposalId,actorId,operationId]);}
+
+  async listPendingImportedIdentities(memberId:string){return this.kernel.withSession(async(client)=>{await this.dependencies.prepareWorkspaceImport(client);
+    const result=await client.query<{import_id:string;workspace_id:string;workspace_name:string;organization_id:string|null;report:PortableWorkspaceImportReport}>(`
+      SELECT imported.import_id,imported.workspace_id,workspace.name workspace_name,workspace.organization_owner_id organization_id,imported.report
+      FROM stash_workspace_imports imported JOIN stash_workspaces workspace ON workspace.id=imported.workspace_id
+      WHERE workspace.personal_owner_id=$1 OR workspace.organization_owner_id IN(SELECT organization_id FROM stash_organization_memberships
+      WHERE account_id=$1 AND role IN ('Owner','Admin')) ORDER BY workspace.name,imported.import_id`,[memberId]);
+    const mapped=await client.query<{source_account_id:string}>("SELECT source_account_id FROM stash_identity_stubs WHERE mapped_to_account_id IS NOT NULL");
+    const resolved=new Set(mapped.rows.map(({source_account_id})=>source_account_id));return result.rows.flatMap((row)=>row.report.identityStubs
+      .filter(({sourceAccountId})=>!resolved.has(sourceAccountId)).map((identity)=>({importId:row.import_id,workspaceId:row.workspace_id,
+        workspaceName:row.workspace_name,...(row.organization_id?{organizationId:row.organization_id}:{}),...identity})));});}
+  async mapImportedIdentityAsMember(memberId:string,input:{importId:string;sourceAccountId:string;localAccountId:string;idempotencyKey:string}){
+    const allowed=await this.kernel.withSession(async(client)=>{await this.dependencies.prepareWorkspaceImport(client);return Boolean((await client.query(`SELECT 1
+      FROM stash_workspace_imports imported JOIN stash_workspaces workspace ON workspace.id=imported.workspace_id WHERE imported.import_id=$1
+      AND ((workspace.personal_owner_id=$2 AND $3=$2) OR (workspace.organization_owner_id IS NOT NULL AND EXISTS(SELECT 1
+      FROM stash_organization_memberships actor JOIN stash_organization_memberships target ON target.organization_id=actor.organization_id
+      WHERE actor.organization_id=workspace.organization_owner_id AND actor.account_id=$2 AND actor.role IN ('Owner','Admin') AND target.account_id=$3)))`,
+    [input.importId,memberId,input.localAccountId])).rowCount);});if(!allowed)return {status:"forbidden" as const};return this.dependencies.mapImportedIdentity(input);}
 
   async prepareWorkspaceProjects(client:PostgresQueryable):Promise<void>{await this.dependencies.prepareRegistration(client);}
   async prepareLocalization(client:PostgresQueryable):Promise<void>{await this.prepareWorkspaceProjects(client);await client.query(`CREATE TABLE IF NOT EXISTS stash_member_localization_preferences

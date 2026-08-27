@@ -260,7 +260,7 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
       for (const secret of [sourceKey, destinationKey]) assert.equal(Buffer.from(portable.archive).includes(Buffer.from(secret)), false);
       assert.equal((await new PortableWorkspaceImportService(source.database.knowledgeAuthoringRepositories(), new LocalAttachmentStorage(source.paths.attachments))
         .import(importId, ownerId, portable.archive)).status, "imported");
-      assert.equal((await source.database.listPendingImportedIdentities(ownerId))[0]?.sourceAccountId, importedAccountId);
+      assert.equal((await source.database.identityAccessRepositories().listPendingImportedIdentities(ownerId))[0]?.sourceAccountId, importedAccountId);
       const workspaceId = randomUUID(); const noteId = randomUUID();
       await source.database.identityAccessRepositories().createWorkspace({ id: workspaceId, name: "Migrated Workspace", owner: { type: "organization", id: organizationId }, createdByMemberId: ownerId },
         { localAccountId: ownerId, displayName: "Ada" });
@@ -300,7 +300,7 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
         }
           assert.deepEqual(await migrated.identityAccessRepositories().findOidcConfiguration(organizationId), { organizationId, issuer: "https://identity.example.test", clientId: "stash-migration", clientSecret: "oidc-secret" });
           assert.equal((await migrated.identityAccessRepositories().findOidcIdentity({ organizationId, issuer: "https://identity.example.test", subject: "ada-subject" }))?.accountId, ownerId);
-        const pendingImported = await migrated.listPendingImportedIdentities(ownerId);
+        const pendingImported = await migrated.identityAccessRepositories().listPendingImportedIdentities(ownerId);
         assert.equal(pendingImported.some((identity) => identity.importId === importId && identity.sourceAccountId === importedAccountId), true);
         assert.equal((await migrated.knowledgeAuthoringRepositories().listNoteHistory(ownerId, noteId)).status, "found"); assert.equal((await migrated.knowledgeAuthoringRepositories().listWorkspaceActivity(ownerId, workspaceId)).status, "found");
         if (attachment.status === "created") assert.deepEqual((await new AttachmentService(migrated.knowledgeAuthoringRepositories(), new LocalAttachmentStorage(destinationAttachments))
