@@ -6,7 +6,8 @@
   "scripts": {
     "start": "expo start",
     "check": "tsc --noEmit",
-    "build": "expo export --platform web"
+    "build": "expo export --platform web",
+    "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
     "@stash/api-client": "workspace:*",
@@ -42,6 +43,7 @@
   },
   "devDependencies": {
     "@types/react": "~19.2.2",
-    "typescript": "~5.9.2"
+    "typescript": "~5.9.2",
+    "vitest": "^3.2.4"
   }
 }
