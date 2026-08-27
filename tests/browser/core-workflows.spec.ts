@@ -35,9 +35,9 @@ test("keeps topbar actions visible and keyboard focus distinct at a narrow viewp
   await page.goto("/app/tasks");
   const notifications = page.getByRole("link", { name: "Notifications" });
   await expect(notifications).toBeVisible();
-  const search = page.getByRole("searchbox", { name: "Search Workspace" });
+  const search = page.getByRole("link", { name: "Search Workspace" });
   await search.focus();
-  const focusRing = await search.locator("..").evaluate((element) => {
+  const focusRing = await search.evaluate((element) => {
     const style = getComputedStyle(element);
     return { style: style.outlineStyle, width: style.outlineWidth };
   });

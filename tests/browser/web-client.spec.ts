@@ -440,6 +440,7 @@ test("removes a Member, revokes authority, and keeps former assignment repair ac
   await page.getByRole("link", { name: "Note Tree" }).click();
   await page.getByText("More", { exact: true }).click();
   await page.getByRole("link", { name: "Members" }).click();
+  await expect(page.locator("details").filter({ has: page.getByText("More", { exact: true }) })).not.toHaveAttribute("open", "");
   await expect(page.getByRole("heading", { name: "Member access" })).toBeVisible();
   await expect(page.getByText("Departing Member", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Review departure" })).toHaveCount(0);
