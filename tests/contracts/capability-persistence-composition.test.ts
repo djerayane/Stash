@@ -21,14 +21,25 @@ test("redesigned capability persistence remains implemented by focused kernel ad
     "PostgresCollectionRepository", "PostgresRelationshipQueryRepository", "PostgresVisualizationBlockRepository",
     "PostgresProjectlessTaskRepository", "PostgresCanonicalTaskRepository", "PostgresProjectPermissionRepository",
   ]) assert.match(database, new RegExp(`#\\w+Repository: ${adapter}`));
-  assert.match(database, /FocusedPostgresCapabilityAdapter/);
+  assert.match(database, /PostgresDevelopmentIntegrationRepositories/);
   assert.doesNotMatch(database, /Repositories\(\)[^{]*\{\s*return this;\s*\}/s);
+  assert.doesNotMatch(database, /\bProxy\b|\bReflect\.get\b/);
+
+  const developmentIntegration = await readFile(new URL(
+    "../../src/development-integration/postgres-development-integration-repositories.ts",
+    import.meta.url,
+  ), "utf8");
+  assert.match(developmentIntegration, /class PostgresDevelopmentIntegrationRepositories/);
+  assert.match(developmentIntegration, /implements DevelopmentIntegrationPostgresRepositories/);
+  for (const method of ["createRepositoryConnection", "linkArtifact", "matchingTasks", "receive", "confirm"])
+    assert.match(developmentIntegration, new RegExp(`\\b${method}\\(`));
 });
 
 test("the Instance exposes capability-owned public routes without registering legacy duplicates", async () => {
   const instance = await readFile(new URL("../../src/instance.ts", import.meta.url), "utf8");
   assert.match(instance, /publicRoutesFromCapabilities/);
-  assert.match(instance, /capabilityRouteOwnership/);
-  for (const feature of ["password-auth", "notes", "tasks", "github-signals"])
-    assert.match(instance, new RegExp(`ownsRoute\\("${feature}"\\)`));
+  assert.match(instance, /routesFromCapabilities\(options\.capabilities\)/);
+  assert.doesNotMatch(instance, /legacyPublicDomainRoutes|capabilityRouteOwnership|ownsRoute/);
+  for (const routeFactory of ["passwordAuthRoute", "noteRoutes", "taskRoutes", "githubSignalRoutes"])
+    assert.doesNotMatch(instance, new RegExp(`\\b${routeFactory}\\b`));
 });
