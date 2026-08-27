@@ -209,7 +209,7 @@ describe("PostgreSQL readable export wiring", { skip: postgresUrl ? false : "STA
       const secondProject = await workspaces.createProject(ownerId, createdWorkspace.workspace.id, { name: "Private", key: "SEC" });
       assert.equal(firstProject.status, "created"); assert.equal(secondProject.status, "created");
       if (firstProject.status !== "created" || secondProject.status !== "created") return;
-      const attachments = new AttachmentService(database, storage);
+      const attachments = new AttachmentService(database.knowledgeAuthoringRepositories(), storage);
       const uploaded = await attachments.create(ownerId, createdWorkspace.workspace.id,
         { filename: "proof.bin", contentType: "application/octet-stream", source: "upload", content: Buffer.from([9, 8, 7, 6]) });
       assert.equal(uploaded.status, "created"); if (uploaded.status !== "created") return;
@@ -219,7 +219,7 @@ describe("PostgreSQL readable export wiring", { skip: postgresUrl ? false : "STA
       const privateNote = await notes.capture(ownerId, createdWorkspace.workspace.id, { projectId: secondProject.project.id, content: "Private roadmap" });
       assert.equal(visibleNote.status, "created"); assert.equal(privateNote.status, "created");
       if (visibleNote.status !== "created" || privateNote.status !== "created") return;
-      const mobileNote = await new MobileCaptureService(database).capture(ownerId, createdWorkspace.workspace.id, {
+      const mobileNote = await new MobileCaptureService(database.knowledgeAuthoringRepositories()).capture(ownerId, createdWorkspace.workspace.id, {
         protocol: "stash.mobile-capture.v1", id: randomUUID(), kind: "text", content: "Captured away from desk",
         createdAt: "2026-08-23T12:00:00.000Z",
       });
@@ -255,7 +255,7 @@ describe("PostgreSQL readable export wiring", { skip: postgresUrl ? false : "STA
       const memberAccess: MemberAccessResolver = { async authenticateBearer(value) { return value === "Bearer owner" ? { accountId: ownerId, sessionId: "owner" }
         : value === "Bearer guest" ? { accountId: guestId, sessionId: "guest" } : undefined; } };
       running = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin", memberAccess,
-        portableWorkspaceExports: new PortableWorkspaceExportService(database, storage), noteLinks });
+        portableWorkspaceExports: new PortableWorkspaceExportService(database.knowledgeAuthoringRepositories(), storage), noteLinks });
       const ownerFiles = unzipStored(Buffer.from(await (await fetch(`${running.url}/api/workspaces/${createdWorkspace.workspace.id}/export`,
         { headers: { authorization: "Bearer owner" } })).arrayBuffer()));
       assert.equal([...ownerFiles.keys()].filter((path) => path.startsWith("notes/")).length, 4);

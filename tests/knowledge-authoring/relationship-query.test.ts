@@ -320,7 +320,7 @@ describe("relationship query contracts", () => {
       assert.equal((await store.upgradeDatabase.query<{ count: number }>("SELECT count(*)::int count FROM stash_workspace_activity WHERE action='visualization_block_updated'")).rows[0]!.count, 1);
       assert.equal((await notes.remove(ownerId, archivedBrokenSource.node.id, "archived")).status, "updated");
       assert.equal((await notes.remove(ownerId, trashedBrokenSource.node.id, "trashed")).status, "updated");
-      const exported = await store.database.readExportSnapshot(ownerId, workspaceId);
+      const exported = await store.database.knowledgeAuthoringRepositories().readExportSnapshot(ownerId, workspaceId);
       assert.equal(exported.status, "found");
       if (exported.status === "found") {
         assert.equal(exported.snapshot.durableObjects?.some(({ kind, id, schema }) =>
@@ -342,7 +342,7 @@ describe("relationship query contracts", () => {
         assert.equal(JSON.stringify(ownerBlock).includes(archivedBrokenSource.node.id), true);
         assert.equal(JSON.stringify(ownerBlock).includes(trashedBrokenSource.node.id), true);
       }
-      const guestExport = await store.database.readExportSnapshot(guestId, workspaceId);
+      const guestExport = await store.database.knowledgeAuthoringRepositories().readExportSnapshot(guestId, workspaceId);
       assert.equal(guestExport.status, "found");
       if (guestExport.status === "found") {
         assert.deepEqual(guestExport.snapshot.notes.map(({ id }) => id).sort(),
@@ -355,16 +355,16 @@ describe("relationship query contracts", () => {
 
       for (const [memberId, importId, destinationOwnerId] of [[ownerId, "91919191-9191-4191-8191-919191919191", "92929292-9292-4292-8292-929292929292"],
         [guestId, "93939393-9393-4393-8393-939393939393", "94949494-9494-4494-8494-949494949494"]] as const) {
-        const archive = await new PortableWorkspaceExportService(store.database, emptyAttachments).export(memberId, workspaceId);
+        const archive = await new PortableWorkspaceExportService(store.database.knowledgeAuthoringRepositories(), emptyAttachments).export(memberId, workspaceId);
         assert.equal(archive.status, "exported"); if (archive.status !== "exported") continue;
         const destination = await EmbeddedInstanceStore.open(await mkdtemp(join(tmpdir(), "stash-relationship-import-")),
           createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
         try {
           await destination.database.createFirstOrganizationOwner({ organizationId: `${destinationOwnerId.slice(0, -1)}1`, organizationName: "Destination",
             ownerId: destinationOwnerId, ownerName: "Importer", ownerEmail: `${destinationOwnerId}@example.test`, passwordHash: "test-only", role: "Owner" });
-          const imported = await new PortableWorkspaceImportService(destination.database, emptyAttachments).import(importId, destinationOwnerId, archive.archive);
+          const imported = await new PortableWorkspaceImportService(destination.database.knowledgeAuthoringRepositories(), emptyAttachments).import(importId, destinationOwnerId, archive.archive);
           assert.equal(imported.status, "imported");
-          const roundTrip = await destination.database.readExportSnapshot(destinationOwnerId, workspaceId);
+          const roundTrip = await destination.database.knowledgeAuthoringRepositories().readExportSnapshot(destinationOwnerId, workspaceId);
           assert.equal(roundTrip.status, "found"); if (roundTrip.status === "found") assertVisualizationClosure(roundTrip.snapshot);
         } finally { await destination.close(); }
       }
