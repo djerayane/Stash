@@ -3,7 +3,7 @@ import type { ClientSessionPrincipal, DatabaseProbe } from "./instance.js";
 import { noteOperationDigest, type NoteConflictResolution, type NoteEditBatch, type NoteEditConflict, type NoteRecord, type NoteRepository, type NoteTriageChange, type NoteTriageResult, type PortableExportTaskProjection, type PortableNoteLinkProjection, type PortableNoteProjection, type PortableNoteStateProjection, type PortableTaskProjection, type TaskCreation } from "./notes.js";
 import { isRichTextDocument, markdownToRichText, paragraphDocument, richTextToMarkdown } from "./rich-text.js";
 import type { BootstrapRecord, OwnerBootstrapRepository } from "./owner-bootstrap.js";
-import type { AccountAuthenticationRecord, PasswordAuthRepository, SessionRecord } from "./password-auth.js";
+import type { PasswordAuthRepository } from "./password-auth.js";
 import type { AccountRegistrationRepository, RegistrationRecord } from "./account-registration.js";
 import type { OidcAuthRepository, OidcIdentityKey, OidcIdentityRecord, OidcOrganizationConfiguration } from "./oidc-auth.js";
 import type { AccountRecoveryRepository, ClaimedEmailRecoveryDelivery, EmailRecoveryDeliveryClaim, EmailRecoveryDeliveryJob, EmailRecoveryRecord, PasskeyRecord, RecoveryCodeRecord } from "./account-recovery.js";
@@ -44,7 +44,7 @@ import { Schema } from "prosemirror-model";
 import { InvalidCollaborationUpdate, type CollaborationSnapshot, type NoteCollaborationRepository } from "./note-collaboration.js";
 import type { WorkspaceSearchFacet, WorkspaceSearchKind, WorkspaceSearchQuery, WorkspaceSearchRepository, WorkspaceSearchResult } from "./workspace-search.js";
 import { proseMirrorToRichText, richTextToProseMirror } from "@stash/rich-text";
-import type { AgentGrant, AgentGrantOption, AgentGrantRepository, AgentProposal, StoredAgentGrant } from "./agent-grants.js";
+import type { AgentGrantRepository } from "./agent-grants.js";
 import type { ImportedIdentityAdministration } from "./imported-identity-administration-routes.js";
 import type { NoteTreeRepository } from "./knowledge-authoring/note-tree.js";
 import { PostgresNoteTreeRepository } from "./knowledge-authoring/postgres-note-tree-repository.js";
@@ -98,20 +98,6 @@ export type { DevelopmentIntegrationPostgresRepositories } from "./development-i
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
 const authenticationKeyCheckLockId = 795_541_992;
-function agentGrantFromRow(row: any): AgentGrant {
-  return { id: row.id, organizationId: row.organization_id, sponsoringMemberId: row.sponsoring_member_id, name: row.name,
-    ...(row.project_id ? { projectId: row.project_id } : {}), scopes: row.capabilities,
-    expiresAt: new Date(row.expires_at).toISOString(), createdAt: new Date(row.created_at).toISOString(),
-    ...(row.revoked_at ? { revokedAt: new Date(row.revoked_at).toISOString() } : {}) };
-}
-function agentProposalFromRow(row: any): AgentProposal {
-  return { id: row.id, grantId: row.grant_id, organizationId: row.organization_id, sponsoringMemberId: row.sponsoring_member_id,
-    agentName: row.agent_name, ...(row.project_id ? { projectId: row.project_id } : {}), capability: row.capability, input: row.input,
-    ...(row.base_revision ? { baseRevision: Number(row.base_revision) } : {}), createdAt: new Date(row.created_at).toISOString(), status: row.status,
-    ...(row.operation_id ? { operationId: row.operation_id } : {}), ...(row.reviewed_at ? { reviewedAt: new Date(row.reviewed_at).toISOString() } : {}),
-    ...(row.reviewed_by_account_id ? { reviewedByMemberId: row.reviewed_by_account_id } : {}), ...(row.result ? { result: row.result } : {}),
-    ...(row.conflict ? { conflict: row.conflict } : {}) };
-}
 const portableProjectionObjectKinds = ["Workspace", "Project", "Workflow", "WorkspaceWorkflow", "Collection", "ViewBlock", "Board", "Note", "NoteLocation", "NoteLink", "Task", "GuestProjectAccess", "RepositoryConnection", "Attachment", "Discussion", "DiscussionWorkLink", "Activity",
   ...PostgresVisualizationBlockRepository.portableObjectKinds] as const;
 const portableProjectionObjectKindSql = portableProjectionObjectKinds.map((kind) => `'${kind}'`).join(", ");
@@ -577,26 +563,6 @@ export class PostgresDatabase implements DatabaseProbe {
       await prepareTable(this.#kernel);
       await this.#kernel.transaction(verify);
     }
-  }
-
-  #accountRecord(row: AccountRow): AccountAuthenticationRecord {
-    return {
-      id: row.id,
-      name: row.name,
-      email: row.email,
-      passwordHash: this.#authenticationSecrets.decrypt(row.password_hash),
-    };
-  }
-
-  #sessionRecord(row: SessionRow): SessionRecord {
-    return {
-      id: row.id,
-      accountId: row.account_id,
-      tokenHash: this.#authenticationSecrets.decrypt(row.token_hash),
-      createdAt: new Date(row.created_at).toISOString(),
-      lastSeenAt: new Date(row.last_seen_at).toISOString(),
-      ...(row.user_agent ? { userAgent: row.user_agent } : {}),
-    };
   }
 
   async #ensureRepositoryConnectionSchema(transactionClient?: PostgresQueryable): Promise<void> {
@@ -1356,8 +1322,6 @@ function hasDependencyCycle(taskIds: ReadonlySet<string>, edges: ReadonlyArray<{
   return [...outgoing.keys()].some(visit);
 }
 
-interface AccountRow { id: string; name: string; email: string; password_hash: string }
-interface SessionRow { id: string; account_id: string; token_hash: string; created_at: Date | string; last_seen_at: Date | string; user_agent: string | null }
 interface OidcIdentityRow { id: string; name: string; email: string; subject_secret: string }
 interface OidcConfigurationRow { organization_id: string; issuer: string; client_id: string; client_secret: string }
 interface MemberLocalizationRow {
