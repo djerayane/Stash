@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 
-import { AccountRecoveryService, type AccountRecoveryRepository, type RecoveryCodeRecord, type PasskeyRecord, type EmailRecoveryRecord, type EmailRecoveryDeliveryClaim, type EmailRecoveryDeliveryJob } from "../src/account-recovery.js";
-import { PasswordAuthService, hashPassword, type AccountAuthenticationRecord, type PasswordAuthRepository, type SessionRecord } from "../src/password-auth.js";
-import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
-import { createAuthenticationSecretCodec } from "../src/authentication-secrets.js";
-import { EmailRecoveryWorker } from "../src/email-recovery-worker.js";
+import { AccountRecoveryService, type AccountRecoveryRepository, type RecoveryCodeRecord, type PasskeyRecord, type EmailRecoveryRecord, type EmailRecoveryDeliveryClaim, type EmailRecoveryDeliveryJob } from "../../src/account-recovery.js";
+import { PasswordAuthService, hashPassword, type AccountAuthenticationRecord, type PasswordAuthRepository, type SessionRecord } from "../../src/password-auth.js";
+import { startInstance, type DatabaseProbe, type RunningInstance } from "../../src/instance.js";
+import { createAuthenticationSecretCodec } from "../../src/authentication-secrets.js";
+import { EmailRecoveryWorker } from "../../src/email-recovery-worker.js";
 
 class AuthDatabase implements DatabaseProbe, PasswordAuthRepository, AccountRecoveryRepository {
   account: AccountAuthenticationRecord | undefined;

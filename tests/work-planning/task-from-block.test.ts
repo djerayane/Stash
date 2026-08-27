@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 
-import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
-import { TaskService, type CreateTaskFromBlockDraft, type TaskFromBlockRepository } from "../src/tasks.js";
-import type { PortableTaskProjection } from "../src/notes.js";
-import type { MemberAccessResolver } from "../src/workspaces-projects.js";
+import { startInstance, type DatabaseProbe, type RunningInstance } from "../../src/instance.js";
+import { TaskService, type CreateTaskFromBlockDraft, type TaskFromBlockRepository } from "../../src/tasks.js";
+import type { PortableTaskProjection } from "../../src/notes.js";
+import type { MemberAccessResolver } from "../../src/workspaces-projects.js";
 
 const noteId = "11111111-1111-4111-8111-111111111111";
 const projectId = "22222222-2222-4222-8222-222222222222";

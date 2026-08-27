@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 
-import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
+import { startInstance, type DatabaseProbe, type RunningInstance } from "../../src/instance.js";
 import {
   OrganizationRoleService,
   type BuiltInOrganizationRole,
   type OrganizationRoleRepository,
-} from "../src/organization-roles.js";
-import type { MemberAccessResolver } from "../src/workspaces-projects.js";
+} from "../../src/organization-roles.js";
+import type { MemberAccessResolver } from "../../src/workspaces-projects.js";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
 const otherOrganizationId = "22222222-2222-4222-8222-222222222222";
