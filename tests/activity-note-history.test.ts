@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 
 import { ActivityService, type ActivityRecord, type ActivityRepository, type NoteHistoryRevision } from "../src/activity.js";
-import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
+import { startInstance, type DatabaseProbe, type RunningInstance } from "./support/start-test-instance.js";
 import { paragraphDocument, type RichTextDocument } from "../src/rich-text.js";
 import type { MemberAccessResolver, PortableIdentity } from "../src/workspaces-projects.js";
 

@@ -10,7 +10,7 @@ import { ActivityService } from "../../src/activity.js";
 import { createCapabilityRegistry } from "../../src/capability-registry.js";
 import { EmbeddedInstanceStore } from "../../src/embedded-instance-store.js";
 import { DiscussionService } from "../../src/discussions.js";
-import { startInstance, type RunningInstance } from "../../src/instance.js";
+import { startInstance, type RunningInstance } from "../support/start-test-instance.js";
 import { EmptyCollectionImpactInspector, NoteTreeService } from "../../src/knowledge-authoring/note-tree.js";
 import { noteTreeRoutes } from "../../src/knowledge-authoring/note-tree-routes.js";
 import { relationshipRoutes } from "../../src/knowledge-authoring/relationship-routes.js";

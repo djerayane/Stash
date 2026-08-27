@@ -8,7 +8,7 @@ import {
   type PasswordAuthRepository,
   type SessionRecord,
 } from "../src/password-auth.js";
-import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
+import { startInstance, type DatabaseProbe, type RunningInstance } from "./support/start-test-instance.js";
 import type { PasswordHashCodec } from "../src/password-hash.js";
 
 class ProtocolCompatibleAuthDatabase implements DatabaseProbe, PasswordAuthRepository {

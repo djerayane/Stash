@@ -3,7 +3,7 @@ import { afterEach, describe, it } from "node:test";
 
 import { AccountRegistrationService, RegistrationAdmissionController, RegistrationThrottled, type RegistrationRecord } from "../src/account-registration.js";
 import type { PasswordHashCodec } from "../src/password-hash.js";
-import { startInstance, type RunningInstance } from "../src/instance.js";
+import { startInstance, type RunningInstance } from "./support/start-test-instance.js";
 
 class RegistrationRepository {
   readonly records: RegistrationRecord[] = [];

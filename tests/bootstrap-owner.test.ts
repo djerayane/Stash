@@ -6,7 +6,7 @@ import {
   type BootstrapRecord,
   type OwnerBootstrapRepository,
 } from "../src/owner-bootstrap.js";
-import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
+import { startInstance, type DatabaseProbe, type RunningInstance } from "./support/start-test-instance.js";
 
 class ProtocolCompatibleDatabase implements DatabaseProbe, OwnerBootstrapRepository {
   public record: BootstrapRecord | undefined;

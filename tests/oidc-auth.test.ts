@@ -3,7 +3,7 @@ import { createHash, generateKeyPairSync, randomUUID, sign } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { afterEach, describe, it } from "node:test";
 
-import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
+import { startInstance, type DatabaseProbe, type RunningInstance } from "./support/start-test-instance.js";
 import {
   OidcAuthService,
   type OidcAuthRepository,

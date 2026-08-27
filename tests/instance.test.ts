@@ -6,7 +6,7 @@ import {
   type AccelerationFailure,
   type RedisCache,
 } from "../src/acceleration.js";
-import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
+import { startInstance, type DatabaseProbe, type RunningInstance } from "./support/start-test-instance.js";
 
 class ProtocolCompatibleDatabaseProbe implements DatabaseProbe {
   public failure: Error | undefined;

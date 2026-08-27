@@ -8,7 +8,7 @@ import {
   type GitHubSignalRepository,
   type SignalCandidate,
 } from "../src/github-signals.js";
-import { startInstance, type RunningInstance } from "../src/instance.js";
+import { startInstance, type RunningInstance } from "./support/start-test-instance.js";
 import { AutomationService, type AutomationRepository, type AutomationState } from "../src/automations.js";
 import { ActivityService, type ActivityRecord, type ActivityRepository } from "../src/activity.js";
 

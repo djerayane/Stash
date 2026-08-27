@@ -15,7 +15,7 @@ import {
   type FirstPersonalInstanceSetup,
   type InstanceSetupRepository,
 } from "../../src/identity-access/instance-setup.js";
-import { startInstance, type DatabaseProbe, type RunningInstance } from "../../src/instance.js";
+import { startInstance, type DatabaseProbe, type RunningInstance } from "../support/start-test-instance.js";
 import { knowledgeAuthoringCapability } from "../../src/knowledge-authoring/index.js";
 import { NoteTreeService } from "../../src/knowledge-authoring/note-tree.js";
 import { NoteService } from "../../src/notes.js";

@@ -6,75 +6,14 @@ import {
   createOptionalRedisAcceleration,
   type OptionalRedisAcceleration,
 } from "./acceleration.js";
-import { ownerBootstrapRoute } from "./bootstrap-route.js";
-import { diagnosticsAdminRoute, diagnosticsSchemaRoute } from "./diagnostics-routes.js";
 import { createDiagnostics, type Diagnostics } from "./diagnostics.js";
 import { json, requireInstanceAdministrator } from "./http-routing.js";
 import { instanceAdminRoute } from "./instance-route.js";
-import { noteRoutes } from "./note-routes.js";
-import type { NoteService } from "./notes.js";
-import type { OwnerBootstrapService } from "./owner-bootstrap.js";
-import { organizationRoleRoutes } from "./organization-role-routes.js";
-import type { OrganizationRoleService } from "./organization-roles.js";
-import { oidcAuthRoute, oidcManagementRoute } from "./oidc-auth-routes.js";
-import type { OidcAuthService } from "./oidc-auth.js";
-import type { OidcManagementService } from "./oidc-management.js";
-import { passwordAuthRoute } from "./password-auth-routes.js";
-import type { PasswordAuthService } from "./password-auth.js";
-import { workspaceProjectRoutes } from "./workspace-project-routes.js";
-import type { MemberAccessResolver, WorkspaceProjectService } from "./workspaces-projects.js";
-import { accountRecoveryRoute } from "./account-recovery-routes.js";
-import type { AccountRecoveryService } from "./account-recovery.js";
-import { memberLocalizationRoutes } from "./member-localization-routes.js";
-import type { MemberLocalizationService } from "./member-localization.js";
-import { invitationRoutes } from "./invitation-routes.js";
-import type { InvitationService } from "./invitations.js";
-import { repositoryConnectionRoutes } from "./repository-connection-routes.js";
-import type { RepositoryConnectionService } from "./repository-connections.js";
-import { taskRoutes } from "./task-routes.js";
-import type { TaskService } from "./tasks.js";
-import { attachmentRoutes } from "./attachment-routes.js";
-import type { AttachmentService } from "./attachments.js";
-import { mobileCaptureRoutes } from "./mobile-capture-routes.js";
-import type { MobileCaptureService } from "./mobile-captures.js";
-import { discussionRoutes } from "./discussion-routes.js";
-import type { DiscussionService } from "./discussions.js";
-import { projectWorkflowRoutes } from "./project-workflow-routes.js";
-import type { ProjectWorkflowService } from "./project-workflows.js";
-import { portableWorkspaceExportRoute } from "./portable-workspace-export-route.js";
-import type { PortableWorkspaceExportService } from "./portable-workspace-export.js";
-import { markdownWorkspaceImportRoute, portableWorkspaceImportRoute } from "./portable-workspace-import-route.js";
-import type { PortableWorkspaceImportService } from "./portable-workspace-import.js";
-import { boardRoutes } from "./board-routes.js";
-import type { BoardService } from "./boards.js";
-import { noteLinkRoutes } from "./note-link-routes.js";
-import type { NoteLinkService } from "./note-links.js";
-import { activityRoutes } from "./activity-routes.js";
-import type { ActivityService } from "./activity.js";
-import { githubArtifactRoutes } from "./github-artifact-routes.js";
-import type { GitHubArtifactService } from "./github-artifacts.js";
-import { githubSignalRoutes, githubWebhookRoute } from "./github-signal-routes.js";
-import type { GitHubSignalService } from "./github-signals.js";
 import { publicDomainApiRoute } from "./public-domain-api.js";
-import { instanceBackupRoute } from "./instance-backup-routes.js";
-import type { InstanceBackupRestoreTarget, InstanceBackupService } from "./instance-backup.js";
-import { notificationRoutes } from "./notification-routes.js";
-import type { NotificationService } from "./notifications.js";
-import { automationRoutes } from "./automation-routes.js";
-import type { AutomationService } from "./automations.js";
-import { noteCollaborationRoutes } from "./note-collaboration-routes.js";
-import type { NoteCollaborationService } from "./note-collaboration.js";
-import { importedIdentityAdministrationRoutes, type ImportedIdentityAdministration } from "./imported-identity-administration-routes.js";
-import { workspaceSearchRoutes } from "./workspace-search-routes.js";
-import type { WorkspaceSearchService } from "./workspace-search.js";
-import { agentGrantRoutes } from "./agent-grant-routes.js";
-import { mcpRoute } from "./mcp-route.js";
-import type { AgentGrantService } from "./agent-grants.js";
-import { instanceUpgradeRoute } from "./instance-upgrade-routes.js";
 import type { InstanceUpgradeService } from "./instance-upgrade.js";
-import { accountRegistrationRoute, type AuthenticationFailureReporter } from "./account-registration-routes.js";
-import type { AccountRegistrationService } from "./account-registration.js";
 import { memberAccessFromCapabilities, publicRoutesFromCapabilities, routesFromCapabilities, type CapabilityRegistry } from "./capability-registry.js";
+import type { AuthenticationFailureReporter } from "./account-registration-routes.js";
+import type { InstanceBackupService } from "./instance-backup.js";
 
 export interface DatabaseProbe {
   verifyConnection(): Promise<void>;
@@ -101,52 +40,16 @@ export interface RunningInstance {
 
 export interface InstanceOptions {
   database: DatabaseProbe;
-  capabilities?: CapabilityRegistry;
+  capabilities: CapabilityRegistry;
   host: string;
   port: number;
   instanceAdminToken: string;
-  ownerBootstrap?: OwnerBootstrapService;
-  passwordAuth?: PasswordAuthService;
-  accountRegistration?: AccountRegistrationService;
-  reportAuthenticationFailure?: AuthenticationFailureReporter;
-  workspaceProjects?: WorkspaceProjectService;
-  notes?: NoteService;
-  noteCollaboration?: NoteCollaborationService;
-  memberAccess?: MemberAccessResolver;
-  organizationRoles?: OrganizationRoleService;
-  memberLocalization?: MemberLocalizationService;
-  oidcAuth?: OidcAuthService;
-  oidcManagement?: OidcManagementService;
-  oidcCallbackOrigin?: string;
-  allowInsecureOidcCallbackOriginForTest?: boolean;
-  accountRecovery?: AccountRecoveryService;
-  invitations?: InvitationService;
   diagnostics?: Diagnostics;
   acceleration?: OptionalRedisAcceleration;
-  repositoryConnections?: RepositoryConnectionService;
-  tasks?: TaskService;
-  attachments?: AttachmentService;
-  mobileCaptures?: MobileCaptureService;
-  discussions?: DiscussionService;
-  projectWorkflows?: ProjectWorkflowService;
-  portableWorkspaceExports?: PortableWorkspaceExportService;
-  portableWorkspaceImports?: PortableWorkspaceImportService;
-  boards?: BoardService;
-  noteLinks?: NoteLinkService;
-  activities?: ActivityService;
-  githubArtifacts?: GitHubArtifactService;
-  githubSignals?: GitHubSignalService;
   webClientRoot?: string;
   instanceBackups?: InstanceBackupService;
-  instanceBackupRoot?: string;
-  instanceBackupRestoreTarget?: InstanceBackupRestoreTarget;
-  notifications?: NotificationService;
-  automations?: AutomationService;
-  importedIdentityAdministration?: ImportedIdentityAdministration;
-  searches?: WorkspaceSearchService;
-  agentGrants?: AgentGrantService;
-  mcpEnabled?: boolean;
   instanceUpgrades?: InstanceUpgradeService;
+  reportAuthenticationFailure?: AuthenticationFailureReporter;
 }
 
 const webContentTypes: Record<string, string> = {
@@ -189,19 +92,6 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
   if (!options.instanceAdminToken) {
     throw new Error("INSTANCE_ADMIN_TOKEN must not be empty");
   }
-  let oidcCallbackOrigin: string | undefined;
-  if (options.oidcAuth) {
-    if (!options.oidcCallbackOrigin) throw new Error("PUBLIC_ORIGIN must be configured when OpenID Connect is enabled");
-    let origin: URL;
-    try { origin = new URL(options.oidcCallbackOrigin); } catch { throw new Error("PUBLIC_ORIGIN must be a valid absolute URL"); }
-    const localhostHttp = origin.protocol === "http:" && origin.hostname === "localhost";
-    if (origin.origin !== origin.href.replace(/\/$/, "") || origin.username || origin.password
-      || (origin.protocol !== "https:" && !localhostHttp && !(options.allowInsecureOidcCallbackOriginForTest && origin.protocol === "http:"))) {
-      throw new Error("PUBLIC_ORIGIN must be an HTTPS origin, or HTTP on localhost, without credentials, path, query, or fragment");
-    }
-    oidcCallbackOrigin = origin.origin;
-  }
-
   const diagnostics = options.diagnostics ?? createDiagnostics({
     instanceVersion: "0.1.0",
     transport: {
@@ -212,68 +102,13 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
   });
   diagnostics.record({ kind: "instance_started", occurredAt: new Date().toISOString() });
   const acceleration = options.acceleration ?? createOptionalRedisAcceleration();
-  const memberAccess = (options.capabilities ? memberAccessFromCapabilities(options.capabilities) : undefined)
-    ?? options.memberAccess ?? options.passwordAuth;
-  const capabilityRegistry = options.capabilities ?? { modules: [] };
-  const capabilityRouteOwnership = new Set(capabilityRegistry.modules.flatMap(({ owns }) => [...(owns ?? [])]));
-  const ownsRoute = (feature: string) => capabilityRouteOwnership.has(feature);
-  const capabilityPublicDomainRoutes = publicRoutesFromCapabilities(capabilityRegistry);
-  const legacyPublicDomainRoutes = memberAccess ? [
-    ...(options.memberLocalization ? [memberLocalizationRoutes(options.memberLocalization, memberAccess)] : []),
-    ...(!ownsRoute("workspace-projects") && options.workspaceProjects ? [workspaceProjectRoutes(options.workspaceProjects, memberAccess)] : []),
-    ...(options.organizationRoles ? [organizationRoleRoutes(options.organizationRoles, memberAccess)] : []),
-    ...(options.invitations ? [invitationRoutes(options.invitations, memberAccess)] : []),
-    ...(!ownsRoute("notes") && options.notes ? [noteRoutes(options.notes, memberAccess)] : []),
-    ...(!ownsRoute("note-collaboration") && options.noteCollaboration ? [noteCollaborationRoutes(options.noteCollaboration, memberAccess)] : []),
-    ...(!ownsRoute("note-links") && options.noteLinks ? [noteLinkRoutes(options.noteLinks, memberAccess)] : []),
-    ...(!ownsRoute("tasks") && options.tasks ? [taskRoutes(options.tasks, memberAccess)] : []),
-    ...(!ownsRoute("project-workflows") && options.projectWorkflows ? [projectWorkflowRoutes(options.projectWorkflows, memberAccess)] : []),
-    ...(!ownsRoute("boards") && options.boards ? [boardRoutes(options.boards, memberAccess)] : []),
-    ...(!ownsRoute("attachments") && options.attachments ? [attachmentRoutes(options.attachments, memberAccess)] : []),
-    ...(!ownsRoute("discussions") && options.discussions ? [discussionRoutes(options.discussions, memberAccess)] : []),
-    ...(!ownsRoute("portable-export") && options.portableWorkspaceExports ? [portableWorkspaceExportRoute(options.portableWorkspaceExports, memberAccess)] : []),
-    ...(!ownsRoute("markdown-import") && options.portableWorkspaceImports ? [markdownWorkspaceImportRoute(options.portableWorkspaceImports,memberAccess)] : []),
-    ...(!ownsRoute("activities") && options.activities ? [activityRoutes(options.activities, memberAccess)] : []),
-    ...(!ownsRoute("notifications") && options.notifications ? [notificationRoutes(options.notifications, memberAccess)] : []),
-    ...(!ownsRoute("repository-connections") && options.repositoryConnections ? [repositoryConnectionRoutes(options.repositoryConnections, memberAccess)] : []),
-    ...(!ownsRoute("github-artifacts") && options.githubArtifacts ? [githubArtifactRoutes(options.githubArtifacts, memberAccess)] : []),
-    ...(!ownsRoute("github-signals") && options.githubSignals ? [githubSignalRoutes(options.githubSignals, memberAccess)] : []),
-    ...(!ownsRoute("automations") && options.automations ? [automationRoutes(options.automations, memberAccess)] : []),
-    ...(options.importedIdentityAdministration ? [importedIdentityAdministrationRoutes(options.importedIdentityAdministration, memberAccess)] : []),
-    ...(!ownsRoute("search") && options.searches ? [workspaceSearchRoutes(options.searches, memberAccess)] : []),
-    ...(options.agentGrants ? [agentGrantRoutes(options.agentGrants, memberAccess,
-      { ...(options.notes ? { notes: options.notes } : {}), ...(options.tasks ? { tasks: options.tasks } : {}) })] : []),
-  ] : [];
-  const publicDomainRoutes = [...capabilityPublicDomainRoutes, ...legacyPublicDomainRoutes];
+  const memberAccess = memberAccessFromCapabilities(options.capabilities);
+  const publicDomainRoutes = publicRoutesFromCapabilities(options.capabilities);
   const applicationRoutes = [
-    ...(!ownsRoute("oidc-management") && options.oidcManagement && options.passwordAuth ? [oidcManagementRoute(options.oidcManagement, options.passwordAuth)] : []),
-    ...(!ownsRoute("oidc-auth") && options.oidcAuth && oidcCallbackOrigin ? [oidcAuthRoute(options.oidcAuth, oidcCallbackOrigin)] : []),
-    ...(!ownsRoute("account-recovery") && options.accountRecovery && options.passwordAuth ? [accountRecoveryRoute(options.accountRecovery, {
-      resolve: (authorization) => options.passwordAuth!.authenticateBearer(authorization),
-    })] : []),
-    ...(!ownsRoute("account-registration") ? [accountRegistrationRoute(options.accountRegistration, options.reportAuthenticationFailure)] : []),
-    ...(!ownsRoute("password-auth") && options.passwordAuth ? [passwordAuthRoute(options.passwordAuth, options.reportAuthenticationFailure)] : []),
-    ...(!ownsRoute("diagnostics") ? [diagnosticsSchemaRoute(diagnostics),
-      requireInstanceAdministrator(options.instanceAdminToken, diagnosticsAdminRoute(diagnostics))] : []),
     requireInstanceAdministrator(options.instanceAdminToken, instanceAdminRoute(acceleration)),
-    ...(!ownsRoute("instance-backups") && options.instanceBackups ? [requireInstanceAdministrator(options.instanceAdminToken, instanceBackupRoute(options.instanceBackups, options.instanceBackupRoot, options.instanceBackupRestoreTarget))] : []),
-    ...(!ownsRoute("instance-upgrades") && options.instanceUpgrades ? [requireInstanceAdministrator(options.instanceAdminToken, instanceUpgradeRoute(options.instanceUpgrades))] : []),
-    ...(!ownsRoute("owner-bootstrap") ? [requireInstanceAdministrator(
-      options.instanceAdminToken,
-      ownerBootstrapRoute(options.ownerBootstrap),
-    )] : []),
-    ...(!ownsRoute("portable-import") && options.portableWorkspaceImports
-      ? [requireInstanceAdministrator(options.instanceAdminToken, portableWorkspaceImportRoute(options.portableWorkspaceImports))] : []),
-    ...legacyPublicDomainRoutes,
-    ...(!ownsRoute("mobile-capture") && options.mobileCaptures && (options.memberAccess ?? options.passwordAuth)
-      ? [mobileCaptureRoutes(options.mobileCaptures, (options.memberAccess ?? options.passwordAuth)!)]
-      : []),
   ];
   const routes = [
-    ...routesFromCapabilities(capabilityRegistry),
-    ...(!ownsRoute("github-signals") && options.githubSignals ? [githubWebhookRoute(options.githubSignals)] : []),
-    ...(!ownsRoute("mcp") && options.agentGrants ? [mcpRoute(options.agentGrants, options.mcpEnabled === true,
-      { ...(options.notes ? { notes: options.notes } : {}), ...(options.tasks ? { tasks: options.tasks } : {}) })] : []),
+    ...routesFromCapabilities(options.capabilities),
     publicDomainApiRoute(publicDomainRoutes), ...applicationRoutes,
   ];
 

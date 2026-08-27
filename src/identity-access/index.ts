@@ -22,6 +22,18 @@ import { organizationRoleRoutes } from "../organization-role-routes.js";
 import type { OrganizationRoleService } from "../organization-roles.js";
 import type { MemberAccessResolver } from "../workspaces-projects.js";
 
+export function validatedOidcCallbackOrigin(value: string | undefined, allowInsecureForTest = false): string {
+  if (!value) throw new Error("PUBLIC_ORIGIN must be configured when OpenID Connect is enabled");
+  let origin: URL;
+  try { origin = new URL(value); } catch { throw new Error("PUBLIC_ORIGIN must be a valid absolute URL"); }
+  const localhostHttp = origin.protocol === "http:" && origin.hostname === "localhost";
+  if (origin.origin !== origin.href.replace(/\/$/, "") || origin.username || origin.password
+    || (origin.protocol !== "https:" && !localhostHttp && !(allowInsecureForTest && origin.protocol === "http:"))) {
+    throw new Error("PUBLIC_ORIGIN must be an HTTPS origin, or HTTP on localhost, without credentials, path, query, or fragment");
+  }
+  return origin.origin;
+}
+
 export function identityAccessCapability(options: {
   passwordAuth: PasswordAuthService;
   instanceAdminToken?: string;
@@ -38,7 +50,11 @@ export function identityAccessCapability(options: {
   oidcAuth?: OidcAuthService;
   oidcManagement?: OidcManagementService;
   oidcCallbackOrigin?: string;
+  allowInsecureOidcCallbackOriginForTest?: boolean;
 }): CapabilityModule {
+  const oidcCallbackOrigin = options.oidcAuth
+    ? validatedOidcCallbackOrigin(options.oidcCallbackOrigin, options.allowInsecureOidcCallbackOriginForTest)
+    : undefined;
   const memberRoutes = () => [
     ...(options.organizationRoles && options.memberAccess ? [organizationRoleRoutes(options.organizationRoles, options.memberAccess)] : []),
     ...(options.invitations && options.memberAccess ? [invitationRoutes(options.invitations, options.memberAccess)] : []),
@@ -61,7 +77,7 @@ export function identityAccessCapability(options: {
       ...memberRoutes(),
       ...(options.accountRecovery ? [accountRecoveryRoute(options.accountRecovery, { resolve: (authorization) => options.passwordAuth.authenticateBearer(authorization) })] : []),
       ...(options.oidcManagement ? [oidcManagementRoute(options.oidcManagement, options.passwordAuth)] : []),
-      ...(options.oidcAuth && options.oidcCallbackOrigin ? [oidcAuthRoute(options.oidcAuth, options.oidcCallbackOrigin)] : []),
+      ...(options.oidcAuth && oidcCallbackOrigin ? [oidcAuthRoute(options.oidcAuth, oidcCallbackOrigin)] : []),
     ],
     publicRoutes: memberRoutes,
   };

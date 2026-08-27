@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 
 import { AttachmentService, encodePortableFilename, LocalAttachmentStorage, portableAttachmentHref, type AttachmentRecord, type AttachmentRepository, type PortableAttachmentProjection } from "../src/attachments.js";
-import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
+import { startInstance, type DatabaseProbe, type RunningInstance } from "./support/start-test-instance.js";
 import type { MemberAccessResolver } from "../src/workspaces-projects.js";
 import { NoteService, type NoteEditBatch, type NoteRecord, type NoteRepository, type PortableNoteProjection } from "../src/notes.js";
 import { richTextToMarkdown } from "../src/rich-text.js";

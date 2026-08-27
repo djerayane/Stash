@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 
-import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
+import { startInstance, type DatabaseProbe, type RunningInstance } from "./support/start-test-instance.js";
 import { initialWorkflowStatus, ProjectWorkflowService, type ProjectWorkflow, type ProjectWorkflowRepository } from "../src/project-workflows.js";
 import { TaskService, type CreateTaskFromBlockDraft, type TaskPlanningReadModel } from "../src/tasks.js";
 import type { PortableTaskProjection } from "../src/notes.js";

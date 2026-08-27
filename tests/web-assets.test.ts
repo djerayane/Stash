@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
-import { startInstance, type RunningInstance } from "../src/instance.js";
+import { startInstance, type RunningInstance } from "./support/start-test-instance.js";
 
 describe("Vite web application hosting", () => {
   let instance: RunningInstance | undefined;

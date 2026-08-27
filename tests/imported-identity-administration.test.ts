@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
-import { startInstance, type RunningInstance } from "../src/instance.js";
+import { startInstance, type RunningInstance } from "./support/start-test-instance.js";
 
 describe("Imported Identity administration", () => {
   let instance: RunningInstance | undefined;

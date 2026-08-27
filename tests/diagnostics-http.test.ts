@@ -6,7 +6,7 @@ import {
   type DiagnosticPayload,
   type DiagnosticTransport,
 } from "../src/diagnostics.js";
-import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
+import { startInstance, type DatabaseProbe, type RunningInstance } from "./support/start-test-instance.js";
 
 class AvailableDatabase implements DatabaseProbe {
   async verifyConnection(): Promise<void> {}

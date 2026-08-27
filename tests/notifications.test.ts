@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 
-import { startInstance, type DatabaseProbe } from "../src/instance.js";
+import { startInstance, type DatabaseProbe } from "./support/start-test-instance.js";
 import {
   assignmentNotificationInputs,
   directMentionMemberIds,

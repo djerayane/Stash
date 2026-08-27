@@ -4,7 +4,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { Pool } from "pg";
 
 import { createAuthenticationSecretCodec } from "../src/authentication-secrets.js";
-import { startInstance, type RunningInstance } from "../src/instance.js";
+import { startInstance, type RunningInstance } from "./support/start-test-instance.js";
 import { NoteService } from "../src/notes.js";
 import { OwnerBootstrapService } from "../src/owner-bootstrap.js";
 import { PostgresDatabase } from "../src/postgres-database.js";
