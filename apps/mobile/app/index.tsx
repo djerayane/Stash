@@ -171,6 +171,11 @@ export default function CaptureScreen() {
           <Text style={{ color: colors.accent, fontSize: 16 }}>Pair or update Instance</Text>
         </Pressable>
       </Link>
+      <Link href="/workspace" asChild>
+        <Pressable accessibilityRole="link" style={{ minHeight: 44, justifyContent: "center" }}>
+          <Text style={{ color: colors.accent, fontSize: 16 }}>Open offline Workspace</Text>
+        </Pressable>
+      </Link>
       <View style={{ gap: 10 }}>
         <TextInput
           accessibilityLabel={checklist ? "Checklist title and items" : "Note text"}
