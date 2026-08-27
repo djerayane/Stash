@@ -106,14 +106,15 @@ function ReadableViews({ views, snapshot }: { views: ViewBlock[]; snapshot: Mobi
       const source = view.definition.source;
       const collection = source.kind === "collection" ? snapshot.collections.find(({ id }) => id === source.collectionId) : undefined;
       const tasks = source.kind === "tasks" ? snapshot.tasks.filter((task) => view.definition.filters.every((filter) =>
-        filter.propertyId === "task:status" ? filter.operator !== "equals" || task.status.id === filter.value
-          : filter.propertyId !== "task:assignee" || filter.operator !== "equals" || task.assigneeIds.includes(String(filter.value)))) : [];
+        matchesSavedFilter(taskValue(task, filter.propertyId), filter.operator, filter.value))).sort((left, right) => {
+          for (const sort of view.definition.sorts) {
+            const compared = displayValue(taskValue(left, sort.propertyId)).localeCompare(displayValue(taskValue(right, sort.propertyId)));
+            if (compared) return sort.direction === "ascending" ? compared : -compared;
+          }
+          return left.title.localeCompare(right.title);
+        }) : [];
       const records = collection ? [...collection.records].filter((record) => view.definition.filters.every((filter) => {
-        const value = record.values[filter.propertyId]; const empty = value === undefined || value === null || value === "" || Array.isArray(value) && !value.length;
-        if (filter.operator === "is_empty") return empty; if (filter.operator === "is_not_empty") return !empty;
-        const comparable = displayValue(value).toLocaleLowerCase(); const expected = displayValue(filter.value).toLocaleLowerCase();
-        if (filter.operator === "equals") return comparable === expected; if (filter.operator === "not_equals") return comparable !== expected;
-        return comparable.includes(expected);
+        return matchesSavedFilter(record.values[filter.propertyId], filter.operator, filter.value);
       })).sort((left, right) => {
         for (const sort of view.definition.sorts) {
           const compared = displayValue(left.values[sort.propertyId]).localeCompare(displayValue(right.values[sort.propertyId]));
@@ -126,6 +127,9 @@ function ReadableViews({ views, snapshot }: { views: ViewBlock[]; snapshot: Mobi
         <Text selectable accessibilityRole="header" style={{ color: colors.label, fontSize: 17, fontWeight: "700" }}>{view.title}</Text>
         <Text selectable style={{ color: colors.secondaryLabel }}>{view.definition.presentation} view · {count} item{count === 1 ? "" : "s"}</Text>
         {tasks.map((task) => <View key={task.id} style={{ gap: 3, paddingVertical: 7 }}>
+          {view.definition.groupBy ? <Text selectable style={{ color: colors.secondaryLabel, fontWeight: "600" }}>
+            {displayValue(taskValue(task, view.definition.groupBy)) || "No value"}
+          </Text> : null}
           <Text selectable style={{ color: colors.label, fontWeight: "600" }}>{task.title}</Text>
           <Text selectable style={{ color: colors.secondaryLabel }}>{task.status.name} · {task.projectKeys.map(({ key }) => key).join(" · ") || "No Project"}</Text>
         </View>)}
@@ -147,6 +151,25 @@ function displayValue(value: unknown): string {
   if (Array.isArray(value)) return value.map((entry) => typeof entry === "object" && entry && "fallback" in entry ? String(entry.fallback) : String(entry)).join(", ");
   if (typeof value === "object" && "start" in value) return String(value.start);
   return "";
+}
+
+function taskValue(task: MobileCanonicalTask, propertyId: string): unknown {
+  if (propertyId === "task:title") return task.title;
+  if (propertyId === "task:description") return task.description;
+  if (propertyId === "task:status") return task.status.id;
+  if (propertyId === "task:assignee") return task.assigneeIds;
+  if (propertyId === "task:project") return task.projectKeys.map(({ key }) => key);
+  return undefined;
+}
+
+function matchesSavedFilter(value: unknown, operator: ViewBlock["definition"]["filters"][number]["operator"], expected: unknown) {
+  const empty = value === undefined || value === null || value === "" || Array.isArray(value) && !value.length;
+  if (operator === "is_empty") return empty;
+  if (operator === "is_not_empty") return !empty;
+  const comparable = displayValue(value).toLocaleLowerCase(); const target = displayValue(expected).toLocaleLowerCase();
+  if (operator === "equals") return Array.isArray(value) ? value.map(displayValue).some((entry) => entry.toLocaleLowerCase() === target) : comparable === target;
+  if (operator === "not_equals") return Array.isArray(value) ? value.map(displayValue).every((entry) => entry.toLocaleLowerCase() !== target) : comparable !== target;
+  return comparable.includes(target);
 }
 
 function ancestors(id: string, snapshot: MobileWorkspaceSnapshot) {
