@@ -28,7 +28,7 @@ describe("PostgreSQL Discussion mention notifications", { skip: databaseUrl ? fa
         ownerName: "Ada Lovelace", ownerEmail: "ada-mentions@example.test", passwordHash: "test-only", role: "Owner" });
       await sql.query("INSERT INTO stash_accounts(id,name,email,password_hash) VALUES($1,'Grace Hopper','grace-mentions@example.test','test-only'),($2,'Private Member','private-mentions@example.test','test-only')", [recipientId, inaccessibleId]);
       await sql.query("INSERT INTO stash_organization_memberships(organization_id,account_id,role) VALUES($1,$2,'Member')", [organizationId, recipientId]);
-      const workspaces = new WorkspaceProjectService(database);
+      const workspaces = new WorkspaceProjectService(database.identityAccessRepositories());
       const workspace = await workspaces.createWorkspace(ownerId, { name: "Mentions", owner: { type: "organization", organizationId } });
       assert.equal(workspace.status, "created"); if (workspace.status !== "created") return;
       const project = await workspaces.createProject(ownerId, workspace.workspace.id, { name: "Delivery", key: "DEL" });

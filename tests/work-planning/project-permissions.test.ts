@@ -108,7 +108,7 @@ describe("Project creation permission", () => {
       await store.upgradeDatabase.query("INSERT INTO stash_organization_memberships(organization_id,account_id,role) VALUES($1,$2,$3)",
         [organizationId, id, role]);
     }
-    const service = new WorkspaceProjectService(store.database);
+    const service = new WorkspaceProjectService(store.database.identityAccessRepositories());
     await store.upgradeDatabase.query(`INSERT INTO stash_workspaces
       (id,name,owner_type,personal_owner_id,organization_owner_id,created_by_account_id)
       VALUES($1,'Owner personal','personal',$2,NULL,$2)`, [personalId, ownerId]);

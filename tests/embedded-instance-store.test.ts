@@ -68,7 +68,7 @@ describe("embedded Instance store", () => {
     await database.verifyConnection(); await database.prepareInstanceStore();
     assert.equal(await database.createFirstOrganizationOwner({ organizationId, organizationName: "Stash", ownerId, ownerName: "Ada",
       ownerEmail: "ada@example.test", passwordHash: "password-hash", role: "Owner" }), true);
-    assert.equal((await database.createWorkspace({ id: workspaceId, name: "Planning", owner: { type: "organization", id: organizationId },
+    assert.equal((await database.identityAccessRepositories().createWorkspace({ id: workspaceId, name: "Planning", owner: { type: "organization", id: organizationId },
       createdByMemberId: ownerId }, { localAccountId: ownerId, displayName: "Ada" })).status, "created");
     const document = paragraphDocument("Embedded release plan", "10000000-0000-4000-8000-000000000005");
     assert.equal(await database.knowledgeAuthoringRepositories().createNote(ownerId, { id: noteId, workspaceId, content: "Embedded release plan", document, revision: 1,

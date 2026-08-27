@@ -27,7 +27,7 @@ describe("PostgreSQL structured Task collaboration", { skip: !databaseUrl }, () 
     database = new PostgresDatabase(testDatabaseUrl, createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
     const owner = await new OwnerBootstrapService(database).bootstrap({ organizationName: "Merge Test", ownerName: "Ada Lovelace",
       ownerEmail: `ada-${randomUUID()}@example.test`, password: "test-password-long-enough" }); assert.ok(owner);
-    const workspaces = new WorkspaceProjectService(database);
+    const workspaces = new WorkspaceProjectService(database.identityAccessRepositories());
     const workspace = await workspaces.createWorkspace(owner.ownerId, { name: "Portable", owner: { type: "organization", organizationId: owner.organizationId } }); assert.equal(workspace.status, "created");
     if (workspace.status !== "created") return;
     const project = await workspaces.createProject(owner.ownerId, workspace.workspace.id, { name: "Stash", key: "STASH" }); assert.equal(project.status, "created");

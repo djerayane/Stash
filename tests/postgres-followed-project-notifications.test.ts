@@ -25,7 +25,7 @@ describe("PostgreSQL followed Project notifications", { skip: databaseUrl ? fals
       await sql.query(`INSERT INTO stash_accounts(id,name,email,password_hash) VALUES
         ($1,'Grace Hopper','grace-follow@example.test','test-only'),($2,'Katherine Johnson','katherine-follow@example.test','test-only')`, [recipientId, followerId]);
       await sql.query("INSERT INTO stash_organization_memberships(organization_id,account_id,role) VALUES($1,$2,'Member'),($1,$3,'Member')", [organizationId, recipientId, followerId]);
-      const workspaces = new WorkspaceProjectService(database); const workspace = await workspaces.createWorkspace(ownerId,
+      const workspaces = new WorkspaceProjectService(database.identityAccessRepositories()); const workspace = await workspaces.createWorkspace(ownerId,
         { name: "Follow", owner: { type: "organization", organizationId } }); assert.equal(workspace.status, "created"); if (workspace.status !== "created") return;
       const project = await workspaces.createProject(ownerId, workspace.workspace.id, { name: "Delivery", key: "DEL" }); assert.equal(project.status, "created"); if (project.status !== "created") return;
       assert.equal(await database.workPlanningRepositories().saveProjectFollow!(recipientId, project.project.id, true), true);

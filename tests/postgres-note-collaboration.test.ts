@@ -25,7 +25,7 @@ describe("PostgreSQL Note collaboration", { skip: databaseUrl ? false : "STASH_T
     database = new PostgresDatabase(scopedDatabaseUrl, createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
     const owner = await new OwnerBootstrapService(database).bootstrap({ organizationName: "Collaboration", ownerName: "Creator",
       ownerEmail: `creator-${randomUUID()}@example.test`, password: "test-password-long-enough" }); assert.ok(owner);
-    const workspaces = new WorkspaceProjectService(database);
+    const workspaces = new WorkspaceProjectService(database.identityAccessRepositories());
     const workspace = await workspaces.createWorkspace(owner.ownerId, { name: "Shared", owner: { type: "organization", organizationId: owner.organizationId } });
     assert.equal(workspace.status, "created"); if (workspace.status !== "created") return;
     const project = await workspaces.createProject(owner.ownerId, workspace.workspace.id, { name: "Notes", key: "NOTE" });

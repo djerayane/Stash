@@ -26,7 +26,7 @@ describe("PostgreSQL permission-safe Workspace search", { skip: !databaseUrl }, 
     database = new PostgresDatabase(scopedUrl.toString(), createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
     const owner = await new OwnerBootstrapService(database).bootstrap({ organizationName: "Search Test", ownerName: "Ada Lovelace",
       ownerEmail: `ada-${randomUUID()}@example.test`, password: "test-password-long-enough" }); assert.ok(owner);
-    const workspaces = new WorkspaceProjectService(database);
+    const workspaces = new WorkspaceProjectService(database.identityAccessRepositories());
     const workspace = await workspaces.createWorkspace(owner.ownerId, { name: "Search", owner: { type: "organization", organizationId: owner.organizationId } });
     assert.equal(workspace.status, "created"); if (workspace.status !== "created") return;
     const visibleProject = await workspaces.createProject(owner.ownerId, workspace.workspace.id, { name: "Visible", key: "VISIBLE" });

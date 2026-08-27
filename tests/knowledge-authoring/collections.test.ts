@@ -95,7 +95,7 @@ describe("Collection contracts", () => {
       const ownerId = "88888888-8888-4888-8888-888888888888";
       await store.database.createFirstOrganizationOwner({ organizationId: "99999999-9999-4999-8999-999999999999",
         organizationName: "Studio", ownerId, ownerName: "Ada", ownerEmail: "ada@example.test", passwordHash: "test-only", role: "Owner" });
-      const workspaceResult = await new WorkspaceProjectService(store.database).createWorkspace(ownerId,
+      const workspaceResult = await new WorkspaceProjectService(store.database.identityAccessRepositories()).createWorkspace(ownerId,
         { name: "Notebook", owner: { type: "personal" } });
       assert.equal(workspaceResult.status, "created"); if (workspaceResult.status !== "created") return;
       const noteResult = await new NoteTreeService(store.database.noteTreeRepository(), new EmptyCollectionImpactInspector())
@@ -176,7 +176,7 @@ describe("Collection contracts", () => {
       const ownerId = "10101010-1010-4010-8010-101010101010";
       await store.database.createFirstOrganizationOwner({ organizationId: "20202020-2020-4020-8020-202020202020", organizationName: "Studio",
         ownerId, ownerName: "Ada", ownerEmail: "delete@example.test", passwordHash: "test-only", role: "Owner" });
-      const workspace = await new WorkspaceProjectService(store.database).createWorkspace(ownerId, { name: "Notebook", owner: { type: "personal" } });
+      const workspace = await new WorkspaceProjectService(store.database.identityAccessRepositories()).createWorkspace(ownerId, { name: "Notebook", owner: { type: "personal" } });
       assert.equal(workspace.status, "created"); if (workspace.status !== "created") return;
       const notes = new NoteTreeService(store.database.noteTreeRepository(), store.database.tutorialContributionRepository());
       const ownerNote = await notes.create(ownerId, workspace.workspace.id, { title: "Source" });
@@ -233,7 +233,7 @@ describe("Collection contracts", () => {
       await store.database.createFirstOrganizationOwner({ organizationId, organizationName: "Studio", ownerId, ownerName: "Ada",
         ownerEmail: "permissions@example.test", passwordHash: "test-only", role: "Owner" });
       await store.upgradeDatabase.query("INSERT INTO stash_accounts(id,name,email,password_hash) VALUES($1,'Guest','guest-collection@example.test','test-only')", [guestId]);
-      const workspaces = new WorkspaceProjectService(store.database);
+      const workspaces = new WorkspaceProjectService(store.database.identityAccessRepositories());
       const workspace = await workspaces.createWorkspace(ownerId, { name: "Notebook", owner: { type: "organization", organizationId } });
       assert.equal(workspace.status, "created"); if (workspace.status !== "created") return;
       const project = await workspaces.createProject(ownerId, workspace.workspace.id, { name: "Shared", key: "SHARED" });

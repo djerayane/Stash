@@ -35,7 +35,7 @@ describe("Note Tree HTTP", () => {
       ownerEmail: "grace@example.test", passwordHash: "test-only", role: "Owner" });
     await store.upgradeDatabase.query(`INSERT INTO stash_accounts (id, name, email, password_hash)
       VALUES ($1, 'Guest', 'guest@example.test', 'test-only')`, [guestId]);
-    const workspace = await new WorkspaceProjectService(store.database).createWorkspace(ownerId,
+    const workspace = await new WorkspaceProjectService(store.database.identityAccessRepositories()).createWorkspace(ownerId,
       { name: "Notebook", owner: { type: "organization", organizationId } });
     assert.equal(workspace.status, "created");
     if (workspace.status !== "created") throw new Error("workspace setup failed");
@@ -108,7 +108,7 @@ describe("Note Tree HTTP", () => {
   });
 
   test("inherited Project Guests can read child Discussions but cannot mutate or discover inaccessible links", async () => {
-    const projects = new WorkspaceProjectService(store.database);
+    const projects = new WorkspaceProjectService(store.database.identityAccessRepositories());
     const project = await projects.createProject(ownerId, workspaceId, { name: "Launch", key: "LAUNCH" });
     assert.equal(project.status, "created");
     if (project.status !== "created") return;
