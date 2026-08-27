@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
 
-import { startInstance } from "../src/instance.js";
+import { startInstance } from "../tests/support/start-test-instance.js";
 import { NoteCollaborationService, type CollaborationSnapshot } from "../src/note-collaboration.js";
 import * as Y from "yjs";
 import { collaborativeDocumentFromRichText, richTextFromCollaborativeDocument } from "../src/postgres-database.js";

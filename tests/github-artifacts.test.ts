@@ -3,7 +3,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { afterEach, describe, it } from "node:test";
 
 import { GitHubArtifactService, type GitHubArtifactProvider, type GitHubArtifactRepository, type DevelopmentArtifact } from "../src/github-artifacts.js";
-import { startInstance, type RunningInstance } from "../src/instance.js";
+import { startInstance, type RunningInstance } from "./support/start-test-instance.js";
 import { GitHubAppClient } from "../src/github-app.js";
 
 const projectId = "11111111-1111-4111-8111-111111111111";

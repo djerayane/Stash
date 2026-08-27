@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 
-import { startInstance, type DatabaseProbe, type RunningInstance } from "../../src/instance.js";
+import { startInstance, type DatabaseProbe, type RunningInstance } from "../support/start-test-instance.js";
 import {
   OrganizationRoleService,
   type BuiltInOrganizationRole,

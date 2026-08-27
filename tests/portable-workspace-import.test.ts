@@ -8,7 +8,7 @@ import { describe, it } from "node:test";
 import { deflateRawSync } from "node:zlib";
 import { Pool } from "pg";
 
-import { startInstance } from "../src/instance.js";
+import { startInstance } from "./support/start-test-instance.js";
 import { PortableWorkspaceExportService, type PortableWorkspaceExportSnapshot } from "../src/portable-workspace-export.js";
 import { InvalidPortableWorkspaceImport, PortableWorkspaceImportService, PortableWorkspaceImportTooLarge, publishedPortableWorkspaceExportSchemas, type PortableWorkspaceImportBundle, type PortableWorkspaceImportReport, type PortableWorkspaceImportRepository } from "../src/portable-workspace-import.js";
 import { LocalAttachmentStorage } from "../src/attachments.js";

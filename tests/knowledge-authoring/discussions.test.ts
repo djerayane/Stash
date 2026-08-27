@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 
 import { DiscussionService, type CreateDiscussionWorkDraft, type DiscussionDraft, type DiscussionRecord, type DiscussionRepository, type DiscussionWorkActivity, type DiscussionWorkOutcome, type DiscussionWorkProjection, type PortableDiscussionProjection, type PortableDiscussionWorkLinkProjection } from "../../src/discussions.js";
-import { startInstance, type DatabaseProbe, type RunningInstance } from "../../src/instance.js";
+import { startInstance, type DatabaseProbe, type RunningInstance } from "../support/start-test-instance.js";
 import type { MemberAccessResolver, PortableIdentity } from "../../src/workspaces-projects.js";
 
 const noteId = "11111111-1111-4111-8111-111111111111";

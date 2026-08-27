@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 
-import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
+import { startInstance, type DatabaseProbe, type RunningInstance } from "./support/start-test-instance.js";
 import { InvalidWorkspaceSearchInput, WorkspaceSearchService, type WorkspaceSearchQuery, type WorkspaceSearchRepository } from "../src/workspace-search.js";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";

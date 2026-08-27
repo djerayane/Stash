@@ -8,7 +8,7 @@ import { Pool } from "pg";
 
 import { createAuthenticationSecretCodec } from "../src/authentication-secrets.js";
 import { AttachmentService, LocalAttachmentStorage, portableAttachmentHref } from "../src/attachments.js";
-import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
+import { startInstance, type DatabaseProbe, type RunningInstance } from "./support/start-test-instance.js";
 import { NoteService } from "../src/notes.js";
 import { PostgresDatabase } from "../src/postgres-database.js";
 import {

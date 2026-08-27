@@ -3,7 +3,7 @@ import { createServer } from "node:http";
 import { afterEach, describe, it } from "node:test";
 
 import { GitHubArtifactService, type DevelopmentArtifact, type GitHubArtifactProvider, type GitHubArtifactRepository } from "../src/github-artifacts.js";
-import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
+import { startInstance, type DatabaseProbe, type RunningInstance } from "./support/start-test-instance.js";
 import { publicDomainApiRoute } from "../src/public-domain-api.js";
 import { RepositoryConnectionService, type GitHubApp, type RepositoryConnectionRecord, type RepositoryConnectionRepository } from "../src/repository-connections.js";
 import {

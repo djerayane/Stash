@@ -7,7 +7,7 @@ import { afterEach, describe, it } from "node:test";
 import { spawnSync } from "node:child_process";
 
 import { InstanceBackupService, type InstanceBackupRestoreTarget, type InstanceBackupSource } from "../src/instance-backup.js";
-import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
+import { startInstance, type DatabaseProbe, type RunningInstance } from "./support/start-test-instance.js";
 
 const masterKey = Buffer.alloc(32, 7).toString("base64");
 

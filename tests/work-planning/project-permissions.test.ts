@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 
-import { startInstance, type DatabaseProbe, type RunningInstance } from "../../src/instance.js";
+import { startInstance, type DatabaseProbe, type RunningInstance } from "../support/start-test-instance.js";
 import { createAuthenticationSecretCodec } from "../../src/authentication-secrets.js";
 import { EmbeddedInstanceStore } from "../../src/embedded-instance-store.js";
 import { builtInProjectCreationPermissions, OrganizationRoleService } from "../../src/organization-roles.js";

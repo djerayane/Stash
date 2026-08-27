@@ -5,7 +5,7 @@ import { Pool } from "pg";
 
 import { AccountRegistrationService } from "../src/account-registration.js";
 import { createAuthenticationSecretCodec } from "../src/authentication-secrets.js";
-import { startInstance, type RunningInstance } from "../src/instance.js";
+import { startInstance, type RunningInstance } from "./support/start-test-instance.js";
 import { PasswordAuthService } from "../src/password-auth.js";
 import { PostgresDatabase } from "../src/postgres-database.js";
 

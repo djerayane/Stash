@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 
 import { InstanceBackupService, type InstanceBackupSource } from "../src/instance-backup.js";
-import { startInstance, type RunningInstance } from "../src/instance.js";
+import { startInstance, type RunningInstance } from "./support/start-test-instance.js";
 import { InstanceUpgradeService, type InstanceUpgradeTarget, type UpgradeCheck } from "../src/instance-upgrade.js";
 import { PostgresInstanceUpgradeTarget } from "../src/postgres-instance-upgrade.js";
 import { readStashReleaseVersion } from "../src/release-version.js";

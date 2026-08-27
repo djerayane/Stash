@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { startInstance } from "../src/instance.js";
+import { startInstance } from "./support/start-test-instance.js";
 
 test("the Instance serves the built web client and its SPA routes", async (context) => {
   const webRoot = await mkdtemp(join(tmpdir(), "stash-web-client-"));

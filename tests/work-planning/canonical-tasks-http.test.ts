@@ -7,7 +7,7 @@ import { after, before, test } from "node:test";
 import { createAuthenticationSecretCodec } from "../../src/authentication-secrets.js";
 import { createCapabilityRegistry } from "../../src/capability-registry.js";
 import { EmbeddedInstanceStore } from "../../src/embedded-instance-store.js";
-import { startInstance, type RunningInstance } from "../../src/instance.js";
+import { startInstance, type RunningInstance } from "../support/start-test-instance.js";
 import { canonicalTaskRoutes } from "../../src/work-planning/canonical-task-routes.js";
 import { CanonicalTaskService } from "../../src/work-planning/canonical-tasks.js";
 import { WorkspaceProjectService, type MemberAccessResolver } from "../../src/workspaces-projects.js";

@@ -3,7 +3,7 @@ import { createHmac } from "node:crypto";
 import { afterEach, describe, it } from "node:test";
 
 import { AutomationService, type AutomationRepository, type AutomationState } from "../src/automations.js";
-import { startInstance, type RunningInstance } from "../src/instance.js";
+import { startInstance, type RunningInstance } from "./support/start-test-instance.js";
 import { NotificationService, type NotificationDelivery, type NotificationPreferences, type NotificationRepository } from "../src/notifications.js";
 import type { ActivityRecord } from "../src/activity.js";
 import { GitHubSignalService, type GitHubSignal, type GitHubSignalRepository, type SignalCandidate } from "../src/github-signals.js";

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 
 import { BoardService, type Board, type BoardRepository, type BoardTask } from "../src/boards.js";
-import { startInstance, type DatabaseProbe, type RunningInstance } from "../src/instance.js";
+import { startInstance, type DatabaseProbe, type RunningInstance } from "./support/start-test-instance.js";
 import type { MemberAccessResolver } from "../src/workspaces-projects.js";
 
 const projectId = "22222222-2222-4222-8222-222222222222";
