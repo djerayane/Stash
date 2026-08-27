@@ -33,6 +33,14 @@ test("redesigned capability persistence remains implemented by focused kernel ad
   assert.match(developmentIntegration, /implements DevelopmentIntegrationPostgresRepositories/);
   for (const method of ["createRepositoryConnection", "linkArtifact", "matchingTasks", "receive", "confirm"])
     assert.match(developmentIntegration, new RegExp(`\\b${method}\\(`));
+
+  const knowledgeAuthoring = await readFile(new URL(
+    "../../src/knowledge-authoring/postgres-knowledge-authoring-repositories.ts",
+    import.meta.url,
+  ), "utf8");
+  for (const method of ["triageNote", "applyTriageChange", "organizeInboxNote", "archiveInboxNote", "linkInboxNote", "createTaskFromInbox"])
+    assert.match(knowledgeAuthoring, new RegExp(`\\b${method}\\(`));
+  assert.doesNotMatch(database, /\b(?:triageNote|applyTriageChange|organizeInboxNote|archiveInboxNote|linkInboxNote|createTaskFromInbox)\(/);
 });
 
 test("the Instance exposes capability-owned public routes without registering legacy duplicates", async () => {
