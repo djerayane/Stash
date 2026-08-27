@@ -1,5 +1,6 @@
 export * from "./visualizations.js";
 export * from "./collections.js";
+import type { Collection, ViewBlock } from "./collections.js";
 
 export type EntityId = string;
 
@@ -174,7 +175,32 @@ export interface MobileSyncMutationBase {
 export type MobileSyncMutation = MobileSyncMutationBase & (
   | { kind: "note_edit"; noteId: string; baseRevision: number; operations: NoteEditOperation[] }
   | { kind: "task_edit"; projectId: string; taskKey: string; baseRevision: number; changes: TaskPlanningUpdate }
+  | { kind: "canonical_task_edit"; taskId: string; baseRevision: number; changes: TaskPlanningUpdate }
 );
+
+export interface MobileNoteTreeNode {
+  id: string; workspaceId: string; parentId?: string; title: string; position: string; childCount: number;
+}
+export interface MobileNoteReadModel {
+  id: string; workspaceId: string; title: string; content: string; revision: number; document?: { type: "doc"; blocks: RichTextBlock[] };
+}
+export interface MobileCanonicalTask {
+  schema: "stash.task.v1"; id: string; workspaceId: string; title: string; description: string; revision?: number;
+  status: { id: string; name: string; category: string; position: number }; assigneeIds: string[];
+  projectKeys: Array<{ projectId: string; key: string }>; sourceNoteIds: string[];
+}
+export interface MobileWorkspaceWorkflow {
+  schema: "stash.workspace-workflow.v1"; workspaceId: string;
+  statuses: Array<{ id: string; name: string; category: string; position: number }>;
+}
+export interface MobileSearchEntry {
+  id: string; kind: "note" | "task" | "collection"; title: string; excerpt?: string;
+}
+export interface MobileWorkspaceSnapshot {
+  schema: "stash.mobile-workspace.v1"; workspaceId: string; refreshedAt: string;
+  noteTree: MobileNoteTreeNode[]; notes: MobileNoteReadModel[]; tasks: MobileCanonicalTask[];
+  workflow: MobileWorkspaceWorkflow; collections: Collection[]; viewBlocks: ViewBlock[]; search: MobileSearchEntry[];
+}
 
 export interface IncomingShareDelivery {
   id: string;
