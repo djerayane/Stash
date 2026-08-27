@@ -40,6 +40,8 @@ export function canonicalTaskRoutes(service: CanonicalTaskService, memberAccess:
           message: result.status === "cycle" ? "A Subtask cannot contain itself through its parent chain." : "A referenced Task, Project, or Workflow status is unavailable." });
         else if (result.status === "audience_broadening") json(response, 409, { ...result, error: result.status,
           message: "Confirm before sharing this Task with additional Project guests." });
+        else if(result.status==="conflict") json(response,409,{...result,error:"revision_conflict",
+          message:"This Task changed while the offline update was pending. The local contribution was preserved for review."});
         else json(response, created ? 201 : 200, result);
       } catch (error) {
         if (error instanceof InvalidCanonicalTaskInput) json(response, 422, { error: "invalid_input", message: "Provide valid canonical Task fields and stable identities." });

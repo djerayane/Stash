@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { PostgresKernel, PostgresQueryable } from "../instance-operations/storage/postgres-kernel.js";
-import type { CanonicalTask, CanonicalTaskRepository, WorkspaceWorkflow } from "./canonical-tasks.js";
+import type { CanonicalTask, CanonicalTaskChanges, CanonicalTaskRepository, WorkspaceWorkflow } from "./canonical-tasks.js";
 
 type Prepare = (client: PostgresQueryable) => Promise<void>;
 type CanReadNote = (memberId: string, noteId: string) => Promise<boolean>;
@@ -13,6 +13,9 @@ export class PostgresCanonicalTaskRepository implements CanonicalTaskRepository 
     private readonly canReadNote?: CanReadNote) {}
   async prepare(client: PostgresQueryable) {
     await this.prepareBase(client);
+    await client.query(`CREATE TABLE IF NOT EXISTS stash_canonical_task_operations(
+      task_id UUID NOT NULL REFERENCES stash_tasks(id) ON DELETE CASCADE,operation_id UUID NOT NULL,digest TEXT NOT NULL,outcome JSONB NOT NULL,
+      PRIMARY KEY(task_id,operation_id))`);
   }
   async ensureWorkflow(client: PostgresQueryable, workspaceId: string): Promise<WorkspaceWorkflow> {
     const current = await client.query<any>(`SELECT id,name,category,position FROM stash_workspace_workflow_statuses
@@ -58,7 +61,7 @@ export class PostgresCanonicalTaskRepository implements CanonicalTaskRepository 
     const sourceRows = (await client.query<any>("SELECT note_id,block_id FROM stash_task_block_sources WHERE task_id=$1 ORDER BY note_id,block_id", [taskId])).rows;
     const sources = !memberId ? sourceRows : (await Promise.all(sourceRows.map(async (source: any) =>
       ({ source, visible: await this.canReadNote?.(memberId, source.note_id) === true })))).filter(({ visible }) => visible).map(({ source }) => source);
-    return { schema: "stash.task.v1", id: row.id, workspaceId: row.workspace_id, title: row.title, description: row.description,
+    return { schema: "stash.task.v1", id: row.id, workspaceId: row.workspace_id, title: row.title, description: row.description, revision:Number(row.revision),
       status: { id: row.workspace_workflow_status_id, name: row.status_name,
         category: row.status_category === "canceled" ? "completed" : row.status_category, position: Number(row.status_position) },
       assigneeIds: row.assignee_ids ?? [], ...(row.parent_task_id ? { parentTaskId: row.parent_task_id } : {}),
@@ -92,15 +95,25 @@ export class PostgresCanonicalTaskRepository implements CanonicalTaskRepository 
     return (await client.query<any>(`SELECT task.workspace_id FROM stash_tasks task JOIN stash_workspaces workspace ON workspace.id=task.workspace_id
       WHERE task.id=$1 AND ${access} ${lock ? "FOR UPDATE OF task" : ""}`, [taskId, memberId])).rows[0];
   }
-  async updateTask(memberId: string, taskId: string, input: { title?: string; description?: string; statusId?: string }) {
+  async updateTask(memberId: string, taskId: string, input: CanonicalTaskChanges, operation?: { operationId:string; baseRevision:number }) {
     return this.kernel.transaction(async (client) => {
       await this.prepare(client); const found = await this.taskAccess(client, memberId, taskId, true); if (!found) return { status: "task_not_found" as const };
+      const digest=operation?createHash("sha256").update(JSON.stringify({baseRevision:operation.baseRevision,changes:input})).digest("hex"):undefined;
+      if(operation){const prior=await client.query<any>("SELECT digest,outcome FROM stash_canonical_task_operations WHERE task_id=$1 AND operation_id=$2",[taskId,operation.operationId]);
+        if(prior.rows[0]){if(prior.rows[0].digest!==digest) return {status:"conflict" as const,task:await this.canonical(client,taskId),operationId:operation.operationId,baseRevision:operation.baseRevision,changes:input};
+          return prior.rows[0].outcome;}}
       if (input.statusId && !(await client.query("SELECT 1 FROM stash_workspace_workflow_statuses WHERE id=$1 AND workspace_id=$2", [input.statusId, found.workspace_id])).rowCount)
         return { status: "invalid_reference" as const };
-      await client.query(`UPDATE stash_tasks SET title=COALESCE($2,title),description=COALESCE($3,description),
-        workspace_workflow_status_id=COALESCE($4,workspace_workflow_status_id),revision=revision+1 WHERE id=$1`,
-      [taskId, input.title ?? null, input.description ?? null, input.statusId ?? null]);
-      const task = await this.canonical(client, taskId); await this.projection(client, task); return { status: "updated" as const, task };
+      if(operation){const changed=await client.query(`UPDATE stash_tasks SET title=COALESCE($2,title),description=COALESCE($3,description),
+          workspace_workflow_status_id=COALESCE($4,workspace_workflow_status_id),revision=revision+1 WHERE id=$1 AND revision=$5 RETURNING id`,
+        [taskId,input.title??null,input.description??null,input.statusId??null,operation.baseRevision]);
+        if(!changed.rowCount){const outcome={status:"conflict" as const,task:await this.canonical(client,taskId),operationId:operation.operationId,baseRevision:operation.baseRevision,changes:input};
+          await client.query("INSERT INTO stash_canonical_task_operations(task_id,operation_id,digest,outcome) VALUES($1,$2,$3,$4::jsonb)",[taskId,operation.operationId,digest,JSON.stringify(outcome)]);return outcome;}}
+      else await client.query(`UPDATE stash_tasks SET title=COALESCE($2,title),description=COALESCE($3,description),
+        workspace_workflow_status_id=COALESCE($4,workspace_workflow_status_id),revision=revision+1 WHERE id=$1`,[taskId,input.title??null,input.description??null,input.statusId??null]);
+      const task=await this.canonical(client,taskId);await this.projection(client,task);const outcome={status:"updated" as const,task};
+      if(operation)await client.query("INSERT INTO stash_canonical_task_operations(task_id,operation_id,digest,outcome) VALUES($1,$2,$3,$4::jsonb)",[taskId,operation.operationId,digest,JSON.stringify(outcome)]);
+      return outcome;
     });
   }
   async replaceAssociations(client: PostgresQueryable, taskId: string, projectIds: string[]) {

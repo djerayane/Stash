@@ -17,7 +17,7 @@ export interface AutomationRepository {
   >;
 }
 
-export interface AutomationCandidate { taskId: string; projectId: string; status: "confirmed" | "pending_confirmation" }
+export interface AutomationCandidate { taskId: string; projectId: string; taskKey?: string; matchedKey?: string; status: "confirmed" | "pending_confirmation" }
 export interface AutomationFailureNotification {
   activity: ActivityRecord;
   projectId: string;

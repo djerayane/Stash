@@ -43,3 +43,22 @@ test("serves authenticated canonical Workspace Tasks with stable error semantics
   const moved = await call(`/api/canonical-tasks/${task.id}`, { method: "PATCH", body: JSON.stringify({ statusId: started.id }) });
   assert.equal(moved.status, 200); assert.equal((await moved.json() as any).task.status.id, started.id);
 });
+
+test("preserves an offline canonical Task contribution across divergent synchronization",async()=>{
+  const captured=await call(`/api/workspaces/${workspaceId}/canonical-tasks`,{method:"POST",body:JSON.stringify({title:"Offline captured Task"})});
+  assert.equal(captured.status,201);const original=(await captured.json() as any).task;assert.equal(original.revision,1);
+  const operationId="71717171-7171-4171-8171-717171717171";
+  const localEnvelope={operationId,baseRevision:original.revision,changes:{title:"Offline local title"}};
+  const serverEdit=await call(`/api/canonical-tasks/${original.id}`,{method:"PATCH",body:JSON.stringify({description:"Desktop detail"})});
+  assert.equal(serverEdit.status,200);const divergent=(await serverEdit.json() as any).task;assert.equal(divergent.id,original.id);assert.equal(divergent.revision,2);
+  const conflict=await call(`/api/canonical-tasks/${original.id}`,{method:"PATCH",body:JSON.stringify(localEnvelope)});
+  assert.equal(conflict.status,409);const preserved=await conflict.json() as any;
+  assert.equal(preserved.error,"revision_conflict");assert.equal(preserved.task.id,original.id);assert.equal(preserved.task.description,"Desktop detail");
+  assert.deepEqual(preserved.changes,localEnvelope.changes);assert.equal(preserved.operationId,operationId);
+  const duplicate=await call(`/api/canonical-tasks/${original.id}`,{method:"PATCH",body:JSON.stringify(localEnvelope)});
+  assert.equal(duplicate.status,409);assert.deepEqual(await duplicate.json(),preserved,"retry keeps the same loss-preserving conflict");
+  const reconciled=await call(`/api/canonical-tasks/${original.id}`,{method:"PATCH",body:JSON.stringify({operationId:"72727272-7272-4272-8272-727272727272",
+    baseRevision:preserved.task.revision,changes:localEnvelope.changes})});
+  assert.equal(reconciled.status,200);const finalTask=(await reconciled.json() as any).task;
+  assert.equal(finalTask.id,original.id);assert.equal(finalTask.title,"Offline local title");assert.equal(finalTask.description,"Desktop detail");assert.equal(finalTask.revision,3);
+});

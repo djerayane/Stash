@@ -2971,7 +2971,7 @@ export class PostgresDatabase implements
         if (!row || currentStatusId === row.target_status_id) return;
         failedRun = { automationId: row.automation_id, configuringMemberId: row.created_by_account_id,
           configuringMemberName: row.created_by_name, workspaceId: row.workspace_id, projectId: candidate.projectId,
-          taskId: row.id, taskKey: row.task_key??candidate.projectId, taskTitle: row.title };
+          taskId: row.id, taskKey: candidate.taskKey??candidate.matchedKey??row.task_key??"Task", taskTitle: row.title };
         const inserted = await client.query<any>(`INSERT INTO stash_automation_transitions(id,automation_id,signal_id,task_id,project_id,
           before_status_id,after_status_id,workspace_before_status_id,workspace_after_status_id,occurred_at)
           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,now()) ON CONFLICT(automation_id,signal_id,task_id) DO NOTHING RETURNING id,occurred_at`,
