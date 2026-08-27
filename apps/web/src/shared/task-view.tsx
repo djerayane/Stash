@@ -13,7 +13,7 @@ export function TaskView<T extends TaskViewRecord>({tasks,definition,statuses,on
   const {records}=evaluateTaskView(tasks,definition);
   if(!records.length)return <>{empty??null}</>;
   const groups=statuses??[...new Map(records.map((task)=>[task.status.id,task.status])).values()];
-  const row=(task:T)=><article data-task-row key={task.id}><span aria-hidden="true" data-task-check /><div><strong>{task.title}</strong><span>{task.projectKeys?.map(({key})=>key).join(" · ")||"No Project"}</span></div>
+  const row=(task:T)=><article data-task-row key={task.id}><div><strong>{task.title}</strong><span>{task.projectKeys?.map(({key})=>key).join(" · ")||"No Project"}</span></div>
     {statuses&&onStatusChange?<label data-status-control><span>Status for {task.title}</span><i aria-hidden="true" /><select aria-label={`Status for ${task.title}`} value={task.status.id}
       onChange={(event)=>onStatusChange(task,event.target.value)}>{statuses.map((status)=><option key={status.id} value={status.id}>{status.name}</option>)}</select></label>
       :<span>{task.status.name}</span>}</article>;

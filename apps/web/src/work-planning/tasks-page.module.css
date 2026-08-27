@@ -23,11 +23,10 @@
 .page nav button[aria-pressed="true"] { color: var(--stash-color-accent); }
 .page nav button[aria-pressed="true"]::after { content: ""; position: absolute; right: 0; bottom: .25rem; left: 0; height: 2px; border-radius: 999px; background: var(--stash-color-accent); }
 .tasks { position: relative; overflow: hidden; display: block; border: 1px solid var(--stash-border-subtle); border-radius: var(--stash-radius-md); background: color-mix(in srgb, var(--stash-color-surface) 76%, transparent); box-shadow: var(--stash-shadow-paper); }
-.tasks[data-view="list"]::before { content: "Task"; display: block; padding: 1rem 1.5rem 1rem 4.5rem; color: var(--stash-color-muted); background: color-mix(in srgb, var(--stash-color-canvas-deep) 42%, transparent); border-bottom: 1px solid var(--stash-border-subtle); font-size: .66rem; font-weight: 720; letter-spacing: .08em; text-transform: uppercase; }
+.tasks[data-view="list"]::before { content: "Task"; display: block; padding: 1rem 1.5rem; color: var(--stash-color-muted); background: color-mix(in srgb, var(--stash-color-canvas-deep) 42%, transparent); border-bottom: 1px solid var(--stash-border-subtle); font-size: .66rem; font-weight: 720; letter-spacing: .08em; text-transform: uppercase; }
 .tasks[data-view="list"]::after { content: "Status"; position: absolute; top: 1rem; right: 5.5rem; color: var(--stash-color-muted); font-size: .66rem; font-weight: 720; letter-spacing: .08em; text-transform: uppercase; }
-.tasks[data-view="list"] [data-task-row] { display: grid; grid-template-columns: 2.15rem minmax(0, 1fr) minmax(11rem, auto); align-items: center; gap: 1.2rem; min-height: 6.5rem; padding: 1.3rem 1.5rem; transition: background-color 160ms ease; }
+.tasks[data-view="list"] [data-task-row] { display: grid; grid-template-columns: minmax(0, 1fr) minmax(11rem, auto); align-items: center; gap: 1.2rem; min-height: 6.5rem; padding: 1.3rem 1.5rem; transition: background-color 160ms ease; }
 .tasks[data-view="list"] [data-task-row]:hover { background: rgb(255 255 255 / 34%); }
-.tasks [data-task-check] { width: 1.65rem; height: 1.65rem; border: 1px solid var(--stash-border-subtle); border-radius: .28rem; background: rgb(255 255 255 / 28%); }
 .tasks [data-task-row] > div { display: grid; gap: .35rem; }
 .tasks [data-task-row] strong { font-size: 1.08rem; font-weight: 610; }
 .tasks [data-task-row] > div span { color: var(--stash-color-muted); font-size: .84rem; }
