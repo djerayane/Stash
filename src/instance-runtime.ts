@@ -50,7 +50,7 @@ import { createCapabilityRegistry } from "./capability-registry.js";
 import { developmentIntegrationCapability } from "./development-integration/index.js";
 import { identityAccessCapability } from "./identity-access/index.js";
 import { InstanceSetupService } from "./identity-access/instance-setup.js";
-import { TutorialContributionService } from "./knowledge-authoring/collections.js";
+import { CollectionService, TutorialContributionService } from "./knowledge-authoring/collections.js";
 import { instanceOperationsCapability } from "./instance-operations/index.js";
 import { knowledgeAuthoringCapability } from "./knowledge-authoring/index.js";
 import { NoteTreeService } from "./knowledge-authoring/note-tree.js";
@@ -138,6 +138,7 @@ export async function composeInstanceRuntime(environment: NodeJS.ProcessEnv): Pr
   const tasks = new TaskService(database, database);
   const workspaceProjects = new WorkspaceProjectService(database);
   const starterTutorials = new TutorialContributionService(database.tutorialContributionRepository());
+  const collections = new CollectionService(database.collectionRepository());
   const projectlessTasks = new ProjectlessTaskService(database.projectlessTaskRepository());
   const repositoryConnections = githubApp ? new RepositoryConnectionService(database, githubApp) : undefined;
   const githubArtifacts = githubApp ? new GitHubArtifactService(database, githubApp) : undefined;
@@ -146,7 +147,7 @@ export async function composeInstanceRuntime(environment: NodeJS.ProcessEnv): Pr
     identityAccessCapability({ passwordAuth, instanceAdminToken, instanceSetup,
       ...(accountRegistration ? { accountRegistration } : {}), reportAuthenticationFailure }),
     knowledgeAuthoringCapability({ notes, noteTree: new NoteTreeService(database.noteTreeRepository(),
-      database.tutorialContributionRepository()), starterTutorials,
+      database.tutorialContributionRepository()), starterTutorials, collections,
       relationships: new RelationshipQueryService(database.relationshipQueryRepository()),
       visualizations: new VisualizationBlockService(database.visualizationBlockRepository()), memberAccess: passwordAuth }),
     workPlanningCapability({ tasks, workspaceProjects, projectlessTasks, memberAccess: passwordAuth }),

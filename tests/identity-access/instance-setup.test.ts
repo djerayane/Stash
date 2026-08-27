@@ -137,8 +137,8 @@ describe("fresh Instance setup", () => {
     assert.equal(repository.setup?.starter.tasks.length, 2);
     assert.equal(repository.setup?.starter.knowledge.collection.schema, "stash.collection.v1");
     assert.equal(repository.setup?.starter.knowledge.collection.ownerNoteId, repository.setup?.starter.notes[1]?.id);
-    assert.deepEqual(repository.setup?.starter.knowledge.viewBlock.source,
-      { kind: "tasks", workspaceId: body.workspaceId, project: "none" });
+    assert.deepEqual(repository.setup?.starter.knowledge.viewBlock.definition.source,
+      { kind: "tasks", workspaceId: body.workspaceId });
   });
 
   it("accepts a current code once, serializes concurrent claims, and then reports completion", async () => {
@@ -265,8 +265,7 @@ describe("fresh Instance setup", () => {
       ownerNoteId: planningNode.id,
       blockId: tutorialBody.tutorial.viewBlock.id,
       title: "First moves",
-      source: { kind: "tasks", workspaceId: result.workspaceId, project: "none" },
-      definition: { query: { scope: "projectless", titleContains: "" }, layout: "list" },
+      definition: { source: { kind: "tasks", workspaceId: result.workspaceId }, presentation: "list", filters: [], sorts: [], layout: {} },
     });
     const childTrashPreview = await fetch(`${instance.url}/api/notes/${linkedNode.id}/branch-preview`, {
       method: "POST", headers: { ...authorization, "content-type": "application/json" }, body: JSON.stringify({ action: "trash" }),
@@ -329,7 +328,8 @@ describe("fresh Instance setup", () => {
     });
     assert.equal(changedView.status, 200);
     assert.deepEqual((await changedView.json() as any).tutorial.viewBlock.definition,
-      { query: { scope: "projectless", titleContains: "Shape" }, layout: "table" });
+      { source: { kind: "tasks", workspaceId: result.workspaceId }, presentation: "table",
+        filters: [{ propertyId: "task:title", operator: "contains", value: "Shape" }], sorts: [], layout: {} });
 
     const exported = await new PortableWorkspaceExportService(store.database, emptyAttachmentStorage)
       .export(sessionBody.member.id, result.workspaceId);
@@ -363,7 +363,8 @@ describe("fresh Instance setup", () => {
     const restoredBody = await restoredTutorial.json() as any;
     assert.equal(restoredBody.tutorial.collection.title, "Questions worth keeping");
     assert.deepEqual(restoredBody.tutorial.viewBlock.definition,
-      { query: { scope: "projectless", titleContains: "Shape" }, layout: "table" });
+      { source: { kind: "tasks", workspaceId: result.workspaceId }, presentation: "table",
+        filters: [{ propertyId: "task:title", operator: "contains", value: "Shape" }], sorts: [], layout: {} });
     assert.equal((await fetch(`${instance.url}/api/notes/${linkedNode.id}/context`, { headers: authorization })).status, 200);
 
     const permanentlyRemoved = await fetch(`${instance.url}/api/notes/${planningNode.id}/starter-tutorial`, {

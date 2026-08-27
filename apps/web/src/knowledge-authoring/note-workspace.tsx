@@ -1,10 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router";
+import type { Collection, ViewBlock } from "@stash/domain-types";
 
 import { ContextDrawer, type NoteContextData } from "./context-drawer";
 import { branchImpactConfirmation, type BranchImpact } from "./branch-impact";
 import styles from "./note-tree.module.css";
+import { CollectionWorkspace } from "./collection-editor";
 
 export function NoteWorkspace({ noteId, token, children, fetcher = globalThis.fetch }: {
   noteId: string; token: string; children: ReactNode; fetcher?: typeof fetch;
@@ -76,6 +78,8 @@ export function NoteWorkspace({ noteId, token, children, fetcher = globalThis.fe
         : (branchAction.isError && branchActionCurrent) || (restore.isError && restoreCurrent)
           ? <p className={styles.branchError} role="alert">{branchActionCurrent ? branchAction.error?.message : restore.error?.message}</p> : null}
     {!permanentlyRemoved ? <div className={styles.editorSlot}>{children}</div> : null}
+    {!removedState && !permanentlyRemoved ? <CollectionWorkspace editable={context.data?.access === "edit"} fetcher={fetcher}
+      noteId={noteId} token={token} /> : null}
     {!removedState && !permanentlyRemoved ? <StarterTutorialPanel fetcher={fetcher} noteId={noteId} token={token}
       onRemoved={(originNoteId) => { if (activeNoteIdRef.current === originNoteId) setPermanentlyRemoved(true); }} /> : null}
     {drawerOpen && context.data ? <ContextDrawer context={context.data} fetcher={fetcher} onClose={close} token={token} /> : null}
@@ -87,12 +91,8 @@ interface StarterTutorialData {
   rootNoteId: string;
   notes: Array<{ id: string; title: string; content: string; parentId?: string }>;
   links: Array<{ id: string; sourceNoteId: string; targetNoteId: string; label: string }>;
-  collection: { schema: "stash.collection.v1"; id: string; workspaceId: string; ownerNoteId: string; title: string;
-    properties: Array<{ id: string; name: string; type: "text"; position: number }>;
-    records: Array<{ id: string; position: number; values: Record<string, string> }> };
-  viewBlock: { schema: "stash.view-block.v1"; id: string; workspaceId: string; ownerNoteId: string; blockId: string; title: string;
-    source: { kind: "tasks"; workspaceId: string; project: "none" };
-    definition: { query: { scope: "projectless"; titleContains: string }; layout: "list" | "table" } };
+  collection: Collection;
+  viewBlock: ViewBlock;
 }
 
 function StarterTutorialPanel({ noteId, token, fetcher, onRemoved }: {
@@ -115,13 +115,13 @@ function StarterTutorialPanel({ noteId, token, fetcher, onRemoved }: {
   const saveCollection = useMutation({ mutationFn: async () => { const response = await fetcher(`/api/notes/${encodeURIComponent(noteId)}/starter-tutorial/collection`, {
       method: "PUT", headers: { ...headers, "content-type": "application/json" },
       body: JSON.stringify({ title: collectionTitle ?? data!.collection.title,
-        recordValue: recordValue ?? Object.values(data!.collection.records[0]?.values ?? {})[0] }),
+        recordValue: recordValue ?? String(Object.values(data!.collection.records[0]?.values ?? {})[0] ?? "") }),
     }); const body = await response.json() as { message?: string }; if (!response.ok) throw new Error(body.message || "The Collection could not be saved."); },
     onSuccess: () => client.invalidateQueries({ queryKey: ["starter-tutorial", noteId] }) });
   const saveView = useMutation({ mutationFn: async () => { const response = await fetcher(`/api/notes/${encodeURIComponent(noteId)}/starter-tutorial/view`, {
       method: "PUT", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify({
-        layout: viewLayout ?? data!.viewBlock.definition.layout,
-        titleContains: titleContains ?? data!.viewBlock.definition.query.titleContains,
+        layout: viewLayout ?? (data!.viewBlock.definition.presentation === "table" ? "table" : "list"),
+        titleContains: titleContains ?? String(data!.viewBlock.definition.filters.find(({ propertyId }) => propertyId === "task:title")?.value ?? ""),
       }),
     }); const body = await response.json() as { message?: string }; if (!response.ok) throw new Error(body.message || "The Task View could not be saved."); },
     onSuccess: () => client.invalidateQueries({ queryKey: ["starter-tutorial", noteId] }) });
@@ -143,23 +143,24 @@ function StarterTutorialPanel({ noteId, token, fetcher, onRemoved }: {
   const data = tutorial.data; if (!data) return null;
   const children = data.notes.filter((note) => note.parentId === data.rootNoteId);
   const property = data.collection.properties[0];
-  const visibleTasks = tasks.data?.filter((task) => task.title.toLocaleLowerCase().includes(data.viewBlock.definition.query.titleContains.toLocaleLowerCase()));
+  const savedTitleFilter = String(data.viewBlock.definition.filters.find(({ propertyId }) => propertyId === "task:title")?.value ?? "");
+  const visibleTasks = tasks.data?.filter((task) => task.title.toLocaleLowerCase().includes(savedTitleFilter.toLocaleLowerCase()));
   return <aside className={styles.starterTutorial} aria-labelledby="starter-tutorial-title">
     <header><p>Working guide</p><h2 id="starter-tutorial-title">Try the pieces together</h2><span>These Notes, links, structured content, and Tasks are real Workspace objects.</span></header>
     <section aria-labelledby="starter-notes-title"><h3 id="starter-notes-title">Nested Notes</h3><ul>{children.map((note) => <li key={note.id}><Link to={`/app/notes/${note.id}`}><strong>{note.title}</strong><span>{note.content}</span></Link></li>)}</ul>
       {data.links.map((link) => <p className={styles.tutorialLink} key={link.id}><span>Relationship</span><Link to={`/app/notes/${link.targetNoteId}`}>{link.label} →</Link></p>)}</section>
     <section aria-labelledby="starter-collection-title"><h3 id="starter-collection-title">Collection</h3><form onSubmit={(event) => { event.preventDefault(); saveCollection.mutate(); }}>
       <label>Collection title<input value={collectionTitle ?? data.collection.title} onChange={(event) => setCollectionTitle(event.target.value)} /></label>
-      <label>{property?.name ?? "Record"}<input value={recordValue ?? (property ? data.collection.records[0]?.values[property.id] ?? "" : "")}
+      <label>{property?.name ?? "Record"}<input value={recordValue ?? (property ? String(data.collection.records[0]?.values[property.id] ?? "") : "")}
         onChange={(event) => setRecordValue(event.target.value)} /></label>
       <button disabled={saveCollection.isPending}>{saveCollection.isPending ? "Saving…" : "Save Collection"}</button></form>
       {saveCollection.isError ? <p role="alert">{saveCollection.error.message}</p> : null}</section>
     <section aria-labelledby="starter-task-view-title"><h3 id="starter-task-view-title">Task View · {data.viewBlock.title}</h3><p>Project: none · Workspace Workflow</p>
-      <form onSubmit={(event) => { event.preventDefault(); saveView.mutate(); }}><label>Layout<select value={viewLayout ?? data.viewBlock.definition.layout}
+      <form onSubmit={(event) => { event.preventDefault(); saveView.mutate(); }}><label>Layout<select value={viewLayout ?? (data.viewBlock.definition.presentation === "table" ? "table" : "list")}
         onChange={(event) => setViewLayout(event.target.value as "list" | "table")}><option value="list">List</option><option value="table">Table</option></select></label>
-        <label>Task title contains<input value={titleContains ?? data.viewBlock.definition.query.titleContains}
+        <label>Task title contains<input value={titleContains ?? savedTitleFilter}
           onChange={(event) => setTitleContains(event.target.value)} /></label><button disabled={saveView.isPending}>{saveView.isPending ? "Saving…" : "Save Task View"}</button></form>
-      {tasks.isError ? <p role="alert">{tasks.error.message}</p> : data.viewBlock.definition.layout === "table" ? <table><thead><tr><th>Task</th><th>Status</th></tr></thead><tbody>{visibleTasks?.map((task) => <tr key={task.id}><td>{task.title}</td><td>{task.status.name}</td></tr>)}</tbody></table>
+      {tasks.isError ? <p role="alert">{tasks.error.message}</p> : data.viewBlock.definition.presentation === "table" ? <table><thead><tr><th>Task</th><th>Status</th></tr></thead><tbody>{visibleTasks?.map((task) => <tr key={task.id}><td>{task.title}</td><td>{task.status.name}</td></tr>)}</tbody></table>
         : <ul>{visibleTasks?.map((task) => <li key={task.id}><span>{task.title}</span><strong>{task.status.name}</strong></li>)}</ul>}
       {saveView.isError ? <p role="alert">{saveView.error.message}</p> : null}</section>
     <footer className={styles.tutorialRemoval}><div><strong>Finished with the guide?</strong><span>Permanent removal also deletes its Collection, View, sample Tasks, and tutorial-only Workflow status.</span></div>

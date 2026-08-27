@@ -17,7 +17,7 @@ test("renders and edits the starter tutorial contribution", async () => {
     if (path.includes("tasks?scope=projectless")) return Response.json({ tasks: [{ id: "task-1", title: "Shape your first idea", status: { id: "ready", name: "Ready", category: "unstarted" } }] });
     if (init?.method === "PUT") return Response.json({ tutorial: {} });
     if (init?.method === "DELETE") return Response.json({ removed: true });
-    return Response.json({ tutorial: { workspaceId: "workspace", rootNoteId: "root", notes: [{ id: "root", title: "Start here", content: "Guide" }, { id: "child-1", parentId: "root", title: "Connect your thinking", content: "Link Notes when ideas belong together." }, { id: "child-2", parentId: "root", title: "Plan the next step", content: "Keep action nearby." }], links: [{ id: "link-1", sourceNoteId: "child-1", targetNoteId: "child-2", label: "Continue planning" }], collection: { schema: "stash.collection.v1", id: "collection-1", workspaceId: "workspace", ownerNoteId: "child-1", title: "Ideas to explore", properties: [{ id: propertyId, name: "Idea", type: "text", position: 1 }], records: [{ id: "record-1", position: 1, values: { [propertyId]: "Shape your first idea" } }] }, viewBlock: { schema: "stash.view-block.v1", id: "view-1", workspaceId: "workspace", ownerNoteId: "child-2", blockId: "view-1", title: "First moves", source: { kind: "tasks", workspaceId: "workspace", project: "none" }, definition: { query: { scope: "projectless", titleContains: "" }, layout: "list" } } } });
+    return Response.json({ tutorial: { workspaceId: "workspace", rootNoteId: "root", notes: [{ id: "root", title: "Start here", content: "Guide" }, { id: "child-1", parentId: "root", title: "Connect your thinking", content: "Link Notes when ideas belong together." }, { id: "child-2", parentId: "root", title: "Plan the next step", content: "Keep action nearby." }], links: [{ id: "link-1", sourceNoteId: "child-1", targetNoteId: "child-2", label: "Continue planning" }], collection: { schema: "stash.collection.v1", id: "collection-1", workspaceId: "workspace", ownerNoteId: "child-1", title: "Ideas to explore", properties: [{ id: propertyId, name: "Idea", type: "text", position: 1 }], records: [{ id: "record-1", position: 1, values: { [propertyId]: "Shape your first idea" } }] }, viewBlock: { schema: "stash.view-block.v1", id: "view-1", workspaceId: "workspace", ownerNoteId: "child-2", blockId: "view-1", title: "First moves", definition: { source: { kind: "tasks", workspaceId: "workspace" }, presentation: "list", filters: [], sorts: [], layout: {} } } } });
   }) as typeof fetch;
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const workspace = (noteId: string, editor: string) => <QueryClientProvider client={client}><MemoryRouter><NoteWorkspace
@@ -120,8 +120,8 @@ test("ignores permanent tutorial removal that completes after direct Note naviga
         title: "Ideas", properties: [{ id: propertyId, name: "Idea", type: "text", position: 1 }],
         records: [{ id: "record-1", position: 1, values: { [propertyId]: "Question" } }] },
       viewBlock: { schema: "stash.view-block.v1", id: "view-1", workspaceId: "workspace", ownerNoteId: "first-note",
-        blockId: "view-1", title: "First moves", source: { kind: "tasks", workspaceId: "workspace", project: "none" },
-        definition: { query: { scope: "projectless", titleContains: "" }, layout: "list" } } } });
+        blockId: "view-1", title: "First moves",
+        definition: { source: { kind: "tasks", workspaceId: "workspace" }, presentation: "list", filters: [], sorts: [], layout: {} } } } });
   }) as typeof fetch;
   vi.spyOn(window, "confirm").mockReturnValueOnce(true);
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });

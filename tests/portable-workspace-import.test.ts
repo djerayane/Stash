@@ -211,6 +211,34 @@ describe("Portable Workspace import", () => {
       .import(randomUUID(), actor.localAccountId, await archiveFor({ ...first.committed!.state, attachments: [] }));
     assert.deepEqual(second.committed?.state.durableObjects, source.durableObjects);
   });
+  it("round-trips canonical Collections and reusable Views with stable relation fallbacks", async () => {
+    const collectionId = "31313131-3131-4131-8131-313131313131";
+    const titleId = "32323232-3232-4232-8232-323232323232";
+    const relationId = "33333333-3333-4333-8333-333333333334";
+    const recordId = "34343434-3434-4434-8434-343434343434";
+    const viewId = "35353535-3535-4535-8535-353535353535";
+    const collection = { schema: "stash.collection.v1" as const, id: collectionId, workspaceId, ownerNoteId: noteId,
+      title: "Research", properties: [{ id: titleId, name: "Idea", type: "text" as const, position: 1 },
+        { id: relationId, name: "Source", type: "relation" as const, position: 2, target: { kind: "notes" as const } }],
+      records: [{ id: recordId, position: 1, values: { [titleId]: "Map constraints",
+        [relationId]: [{ id: noteId, fallback: "Durable source name" }] } }] };
+    const view = { schema: "stash.view-block.v1" as const, id: viewId, workspaceId, ownerNoteId: noteId,
+      blockId: "36363636-3636-4636-8636-363636363636", title: "Research board", definition: {
+        source: { kind: "collection" as const, collectionId }, presentation: "board" as const, filters: [], sorts: [],
+        groupBy: relationId, layout: { density: "compact" }, focused: { recordId },
+      } };
+    const durableObjects = [{ kind: "Collection", id: collectionId, schema: collection.schema, payload: collection },
+      { kind: "ViewBlock", id: viewId, schema: view.schema, payload: view }];
+    const source: PortableWorkspaceExportSnapshot = { ...snapshot, attachments: [], durableObjects };
+    const first = new ImportMemory();
+    await new PortableWorkspaceImportService(first, { async put() {}, async get() { return Buffer.alloc(0); }, async delete() {} })
+      .import(randomUUID(), actor.localAccountId, await archiveFor(source));
+    assert.deepEqual(first.committed?.state.durableObjects, durableObjects);
+    const second = new ImportMemory();
+    await new PortableWorkspaceImportService(second, { async put() {}, async get() { return Buffer.alloc(0); }, async delete() {} })
+      .import(randomUUID(), actor.localAccountId, await archiveFor({ ...first.committed!.state, attachments: [] }));
+    assert.deepEqual(second.committed?.state.durableObjects, durableObjects);
+  });
   it("round-trips a canceled Workspace Task through its canonical Workspace Workflow", async () => {
     const workflowId = "41414141-4141-4141-8141-414141414141";
     const statusId = "42424242-4242-4242-8242-424242424242";

@@ -185,8 +185,7 @@ export class InstanceSetupService {
               records: [{ id: randomUUID(), position: 1, values: { [collectionPropertyId]: "Shape your first idea" } }] },
             viewBlock: { schema: "stash.view-block.v1", id: viewBlockId, workspaceId: workspace.id,
               ownerNoteId: planNoteId, blockId: viewBlockId, title: "First moves",
-              source: { kind: "tasks", workspaceId: workspace.id, project: "none" },
-              definition: { query: { scope: "projectless", titleContains: "" }, layout: "list" } },
+              definition: { source: { kind: "tasks", workspaceId: workspace.id }, presentation: "list", filters: [], sorts: [], layout: {} } },
           },
         },
       };
