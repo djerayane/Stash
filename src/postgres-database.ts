@@ -246,6 +246,14 @@ export class PostgresDatabase implements DatabaseProbe {
       authorizeProject: (client, memberId, workspaceId) => this.#projectPermissionRepository.authorize(client, memberId, workspaceId),
       ensureDefaultWorkflow: (client, projectId) => this.#workPlanningAdapter.ensureDefaultWorkflow(client, projectId),
       findPortableMemberIdentity: (memberId) => this.#knowledgeAuthoringAdapter.findPortableMemberIdentity(memberId),
+      roles: {
+        assignBuiltInRole: (...args) => this.#organizationRoleRepository.assignBuiltInRole(...args),
+        listCustomRoles: (...args) => this.#organizationRoleRepository.listCustomRoles(...args),
+        createCustomRole: (...args) => this.#organizationRoleRepository.createCustomRole(...args),
+        updateCustomRole: (...args) => this.#organizationRoleRepository.updateCustomRole(...args),
+        assignCustomRole: (...args) => this.#organizationRoleRepository.assignCustomRole(...args),
+        revokeCustomRole: (...args) => this.#organizationRoleRepository.revokeCustomRole(...args),
+      },
     });
     this.#projectlessTaskRepository = new PostgresProjectlessTaskRepository(this.#kernel,
       (client) => this.#instanceSetupRepository.prepare(client));
@@ -396,10 +404,7 @@ export class PostgresDatabase implements DatabaseProbe {
 
   identityAccessRepositories(): IdentityAccessPostgresRepositories {
     return Object.assign(this.#identityAccessAdapter, {
-      assignBuiltInRole: this.assignBuiltInRole.bind(this), removeOrganizationMember: this.removeOrganizationMember.bind(this),
-      listCustomRoles: this.listCustomRoles.bind(this), createCustomRole: this.createCustomRole.bind(this),
-      updateCustomRole: this.updateCustomRole.bind(this), assignCustomRole: this.assignCustomRole.bind(this),
-      revokeCustomRole: this.revokeCustomRole.bind(this),
+      removeOrganizationMember: this.removeOrganizationMember.bind(this),
       createInvitation: this.createInvitation.bind(this), acceptInvitation: this.acceptInvitation.bind(this),
       savePasskey: this.savePasskey.bind(this), findPasskey: this.findPasskey.bind(this),
       updatePasskeyCounterAndCreateSession: this.updatePasskeyCounterAndCreateSession.bind(this),
@@ -606,51 +611,6 @@ export class PostgresDatabase implements DatabaseProbe {
     const after = taskPlanningReadModelFromRow(saved.rows[0]);
     await this.#recordPortableProjection(client, "Task", after.id, after.schema, taskProjectionFromRow(saved.rows[0]));
     await this.#recordTaskActivity(client, actorId, after.workspaceId, after.id, action, before, after, cause);
-  }
-
-  async assignBuiltInRole(
-    organizationId: string,
-    actorId: string,
-    accountId: string,
-    role: BuiltInOrganizationRole,
-  ): Promise<"updated" | "member_not_found" | "final_owner" | "forbidden"> {
-    return this.#withTransaction(async (client) => {
-      const memberships = await this.#lockedOrganizationMemberships(client, organizationId);
-      if (!this.#canManageRoles(memberships, actorId)) return "forbidden";
-      const target = memberships.find((membership) => membership.account_id === accountId);
-      if (!target) return "member_not_found";
-      if (target.role === "Owner" && role !== "Owner"
-        && this.#isOnlyOwner(memberships, accountId)) {
-        return "final_owner";
-      }
-      await client.query(
-        `UPDATE stash_organization_memberships SET role = $3
-         WHERE organization_id = $1 AND account_id = $2`,
-        [organizationId, accountId, role],
-      );
-      return "updated";
-    });
-  }
-
-  listCustomRoles(organizationId: string): Promise<CustomOrganizationRole[]> {
-    return this.#organizationRoleRepository.listCustomRoles(organizationId);
-  }
-
-  createCustomRole(organizationId: string, actorId: string, role: CustomOrganizationRole) {
-    return this.#organizationRoleRepository.createCustomRole(organizationId, actorId, role);
-  }
-
-  updateCustomRole(organizationId: string, actorId: string, roleId: string,
-    input: { name: string; permissions: Array<"create_project"> }) {
-    return this.#organizationRoleRepository.updateCustomRole(organizationId, actorId, roleId, input);
-  }
-
-  assignCustomRole(organizationId: string, actorId: string, roleId: string, memberId: string) {
-    return this.#organizationRoleRepository.assignCustomRole(organizationId, actorId, roleId, memberId);
-  }
-
-  revokeCustomRole(organizationId: string, actorId: string, roleId: string, memberId: string) {
-    return this.#organizationRoleRepository.revokeCustomRole(organizationId, actorId, roleId, memberId);
   }
 
   async removeOrganizationMember(

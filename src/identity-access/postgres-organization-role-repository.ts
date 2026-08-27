@@ -1,5 +1,5 @@
 import type { PostgresKernel, PostgresQueryable } from "../instance-operations/storage/postgres-kernel.js";
-import type { CustomOrganizationRole } from "../organization-roles.js";
+import type { BuiltInOrganizationRole, CustomOrganizationRole } from "../organization-roles.js";
 
 type PrepareOrganizations = (client: PostgresQueryable) => Promise<void>;
 
@@ -42,6 +42,17 @@ export class PostgresOrganizationRoleRepository {
       return result.rows.map((row: any) => ({ id: row.id, name: row.name, immutable: false,
         permissions: row.permissions, memberIds: row.member_ids }));
     });
+  }
+
+  async assignBuiltInRole(organizationId:string,actorId:string,accountId:string,role:BuiltInOrganizationRole) {
+    return this.kernel.transaction(async(client)=>{await this.prepare(client);
+      const memberships=(await client.query<{account_id:string;role:BuiltInOrganizationRole}>(
+        "SELECT account_id,role FROM stash_organization_memberships WHERE organization_id=$1 FOR UPDATE",[organizationId])).rows;
+      if(!memberships.some((member)=>member.account_id===actorId&&member.role==="Owner"))return "forbidden" as const;
+      const target=memberships.find((member)=>member.account_id===accountId);if(!target)return "member_not_found" as const;
+      if(target.role==="Owner"&&role!=="Owner"&&memberships.filter((member)=>member.role==="Owner").length===1)return "final_owner" as const;
+      await client.query("UPDATE stash_organization_memberships SET role=$3 WHERE organization_id=$1 AND account_id=$2",[organizationId,accountId,role]);
+      return "updated" as const;});
   }
 
   async createCustomRole(organizationId: string, actorId: string, role: CustomOrganizationRole) {
