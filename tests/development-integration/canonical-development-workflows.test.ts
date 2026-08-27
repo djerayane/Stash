@@ -43,7 +43,7 @@ test("development adapters resolve canonical active keys and aliases and automat
       assert.deepEqual(matches.map(({taskId})=>taskId),[created.task.id]);
       assert.equal(matches[0]?.projectId,projectId);
       assert.equal((await store.database.workPlanningRepositories().findTaskByKey(ownerId,projectId,key)).status,"found");
-      const search=await store.database.searchWorkspace(ownerId,workspace.workspace.id,{q:key,object:"task"});
+      const search=await store.database.knowledgeAuthoringRepositories().searchWorkspace(ownerId,workspace.workspace.id,{q:key,object:"task"});
       assert.equal(search.status,"found");
       assert.deepEqual(search.status==="found"?search.results.map((result:{id:string})=>result.id):[],[created.task.id]);
     }

@@ -477,7 +477,7 @@ async function startFirstRunInstance() {
       knowledgeAuthoringCapability({ notes, noteTree: new NoteTreeService(database.noteTreeRepository(), database.tutorialContributionRepository()),
         starterTutorials: new TutorialContributionService(database.tutorialContributionRepository()),
         collections: new CollectionService(database.collectionRepository()), noteLinks: new NoteLinkService(database.knowledgeAuthoringRepositories()),
-        discussions: new DiscussionService(database.knowledgeAuthoringRepositories()), searches: new WorkspaceSearchService(database),
+        discussions: new DiscussionService(database.knowledgeAuthoringRepositories()), searches: new WorkspaceSearchService(database.knowledgeAuthoringRepositories()),
         portableWorkspaceExports: new PortableWorkspaceExportService(database, attachments), memberAccess: auth }),
       workPlanningCapability({ tasks, workspaceProjects: projects, memberAccess: auth,
         projectlessTasks: new ProjectlessTaskService(database.projectlessTaskRepository()),

@@ -302,7 +302,7 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
         assert.equal((await migrated.findOidcIdentity({ organizationId, issuer: "https://identity.example.test", subject: "ada-subject" }))?.accountId, ownerId);
         const pendingImported = await migrated.listPendingImportedIdentities(ownerId);
         assert.equal(pendingImported.some((identity) => identity.importId === importId && identity.sourceAccountId === importedAccountId), true);
-        assert.equal((await migrated.listNoteHistory(ownerId, noteId)).status, "found"); assert.equal((await migrated.listWorkspaceActivity(ownerId, workspaceId)).status, "found");
+        assert.equal((await migrated.knowledgeAuthoringRepositories().listNoteHistory(ownerId, noteId)).status, "found"); assert.equal((await migrated.knowledgeAuthoringRepositories().listWorkspaceActivity(ownerId, workspaceId)).status, "found");
         if (attachment.status === "created") assert.deepEqual((await new AttachmentService(migrated, new LocalAttachmentStorage(destinationAttachments))
           .get(ownerId, attachment.record.id))?.content, attachmentBytes);
         assert.deepEqual(JSON.parse(await readFile(join(destinationConfiguration, "runtime.json"), "utf8")), { publicOrigin: "https://stash.example.test", registration: false });

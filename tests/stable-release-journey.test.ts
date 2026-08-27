@@ -51,7 +51,7 @@ describe("first stable release journey through a running Instance", () => {
       mobileCaptures: new MobileCaptureService(store.database), tasks: new TaskService(store.database, store.database),
       projectWorkflows: new ProjectWorkflowService(store.database), boards: new BoardService(store.database),
       repositoryConnections: connections, githubSignals: new GitHubSignalService(store.database.developmentIntegrationRepositories(), webhookSecret, automations),
-      automations, activities: new ActivityService(store.database), portableWorkspaceExports: new PortableWorkspaceExportService(store.database, attachments) });
+      automations, activities: new ActivityService(store.database.knowledgeAuthoringRepositories()), portableWorkspaceExports: new PortableWorkspaceExportService(store.database, attachments) });
     cleanups.push(async () => { await instance.close(); await store.close(); await rm(root, { recursive: true, force: true }); });
     const json = (path: string, init: RequestInit = {}) => fetch(`${instance.url}${path}`, { ...init,
       headers: { authorization: bearer, ...(init.body ? { "content-type": "application/json" } : {}), ...init.headers } });

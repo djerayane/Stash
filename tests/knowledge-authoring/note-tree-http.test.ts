@@ -45,7 +45,7 @@ describe("Note Tree HTTP", () => {
         : header === "Bearer guest" ? { accountId: guestId, sessionId: "guest-session" } : undefined;
     } };
     instance = await startInstance({ database: store.database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin",
-      activities: new ActivityService(store.database), discussions: new DiscussionService(store.database.knowledgeAuthoringRepositories()), memberAccess: access,
+      activities: new ActivityService(store.database.knowledgeAuthoringRepositories()), discussions: new DiscussionService(store.database.knowledgeAuthoringRepositories()), memberAccess: access,
       capabilities: createCapabilityRegistry([{ name: "knowledge-authoring", routes: () => [noteTreeRoutes(new NoteTreeService(
         store.database.noteTreeRepository(), new EmptyCollectionImpactInspector()), access), relationshipRoutes(
           new RelationshipQueryService(store.database.relationshipQueryRepository()), access), visualizationRoutes(
