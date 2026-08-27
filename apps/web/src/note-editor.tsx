@@ -187,6 +187,10 @@ function NoteEditorDocument({ noteId, memberId, fetcher = globalThis.fetch, toke
   }, { scope: layoutRef, dependencies: [editorMode], revertOnUpdate: true });
 
   useEffect(() => {
+    setDocumentReady(false);
+  }, [memberId, noteId]);
+
+  useEffect(() => {
     if (!editor || !note.data || !collaboration.data) return;
     if (shouldSeedCanonicalDocument.current) { shouldSeedCanonicalDocument.current = false; editor.commands.setContent(toTiptap(note.data.document)); }
     editor.setEditable(canEdit);

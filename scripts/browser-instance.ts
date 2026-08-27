@@ -459,7 +459,7 @@ console.log(`Browser acceptance Instance listening on ${instance.url}`);
 
 const firstRunDirectory = await mkdtemp(join(tmpdir(), "stash-browser-first-run-"));
 const firstRunCodec = createAuthenticationSecretCodec(randomBytes(32).toString("base64"));
-const firstRunStore = await EmbeddedInstanceStore.open(firstRunDirectory, firstRunCodec);
+let firstRunStore = await EmbeddedInstanceStore.open(firstRunDirectory, firstRunCodec);
 const firstRunAuth = new PasswordAuthService(firstRunStore.database);
 const firstRunSetupRepository = firstRunStore.database.instanceSetupRepository();
 const firstRunSetup = new InstanceSetupService(firstRunSetupRepository,
@@ -468,6 +468,24 @@ const firstRunNotes = new NoteService(firstRunStore.database);
 const firstRunTasks = new TaskService(firstRunStore.database, firstRunStore.database);
 const firstRunProjects = new WorkspaceProjectService(firstRunStore.database);
 const firstRunAttachments = new LocalAttachmentStorage(firstRunStore.paths.attachments);
+const firstRunCollections = new CollectionService(firstRunStore.database.collectionRepository());
+const firstRunCanonicalTasks = new CanonicalTaskService(firstRunStore.database.canonicalTaskRepository());
+const firstRunNoteLinks = new NoteLinkService(firstRunStore.database);
+const firstRunDiscussions = new DiscussionService(firstRunStore.database);
+const firstRunSearches = new WorkspaceSearchService(firstRunStore.database);
+const firstRunReopenRoute: HttpRoute = {
+  matches(request, url) { return request.method === "POST" && url.pathname === "/api/test/first-run/reopen"; },
+  async handle(request, response) {
+    const member = await firstRunAuth.authenticateBearer(request.headers.authorization);
+    if (!member) { json(response, 401, { error: "unauthorized" }); return true; }
+    await firstRunStore.close();
+    firstRunStore = await EmbeddedInstanceStore.open(firstRunDirectory, firstRunCodec);
+    const durable = await firstRunStore.upgradeDatabase.query<{ count: number }>(
+      "SELECT count(*)::int count FROM stash_notes WHERE created_by_account_id=$1", [member.accountId]);
+    json(response, 200, { status: "reopened", noteCount: durable.rows[0]?.count ?? 0 });
+    return true;
+  },
+};
 const firstRunInstance = await startInstance({ database: firstRunStore.database, host: "0.0.0.0", port: Number.parseInt(process.env.STASH_BROWSER_FIRST_RUN_PORT ?? "4174", 10),
   instanceAdminToken: "first-run-admin", passwordAuth: firstRunAuth, memberAccess: firstRunAuth, notes: firstRunNotes,
   noteCollaboration: new NoteCollaborationService(firstRunStore.database), tasks: firstRunTasks, workspaceProjects: firstRunProjects,
@@ -475,9 +493,11 @@ const firstRunInstance = await startInstance({ database: firstRunStore.database,
   capabilities: createCapabilityRegistry([
     identityAccessCapability({ passwordAuth: firstRunAuth, instanceSetup: firstRunSetup }),
     knowledgeAuthoringCapability({ notes: firstRunNotes, noteTree: new NoteTreeService(firstRunStore.database.noteTreeRepository(), firstRunStore.database.tutorialContributionRepository()),
-      starterTutorials: new TutorialContributionService(firstRunStore.database.tutorialContributionRepository()), memberAccess: firstRunAuth }),
+      starterTutorials: new TutorialContributionService(firstRunStore.database.tutorialContributionRepository()), collections: firstRunCollections,
+      noteLinks: firstRunNoteLinks, discussions: firstRunDiscussions, searches: firstRunSearches, portableWorkspaceExports: new PortableWorkspaceExportService(firstRunStore.database, firstRunAttachments), memberAccess: firstRunAuth }),
     workPlanningCapability({ tasks: firstRunTasks, workspaceProjects: firstRunProjects, memberAccess: firstRunAuth,
-      projectlessTasks: new ProjectlessTaskService(firstRunStore.database.projectlessTaskRepository()) }),
+      projectlessTasks: new ProjectlessTaskService(firstRunStore.database.projectlessTaskRepository()), canonicalTasks: firstRunCanonicalTasks }),
+    { name: "journey-verification", routes: () => [firstRunReopenRoute] },
   ]), webClientRoot: fileURLToPath(new URL("../apps/web/dist", import.meta.url)) });
 console.log(`Fresh browser setup Instance listening on ${firstRunInstance.url}`);
 

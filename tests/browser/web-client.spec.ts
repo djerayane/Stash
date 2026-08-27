@@ -17,7 +17,7 @@ async function installMemberSession(page: Page) {
   await page.addInitScript((session) => localStorage.setItem("stash.member-session", session), memberSession);
 }
 
-test("@a11y completes protected first-run setup by keyboard and opens the starter Note", async ({ page }) => {
+test("@a11y @stable-knowledge-journey carries a fresh personal Instance through durable knowledge and work", async ({ page }) => {
   await expect.poll(async () => fetch("http://127.0.0.1:4174/health/ready").then(({ status }) => status).catch(() => 0),
     { timeout: 20_000 }).toBe(200);
   await page.emulateMedia({ reducedMotion: "reduce" });
@@ -68,6 +68,40 @@ test("@a11y completes protected first-run setup by keyboard and opens the starte
   await page.getByRole("textbox", { name: "Project key" }).fill("LAUNCH");
   await page.getByRole("button", { name: "Create Project" }).press("Enter");
   await expect(page).toHaveURL(/\/app\/projects\/[0-9a-f-]{36}\/boards$/);
+  const projectId = page.url().split("/").at(-2)!;
+
+  const journey = await page.evaluate(async ({ projectId, starterNoteId }) => {
+    const token = JSON.parse(localStorage.getItem("stash.member-session")!).token as string;
+    const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+    const session = await (await fetch("/api/client-session", { headers })).json();
+    const root = await (await fetch(`/api/workspaces/${session.workspace.id}/note-tree`, { method: "POST", headers,
+      body: JSON.stringify({ title: "Durable launch knowledge" }) })).json();
+    const childResponse = await fetch(`/api/workspaces/${session.workspace.id}/note-tree`, { method: "POST", headers,
+      body: JSON.stringify({ title: "Linked release evidence", parentId: root.node.id }) });
+    const child = await childResponse.json();
+    const linked = await fetch(`/api/notes/${root.node.id}/context/links`, { method: "POST", headers,
+      body: JSON.stringify({ targetNoteId: child.node.id, label: "Release evidence", relationshipType: "supports" }) });
+    const collection = await fetch(`/api/notes/${root.node.id}/collections`, { method: "POST", headers, body: JSON.stringify({
+      schema: "stash.collection.v1", id: crypto.randomUUID(), workspaceId: session.workspace.id, ownerNoteId: root.node.id,
+      title: "Release questions", properties: [{ id: crypto.randomUUID(), name: "Question", type: "text", position: 1 }], records: [],
+    }) });
+    const createdTask = await (await fetch(`/api/workspaces/${session.workspace.id}/canonical-tasks`, { method: "POST", headers,
+      body: JSON.stringify({ title: "Promote the release decision" }) })).json();
+    const associated = await fetch(`/api/canonical-tasks/${createdTask.task.id}/projects`, { method: "PUT", headers,
+      body: JSON.stringify({ projectIds: [projectId] }) });
+    const associatedBody = await associated.json();
+    const discussion = await fetch("/api/discussions", { method: "POST", headers,
+      body: JSON.stringify({ target: { kind: "note", noteId: root.node.id }, message: "Keep the launch context attached" }) });
+    const search = await fetch(`/api/workspaces/${session.workspace.id}/search?q=launch`, { headers });
+    const exported = await fetch(`/api/workspaces/${session.workspace.id}/export`, { headers });
+    return { token, workspaceId: session.workspace.id, rootId: root.node.id, starterNoteId,
+      childStatus: childResponse.status, linkStatus: linked.status, collectionStatus: collection.status,
+      taskStatus: associated.status, projectKeys: associatedBody.task?.projectKeys, discussionStatus: discussion.status,
+      searchStatus: search.status, searchTotal: (await search.json()).total, exportStatus: exported.status };
+  }, { projectId, starterNoteId });
+  expect(journey).toMatchObject({ childStatus: 201, linkStatus: 201, collectionStatus: 201, taskStatus: 200,
+    projectKeys: [{ projectId, key: "LAUNCH-1" }], discussionStatus: 201, searchStatus: 200, exportStatus: 200 });
+  expect(journey.searchTotal).toBeGreaterThan(0);
 
   await page.goto(`http://127.0.0.1:4174/app/notes/${starterNoteId}`);
   page.once("dialog", (dialog) => void dialog.accept());
@@ -105,13 +139,28 @@ test("@a11y completes protected first-run setup by keyboard and opens the starte
     const tasks = await (await fetch(`/api/workspaces/${session.workspace.id}/tasks?scope=projectless`, { headers: { authorization: `Bearer ${token}` } })).json();
     return { tutorialStatus: tutorial.status, tasks };
   }, { starterNoteId });
-  expect(cleanup).toEqual({ tutorialStatus: 404, tasks: { tasks: [] } });
+  expect(cleanup.tutorialStatus).toBe(404);
+  expect(cleanup.tasks.tasks).toEqual([expect.objectContaining({ title: "Promote the release decision" })]);
   await page.goto(`http://127.0.0.1:4174/app/notes/${independentNoteId}`);
   await expect(page.getByRole("textbox", { name: "Note content" })).toBeVisible();
   await expect(page.getByText("The starter tutorial and its sample Tasks were permanently removed.")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Restore Note branch" })).toHaveCount(0);
   await page.getByRole("button", { name: "Open Note context" }).press("Enter");
   await expect(page.getByRole("complementary", { name: "Note context" })).toBeVisible();
+
+  await page.evaluate(() => localStorage.removeItem("stash.member-session"));
+  await page.goto("http://127.0.0.1:4174/sign-in");
+  await page.getByRole("textbox", { name: "Email" }).fill("ada@example.test");
+  await page.getByLabel("Password").fill("correct horse battery staple");
+  await page.getByRole("button", { name: "Sign in" }).press("Enter");
+  await expect(page).toHaveURL(/\/app\//);
+  await page.goto(`http://127.0.0.1:4174/app/notes/${journey.rootId}`);
+  await expect(page.getByRole("heading", { name: "Durable launch knowledge" })).toBeVisible();
+  const reopened = await page.request.post("http://127.0.0.1:4174/api/test/first-run/reopen", {
+    headers: { authorization: `Bearer ${journey.token}` },
+  });
+  expect(reopened.status()).toBe(200);
+  expect((await reopened.json()).noteCount).toBeGreaterThan(0);
 });
 
 test("uses the real custom Role admin flow to grant Project creation and explains denial before it", async ({ page }) => {

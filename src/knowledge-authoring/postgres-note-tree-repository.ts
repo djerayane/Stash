@@ -382,15 +382,6 @@ export class PostgresNoteTreeRepository implements NoteTreeRepository {
     });
   }
 
-  /** Temporary legacy collaboration delegation until the Note editor consumes this capability directly. */
-  async authorizeNote(client: PostgresQueryable, memberId: string, noteId: string): Promise<"edit" | "read" | "none"> {
-    const result = await client.query<{ can_edit: boolean; can_read: boolean }>(`SELECT
-      ${workspaceMember("workspace")} AS can_edit,
-      ${effectiveNoteReadSql("note", "workspace", "$2")} AS can_read
-      FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id=note.workspace_id WHERE note.id=$1`, [noteId, memberId]);
-    return result.rows[0]?.can_edit ? "edit" : result.rows[0]?.can_read ? "read" : "none";
-  }
-
   async createContextLink(memberId: string, sourceNoteId: string,
     link: { id: string; targetNoteId: string; label: string; relationshipType?: string }) {
     return this.kernel.transaction(async (client) => {
