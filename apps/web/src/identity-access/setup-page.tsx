@@ -70,10 +70,7 @@ export function SetupPage({ state, fetcher = fetch, onComplete = defaultCompleti
     <div className={styles.layout}>
       <section className={styles.introduction} aria-labelledby="setup-title">
         <div className={`${styles.brand} ${styles.reveal}`}>
-          <svg className={styles.brandMark} viewBox="0 0 64 52" aria-hidden="true">
-            <path d="M14 4h37a9 9 0 0 1 9 9v2a9 9 0 0 1-9 9H25c-4 0-6 2-6 6H4V14A10 10 0 0 1 14 4Z" />
-            <path d="M50 48H13a9 9 0 0 1-9-9v-2a9 9 0 0 1 9-9h26c4 0 6-2 6-6h15v16a10 10 0 0 1-10 10Z" />
-          </svg>
+          <img className={styles.brandMark} src="/assets/stash-logo-mark-temporary.svg" alt="" />
           <strong>Stash</strong>
         </div>
         <h1 aria-label="Keep the thread." className={styles.reveal} id="setup-title">Keep the<br /><span>thread.</span></h1>
@@ -85,7 +82,7 @@ export function SetupPage({ state, fetcher = fetch, onComplete = defaultCompleti
           <span className={step === "identity" ? styles.active : styles.complete} /><span className={step === "workspace" ? styles.active : ""} />
         </div>
         {step === "identity" ? <form className={styles.form} onSubmit={(event) => { event.preventDefault(); setStep("workspace"); }}>
-          <div className={styles.reveal}><p className={styles.stepName}>Set up your Workspace</p><h2 id="form-title">Make Stash yours</h2><p>You’ll be the first owner and admin of this Instance.</p></div>
+          <div className={styles.reveal}><p className={styles.stepName}>Set up your Workspace</p><h2 id="form-title">Create your Stash Workspace</h2><p>You’ll be the first owner and admin of this Instance.</p></div>
           <label className={styles.reveal}>Name<input aria-label="Name" autoComplete="name" autoFocus maxLength={200} required value={name} onChange={(event) => setName(event.target.value)} /></label>
           <label className={styles.reveal}>Email<input aria-label="Email" autoComplete="email" maxLength={320} required type="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label>
           <button className={`${styles.primary} ${styles.reveal}`} type="submit">Continue</button>

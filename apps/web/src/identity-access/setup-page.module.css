@@ -3,12 +3,10 @@
 .introduction { position:relative; min-height:100dvh; overflow:hidden; isolation:isolate; color:#f7f5ef; background:#111210; }
 .introduction::after { content:""; position:absolute; inset:0; z-index:-1; background:linear-gradient(90deg,rgb(8 9 8 / 78%) 0 35%,transparent 68%),linear-gradient(0deg,rgb(8 9 8 / 36%),transparent 55%); }
 .artwork { position:absolute; inset:0; z-index:-2; width:100%; height:100%; object-fit:cover; object-position:center; }
-.brand { position:absolute; top:clamp(2rem,5vw,4.5rem); left:clamp(2rem,6vw,6.5rem); display:flex; align-items:center; gap:.9rem; }
-.brand strong { color:#f7f5ef; font:700 clamp(1.8rem,2.5vw,2.8rem)/1 var(--stash-font-sans); letter-spacing:-.055em; }
-.brandMark { width:3.5rem; height:2.8rem; overflow:visible; }
-.brandMark path:first-child { fill:#b8b9b1; }
-.brandMark path:last-child { fill:var(--stash-color-accent); }
-.introduction h1 { position:absolute; z-index:1; left:clamp(2rem,6vw,6.5rem); top:clamp(12rem,28vh,20rem); max-width:37rem; margin:0; color:#f7f5ef; font:650 clamp(4rem,7vw,7.4rem)/.88 var(--stash-font-display); letter-spacing:-.075em; }
+.brand { position:absolute; top:clamp(2rem,5vw,4.5rem); left:clamp(2rem,6vw,6.5rem); display:flex; align-items:center; gap:.85rem; }
+.brandMark { display:block; width:3.2rem; height:3.2rem; object-fit:contain; }
+.brand strong { color:#f7f5ef; font:650 2rem/1 var(--stash-font-sans); letter-spacing:-.045em; }
+.introduction h1 { position:absolute; z-index:1; left:clamp(2rem,6vw,6.5rem); top:clamp(12rem,28vh,20rem); max-width:23rem; margin:0; color:#f7f5ef; font:480 clamp(3.7rem,5vw,5rem)/.92 var(--stash-font-display); letter-spacing:-.045em; }
 .introduction h1 span { color:var(--stash-color-accent); }
 .panel { min-height:100dvh; display:grid; align-content:center; width:min(100% - 5rem,38rem); margin-inline:auto; padding:clamp(3rem,7vw,7rem) 0; }
 .mobileBrand { display:none; }
@@ -17,7 +15,7 @@
 .progress .active,.progress .complete { background:var(--stash-color-accent); }
 .form { display:grid; gap:1.45rem; }
 .stepName { margin:0 0 1.2rem; color:#b93420; font-size:.72rem; font-weight:800; letter-spacing:.12em; text-transform:uppercase; }
-.form h2 { max-width:35rem; margin:0; font:600 clamp(2.5rem,4.4vw,4.2rem)/.97 var(--stash-font-display); letter-spacing:-.06em; text-wrap:balance; }
+.form h2 { max-width:35rem; margin:0; font:480 clamp(2.25rem,3vw,2.65rem)/1.02 var(--stash-font-display); letter-spacing:-.035em; text-wrap:balance; }
 .form > div:first-child > p:last-child { margin:1.1rem 0 .55rem; color:var(--stash-color-muted); font-size:1rem; line-height:1.6; }
 .form label { display:grid; gap:.5rem; color:var(--stash-color-ink); font-size:.82rem; font-weight:700; }
 .form input { min-height:3.5rem; width:100%; padding:.85rem 1rem; color:var(--stash-color-ink); background:rgb(255 255 255 / 44%); border:1px solid #cac6be; border-radius:.45rem; font:500 1rem/1.2 var(--stash-font-sans); transition:border-color .16s ease,box-shadow .16s ease,background .16s ease; }
@@ -39,16 +37,16 @@
   .introduction::after { background:linear-gradient(90deg,rgb(8 9 8 / 74%),rgb(8 9 8 / 12%)); }
   .artwork { object-position:61% 48%; }
   .brand { top:max(1.5rem,env(safe-area-inset-top)); left:max(1.5rem,env(safe-area-inset-left)); }
-  .brandMark { width:2.7rem; height:2.2rem; }
+  .brandMark { width:2.65rem; height:2.65rem; }
   .brand strong { font-size:1.65rem; }
-  .introduction h1 { left:1.5rem; top:auto; bottom:1.6rem; font-size:clamp(2.8rem,11vw,4.4rem); }
+  .introduction h1 { left:1.5rem; top:auto; bottom:1.6rem; font-size:clamp(2.8rem,9vw,4rem); }
   .panel { min-height:calc(100dvh - 13rem); width:min(100% - 3rem,38rem); padding:3.5rem 0; }
 }
 @media (max-width:560px) {
   .introduction { min-height:10.5rem; }
   .introduction h1 { left:max(1.5rem,env(safe-area-inset-left)); bottom:.85rem; font-size:2.15rem; line-height:.83; }
   .brand { top:max(.8rem,env(safe-area-inset-top)); transform:none; }
-  .brandMark { width:2rem; height:1.65rem; }
+  .brandMark { width:2rem; height:2rem; }
   .brand strong { font-size:1.3rem; }
   .panel { min-height:calc(100dvh - 10.5rem); width:min(100% - 2rem,34rem); padding:2.5rem 0 max(2.5rem,env(safe-area-inset-bottom)); align-content:start; }
   .mobileBrand { display:block; margin-bottom:1rem; color:var(--stash-color-muted); font-size:.76rem; font-weight:700; text-align:right; }
