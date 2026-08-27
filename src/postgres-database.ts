@@ -50,7 +50,7 @@ import { PostgresNoteTreeRepository } from "./knowledge-authoring/postgres-note-
 import type { FirstPersonalInstanceSetup, InstanceSetupRepository } from "./identity-access/instance-setup.js";
 import { PostgresInstanceSetupRepository } from "./identity-access/postgres-instance-setup-repository.js";
 import { PostgresOrganizationRoleRepository } from "./identity-access/postgres-organization-role-repository.js";
-import type { TutorialContributionRepository } from "./knowledge-authoring/collections.js";
+import type { CollectionRepository, TutorialContributionRepository } from "./knowledge-authoring/collections.js";
 import { PostgresTutorialContributionRepository } from "./knowledge-authoring/postgres-tutorial-contribution-repository.js";
 import { PostgresRelationshipQueryRepository } from "./knowledge-authoring/postgres-relationship-query-repository.js";
 import type { RelationshipQueryRepository } from "./knowledge-authoring/relationship-query.js";
@@ -310,6 +310,10 @@ export class PostgresDatabase implements
   }
 
   tutorialContributionRepository(): TutorialContributionRepository {
+    return this.#tutorialContributionRepository;
+  }
+
+  collectionRepository(): CollectionRepository {
     return this.#tutorialContributionRepository;
   }
 
@@ -4382,7 +4386,7 @@ export class PostgresDatabase implements
         const document = structuredClone(latest?.document ?? markdownToRichText(note.content));
         const view = durable.find(({ kind, payload }) => kind === "ViewBlock" && payload.ownerNoteId === note.id)?.payload;
         if (view && !document.blocks.some(({ id }: any) => id === view.blockId)) document.blocks.push({ type: "paragraph",
-          blockKey: randomUUID(), id: view.blockId, content: [{ text: `Task View: ${view.title}` }] });
+          blockKey: randomUUID(), id: view.blockId, content: [{ text: `View: ${view.title}` }] });
         await client.query(`INSERT INTO stash_notes(id,workspace_id,project_id,content,document,revision,tags,reminder_at,
           created_by_account_id,created_at,portable_path,location_revision) VALUES($1,$2,$3,$4,$5::jsonb,$6,$7::jsonb,$8,$9,$10,$11,$12)`,
         [note.id,state.workspace.id,note.projectId ?? null,note.content,JSON.stringify(document),
@@ -4396,15 +4400,21 @@ export class PostgresDatabase implements
       for (const item of durable.filter(({ kind }) => kind === "Collection")) {
         const collection=item.payload; await client.query("INSERT INTO stash_collections(id,workspace_id,owner_note_id,title) VALUES($1,$2,$3,$4)",
           [collection.id,state.workspace.id,collection.ownerNoteId,collection.title]);
-        for(const property of collection.properties) await client.query("INSERT INTO stash_collection_properties(id,collection_id,name,property_type,position) VALUES($1,$2,$3,$4,$5)",
-          [property.id,collection.id,property.name,property.type,property.position]);
+        for(const property of collection.properties) { const configuration=property.type==="single_select"||property.type==="multi_select"?{options:property.options}
+          :property.type==="relation"?{target:property.target}:{};
+          await client.query("INSERT INTO stash_collection_properties(id,collection_id,name,property_type,configuration,position) VALUES($1,$2,$3,$4,$5::jsonb,$6)",
+            [property.id,collection.id,property.name,property.type,JSON.stringify(configuration),property.position]); }
         for(const record of collection.records){await client.query("INSERT INTO stash_collection_records(id,collection_id,position) VALUES($1,$2,$3)",[record.id,collection.id,record.position]);
           for(const [propertyId,value] of Object.entries(record.values))await client.query("INSERT INTO stash_collection_record_values(record_id,property_id,value) VALUES($1,$2,$3::jsonb)",[record.id,propertyId,JSON.stringify(value)]);}
         await this.#recordPortableProjection(client,"Collection",item.id,item.schema as any,collection);
       }
       for (const item of durable.filter(({ kind }) => kind === "ViewBlock")) {
-        const view=item.payload; await client.query(`INSERT INTO stash_view_blocks(id,workspace_id,owner_note_id,block_id,title,source_kind,source_workspace_id,source_project_scope,query,layout)
-          VALUES($1,$2,$3,$4,$5,'tasks',$2,'none',$6::jsonb,$7)`,[view.id,state.workspace.id,view.ownerNoteId,view.blockId,view.title,JSON.stringify(view.definition.query),view.definition.layout]);
+        const view=item.payload; await client.query(`INSERT INTO stash_view_blocks(id,workspace_id,owner_note_id,block_id,title,source_kind,source_workspace_id,
+          source_collection_id,source_project_scope,query,layout,definition) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NULL,$10,$11::jsonb)`,
+        [view.id,state.workspace.id,view.ownerNoteId,view.blockId,view.title,view.definition.source.kind,
+          view.definition.source.kind==="tasks"?view.definition.source.workspaceId:null,
+          view.definition.source.kind==="collection"?view.definition.source.collectionId:null,
+          view.definition.source.kind==="tasks"?"none":null,view.definition.presentation,JSON.stringify(view.definition)]);
         await this.#recordPortableProjection(client,"ViewBlock",item.id,item.schema as any,view);
       }
       for (const contributor of this.#portableProjectionContributors)

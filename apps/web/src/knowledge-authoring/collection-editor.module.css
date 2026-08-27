@@ -1,0 +1,39 @@
+.workspace { width: min(100% - 2rem, 64rem); display: grid; gap: 1rem; margin: 1rem auto 3rem; color: var(--stash-color-ink); }
+.workspace > header, .viewBlock > header, .ownership { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 1rem; }
+.workspace > header p, .viewBlock > header p { margin: 0; color: var(--stash-color-accent); font-size: .66rem; font-weight: 760; letter-spacing: .09em; text-transform: uppercase; }
+.workspace h2, .workspace h3 { max-width: 64rem; margin: .15rem 0 0; font-family: var(--stash-font-display); letter-spacing: -.025em; }
+.workspace button, .workspace input, .workspace select { min-height: 2.5rem; padding: .5rem .65rem; border: 1px solid var(--stash-border-strong); color: var(--stash-color-ink); background: var(--stash-color-canvas); }
+.workspace button { font-weight: 720; }
+.workspace button:focus-visible, .workspace input:focus-visible, .workspace select:focus-visible { outline: 3px solid var(--stash-color-focus); outline-offset: 2px; }
+.form, .viewCreate, .viewControls, .impact form { display: flex; flex-wrap: wrap; align-items: end; gap: .75rem; padding: 1rem; border: 1px solid var(--stash-border-subtle); background: var(--stash-color-surface); }
+.form label, .viewCreate label, .viewControls label, .impact label, .viewBlock > header label { min-width: 10rem; display: grid; gap: .3rem; color: var(--stash-color-muted); font-size: .7rem; font-weight: 720; }
+.viewControls label { color: var(--stash-color-ink); }
+.views { display: grid; gap: 1rem; }
+.viewBlock { overflow: hidden; display: grid; gap: 0; border: 1px solid var(--stash-border-subtle); background: var(--stash-color-surface); }
+.viewBlock > header { padding: 1rem; }
+.viewControls { border-width: 1px 0; background: var(--stash-color-canvas-deep); }
+.status, .unavailable { margin: 1rem; padding: 1rem; color: var(--stash-color-muted); border: 1px solid var(--stash-border-subtle); }
+.ownership { padding: 1rem; border: 1px solid var(--stash-border-subtle); background: var(--stash-color-surface); }
+.ownership div { max-width: 44rem; display: grid; gap: .25rem; }
+.ownership span { color: var(--stash-color-muted); font-size: .75rem; line-height: 1.5; }
+.impact { display: grid; gap: .75rem; padding: 1rem; border: 2px solid var(--stash-color-accent); background: var(--stash-color-surface); }
+.impact p { margin: 0; color: var(--stash-color-muted); }
+.focused { margin: 0; padding: .65rem 1rem; color: var(--stash-color-muted); background: var(--stash-color-canvas-deep); font-size: .72rem; }
+:global(.collection-table-scroll) { overflow-x: auto; }
+:global(.collection-table-scroll table) { width: 100%; border-collapse: collapse; }
+:global(.collection-table-scroll th), :global(.collection-table-scroll td) { min-width: 9rem; padding: .7rem; border: 1px solid var(--stash-border-subtle); text-align: left; font-size: .76rem; }
+:global(.collection-list), :global(.collection-board ul), :global(.collection-calendar ul) { display: grid; gap: .5rem; margin: 0; padding: 0; list-style: none; }
+:global(.collection-list) { padding: 1rem; }
+:global(.collection-list button) { width: 100%; display: grid; gap: .25rem; text-align: left; }
+:global(.collection-list span) { color: var(--stash-color-muted); font-size: .7rem; }
+:global(.collection-board) { overflow-x: auto; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(15rem, 1fr); gap: 1px; padding: 1px; background: var(--stash-border-subtle); }
+:global(.collection-board > section) { padding: .8rem; background: var(--stash-color-canvas-deep); }
+:global(.collection-board h4), :global(.collection-calendar h4) { margin: 0 0 .7rem; font-size: .76rem; }
+:global(.collection-board li) { display: grid; gap: .35rem; padding: .5rem; background: var(--stash-color-surface); }
+:global(.collection-board li div) { display: flex; flex-wrap: wrap; gap: .3rem; }
+:global(.collection-board li div button) { min-height: 2rem; padding: .35rem .45rem; font-size: .65rem; }
+:global(.collection-card) { width: 100%; text-align: left; }
+:global(.collection-calendar) { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 1px; background: var(--stash-border-subtle); }
+:global(.collection-calendar > section) { min-height: 8rem; padding: .8rem; background: var(--stash-color-surface); }
+@media (max-width: 700px) { .workspace { width: min(100% - 1rem, 64rem); } .viewControls { display: grid; grid-template-columns: 1fr 1fr; } }
+@media (prefers-reduced-motion: reduce) { .workspace * { scroll-behavior: auto; transition: none !important; } }

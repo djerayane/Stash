@@ -45,7 +45,7 @@
 .branchStatus, .branchError { grid-column: 1 / -1; margin: 0; padding: .55rem clamp(1rem, 3vw, 2rem); color: var(--stash-color-muted); background: var(--stash-color-surface); border-bottom: 1px solid var(--stash-border-subtle); font-size: .75rem; }
 .branchError { color: var(--stash-color-error); }
 .editorSlot { min-width: 0; grid-row: 3; }
-.starterTutorial { grid-column: 1; grid-row: 4; width: min(100% - 2rem, 68rem); display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; margin: 0 auto 3rem; border: 1px solid var(--stash-border-subtle); background: var(--stash-border-subtle); }
+.starterTutorial { grid-column: 1; grid-row: 5; width: min(100% - 2rem, 68rem); display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; margin: 0 auto 3rem; border: 1px solid var(--stash-border-subtle); background: var(--stash-border-subtle); }
 .starterTutorial > header { grid-column: 1 / -1; padding: 1.4rem; background: var(--stash-color-surface); }
 .starterTutorial > header p { margin: 0 0 .4rem; color: var(--stash-color-accent); font-size: .68rem; font-weight: 760; letter-spacing: .1em; text-transform: uppercase; }
 .starterTutorial h2 { margin: 0; font: 500 1.55rem/1.05 var(--stash-font-display); letter-spacing: -.035em; }

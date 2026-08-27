@@ -6,6 +6,8 @@ import type { NoteTreeService } from "./note-tree.js";
 import { noteTreeRoutes } from "./note-tree-routes.js";
 import { starterTutorialRoutes } from "./starter-tutorial-routes.js";
 import type { TutorialContributionService } from "./collections.js";
+import type { CollectionService } from "./collections.js";
+import { collectionRoutes } from "./collection-routes.js";
 import type { RelationshipQueryService } from "./relationship-query.js";
 import { relationshipRoutes } from "./relationship-routes.js";
 import type { VisualizationBlockService } from "./visualization-block.js";
@@ -18,6 +20,7 @@ export function knowledgeAuthoringCapability(options: {
   notes: NoteService;
   noteTree?: NoteTreeService;
   starterTutorials?: TutorialContributionService;
+  collections?: CollectionService;
   relationships?: RelationshipQueryService;
   visualizations?: VisualizationBlockService;
   memberAccess: MemberAccessResolver;
@@ -28,6 +31,7 @@ export function knowledgeAuthoringCapability(options: {
       ...(options.noteTree ? [noteTreeRoutes(options.noteTree, options.memberAccess)] : []),
       ...(options.relationships ? [relationshipRoutes(options.relationships, options.memberAccess)] : []),
       ...(options.visualizations ? [visualizationRoutes(options.visualizations, options.memberAccess)] : []),
+      ...(options.collections ? [collectionRoutes(options.collections, options.memberAccess)] : []),
       ...(options.starterTutorials ? [starterTutorialRoutes(options.starterTutorials, options.memberAccess)] : [])],
   };
 }

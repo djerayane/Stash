@@ -32,7 +32,8 @@ import { createAuthenticationSecretCodec } from "../src/authentication-secrets.j
 import { DiscussionService } from "../src/discussions.js";
 import { json, type HttpRoute } from "../src/http-routing.js";
 import { identityAccessCapability } from "../src/identity-access/index.js";
-import { TutorialContributionService } from "../src/knowledge-authoring/collections.js";
+import { CollectionService, TutorialContributionService } from "../src/knowledge-authoring/collections.js";
+import { collectionRoutes } from "../src/knowledge-authoring/collection-routes.js";
 import { knowledgeAuthoringCapability } from "../src/knowledge-authoring/index.js";
 import { workPlanningCapability } from "../src/work-planning/index.js";
 import { ProjectlessTaskService } from "../src/work-planning/projectless-tasks.js";
@@ -320,6 +321,7 @@ const instance = await startInstance({
     async setupComplete() { return true; }, async createFirstPersonalInstance() { return false; },
   }, { boundHost: "127.0.0.1", output() {} }))] }, { name: "knowledge-authoring", routes: () => [
     noteTreeRoutes(new NoteTreeService(browserNoteTreeRepository, new EmptyCollectionImpactInspector()), browserMemberAccess),
+    collectionRoutes(new CollectionService(browserTreeStore.database.collectionRepository()), browserMemberAccess),
     relationshipRoutes(new RelationshipQueryService(browserTreeStore.database.relationshipQueryRepository()), browserMemberAccess),
     reopenNoteTreeRoute,
   ] }]),

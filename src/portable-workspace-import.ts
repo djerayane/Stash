@@ -6,7 +6,7 @@ import { inflateRawSync } from "node:zlib";
 import { encodePortableFilename, type AttachmentStorage } from "./attachments.js";
 import type { PortableWorkspaceCanonicalState } from "./portable-workspace-export.js";
 import { isRichTextDocument, markdownToRichText } from "./rich-text.js";
-import { normalizeVisualizationDefinition } from "@stash/domain-types";
+import { normalizeCollection, normalizeViewBlock, normalizeVisualizationDefinition } from "@stash/domain-types";
 
 export interface ImportTransformation { kind: "transformed" | "skipped" | "ambiguous"; object: string; reason: string }
 export interface IdentityStub { sourceAccountId: string; displayName: string }
@@ -372,16 +372,15 @@ function parseState(content: Buffer): PortableWorkspaceCanonicalState {
           ||!["unstarted","started","completed","canceled"].includes(String(status.category))||!Number.isInteger(status.position)||Number(status.position)<1||positions.has(Number(status.position))) throw new InvalidPortableWorkspaceImport("invalid_workspace_workflow");
         names.add(status.name); positions.add(Number(status.position)); }
       sanitized=structuredClone(payload); }
-    if(item.kind==="Collection") { exact(payload,["schema","id","workspaceId","ownerNoteId","title","properties","records"],"collection");
-      if(payload.id!==item.id||payload.workspaceId!==workspaceId||!notes.has(String(payload.ownerNoteId))||typeof payload.title!=="string"||!payload.title.trim()||payload.title.length>120||/[\r\n]/.test(payload.title)||!Array.isArray(payload.properties)||!Array.isArray(payload.records)) throw new InvalidPortableWorkspaceImport("invalid_collection");
-      const propertyIds=new Set<string>(); const propertyPositions=new Set<number>(); for(const property of payload.properties){exact(property,["id","name","type","position"],"collection_property"); if(!uuid.test(String(property.id))||propertyIds.has(String(property.id))||typeof property.name!=="string"||!property.name.trim()||property.name.length>120||/[\r\n]/.test(property.name)||property.type!=="text"||!Number.isInteger(property.position)||Number(property.position)<1||propertyPositions.has(Number(property.position))) throw new InvalidPortableWorkspaceImport("invalid_collection"); propertyIds.add(String(property.id));propertyPositions.add(Number(property.position));}
-      const recordIds=new Set<string>(); const recordPositions=new Set<number>(); for(const record of payload.records){exact(record,["id","position","values"],"collection_record");if(!uuid.test(String(record.id))||recordIds.has(String(record.id))||!Number.isInteger(record.position)||Number(record.position)<1||recordPositions.has(Number(record.position))||!object(record.values)||Object.keys(record.values).some((id)=>!propertyIds.has(id))||Object.values(record.values).some((entry)=>typeof entry!=="string"))throw new InvalidPortableWorkspaceImport("invalid_collection");recordIds.add(String(record.id));recordPositions.add(Number(record.position));}
-      sanitized=structuredClone(payload); }
-    if(item.kind==="ViewBlock") { exact(payload,["schema","id","workspaceId","ownerNoteId","blockId","title","source","definition"],"view_block");
-      if(payload.id!==item.id||payload.workspaceId!==workspaceId||!notes.has(String(payload.ownerNoteId))||!uuid.test(String(payload.blockId))||typeof payload.title!=="string"||!payload.title.trim()||payload.title.length>120||/[\r\n]/.test(payload.title)||!object(payload.source)||!object(payload.definition)) throw new InvalidPortableWorkspaceImport("invalid_view_block");
-      exact(payload.source,["kind","workspaceId","project"],"view_block_source"); exact(payload.definition,["query","layout"],"view_definition");
-      if(payload.source.kind!=="tasks"||payload.source.workspaceId!==workspaceId||payload.source.project!=="none"||!["list","table"].includes(String(payload.definition.layout))||!object(payload.definition.query)) throw new InvalidPortableWorkspaceImport("invalid_view_block");
-      exact(payload.definition.query,["scope","titleContains"],"view_query"); if(payload.definition.query.scope!=="projectless"||typeof payload.definition.query.titleContains!=="string"||payload.definition.query.titleContains.length>120||/[\r\n]/.test(payload.definition.query.titleContains)) throw new InvalidPortableWorkspaceImport("invalid_view_block"); sanitized=structuredClone(payload); }
+    if(item.kind==="Collection") { try { const collection=normalizeCollection(payload);
+        if(collection.id!==item.id||collection.workspaceId!==workspaceId||!notes.has(collection.ownerNoteId)) throw new Error();
+        sanitized=collection;
+      } catch { throw new InvalidPortableWorkspaceImport("invalid_collection"); } }
+    if(item.kind==="ViewBlock") { try { const view=normalizeViewBlock(payload);
+        if(view.id!==item.id||view.workspaceId!==workspaceId||!notes.has(view.ownerNoteId)
+          ||view.definition.source.kind==="tasks"&&view.definition.source.workspaceId!==workspaceId) throw new Error();
+        sanitized=view;
+      } catch { throw new InvalidPortableWorkspaceImport("invalid_view_block"); } }
     if(item.kind==="VisualizationBlock") { exact(payload,["schema","id","kind","query","filters","layout","viewEdges","workspaceId","ownerNoteId","revision"],"visualization_block");
       if(payload.workspaceId!==workspaceId||payload.id!==item.id||!notes.has(String(payload.ownerNoteId))||!Number.isInteger(payload.revision)||Number(payload.revision)<1)
         throw new InvalidPortableWorkspaceImport("invalid_visualization_block");
@@ -443,6 +442,16 @@ function parseState(content: Buffer): PortableWorkspaceCanonicalState {
           :payload.state!==undefined&&!["active","degraded"].includes(String(payload.state))))
         throw new InvalidPortableWorkspaceImport("invalid_repository_connection"); sanitized=structuredClone(payload); }
     sanitizedDurable.push({kind:String(item.kind),id:String(item.id),schema:String(item.schema),payload:sanitized!});
+  }
+  const importedCollections = new Map(sanitizedDurable.filter(({ kind }) => kind === "Collection")
+    .map((item) => [item.id, item.payload as ReturnType<typeof normalizeCollection>]));
+  for (const item of sanitizedDurable.filter(({ kind }) => kind === "ViewBlock")) {
+    const view = item.payload as ReturnType<typeof normalizeViewBlock>;
+    if (view.definition.source.kind === "collection") {
+      const source = importedCollections.get(view.definition.source.collectionId);
+      if (!source || view.definition.focused && !source.records.some(({ id }) => id === view.definition.focused!.recordId))
+        throw new InvalidPortableWorkspaceImport("dangling_view_source");
+    }
   }
   const projectStatusOwners = new Map<string,string>(); const workspaceStatuses = new Set<string>();
   for(const item of value.durableObjects) if(object(item)&&object(item.payload)&&Array.isArray(item.payload.statuses)) {
