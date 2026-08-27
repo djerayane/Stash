@@ -233,6 +233,7 @@ export class PostgresDatabase implements DatabaseProbe {
       await this.#noteTreeRepository.prepare(client);
     }, this.#tutorialContributionRepository);
     this.#identityAccessAdapter = new PostgresIdentityAccessRepositories(this.#kernel, authenticationSecrets, {
+      prepareProjections: (client) => this.#ensurePortableProjectionSchema(client),
       recordWorkspaceProjection: (client, record) => this.#recordPortableProjection(client, "Workspace", record.workspace.id, "stash.workspace.v1", {
         schema: "stash.workspace.v1", id: record.workspace.id, name: record.workspace.name,
         owner: { type: "personal", identity: { localAccountId: record.account.id, displayName: record.account.name } },
