@@ -244,7 +244,7 @@ await browserTreeStore.upgradeDatabase.query("INSERT INTO stash_organization_mem
 await browserTreeStore.upgradeDatabase.query(`INSERT INTO stash_projects(id,workspace_id,name,project_key,created_by_account_id)
   VALUES($1,$2,'Stash','STASH',$3)`, [projectId, browserWorkspaceId, browserMemberId]);
 let activeNoteTreeRepository = browserTreeStore.database.noteTreeRepository();
-let activeDurableDiscussionService = new DiscussionService(browserTreeStore.database);
+let activeDurableDiscussionService = new DiscussionService(browserTreeStore.database.knowledgeAuthoringRepositories());
 const seededRoot = await activeNoteTreeRepository.createTreeNote(browserMemberId, browserWorkspaceId,
   { id: noteId, title: "Release collaboration plan" });
 if (seededRoot.status !== "created") throw new Error("browser_note_tree_root_seed_failed");
@@ -322,7 +322,7 @@ const reopenNoteTreeRoute: HttpRoute = {
     await browserTreeStore.close();
     browserTreeStore = await EmbeddedInstanceStore.open(browserTreeDirectory, browserTreeCodec);
     activeNoteTreeRepository = browserTreeStore.database.noteTreeRepository();
-    activeDurableDiscussionService = new DiscussionService(browserTreeStore.database);
+    activeDurableDiscussionService = new DiscussionService(browserTreeStore.database.knowledgeAuthoringRepositories());
     json(response, 200, { status: "reopened" });
     return true;
   },
@@ -477,7 +477,7 @@ async function startFirstRunInstance() {
       knowledgeAuthoringCapability({ notes, noteTree: new NoteTreeService(database.noteTreeRepository(), database.tutorialContributionRepository()),
         starterTutorials: new TutorialContributionService(database.tutorialContributionRepository()),
         collections: new CollectionService(database.collectionRepository()), noteLinks: new NoteLinkService(database.knowledgeAuthoringRepositories()),
-        discussions: new DiscussionService(database), searches: new WorkspaceSearchService(database),
+        discussions: new DiscussionService(database.knowledgeAuthoringRepositories()), searches: new WorkspaceSearchService(database),
         portableWorkspaceExports: new PortableWorkspaceExportService(database, attachments), memberAccess: auth }),
       workPlanningCapability({ tasks, workspaceProjects: projects, memberAccess: auth,
         projectlessTasks: new ProjectlessTaskService(database.projectlessTaskRepository()),

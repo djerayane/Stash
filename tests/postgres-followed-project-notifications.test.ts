@@ -36,7 +36,7 @@ describe("PostgreSQL followed Project notifications", { skip: databaseUrl ? fals
       assert.equal(inbox.length, 1); assert.equal(inbox[0]?.trigger, "followed_change"); assert.equal(inbox[0]?.activity.object.kind, "Note");
       assert.equal(inbox[0]?.activity.actor.localAccountId, ownerId);
       if (created.status === "created") {
-        const discussion = await new DiscussionService(database).create(ownerId, { target: { kind: "note", noteId: created.note.id },
+        const discussion = await new DiscussionService(database.knowledgeAuthoringRepositories()).create(ownerId, { target: { kind: "note", noteId: created.note.id },
           message: `Review this <@${recipientId}>` }); assert.equal(discussion.status, "created");
         const mentioned = (await database.workPlanningRepositories().listNotifications(recipientId)).filter(({ activity: item }) => item.action === "discussion_message_mentioned_members");
         const follower = (await database.workPlanningRepositories().listNotifications(followerId)).filter(({ activity: item }) => item.action === "discussion_message_mentioned_members");
