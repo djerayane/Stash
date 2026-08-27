@@ -1,5 +1,5 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import type { DatabaseProbe } from "./instance.js";
+import type { ClientSessionPrincipal, DatabaseProbe } from "./instance.js";
 import { noteOperationDigest, type NoteConflictResolution, type NoteEditBatch, type NoteEditConflict, type NoteRecord, type NoteRepository, type NoteTriageChange, type NoteTriageResult, type PortableExportTaskProjection, type PortableNoteLinkProjection, type PortableNoteProjection, type PortableNoteStateProjection, type PortableTaskProjection, type TaskCreation } from "./notes.js";
 import { isRichTextDocument, markdownToRichText, paragraphDocument, richTextToMarkdown } from "./rich-text.js";
 import type { BootstrapRecord, OwnerBootstrapRepository } from "./owner-bootstrap.js";
@@ -85,7 +85,8 @@ export interface PostgresDatabaseOptions extends PostgresKernelOptions {}
 
 export type IdentityAccessPostgresRepositories = PasswordAuthRepository & AccountRegistrationRepository
   & OidcAuthRepository & AccountRecoveryRepository & OrganizationRoleRepository & InvitationRepository
-  & MemberLocalizationRepository & WorkspaceProjectRepository & AgentGrantRepository & ImportedIdentityAdministration;
+  & MemberLocalizationRepository & WorkspaceProjectRepository & AgentGrantRepository & ImportedIdentityAdministration
+  & { resolveClientSessionPrincipal(accountId:string):Promise<ClientSessionPrincipal|undefined> };
 export type KnowledgeAuthoringPostgresRepositories = NoteRepository & NoteCollaborationRepository
   & NoteLinkRepository & DiscussionRepository & WorkspaceSearchRepository & AttachmentRepository & ActivityRepository
   & PortableWorkspaceExportRepository & PortableWorkspaceImportRepository & MobileCaptureRepository;
@@ -506,59 +507,8 @@ export class PostgresDatabase implements DatabaseProbe {
     return this.#instanceSetupRepository.createFirstPersonalInstance(setup);
   }
 
-  /** Compatibility surface for capability callers not yet migrated off the universal store. */
-  async findPortableMemberIdentity(memberId: string): Promise<PortableIdentity | undefined> {
-    return this.#knowledgeAuthoringAdapter.findPortableMemberIdentity(memberId);
-  }
-
   async close(): Promise<void> {
     await this.#kernel.close();
-  }
-
-  async resolveClientSessionPrincipal(accountId: string) {
-    return this.#kernel.withSession(async (client) => {
-      await this.#identityAccessAdapter.prepareInvitations(client);
-      const result = await client.query<{ account_id: string; account_name: string; account_email: string; workspace_id: string; workspace_name: string; organization_id: string | null }>(`
-        SELECT account.id account_id, account.name account_name, account.email account_email,
-          workspace.id workspace_id, workspace.name workspace_name, workspace.organization_owner_id organization_id
-        FROM stash_accounts account
-        JOIN LATERAL (
-          SELECT candidate.id, candidate.name, candidate.organization_owner_id
-          FROM stash_workspaces candidate
-          WHERE (candidate.owner_type='personal' AND candidate.personal_owner_id=account.id)
-            OR (candidate.owner_type='organization' AND EXISTS (
-              SELECT 1 FROM stash_organization_memberships membership
-              WHERE membership.organization_id=candidate.organization_owner_id AND membership.account_id=account.id))
-            OR EXISTS (
-              SELECT 1 FROM stash_projects project JOIN stash_project_guests guest ON guest.project_id=project.id
-              WHERE project.workspace_id=candidate.id AND guest.account_id=account.id)
-          ORDER BY candidate.created_at, candidate.id LIMIT 1
-        ) workspace ON true
-        WHERE account.id=$1`, [accountId]);
-      const row = result.rows[0];
-      if (!row) return undefined;
-      const administration = await client.query<{ organization_id: string; organization_name: string; member_id: string;
-        member_name: string; member_email: string; member_role: BuiltInOrganizationRole }>(`
-        SELECT organization.id organization_id, organization.name organization_name,
-          member.id member_id, member.name member_name, member.email member_email, membership.role member_role
-        FROM stash_organization_memberships actor_membership
-        JOIN stash_organizations organization ON organization.id=actor_membership.organization_id
-        JOIN stash_organization_memberships membership ON membership.organization_id=organization.id
-        JOIN stash_accounts member ON member.id=membership.account_id
-        WHERE actor_membership.account_id=$1 AND actor_membership.role IN ('Owner','Admin')
-        ORDER BY organization.id, member.name, member.id`, [accountId]);
-      const organizationAdministrations = [...new Set(administration.rows.map(({ organization_id }) => organization_id))]
-        .map((organizationId) => {
-          const eligibleMembers = administration.rows.filter(({ organization_id }) => organization_id === organizationId);
-          return { organizationId, organizationName: eligibleMembers[0]!.organization_name,
-            members: eligibleMembers.map((member) => ({ id: member.member_id, name: member.member_name,
-              email: member.member_email, role: member.member_role })) };
-        });
-      return { member: { id: row.account_id, name: row.account_name, email: row.account_email },
-        workspace: { id: row.workspace_id, name: row.workspace_name }, capabilities: [],
-        ...(organizationAdministrations.length ? { organizationAdministrations } : {}),
-        ...(row.organization_id ? { activeOrganizationId: row.organization_id } : {}) };
-    });
   }
 
   async #linkDevelopmentArtifact(memberId: string, projectId: string, taskKey: string, artifact: DevelopmentArtifact) {

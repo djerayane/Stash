@@ -237,7 +237,7 @@ describe("PostgreSQL readable export wiring", { skip: postgresUrl ? false : "STA
       assert.equal(moved.status, "moved");
       const samePath = await noteLinks.move(ownerId, privateNote.note.id, { expectedRevision: 2, path: "private/roadmap.md" });
       assert.equal(samePath.status, "unchanged"); assert.equal(samePath.location.revision, 2);
-      const tasks = new TaskService(database.workPlanningRepositories(), database);
+      const tasks = new TaskService(database.workPlanningRepositories(), database.identityAccessRepositories());
       const visibleBlockKey = visibleNote.note.document.blocks[0]?.blockKey; const privateBlockKey = privateNote.note.document.blocks[0]?.blockKey;
       assert.ok(visibleBlockKey); assert.ok(privateBlockKey);
       await tasks.createFromBlock(ownerId, visibleNote.note.id, visibleBlockKey,

@@ -190,7 +190,12 @@ export async function composeInstanceRuntime(environment: NodeJS.ProcessEnv): Pr
       instanceBackupRestoreTarget: restoreTarget, ...(instanceBackupRoot ? { instanceBackupRoot } : {}),
       ...(upgrades ? { instanceUpgrades: upgrades } : {}), portableWorkspaceImports }),
   ]);
-  const instance = await startInstance({ database, host, port,
+  const databaseProbe = {
+    verifyConnection: () => database.verifyConnection(),
+    close: () => database.close(),
+    resolveClientSessionPrincipal: (accountId: string) => identityAccessRepositories.resolveClientSessionPrincipal(accountId),
+  };
+  const instance = await startInstance({ database: databaseProbe, host, port,
     instanceAdminToken, capabilities, diagnostics,
     webClientRoot: environment.WEB_CLIENT_ROOT?.trim() || fileURLToPath(new URL("../apps/web/dist", import.meta.url)),
     ...(redis ? { acceleration: redis.acceleration } : {}) });

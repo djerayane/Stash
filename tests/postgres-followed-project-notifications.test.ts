@@ -44,7 +44,7 @@ describe("PostgreSQL followed Project notifications", { skip: databaseUrl ? fals
         assert.deepEqual(follower.map(({ trigger }) => trigger), ["followed_change"], "other Project followers receive the canonical Discussion Activity");
       }
       if (created.status === "created") {
-        const blockKey = created.note.document.blocks[0]!.id!; const tasks = new TaskService(database.workPlanningRepositories(), database);
+        const blockKey = created.note.document.blocks[0]!.id!; const tasks = new TaskService(database.workPlanningRepositories(), database.identityAccessRepositories());
         const task = await tasks.createFromBlock(ownerId, created.note.id, blockKey, { projectId: project.project.id, title: "Assign once" });
         assert.equal(task.status, "created"); if (task.status === "created") {
           await tasks.updateByKey(ownerId, project.project.id, task.task.key, { assigneeIds: [recipientId] });
