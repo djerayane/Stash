@@ -112,13 +112,16 @@ const repositoryConnectionSelect = `SELECT connection.id, connection.organizatio
   connection.ownership, connection.state,
   ARRAY(SELECT project_id FROM stash_repository_connection_projects link WHERE link.connection_id = connection.id ORDER BY project_id) AS project_ids
   FROM stash_repository_connections connection`;
-const taskPlanningSelect = `SELECT task.*, status.name AS status_name, status.category AS status_category,
+const taskPlanningSelect = `SELECT task.*, COALESCE(workspace_status.name,status.name) AS status_name,
+  COALESCE(workspace_status.category,status.category) AS status_category,
   creator.name AS created_by_name,
   ARRAY(SELECT source.note_id FROM stash_task_note_sources source WHERE source.task_id = task.id ORDER BY source.note_id) AS source_note_ids,
   COALESCE((SELECT jsonb_agg(jsonb_build_object('noteId', source.note_id, 'blockId', source.block_id) ORDER BY source.note_id, source.block_id)
     FROM stash_task_block_sources source WHERE source.task_id = task.id), '[]'::jsonb) AS source_blocks,
   COALESCE((SELECT jsonb_agg(jsonb_build_object('projectId', alias.project_id, 'key', alias.task_key) ORDER BY alias.created_at)
     FROM stash_task_key_aliases alias WHERE alias.task_id = task.id), '[]'::jsonb) AS key_aliases
+  , COALESCE((SELECT jsonb_agg(jsonb_build_object('projectId', association.project_id, 'key', association.task_key) ORDER BY association.project_id)
+    FROM stash_task_projects association WHERE association.task_id = task.id), '[]'::jsonb) AS project_keys
   , COALESCE((SELECT jsonb_agg(relation ORDER BY relation->>'taskId', relation->>'type') FROM (
       SELECT jsonb_build_object('taskId', edge.prerequisite_task_id, 'type', 'depends_on') AS relation
       FROM stash_task_dependencies edge WHERE edge.dependent_task_id = task.id
@@ -133,24 +136,29 @@ const taskPlanningSelect = `SELECT task.*, status.name AS status_name, status.ca
       JOIN stash_workflow_statuses prerequisite_status ON prerequisite_status.id = prerequisite.workflow_status_id
       WHERE edge.dependent_task_id = task.id AND prerequisite_status.category <> 'completed'), '[]'::jsonb) AS dependency_warnings
   FROM stash_tasks task
-  JOIN stash_workflow_statuses status ON status.id = task.workflow_status_id
+  LEFT JOIN stash_workflow_statuses status ON status.id = task.workflow_status_id
+  LEFT JOIN stash_workspace_workflow_statuses workspace_status ON workspace_status.id = task.workspace_workflow_status_id
   JOIN stash_accounts creator ON creator.id = task.created_by_account_id
   JOIN stash_workspaces workspace ON workspace.id = task.workspace_id
-  WHERE (task.project_id = $1 AND task.task_key = $2 OR EXISTS (SELECT 1 FROM stash_task_key_aliases alias
+  WHERE (task.project_id = $1 AND task.task_key = $2 OR EXISTS (SELECT 1 FROM stash_task_projects association
+      WHERE association.task_id=task.id AND association.project_id=$1 AND association.task_key=$2) OR EXISTS (SELECT 1 FROM stash_task_key_aliases alias
       WHERE alias.task_id = task.id AND alias.project_id = $1 AND alias.task_key = $2))
     AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $3)
       OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
         WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $3))
-      OR EXISTS (SELECT 1 FROM stash_project_guests guest WHERE guest.project_id = task.project_id AND guest.account_id = $3))`;
+      OR EXISTS (SELECT 1 FROM stash_project_guests guest JOIN stash_task_projects association ON association.project_id=guest.project_id
+        WHERE association.task_id=task.id AND guest.account_id=$3))`;
 const taskPlanningSelectById = taskPlanningSelect
-  .replace("(task.project_id = $1 AND task.task_key = $2 OR EXISTS (SELECT 1 FROM stash_task_key_aliases alias\n      WHERE alias.task_id = task.id AND alias.project_id = $1 AND alias.task_key = $2))", "task.id = $1")
+  .replace(/\(task\.project_id = \$1[\s\S]*?alias\.task_key = \$2\)\)/, "task.id = $1")
   .replaceAll("$3", "$2");
 
-function taskProjectionFromRow(row: any): PortableTaskProjection {
+function taskProjectionFromRow(row: any): PortableExportTaskProjection {
   return {
-    schema: "stash.task.v1", id: row.id, workspaceId: row.workspace_id, projectId: row.project_id,
-    key: row.task_key, ...(row.key_aliases?.length ? { keyAliases: row.key_aliases } : {}), title: row.title,
-    status: { id: row.workflow_status_id, name: row.status_name, category: row.status_category },
+    schema: "stash.task.v1", id: row.id, workspaceId: row.workspace_id, ...(row.project_id ? { projectId: row.project_id } : {}),
+    ...(row.task_key ? { key: row.task_key } : {}), ...(row.project_keys?.length ? { projectKeys: row.project_keys,
+      projectAssociations: row.project_keys.map((entry: any) => entry.projectId) } : {}),
+    ...(row.key_aliases?.length ? { keyAliases: row.key_aliases } : {}), title: row.title,
+    status: { id: row.workspace_workflow_status_id ?? row.workflow_status_id, name: row.status_name, category: row.status_category },
     assigneeIds: row.assignee_ids ?? [], ...(row.former_assignee_ids?.length ? { formerAssigneeIds: row.former_assignee_ids } : {}),
     priority: row.priority ?? "none", labelNames: row.label_names ?? [],
     ...(row.due_date ? { dueDate: typeof row.due_date === "string" ? row.due_date : row.due_date.toISOString().slice(0, 10) } : {}),
@@ -174,7 +182,7 @@ function formerAssignmentsAfterUpdate(
 }
 
 function taskPlanningReadModelFromRow(row: any): TaskPlanningReadModel {
-  return { ...taskProjectionFromRow(row), revision: Number(row.revision), dependencyWarnings: row.dependency_warnings ?? [] };
+  return { ...taskProjectionFromRow(row), revision: Number(row.revision), dependencyWarnings: row.dependency_warnings ?? [] } as TaskPlanningReadModel;
 }
 
 function taskConflictFromRow(row: any): TaskEditConflict {
@@ -2390,7 +2398,13 @@ export class PostgresDatabase implements
             task.title,'/app/tasks/'||task.id,association.project_id,
             author.name, (SELECT string_agg(account.name,', ' ORDER BY account.name) FROM stash_accounts account
               WHERE task.assignee_ids ? account.id::text), COALESCE(workspace_status.name,status.name), task.created_at,
-            concat_ws(' ',association.task_key,task.task_key,task.title,task.label_names::text,task.development_links::text)
+            concat_ws(' ',association.task_key,task.task_key,task.title,task.label_names::text,task.development_links::text,
+              (SELECT string_agg(visible_key,' ') FROM (
+                SELECT active.task_key visible_key FROM stash_task_projects active
+                  WHERE active.task_id=task.id AND active.project_id IN(SELECT id FROM visible_projects)
+                UNION SELECT alias.task_key FROM stash_task_key_aliases alias
+                  WHERE alias.task_id=task.id AND alias.project_id IN(SELECT id FROM visible_projects)
+              ) visible_keys))
           FROM stash_tasks task JOIN stash_accounts author ON author.id=task.created_by_account_id
           LEFT JOIN stash_workflow_statuses status ON status.id=task.workflow_status_id
           LEFT JOIN stash_workspace_workflow_statuses workspace_status ON workspace_status.id=task.workspace_workflow_status_id
@@ -2737,18 +2751,7 @@ export class PostgresDatabase implements
   }
 
   async canLinkArtifact(memberId: string, projectId: string, taskKey: string) {
-    return this.#kernel.withSession(async (client) => {
-      await this.#ensureInvitationSchema(client);
-      const result = await client.query(`SELECT 1 FROM stash_tasks task
-      JOIN stash_projects project ON project.id = task.project_id
-      JOIN stash_workspaces workspace ON workspace.id = project.workspace_id
-      WHERE ((task.project_id = $1 AND task.task_key = $2) OR EXISTS (SELECT 1 FROM stash_task_key_aliases alias
-        WHERE alias.task_id = task.id AND alias.project_id = $1 AND alias.task_key = $2))
-        AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $3)
-          OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
-            WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $3)))`, [projectId, taskKey, memberId]);
-      return Boolean(result.rowCount);
-    });
+    return (await this.findTaskByKey(memberId, projectId, taskKey)).status === "found";
   }
 
   async linkArtifact(memberId: string, projectId: string, taskKey: string, artifact: DevelopmentArtifact) {
@@ -2776,14 +2779,14 @@ export class PostgresDatabase implements
     await this.#ensureGitHubSignalSchema();
     if (!keys.length) return [];
     const result = await this.#kernel.query<{ task_id: string; project_id: string; organization_id: string; task_key: string; title: string; matched_key: string }>(`
-      SELECT DISTINCT task.id AS task_id, task.project_id, connection.organization_id, task.task_key, task.title, matched.matched_key
+      SELECT DISTINCT task.id AS task_id, link.project_id, connection.organization_id, identity.task_key, task.title, identity.matched_key
       FROM stash_repository_connections connection
       JOIN stash_repository_connection_projects link ON link.connection_id = connection.id
-      JOIN stash_tasks task ON task.project_id = link.project_id
-      JOIN LATERAL (
-        SELECT task.task_key AS matched_key WHERE task.task_key = ANY($3::text[])
-        UNION SELECT alias.task_key FROM stash_task_key_aliases alias WHERE alias.task_id = task.id AND alias.task_key = ANY($3::text[])
-      ) matched ON true
+      JOIN LATERAL (SELECT association.task_id,association.task_key,association.task_key matched_key FROM stash_task_projects association
+          WHERE association.project_id=link.project_id AND association.task_key=ANY($3::text[])
+        UNION SELECT alias.task_id,alias.task_key,alias.task_key FROM stash_task_key_aliases alias
+          WHERE alias.project_id=link.project_id AND alias.task_key=ANY($3::text[])) identity ON TRUE
+      JOIN stash_tasks task ON task.id=identity.task_id
       WHERE connection.provider='github' AND connection.state='active'
         AND connection.installation_id=$1 AND connection.repository_id=$2
       `, [installationId, repositoryId, keys]);
@@ -2833,7 +2836,10 @@ export class PostgresDatabase implements
         signal.delivery_id, signal.repository_id, signal.occurred_at
         FROM stash_github_signal_suggestions suggestion JOIN stash_github_signals signal ON signal.id = suggestion.signal_id
         JOIN stash_tasks task ON task.id = suggestion.task_id
-        WHERE suggestion.id=$1 AND suggestion.project_id=$2 AND (suggestion.task_key=$3 OR task.task_key=$3) FOR UPDATE OF suggestion`, [suggestionId, projectId, taskKey]);
+        WHERE suggestion.id=$1 AND suggestion.project_id=$2 AND (suggestion.task_key=$3
+          OR EXISTS(SELECT 1 FROM stash_task_projects association WHERE association.task_id=task.id AND association.project_id=$2 AND association.task_key=$3)
+          OR EXISTS(SELECT 1 FROM stash_task_key_aliases alias WHERE alias.task_id=task.id AND alias.project_id=$2 AND alias.task_key=$3))
+        FOR UPDATE OF suggestion`, [suggestionId, projectId, taskKey]);
       const row = result.rows[0]; if (!row) return "not_found" as const;
       await client.query("UPDATE stash_github_signal_suggestions SET status='confirmed', confirmed_by_account_id=$2, confirmed_at=NOW() WHERE id=$1", [suggestionId, memberId]);
       await this.#linkSignalArtifact(client, row.task_id, githubSignalFromRow(row), memberId);
@@ -2847,12 +2853,24 @@ export class PostgresDatabase implements
       await this.#ensureAutomationSchema(client, true);
       const visible = await client.query<any>(taskPlanningSelect, [projectId, taskKey, memberId]);
       const task = visible.rows[0]; if (!task) return undefined;
-      const recipes = await client.query<any>(`SELECT recipe.*, status.name AS target_status_name FROM stash_automation_recipes recipe
-        JOIN stash_workflow_statuses status ON status.id=recipe.target_status_id WHERE recipe.project_id=$1 ORDER BY recipe.created_at,recipe.id`, [projectId]);
-      const transitions = await client.query<any>(`SELECT transition.*, before_status.name AS before_status_name, after_status.name AS after_status_name
-        FROM stash_automation_transitions transition JOIN stash_workflow_statuses before_status ON before_status.id=transition.before_status_id
-        JOIN stash_workflow_statuses after_status ON after_status.id=transition.after_status_id WHERE transition.task_id=$1 ORDER BY transition.occurred_at DESC`, [task.id]);
-      const statuses = await client.query<{ id: string; name: string }>("SELECT id,name FROM stash_workflow_statuses WHERE project_id=$1 AND archived=FALSE ORDER BY position", [projectId]);
+      const recipes = await client.query<any>(`SELECT recipe.*,
+        COALESCE(workspace_status.id,legacy_status.id) target_status_id,
+        COALESCE(workspace_status.name,legacy_status.name) AS target_status_name FROM stash_automation_recipes recipe
+        LEFT JOIN stash_workflow_statuses legacy_status ON legacy_status.id=recipe.target_status_id
+        LEFT JOIN stash_workspace_workflow_statuses workspace_status ON workspace_status.id=recipe.workspace_target_status_id
+        WHERE recipe.project_id=$1 ORDER BY recipe.created_at,recipe.id`, [projectId]);
+      const transitions = await client.query<any>(`SELECT transition.*,
+        COALESCE(workspace_before.id,legacy_before.id) before_status_id,COALESCE(workspace_after.id,legacy_after.id) after_status_id,
+        COALESCE(workspace_before.name,legacy_before.name) before_status_name,COALESCE(workspace_after.name,legacy_after.name) after_status_name
+        FROM stash_automation_transitions transition
+        LEFT JOIN stash_workflow_statuses legacy_before ON legacy_before.id=transition.before_status_id
+        LEFT JOIN stash_workflow_statuses legacy_after ON legacy_after.id=transition.after_status_id
+        LEFT JOIN stash_workspace_workflow_statuses workspace_before ON workspace_before.id=transition.workspace_before_status_id
+        LEFT JOIN stash_workspace_workflow_statuses workspace_after ON workspace_after.id=transition.workspace_after_status_id
+        WHERE transition.task_id=$1 ORDER BY transition.occurred_at DESC`, [task.id]);
+      const statuses = task.workspace_workflow_status_id
+        ? await client.query<{ id: string; name: string }>("SELECT id,name FROM stash_workspace_workflow_statuses WHERE workspace_id=$1 ORDER BY position", [task.workspace_id])
+        : await client.query<{ id: string; name: string }>("SELECT id,name FROM stash_workflow_statuses WHERE project_id=$1 AND archived=FALSE ORDER BY position", [projectId]);
       return { recipes: recipes.rows.map(automationRecipeFromRow), transitions: transitions.rows.map(automationTransitionFromRow), availableStatuses: statuses.rows };
     });
   }
@@ -2864,14 +2882,19 @@ export class PostgresDatabase implements
       const access = await this.#findProjectWorkflowAccess(client, memberId, projectId, true);
       if (access === "forbidden") return "forbidden" as const;
       if (access === "not_found") return "not_found" as const;
-      const status = await client.query<{ name: string }>("SELECT name FROM stash_workflow_statuses WHERE id=$1 AND project_id=$2 AND archived=FALSE", [targetStatusId, projectId]);
+      const status = await client.query<{ name: string; canonical: boolean }>(`SELECT status.name,FALSE canonical FROM stash_workflow_statuses status
+        WHERE status.id=$1 AND status.project_id=$2 AND status.archived=FALSE UNION ALL
+        SELECT status.name,TRUE canonical FROM stash_workspace_workflow_statuses status JOIN stash_projects project ON project.workspace_id=status.workspace_id
+        WHERE status.id=$1 AND project.id=$2`, [targetStatusId, projectId]);
       if (!status.rowCount) return "invalid_status" as const;
       const id = randomUUID();
-      const result = await client.query<any>(`INSERT INTO stash_automation_recipes(id,project_id,trigger,target_status_id,created_by_account_id,created_at)
-        VALUES($1,$2,$3,$4,$5,now()) ON CONFLICT(project_id,trigger) DO UPDATE SET target_status_id=EXCLUDED.target_status_id,
+      const canonical=status.rows[0]!.canonical;
+      const result = await client.query<any>(`INSERT INTO stash_automation_recipes(id,project_id,trigger,target_status_id,workspace_target_status_id,created_by_account_id,created_at)
+        VALUES($1,$2,$3,$4,$5,$6,now()) ON CONFLICT(project_id,trigger) DO UPDATE SET target_status_id=EXCLUDED.target_status_id,
+        workspace_target_status_id=EXCLUDED.workspace_target_status_id,
         enabled=TRUE,created_by_account_id=EXCLUDED.created_by_account_id,created_at=EXCLUDED.created_at
-        RETURNING *`, [id, projectId, trigger, targetStatusId, memberId]);
-      return { status: "enabled" as const, recipe: automationRecipeFromRow({ ...result.rows[0], target_status_name: status.rows[0]!.name }) };
+        RETURNING *`, [id,projectId,trigger,canonical?null:targetStatusId,canonical?targetStatusId:null,memberId]);
+      return { status: "enabled" as const, recipe: automationRecipeFromRow({ ...result.rows[0], target_status_id:targetStatusId,target_status_name:status.rows[0]!.name }) };
     });
   }
 
@@ -2882,16 +2905,27 @@ export class PostgresDatabase implements
       const access = await this.#findProjectWorkflowAccess(client, memberId, projectId, true);
       if (access === "forbidden") return "forbidden" as const;
       if (access === "not_found") return "not_found" as const;
-      const result = await client.query<any>(`SELECT transition.*, before_status.name AS before_status_name, after_status.name AS after_status_name,
-        task.workflow_status_id,task.workspace_id FROM stash_automation_transitions transition JOIN stash_tasks task ON task.id=transition.task_id
-        JOIN stash_workflow_statuses before_status ON before_status.id=transition.before_status_id JOIN stash_workflow_statuses after_status ON after_status.id=transition.after_status_id
-        WHERE transition.id=$1 AND transition.project_id=$2 AND task.task_key=$3 FOR UPDATE OF transition,task`, [transitionId, projectId, taskKey]);
+      const result = await client.query<any>(`SELECT transition.*,
+        COALESCE(workspace_before.id,legacy_before.id) before_status_id,COALESCE(workspace_after.id,legacy_after.id) after_status_id,
+        COALESCE(workspace_before.name,legacy_before.name) before_status_name,COALESCE(workspace_after.name,legacy_after.name) after_status_name,
+        task.workflow_status_id,task.workspace_workflow_status_id,task.workspace_id
+        FROM stash_automation_transitions transition JOIN stash_tasks task ON task.id=transition.task_id
+        LEFT JOIN stash_workflow_statuses legacy_before ON legacy_before.id=transition.before_status_id
+        LEFT JOIN stash_workflow_statuses legacy_after ON legacy_after.id=transition.after_status_id
+        LEFT JOIN stash_workspace_workflow_statuses workspace_before ON workspace_before.id=transition.workspace_before_status_id
+        LEFT JOIN stash_workspace_workflow_statuses workspace_after ON workspace_after.id=transition.workspace_after_status_id
+        WHERE transition.id=$1 AND transition.project_id=$2 AND (task.task_key=$3
+          OR EXISTS(SELECT 1 FROM stash_task_projects association WHERE association.task_id=task.id AND association.project_id=$2 AND association.task_key=$3)
+          OR EXISTS(SELECT 1 FROM stash_task_key_aliases alias WHERE alias.task_id=task.id AND alias.project_id=$2 AND alias.task_key=$3))
+        FOR UPDATE OF transition,task`, [transitionId,projectId,taskKey]);
       const row = result.rows[0]; if (!row) return "not_found" as const;
       if (row.reversed_at) return { status: "reversed" as const, transition: automationTransitionFromRow(row) };
-      if (row.workflow_status_id !== row.after_status_id) return "conflict" as const;
+      const canonical=row.workspace_after_status_id!==null; const currentStatusId=row.workspace_workflow_status_id??row.workflow_status_id;
+      if (currentStatusId !== row.after_status_id) return "conflict" as const;
       const before = await client.query<any>(taskPlanningSelectById, [row.task_id, memberId]);
-      await client.query(`UPDATE stash_tasks SET workflow_status_id=$2,revision=revision+1,
-        field_revisions=jsonb_set(field_revisions,'{statusId}',to_jsonb(revision+1),true) WHERE id=$1`, [row.task_id, row.before_status_id]);
+      await client.query(`UPDATE stash_tasks SET workflow_status_id=CASE WHEN $3 THEN workflow_status_id ELSE $2 END,
+        workspace_workflow_status_id=CASE WHEN $3 THEN $2 ELSE workspace_workflow_status_id END,revision=revision+1,
+        field_revisions=jsonb_set(field_revisions,'{statusId}',to_jsonb(revision+1),true) WHERE id=$1`, [row.task_id,row.before_status_id,canonical]);
       const reversedAt = new Date().toISOString();
       await client.query("UPDATE stash_automation_transitions SET reversed_at=$2,reversed_by_account_id=$3 WHERE id=$1", [transitionId, reversedAt, memberId]);
       const saved = await client.query<any>(taskPlanningSelectById, [row.task_id, memberId]);
@@ -2920,23 +2954,34 @@ export class PostgresDatabase implements
       try {
         await this.#withTransaction(async (client) => {
           await this.#ensureAutomationSchema(client, true);
-        const result = await client.query<any>(`SELECT recipe.id AS automation_id,recipe.target_status_id,recipe.created_by_account_id,
-          configurer.name AS created_by_name,task.*,current_status.name AS status_name,current_status.category AS status_category
-          FROM stash_automation_recipes recipe JOIN stash_tasks task ON task.id=$1 AND task.project_id=recipe.project_id
-          JOIN stash_workflow_statuses current_status ON current_status.id=task.workflow_status_id
+        const result = await client.query<any>(`SELECT recipe.id AS automation_id,
+          COALESCE(recipe.workspace_target_status_id,recipe.target_status_id) target_status_id,
+          recipe.workspace_target_status_id IS NOT NULL canonical_status,recipe.created_by_account_id,
+          configurer.name AS created_by_name,task.*,
+          COALESCE(current_workspace.name,current_legacy.name) status_name,
+          COALESCE(current_workspace.category,current_legacy.category) status_category
+          FROM stash_automation_recipes recipe JOIN stash_tasks task ON task.id=$1 AND
+            (task.project_id=recipe.project_id OR EXISTS(SELECT 1 FROM stash_task_projects association
+              WHERE association.task_id=task.id AND association.project_id=recipe.project_id))
+          LEFT JOIN stash_workflow_statuses current_legacy ON current_legacy.id=task.workflow_status_id
+          LEFT JOIN stash_workspace_workflow_statuses current_workspace ON current_workspace.id=task.workspace_workflow_status_id
           JOIN stash_accounts configurer ON configurer.id=recipe.created_by_account_id
           WHERE recipe.project_id=$2 AND recipe.trigger=$3 AND recipe.enabled=TRUE FOR UPDATE OF task,recipe`, [candidate.taskId, candidate.projectId, triggeredSignal.trigger]);
-        const row = result.rows[0]; if (!row || row.workflow_status_id === row.target_status_id) return;
+        const row = result.rows[0]; const currentStatusId=row?.workspace_workflow_status_id??row?.workflow_status_id;
+        if (!row || currentStatusId === row.target_status_id) return;
         failedRun = { automationId: row.automation_id, configuringMemberId: row.created_by_account_id,
           configuringMemberName: row.created_by_name, workspaceId: row.workspace_id, projectId: candidate.projectId,
-          taskId: row.id, taskKey: row.task_key, taskTitle: row.title };
-        const inserted = await client.query<any>(`INSERT INTO stash_automation_transitions(id,automation_id,signal_id,task_id,project_id,before_status_id,after_status_id,occurred_at)
-          VALUES($1,$2,$3,$4,$5,$6,$7,now()) ON CONFLICT(automation_id,signal_id,task_id) DO NOTHING RETURNING id,occurred_at`,
-        [randomUUID(), row.automation_id, signal.id, row.id, candidate.projectId, row.workflow_status_id, row.target_status_id]);
+          taskId: row.id, taskKey: row.task_key??candidate.projectId, taskTitle: row.title };
+        const inserted = await client.query<any>(`INSERT INTO stash_automation_transitions(id,automation_id,signal_id,task_id,project_id,
+          before_status_id,after_status_id,workspace_before_status_id,workspace_after_status_id,occurred_at)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,now()) ON CONFLICT(automation_id,signal_id,task_id) DO NOTHING RETURNING id,occurred_at`,
+        [randomUUID(),row.automation_id,signal.id,row.id,candidate.projectId,row.canonical_status?null:currentStatusId,
+          row.canonical_status?null:row.target_status_id,row.canonical_status?currentStatusId:null,row.canonical_status?row.target_status_id:null]);
         if (!inserted.rowCount) return;
         const before = taskPlanningReadModelFromRow(row);
-        await client.query(`UPDATE stash_tasks SET workflow_status_id=$2,revision=revision+1,
-          field_revisions=jsonb_set(field_revisions,'{statusId}',to_jsonb(revision+1),true) WHERE id=$1`, [row.id, row.target_status_id]);
+        await client.query(`UPDATE stash_tasks SET workflow_status_id=CASE WHEN $3 THEN workflow_status_id ELSE $2 END,
+          workspace_workflow_status_id=CASE WHEN $3 THEN $2 ELSE workspace_workflow_status_id END,revision=revision+1,
+          field_revisions=jsonb_set(field_revisions,'{statusId}',to_jsonb(revision+1),true) WHERE id=$1`, [row.id,row.target_status_id,row.canonical_status]);
         const saved = await client.query<any>(taskPlanningSelectById, [row.id, row.created_by_account_id]); const after = taskPlanningReadModelFromRow(saved.rows[0]);
         await this.#recordPortableProjection(client, "Task", after.id, after.schema, taskProjectionFromRow(saved.rows[0]));
         await this.#recordTaskActivity(client, row.created_by_account_id, row.workspace_id, row.id, "task_status_automated", before, after,
@@ -3767,6 +3812,12 @@ export class PostgresDatabase implements
         occurred_at TIMESTAMPTZ NOT NULL, activity JSONB NOT NULL, recipient_member_id UUID NOT NULL REFERENCES stash_accounts(id),
         summary TEXT NOT NULL, UNIQUE(automation_id,signal_id,task_id)
       );
+      ALTER TABLE stash_automation_recipes ALTER COLUMN target_status_id DROP NOT NULL;
+      ALTER TABLE stash_automation_recipes ADD COLUMN IF NOT EXISTS workspace_target_status_id UUID REFERENCES stash_workspace_workflow_statuses(id);
+      ALTER TABLE stash_automation_transitions ALTER COLUMN before_status_id DROP NOT NULL;
+      ALTER TABLE stash_automation_transitions ALTER COLUMN after_status_id DROP NOT NULL;
+      ALTER TABLE stash_automation_transitions ADD COLUMN IF NOT EXISTS workspace_before_status_id UUID REFERENCES stash_workspace_workflow_statuses(id);
+      ALTER TABLE stash_automation_transitions ADD COLUMN IF NOT EXISTS workspace_after_status_id UUID REFERENCES stash_workspace_workflow_statuses(id);
     `);
   }
 
@@ -4488,7 +4539,11 @@ export class PostgresDatabase implements
       for (const task of state.tasks) for (const edge of task.dependencies ?? []) if (edge.type === "depends_on")
         await client.query("INSERT INTO stash_task_dependencies(dependent_task_id,prerequisite_task_id) VALUES($1,$2) ON CONFLICT DO NOTHING",[task.id,edge.taskId]);
       for (const project of durable.filter(({ kind }) => kind === "Project").map(({ id }) => id)) {
-        const numbers = state.tasks.filter((task) => task.projectId === project && task.key).map(({ key }) => Number(key!.slice(key!.lastIndexOf("-") + 1)))
+        const numbers = state.tasks.flatMap((task) => [
+          ...(task.projectId === project && task.key ? [task.key] : []),
+          ...(((task as any).projectKeys ?? []).filter((entry: any) => entry.projectId === project).map((entry: any) => entry.key)),
+          ...((task.keyAliases ?? []).filter((entry) => entry.projectId === project).map((entry) => entry.key)),
+        ]).map((key) => Number(key.slice(key.lastIndexOf("-") + 1)))
           .filter(Number.isSafeInteger);
         await client.query("UPDATE stash_projects SET next_task_number=$2 WHERE id=$1",[project,Math.max(0,...numbers)+1]);
       }
