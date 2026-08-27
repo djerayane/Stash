@@ -235,7 +235,7 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
       const password = "migration-password-long-enough"; const passwordHash = await hashPassword(password);
       await source.database.createFirstOrganizationOwner({ organizationId, organizationName: "Migrated", ownerId, ownerName: "Ada", ownerEmail: "ada@example.test", passwordHash, role: "Owner" });
       for (const [id, name, email] of [[adminId, "Admin", "admin@example.test"], [memberId, "Member", "member@example.test"]] as const) {
-        await source.database.createAccountWithPersonalWorkspaceAndSession({ account: { id, name, email, passwordHash },
+        await source.database.identityAccessRepositories().createAccountWithPersonalWorkspaceAndSession({ account: { id, name, email, passwordHash },
           workspace: { id: randomUUID(), name: `${name} Workspace` }, session: { id: randomUUID(), accountId: id,
             tokenHash: `${name}-migration-session`, createdAt: "2026-08-24T09:00:00.000Z", lastSeenAt: "2026-08-24T09:00:00.000Z" } });
       }
@@ -295,7 +295,7 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
       const migrated = new (await import("../src/postgres-database.js")).PostgresDatabase(scoped, createAuthenticationSecretCodec(destinationKey));
       try { await migrated.verifyConnection();
         for (const [email, id, role] of [["ada@example.test", ownerId, "Owner"], ["admin@example.test", adminId, "Admin"], ["member@example.test", memberId, "Member"]] as const) {
-          assert.equal((await new PasswordAuthService(migrated).signIn({ email, password })).member.id, id);
+          assert.equal((await new PasswordAuthService(migrated.identityAccessRepositories()).signIn({ email, password })).member.id, id);
           assert.equal(await migrated.organizationRole(organizationId, id), role);
         }
         assert.deepEqual(await migrated.findOidcConfiguration(organizationId), { organizationId, issuer: "https://identity.example.test", clientId: "stash-migration", clientSecret: "oidc-secret" });
@@ -334,7 +334,7 @@ describe("embedded-to-external PostgreSQL migration", { skip: postgresUrl ? fals
         keys: { source: sourceKey, destination: sourceKey, mode: "preserve" } });
       await assertDirectoryExcludesSecrets(destinationRoot, [sourceKey]); assert.equal(JSON.stringify(result).includes(sourceKey), false);
       const migrated = new (await import("../src/postgres-database.js")).PostgresDatabase(scoped, createAuthenticationSecretCodec(sourceKey));
-      try { await migrated.verifyConnection(); assert.equal((await migrated.findAccountByEmail("grace@example.test"))?.passwordHash, "preserved-hash"); }
+      try { await migrated.verifyConnection(); assert.equal((await migrated.identityAccessRepositories().findAccountByEmail("grace@example.test"))?.passwordHash, "preserved-hash"); }
       finally { await migrated.close(); }
     } finally { await source.close(); await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined); await admin.end(); }
   });

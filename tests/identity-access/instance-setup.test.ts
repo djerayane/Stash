@@ -197,7 +197,7 @@ describe("fresh Instance setup", () => {
     directories.push(directory);
     const store = await EmbeddedInstanceStore.open(directory,
       createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
-    const passwordAuth = new PasswordAuthService(store.database);
+    const passwordAuth = new PasswordAuthService(store.database.identityAccessRepositories());
     const setupRepository = store.database.instanceSetupRepository();
     const setup = new InstanceSetupService(setupRepository, { boundHost: "127.0.0.1", output() {} });
     instance = await startInstance({

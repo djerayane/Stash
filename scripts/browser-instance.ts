@@ -464,7 +464,7 @@ let firstRunStore = await EmbeddedInstanceStore.open(firstRunDirectory, firstRun
 let firstRunInstance: Awaited<ReturnType<typeof startInstance>>;
 async function startFirstRunInstance() {
   const database = firstRunStore.database;
-  const auth = new PasswordAuthService(database);
+  const auth = new PasswordAuthService(database.identityAccessRepositories());
   const notes = new NoteService(database.knowledgeAuthoringRepositories());
   const tasks = new TaskService(database, database);
   const projects = new WorkspaceProjectService(database);
@@ -510,7 +510,7 @@ await roleStore.upgradeDatabase.query("INSERT INTO stash_accounts(id,name,email,
   [roleMemberId, "Role Member", "role-member@stash.test", roleCodec.encrypt(await hashPassword("member correct horse battery"))]);
 await roleStore.upgradeDatabase.query("INSERT INTO stash_organization_memberships(organization_id,account_id,role) VALUES($1,$2,'Member')",
   [roleOrganizationId, roleMemberId]);
-const roleAuth = new PasswordAuthService(roleStore.database);
+const roleAuth = new PasswordAuthService(roleStore.database.identityAccessRepositories());
 const roleTasks = new TaskService(roleStore.database, roleStore.database);
 const roleProjects = new WorkspaceProjectService(roleStore.database);
 const roleService = new OrganizationRoleService(roleStore.database);

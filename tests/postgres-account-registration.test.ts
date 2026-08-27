@@ -20,8 +20,9 @@ describe("PostgreSQL built-in account registration", { skip: !databaseUrl }, () 
     admin = new Pool({ connectionString: databaseUrl! }); schema = `account_registration_${randomUUID().replaceAll("-", "")}`;
     await admin.query(`CREATE SCHEMA ${schema}`); const scopedUrl = new URL(databaseUrl!); scopedUrl.searchParams.set("options", `-csearch_path=${schema}`);
     database = new PostgresDatabase(scopedUrl.toString(), createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
-    const passwords = new PasswordAuthService(database); instance = await startInstance({ database, host: "127.0.0.1", port: 0,
-      instanceAdminToken: "test-admin", passwordAuth: passwords, accountRegistration: new AccountRegistrationService(database) });
+    const repositories = database.identityAccessRepositories();
+    const passwords = new PasswordAuthService(repositories); instance = await startInstance({ database, host: "127.0.0.1", port: 0,
+      instanceAdminToken: "test-admin", passwordAuth: passwords, accountRegistration: new AccountRegistrationService(repositories) });
     const input = { name: "Postgres Member", email: `member-${randomUUID()}@stash.test`, password: "correct horse battery staple" };
     const response = await fetch(`${instance.url}/api/auth/registration`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) });
     assert.equal(response.status, 201); const body = await response.json() as { token: string; member: { id: string }; workspace: { id: string } };
