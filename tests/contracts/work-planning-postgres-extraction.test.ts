@@ -1,37 +1,33 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import { describe, it } from "node:test";
+import { Pool } from "pg";
+import { createAuthenticationSecretCodec } from "../../src/authentication-secrets.js";
+import { PostgresDatabase } from "../../src/postgres-database.js";
+import { workPlanningCapability } from "../../src/work-planning/index.js";
 
-describe("PostgreSQL work-planning persistence ownership", () => {
-  it("owns Workflow and Board persistence in the work-planning adapter", async () => {
-    const adapter = await readFile(new URL("../../src/work-planning/postgres-work-planning-repositories.ts", import.meta.url), "utf8");
-    const database = await readFile(new URL("../../src/postgres-database.ts", import.meta.url), "utf8");
-
-    for (const method of ["findWorkflow", "replaceWorkflow", "listBoards", "createBoard", "readBoard", "moveTaskOnBoard"])
-      assert.match(adapter, new RegExp(`async ${method}\\(`));
-    assert.match(adapter, /CREATE TABLE IF NOT EXISTS stash_boards/);
-    assert.match(database, /workPlanningRepositories\(\): WorkPlanningPostgresRepositories \{\s+return this\.#workPlanningAdapter;/);
-    assert.doesNotMatch(database, /async #ensureBoardSchema\(/);
+describe("PostgreSQL Work Planning composition", () => {
+  it("exposes one stable repository satisfying every planning service seam", async () => {
+    const database = new PostgresDatabase("postgresql://unused", createAuthenticationSecretCodec(randomBytes(32).toString("base64")), { pool: new Pool() });
+    try {
+      const planning = database.workPlanningRepositories();
+      assert.equal(database.workPlanningRepositories(), planning);
+      assert.notEqual(planning, database.identityAccessRepositories());
+      for (const operation of ["createTaskFromBlock", "applyStructuredTaskEdit", "moveTask", "findWorkflow", "createBoard", "saveNotification", "enableAutomation"] as const)
+        assert.equal(typeof planning[operation], "function", operation);
+    } finally { await database.close(); }
   });
 
-  it("owns Task source reads and Automations outside the universal database", async () => {
-    const adapter = await readFile(new URL("../../src/work-planning/postgres-work-planning-repositories.ts", import.meta.url), "utf8");
-    const database = await readFile(new URL("../../src/postgres-database.ts", import.meta.url), "utf8");
-    const methods = ["createTaskFromBlock", "createWorkspaceTaskFromBlock", "linkTaskToBlock", "listLinkedTasks", "listTaskSourceBlocks",
-      "listAutomationState", "enableAutomation", "reverseAutomation", "applySignalAutomations"];
-    for (const method of methods) assert.match(adapter, new RegExp(`(?:async )?${method}\\(`));
-    assert.doesNotMatch(database, new RegExp(`(?:async )?(?:${methods.join("|")})\\(`));
-  });
-
-  it("owns structured Task edits and moves in the work-planning adapter", async () => {
-    const adapter = await readFile(new URL("../../src/work-planning/postgres-work-planning-repositories.ts", import.meta.url), "utf8");
-    const database = await readFile(new URL("../../src/postgres-database.ts", import.meta.url), "utf8");
-    for (const method of ["applyStructuredTaskEdit", "listStructuredTaskConflicts", "resolveStructuredTaskConflict", "moveTask"])
-      assert.match(adapter, new RegExp(`async ${method}\\(`));
-    assert.match(adapter, /private async applyStructuredTaskChanges\(/);
-    assert.match(adapter, /CREATE TABLE IF NOT EXISTS stash_task_edit_operations/);
-    assert.match(database, /workPlanningRepositories\(\): WorkPlanningPostgresRepositories \{\s+return this\.#workPlanningAdapter;/);
-    assert.doesNotMatch(database, /async (?:applyStructuredTaskEdit|listStructuredTaskConflicts|resolveStructuredTaskConflict|moveTask)\(/);
-    assert.doesNotMatch(database, /async #(?:applyStructuredTaskChanges|createTask|ensureDefaultWorkflow)\(/);
+  it("publishes optional planning routes only for composed services", () => {
+    const memberAccess = { authenticateBearer: async () => undefined };
+    const basic = workPlanningCapability({ tasks: {} as never, memberAccess });
+    const complete = workPlanningCapability({ tasks: {} as never, memberAccess, projectWorkflows: {} as never,
+      boards: {} as never, notifications: {} as never, automations: {} as never });
+    const matches = (capability: ReturnType<typeof workPlanningCapability>, method: string, pathname: string) => capability.routes()
+      .some((route) => route.matches(new Request(`http://stash.invalid${pathname}`, { method }) as never, new URL(`http://stash.invalid${pathname}`)));
+    assert.equal(matches(basic, "GET", "/api/projects/project/boards"), false);
+    assert.equal(matches(complete, "GET", "/api/projects/project/boards"), true);
+    assert.equal(matches(complete, "GET", "/api/projects/project/tasks/STASH-1/automations"), true);
+    assert.ok(complete.owns?.includes("boards")); assert.ok(complete.owns?.includes("automations"));
   });
 });
