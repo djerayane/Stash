@@ -14,6 +14,8 @@ export function NoteWorkspace({ noteId, token, children, fetcher = globalThis.fe
   const [permanentlyRemoved, setPermanentlyRemoved] = useState(false);
   const toggleRef = useRef<HTMLButtonElement>(null);
   const removalStatusRef = useRef<HTMLParagraphElement>(null);
+  const activeNoteIdRef = useRef(noteId);
+  activeNoteIdRef.current = noteId;
   useEffect(() => { setRemovedState(undefined); setPermanentlyRemoved(false); }, [noteId]);
   useEffect(() => { if (permanentlyRemoved) removalStatusRef.current?.focus(); }, [permanentlyRemoved]);
   const client = useQueryClient();
@@ -23,42 +25,59 @@ export function NoteWorkspace({ noteId, token, children, fetcher = globalThis.fe
     if (!response.ok) throw new Error(body.message || "Note context is unavailable.");
     return body;
   } });
-  const branchAction = useMutation({ mutationFn: async (action: "archive" | "trash") => {
-    const previewResponse = await fetcher(`/api/notes/${encodeURIComponent(noteId)}/branch-preview`, { method: "POST",
+  const branchAction = useMutation({ mutationFn: async ({ action, originNoteId }: {
+    action: "archive" | "trash"; originNoteId: string;
+  }) => {
+    const previewResponse = await fetcher(`/api/notes/${encodeURIComponent(originNoteId)}/branch-preview`, { method: "POST",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ action }) });
     const preview = await previewResponse.json() as { impact?: BranchImpact; message?: string };
     if (!previewResponse.ok || !preview.impact) throw new Error(preview.message || "The branch impact could not be calculated.");
     const impact = preview.impact;
     const verb = action === "archive" ? "Archive" : "Move to trash";
     const confirmed = window.confirm(branchImpactConfirmation(`${verb} this Note and ${impact.descendantCount} descendants?`, impact));
-    if (!confirmed) return { cancelled: true as const };
-    const response = await fetcher(`/api/notes/${encodeURIComponent(noteId)}/${action}`, { method: "POST", headers: { authorization: `Bearer ${token}` } });
+    if (!confirmed) return { cancelled: true as const, originNoteId };
+    const response = await fetcher(`/api/notes/${encodeURIComponent(originNoteId)}/${action}`, { method: "POST", headers: { authorization: `Bearer ${token}` } });
     const body = await response.json() as { message?: string };
     if (!response.ok) throw new Error(body.message || "The Note branch could not be updated.");
-    return { cancelled: false as const, state: action === "archive" ? "archived" as const : "trashed" as const };
-  }, onSuccess: async (result) => { if (!result || result.cancelled) return; setRemovedState(result.state); await client.invalidateQueries({ queryKey: ["note-tree"] }); } });
-  const restore = useMutation({ mutationFn: async () => {
-    const response = await fetcher(`/api/notes/${encodeURIComponent(noteId)}/restore`, { method: "POST", headers: { authorization: `Bearer ${token}` } });
+    return { cancelled: false as const, originNoteId,
+      state: action === "archive" ? "archived" as const : "trashed" as const };
+  }, onSuccess: async (result) => {
+    if (!result || result.cancelled) return;
+    const invalidation = client.invalidateQueries({ queryKey: ["note-tree"] });
+    if (activeNoteIdRef.current === result.originNoteId) setRemovedState(result.state);
+    await invalidation;
+  } });
+  const restore = useMutation({ mutationFn: async (originNoteId: string) => {
+    const response = await fetcher(`/api/notes/${encodeURIComponent(originNoteId)}/restore`, { method: "POST", headers: { authorization: `Bearer ${token}` } });
     const body = await response.json() as { message?: string };
     if (!response.ok) throw new Error(body.message || "The Note branch could not be restored.");
-  }, onSuccess: async () => { setRemovedState(undefined); await client.invalidateQueries({ queryKey: ["note-tree"] }); } });
+    return originNoteId;
+  }, onSuccess: async (originNoteId) => {
+    const invalidation = client.invalidateQueries({ queryKey: ["note-tree"] });
+    if (activeNoteIdRef.current === originNoteId) setRemovedState(undefined);
+    await invalidation;
+  } });
+  const branchActionCurrent = branchAction.variables?.originNoteId === noteId;
+  const restoreCurrent = restore.variables === noteId;
   const close = () => { setDrawerOpen(false); requestAnimationFrame(() => toggleRef.current?.focus()); };
   return <div className={`${styles.noteWorkspace} ${drawerOpen ? styles.drawerIsOpen : ""}`}>
     <section aria-label="Note workspace controls" className={styles.workspaceBar}>
       {context.data ? <nav aria-label="Breadcrumb"><ol>{context.data.breadcrumbs.map((item, index) => <li key={item.id}>{index < context.data!.breadcrumbs.length - 1 ? <Link to={`/app/notes/${item.id}`}>{item.title}</Link> : <span aria-current="page">{item.title}</span>}</li>)}</ol></nav> : <span>{context.isError ? "Context unavailable" : "Opening Note…"}</span>}
       <div className={styles.workspaceActions}><Link to={`/app/notes/${noteId}/history`}>View history</Link>
         {context.data?.access === "read" ? <span role="note">Read-only access · Project Guests can navigate context and inspect history, but cannot change the Note.</span> : null}
-        {context.data?.access === "edit" && !permanentlyRemoved && (removedState ? <button aria-label="Restore Note branch" disabled={restore.isPending} type="button" onClick={() => restore.mutate()}>Restore branch</button> : <>
-        <button aria-label="Archive Note branch" disabled={branchAction.isPending} type="button" onClick={() => branchAction.mutate("archive")}>Archive</button>
-        <button aria-label="Move Note branch to trash" disabled={branchAction.isPending} type="button" onClick={() => branchAction.mutate("trash")}>Trash</button></>)}
+        {context.data?.access === "edit" && !permanentlyRemoved && (removedState ? <button aria-label="Restore Note branch" disabled={restore.isPending && restoreCurrent} type="button" onClick={() => restore.mutate(noteId)}>Restore branch</button> : <>
+        <button aria-label="Archive Note branch" disabled={branchAction.isPending && branchActionCurrent} type="button" onClick={() => branchAction.mutate({ action: "archive", originNoteId: noteId })}>Archive</button>
+        <button aria-label="Move Note branch to trash" disabled={branchAction.isPending && branchActionCurrent} type="button" onClick={() => branchAction.mutate({ action: "trash", originNoteId: noteId })}>Trash</button></>)}
         <button ref={toggleRef} aria-expanded={drawerOpen} aria-label={drawerOpen ? "Close Note context" : "Open Note context"} type="button"
           onClick={() => drawerOpen ? close() : setDrawerOpen(true)}>{drawerOpen ? "Close context" : "Context"}</button></div>
     </section>
     {permanentlyRemoved ? <p className={styles.branchStatus} ref={removalStatusRef} role="status" tabIndex={-1}>The starter tutorial and its sample Tasks were permanently removed.</p>
-      : removedState ? <p className={styles.branchStatus} role="status">This Note branch is {removedState}. Restore it to return it to the Note Tree.</p> : branchAction.isError || restore.isError ? <p className={styles.branchError} role="alert">{branchAction.error?.message ?? restore.error?.message}</p> : null}
+      : removedState ? <p className={styles.branchStatus} role="status">This Note branch is {removedState}. Restore it to return it to the Note Tree.</p>
+        : (branchAction.isError && branchActionCurrent) || (restore.isError && restoreCurrent)
+          ? <p className={styles.branchError} role="alert">{branchActionCurrent ? branchAction.error?.message : restore.error?.message}</p> : null}
     {!permanentlyRemoved ? <div className={styles.editorSlot}>{children}</div> : null}
     {!removedState && !permanentlyRemoved ? <StarterTutorialPanel fetcher={fetcher} noteId={noteId} token={token}
-      onRemoved={() => setPermanentlyRemoved(true)} /> : null}
+      onRemoved={(originNoteId) => { if (activeNoteIdRef.current === originNoteId) setPermanentlyRemoved(true); }} /> : null}
     {drawerOpen && context.data ? <ContextDrawer context={context.data} fetcher={fetcher} onClose={close} token={token} /> : null}
   </div>;
 }
@@ -77,7 +96,7 @@ interface StarterTutorialData {
 }
 
 function StarterTutorialPanel({ noteId, token, fetcher, onRemoved }: {
-  noteId: string; token: string; fetcher: typeof fetch; onRemoved: () => void;
+  noteId: string; token: string; fetcher: typeof fetch; onRemoved: (originNoteId: string) => void;
 }) {
   const client = useQueryClient(); const headers = { authorization: `Bearer ${token}` };
   const tutorial = useQuery({ queryKey: ["starter-tutorial", noteId], retry: false, queryFn: async () => {
@@ -106,13 +125,21 @@ function StarterTutorialPanel({ noteId, token, fetcher, onRemoved }: {
       }),
     }); const body = await response.json() as { message?: string }; if (!response.ok) throw new Error(body.message || "The Task View could not be saved."); },
     onSuccess: () => client.invalidateQueries({ queryKey: ["starter-tutorial", noteId] }) });
-  const remove = useMutation({ mutationFn: async () => {
-    if (!window.confirm("Permanently remove this starter Note branch, its Collection and View, and its sample Tasks? This cannot be undone.")) return false;
-    const response = await fetcher(`/api/notes/${encodeURIComponent(noteId)}/starter-tutorial`, { method: "DELETE",
+  const remove = useMutation({ mutationFn: async (originNoteId: string) => {
+    if (!window.confirm("Permanently remove this starter Note branch, its Collection and View, and its sample Tasks? This cannot be undone."))
+      return { removed: false as const, originNoteId };
+    const response = await fetcher(`/api/notes/${encodeURIComponent(originNoteId)}/starter-tutorial`, { method: "DELETE",
       headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify({ confirmed: true }) });
     const body = await response.json() as { removed?: boolean; message?: string };
-    if (!response.ok || !body.removed) throw new Error(body.message || "The starter tutorial could not be removed."); return true;
-  }, onSuccess: async (removed) => { if (!removed) return; await client.invalidateQueries({ queryKey: ["note-tree"] }); onRemoved(); } });
+    if (!response.ok || !body.removed) throw new Error(body.message || "The starter tutorial could not be removed.");
+    return { removed: true as const, originNoteId };
+  }, onSuccess: async (result) => {
+    if (!result.removed) return;
+    const invalidation = client.invalidateQueries({ queryKey: ["note-tree"] });
+    onRemoved(result.originNoteId);
+    await invalidation;
+  } });
+  const removeCurrent = remove.variables === noteId;
   const data = tutorial.data; if (!data) return null;
   const children = data.notes.filter((note) => note.parentId === data.rootNoteId);
   const property = data.collection.properties[0];
@@ -136,7 +163,7 @@ function StarterTutorialPanel({ noteId, token, fetcher, onRemoved }: {
         : <ul>{visibleTasks?.map((task) => <li key={task.id}><span>{task.title}</span><strong>{task.status.name}</strong></li>)}</ul>}
       {saveView.isError ? <p role="alert">{saveView.error.message}</p> : null}</section>
     <footer className={styles.tutorialRemoval}><div><strong>Finished with the guide?</strong><span>Permanent removal also deletes its Collection, View, sample Tasks, and tutorial-only Workflow status.</span></div>
-      <button disabled={remove.isPending} type="button" onClick={() => remove.mutate()}>{remove.isPending ? "Removing…" : "Remove tutorial"}</button>
-      {remove.isError ? <p role="alert">{remove.error.message}</p> : null}</footer>
+      <button disabled={remove.isPending && removeCurrent} type="button" onClick={() => remove.mutate(noteId)}>{remove.isPending && removeCurrent ? "Removing…" : "Remove tutorial"}</button>
+      {remove.isError && removeCurrent ? <p role="alert">{remove.error.message}</p> : null}</footer>
   </aside>;
 }

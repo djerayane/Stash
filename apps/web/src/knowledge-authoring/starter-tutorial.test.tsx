@@ -1,8 +1,14 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { expect, test, vi } from "vitest";
 import { NoteWorkspace } from "./note-workspace";
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((complete) => { resolve = complete; });
+  return { promise, resolve };
+}
 
 test("renders and edits the starter tutorial contribution", async () => {
   const requests: Array<{ path: string; init?: RequestInit }> = []; const propertyId = "property-1";
@@ -63,6 +69,77 @@ test("clears archived branch state when direct navigation reuses the Note worksp
   expect(screen.queryByText(/This Note branch is archived/)).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Restore Note branch" })).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Open Note context" })).toBeVisible();
+});
+
+test("ignores an ordinary branch removal response that completes after direct Note navigation", async () => {
+  const archive = deferred<Response>();
+  const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input);
+    if (path.endsWith("/branch-preview")) return Response.json({ impact: { noteId: "first-note", title: "First Note",
+      descendantCount: 0, descendants: [], collectionCount: 0, collectionRelocationRequired: false,
+      externalLinks: [], projectAccessChanges: [] } });
+    if (path.endsWith("/archive") && init?.method === "POST") return archive.promise;
+    if (path.endsWith("/starter-tutorial")) return Response.json({ message: "Not a tutorial" }, { status: 404 });
+    const second = path.includes("second-note");
+    return Response.json({ noteId: second ? "second-note" : "first-note", workspaceId: "workspace", state: "active",
+      revision: 1, createdAt: new Date(0).toISOString(), historyCount: 1, access: "edit", accessSource: "workspace",
+      breadcrumbs: [{ id: second ? "second-note" : "first-note", title: second ? "Second Note" : "First Note" }],
+      outgoingLinks: [], backlinks: [], projectIds: [], projects: [] });
+  }) as typeof fetch;
+  vi.spyOn(window, "confirm").mockReturnValueOnce(true);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(["note-tree", "workspace"], { nodes: [] });
+  const workspace = (noteId: string, editor: string) => <QueryClientProvider client={client}><MemoryRouter><NoteWorkspace
+    fetcher={fetcher} noteId={noteId} token="member"><p>{editor}</p></NoteWorkspace></MemoryRouter></QueryClientProvider>;
+  const view = render(workspace("first-note", "First Note editor"));
+  fireEvent.click(await screen.findByRole("button", { name: "Archive Note branch" }));
+  await waitFor(() => expect(fetcher).toHaveBeenCalledWith("/api/notes/first-note/archive", expect.objectContaining({ method: "POST" })));
+  view.rerender(workspace("second-note", "Second Note editor"));
+  await act(async () => archive.resolve(Response.json({ status: "updated", affectedIds: ["first-note"] })));
+  expect(await screen.findByText("Second Note editor")).toBeVisible();
+  expect(screen.queryByText(/This Note branch is archived/)).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Restore Note branch" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Open Note context" })).toBeVisible();
+  expect(client.getQueryState(["note-tree", "workspace"])?.isInvalidated).toBe(true);
+});
+
+test("ignores permanent tutorial removal that completes after direct Note navigation", async () => {
+  const removal = deferred<Response>(); const propertyId = "property-1";
+  const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input); const second = path.includes("second-note");
+    if (path.endsWith("/context")) return Response.json({ noteId: second ? "second-note" : "first-note", workspaceId: "workspace",
+      state: "active", revision: 1, createdAt: new Date(0).toISOString(), historyCount: 1, access: "edit", accessSource: "workspace",
+      breadcrumbs: [{ id: second ? "second-note" : "first-note", title: second ? "Second Note" : "First Note" }],
+      outgoingLinks: [], backlinks: [], projectIds: [], projects: [] });
+    if (path.includes("tasks?scope=projectless")) return Response.json({ tasks: [] });
+    if (init?.method === "DELETE") return removal.promise;
+    if (second) return Response.json({ message: "Not a tutorial" }, { status: 404 });
+    return Response.json({ tutorial: { workspaceId: "workspace", rootNoteId: "first-note",
+      notes: [{ id: "first-note", title: "Start here", content: "Guide" }], links: [],
+      collection: { schema: "stash.collection.v1", id: "collection-1", workspaceId: "workspace", ownerNoteId: "first-note",
+        title: "Ideas", properties: [{ id: propertyId, name: "Idea", type: "text", position: 1 }],
+        records: [{ id: "record-1", position: 1, values: { [propertyId]: "Question" } }] },
+      viewBlock: { schema: "stash.view-block.v1", id: "view-1", workspaceId: "workspace", ownerNoteId: "first-note",
+        blockId: "view-1", title: "First moves", source: { kind: "tasks", workspaceId: "workspace", project: "none" },
+        definition: { query: { scope: "projectless", titleContains: "" }, layout: "list" } } } });
+  }) as typeof fetch;
+  vi.spyOn(window, "confirm").mockReturnValueOnce(true);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(["note-tree", "workspace"], { nodes: [] });
+  const workspace = (noteId: string, editor: string) => <QueryClientProvider client={client}><MemoryRouter><NoteWorkspace
+    fetcher={fetcher} noteId={noteId} token="member"><p>{editor}</p></NoteWorkspace></MemoryRouter></QueryClientProvider>;
+  const view = render(workspace("first-note", "First Note editor"));
+  fireEvent.click(await screen.findByRole("button", { name: "Remove tutorial" }));
+  await waitFor(() => expect(fetcher).toHaveBeenCalledWith("/api/notes/first-note/starter-tutorial", expect.objectContaining({ method: "DELETE" })));
+  view.rerender(workspace("second-note", "Second Note editor"));
+  const newContext = await screen.findByRole("button", { name: "Open Note context" });
+  newContext.focus();
+  await act(async () => removal.resolve(Response.json({ removed: true })));
+  expect(await screen.findByText("Second Note editor")).toBeVisible();
+  expect(screen.queryByText("The starter tutorial and its sample Tasks were permanently removed.")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Restore Note branch" })).not.toBeInTheDocument();
+  expect(newContext).toHaveFocus();
+  expect(client.getQueryState(["note-tree", "workspace"])?.isInvalidated).toBe(true);
 });
 
 test("keeps an unavailable optional tutorial from competing with the Note editor", async () => {
