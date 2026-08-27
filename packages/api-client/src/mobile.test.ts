@@ -16,6 +16,29 @@ describe("mobile protocol client", () => {
     const response = await client.applyNoteEdit("note", { baseRevision: 1, operations: [] }, new AbortController().signal);
     expect(response.status).toBe(409);
   });
+
+  it("reads the portable workspace surfaces and patches canonical Tasks by stable id", async () => {
+    const request = vi.fn<typeof fetch>(async () => Response.json({}));
+    const signal = new AbortController().signal;
+    const client = createMobileProtocolClient({ instanceUrl: "https://stash.example/", memberToken: "secret", fetch: request });
+    await client.noteTree("workspace/id", signal);
+    await client.note("note/id", signal);
+    await client.canonicalTasks("workspace/id", signal);
+    await client.noteCollections("note/id", signal);
+    await client.search("workspace/id", "release & notes", signal);
+    await client.applyCanonicalTaskEdit("task/id", { title: "Done" }, signal);
+    expect(request.mock.calls.map(([url]) => url)).toEqual([
+      "https://stash.example/api/workspaces/workspace%2Fid/note-tree",
+      "https://stash.example/api/notes/note%2Fid",
+      "https://stash.example/api/workspaces/workspace%2Fid/canonical-tasks",
+      "https://stash.example/api/notes/note%2Fid/collections",
+      "https://stash.example/api/workspaces/workspace%2Fid/search?q=release%20%26%20notes",
+      "https://stash.example/api/canonical-tasks/task%2Fid",
+    ]);
+    expect(request).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({
+      method: "PATCH", headers: { authorization: "Bearer secret", "content-type": "application/json" },
+    }));
+  });
 });
 
 describe("Member API client", () => {

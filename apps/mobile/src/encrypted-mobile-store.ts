@@ -96,8 +96,11 @@ function mutationContribution(mutation: MobileSyncMutation) {
         ...(normalized.block.id ? { id: canonicalUuid(normalized.block.id) } : {}) };
       return normalized;
     }) }
-    : { ...contribution, id: canonicalUuid(contribution.id), projectId: canonicalUuid(contribution.projectId),
-      changes: canonicalTaskChanges(contribution.changes) };
+    : contribution.kind === "canonical_task_edit"
+      ? { ...contribution, id: canonicalUuid(contribution.id), taskId: canonicalUuid(contribution.taskId),
+        changes: canonicalTaskChanges(contribution.changes) }
+      : { ...contribution, id: canonicalUuid(contribution.id), projectId: canonicalUuid(contribution.projectId),
+        changes: canonicalTaskChanges(contribution.changes) };
   return JSON.stringify(canonicalJson({ ...canonical, origin: { ...canonical.origin,
     instanceUrl: new URL(canonical.origin.instanceUrl).origin, workspaceId: canonicalUuid(canonical.origin.workspaceId),
     memberId: canonicalUuid(canonical.origin.memberId) } }));

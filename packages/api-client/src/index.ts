@@ -48,6 +48,12 @@ export interface MobileProtocolClient {
   createCapture(workspaceId: string, body: unknown, signal: AbortSignal): Promise<Response>;
   applyNoteEdit(noteId: string, body: unknown, signal: AbortSignal): Promise<Response>;
   applyTaskEdit(projectId: string, taskKey: string, body: unknown, signal: AbortSignal): Promise<Response>;
+  applyCanonicalTaskEdit(taskId: string, body: unknown, signal: AbortSignal): Promise<Response>;
+  noteTree(workspaceId: string, signal: AbortSignal): Promise<Response>;
+  note(noteId: string, signal: AbortSignal): Promise<Response>;
+  canonicalTasks(workspaceId: string, signal: AbortSignal): Promise<Response>;
+  noteCollections(noteId: string, signal: AbortSignal): Promise<Response>;
+  search(workspaceId: string, query: string, signal: AbortSignal): Promise<Response>;
 }
 
 export class StashApiError extends Error {
@@ -155,6 +161,14 @@ export function createMobileProtocolClient(options: MobileProtocolClientOptions)
     }),
     createCapture: (workspaceId, body, signal) => send(`/api/mobile/v1/workspaces/${encodeURIComponent(workspaceId)}/captures`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal,
+    }),
+    noteTree: (workspaceId, signal) => send(`/api/workspaces/${encodeURIComponent(workspaceId)}/note-tree`, { signal }),
+    note: (noteId, signal) => send(`/api/notes/${encodeURIComponent(noteId)}`, { signal }),
+    canonicalTasks: (workspaceId, signal) => send(`/api/workspaces/${encodeURIComponent(workspaceId)}/canonical-tasks`, { signal }),
+    noteCollections: (noteId, signal) => send(`/api/notes/${encodeURIComponent(noteId)}/collections`, { signal }),
+    search: (workspaceId, query, signal) => send(`/api/workspaces/${encodeURIComponent(workspaceId)}/search?q=${encodeURIComponent(query)}`, { signal }),
+    applyCanonicalTaskEdit: (taskId, body, signal) => send(`/api/canonical-tasks/${encodeURIComponent(taskId)}`, {
+      method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal,
     }),
     applyNoteEdit: (noteId, body, signal) => send(`/api/notes/${encodeURIComponent(noteId)}`, {
       method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal,

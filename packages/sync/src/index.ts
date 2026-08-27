@@ -2,6 +2,7 @@ import { createMobileProtocolClient } from "@stash/api-client";
 import type {
   IncomingShareDelivery, MobileCapture, MobileCaptureOptions, MobileCapturePairing, MobileSyncMutation,
   MobileSyncResult, NoteEditOperation, TaskPlanningUpdate,
+  MobileWorkspaceSnapshot,
 } from "@stash/domain-types";
 import { canonicalUuid, isUuid, validMobilePairingOrigin, validPortableFilename } from "@stash/validation";
 
@@ -26,6 +27,8 @@ export interface EncryptedMobileCaptureStore {
   listIncomingShares(): Promise<IncomingShareDelivery[]>;
   removeIncomingShare(id: string): Promise<void>;
   saveIncomingShare(delivery: IncomingShareDelivery): Promise<void>;
+  loadWorkspaceSnapshot?(scope: string): Promise<MobileWorkspaceSnapshot | undefined>;
+  saveWorkspaceSnapshot?(scope: string, snapshot: MobileWorkspaceSnapshot): Promise<void>;
 }
 
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -244,6 +247,61 @@ export class MobileCaptureClient {
     return mutation;
   }
 
+  async queueCanonicalTaskEdit(taskId: string, baseRevision: number, changes: TaskPlanningUpdate,
+    mutationId = crypto.randomUUID()) {
+    if (!isUuid(taskId) || !Number.isSafeInteger(baseRevision) || baseRevision < 1 || !changes || typeof changes !== "object"
+      || Array.isArray(changes) || !Object.keys(changes).length) throw new Error("A mobile Task edit requires a valid canonical Task, revision, and changes.");
+    const pairing = await this.#pairingForCapture();
+    const mutation: MobileSyncMutation = { id: canonicalUuid(requireUuid(mutationId)), kind: "canonical_task_edit",
+      taskId: canonicalUuid(taskId), baseRevision, changes: canonicalTaskChanges(changes), attempts: 0,
+      origin: pairingOrigin(pairing) };
+    await this.#store.saveMutation(mutation); return mutation;
+  }
+
+  async cachedWorkspace(): Promise<MobileWorkspaceSnapshot | undefined> {
+    const pairing = await this.#store.loadPairing();
+    if (!pairing?.memberId || !this.#store.loadWorkspaceSnapshot) return undefined;
+    const snapshot = await this.#store.loadWorkspaceSnapshot(pairingScope(pairing));
+    if (!snapshot) return undefined;
+    const pending = (await this.#store.listMutations()).filter((mutation): mutation is Extract<MobileSyncMutation,
+      { kind: "canonical_task_edit" }> => mutation.kind === "canonical_task_edit" && samePairingIdentity(mutation.origin, pairing));
+    return pending.reduce((current, mutation) => ({ ...current, tasks: current.tasks.map((task) => {
+      if (task.id !== mutation.taskId) return task;
+      const status = mutation.changes.statusId
+        ? current.workflow.statuses.find(({ id }) => id === mutation.changes.statusId) ?? task.status : task.status;
+      return { ...task, status,
+        ...(mutation.changes.title !== undefined ? { title: mutation.changes.title } : {}),
+        ...(mutation.changes.assigneeIds !== undefined ? { assigneeIds: [...mutation.changes.assigneeIds] } : {}) };
+    }) }), structuredClone(snapshot));
+  }
+
+  async refreshWorkspace(signal?: AbortSignal): Promise<MobileWorkspaceSnapshot> {
+    const pairing = await this.#pairingForCapture();
+    if (!this.#store.saveWorkspaceSnapshot) throw new Error("This store does not support offline workspace reads.");
+    const controller = this.#controller(signal); this.#refreshControllers.add(controller);
+    try {
+      const protocol = createMobileProtocolClient({ instanceUrl: pairing.instanceUrl, memberToken: pairing.memberToken, fetch: this.#fetch });
+      const [treeResponse, taskResponse] = await Promise.all([
+        protocol.noteTree(pairing.workspaceId, controller.signal), protocol.canonicalTasks(pairing.workspaceId, controller.signal),
+      ]);
+      const treeBody = await responseJson(treeResponse); const taskBody = await responseJson(taskResponse);
+      const noteTree = requiredArray(treeBody.nodes, "Note Tree");
+      const noteBodies = await Promise.all(noteTree.map(async (node: any) => responseJson(await protocol.note(String(node.id), controller.signal))));
+      const collectionBodies = await Promise.all(noteTree.map(async (node: any) => responseJson(await protocol.noteCollections(String(node.id), controller.signal))));
+      const notes = noteBodies.map((body: any) => body.note ?? body);
+      const collections = collectionBodies.flatMap((body: any) => requiredArray(body.collections, "Collections"));
+      const viewBlocks = collectionBodies.flatMap((body: any) => requiredArray(body.views, "View Blocks"));
+      const tasks = requiredArray(taskBody.tasks, "Tasks"); const workflow = taskBody.workflow;
+      if (!workflow || typeof workflow !== "object") throw new Error("Workspace refresh returned an invalid Workflow.");
+      const snapshot: MobileWorkspaceSnapshot = { schema: "stash.mobile-workspace.v1", workspaceId: pairing.workspaceId,
+        refreshedAt: new Date(this.#now()).toISOString(), noteTree, notes, tasks, workflow, collections, viewBlocks,
+        search: [...notes.map((note: any) => ({ id: String(note.id), kind: "note" as const, title: String(note.title ?? note.content?.split("\n")[0] ?? "Untitled"), excerpt: String(note.content ?? "").slice(0, 240) })),
+          ...tasks.map((task: any) => ({ id: String(task.id), kind: "task" as const, title: String(task.title), excerpt: String(task.description ?? "").slice(0, 240) })),
+          ...collections.map((collection: any) => ({ id: String(collection.id), kind: "collection" as const, title: String(collection.title) }))] };
+      await this.#store.saveWorkspaceSnapshot(pairingScope(pairing), snapshot); return snapshot;
+    } finally { this.#refreshControllers.delete(controller); }
+  }
+
   async #enqueue(kind: MobileCapture["kind"], content: string, checklist: MobileCapture["checklist"], structure: Pick<MobileCapture, "projectId" | "tags" | "reminder">, captureId: string = crypto.randomUUID()) {
     if (!content.trim()) throw new Error("A capture requires content.");
     const pairing = await this.#pairingForCapture();
@@ -344,6 +402,8 @@ export class MobileCaptureClient {
         response = mutation.kind === "note_edit"
           ? await protocol.applyNoteEdit(mutation.noteId,
             { baseRevision: mutation.baseRevision, operations: mutation.operations }, controller.signal)
+          : mutation.kind === "canonical_task_edit"
+            ? await protocol.applyCanonicalTaskEdit(mutation.taskId, mutation.changes, controller.signal)
           : await protocol.applyTaskEdit(mutation.projectId, mutation.taskKey,
             { operationId: mutation.id, baseRevision: mutation.baseRevision, changes: mutation.changes }, controller.signal);
       } catch {
@@ -456,6 +516,15 @@ function retryDelay(retryAfter: string | null, attempts: number, now: number): n
     if (Number.isFinite(date)) return Math.max(1_000, date - now);
   }
   return Math.min(1_000 * 2 ** Math.max(0, attempts - 1), 60_000);
+}
+
+async function responseJson(response: Response): Promise<any> {
+  const body = await response.json().catch(() => undefined) as any;
+  if (!response.ok) throw new Error(typeof body?.message === "string" ? body.message : `Workspace refresh failed with ${response.status}.`);
+  return body;
+}
+function requiredArray(value: unknown, label: string): any[] {
+  if (!Array.isArray(value)) throw new Error(`Workspace refresh returned invalid ${label}.`); return value;
 }
 
 export { isUuid } from "@stash/validation";
