@@ -41,7 +41,7 @@ describe("PostgreSQL GitHub Signal acceptance", { skip: databaseUrl ? false : "S
         { projectId: project.project.id, title: "Fail visibly" });
       assert.equal(created.status, "created"); if (created.status !== "created") throw new Error("task setup failed");
       const target = await sql.query<{ id: string }>("SELECT id FROM stash_workflow_statuses WHERE project_id=$1 AND category='started' ORDER BY position LIMIT 1", [project.project.id]);
-      const notifications = new NotificationService(database); const automations = new AutomationService(database, notifications);
+      const notifications = new NotificationService(database.workPlanningRepositories()); const automations = new AutomationService(database, notifications);
       await automations.enable(ownerId, project.project.id, { trigger: "branch_created", targetStatusId: target.rows[0]!.id });
       await automations.enable(configuringMemberId, project.project.id, { trigger: "branch_created", targetStatusId: target.rows[0]!.id });
       const github: GitHubApp = { async inspectRepository(input) { return { installationId: input.installationId, repositoryId: "987", repositoryUrl: "https://github.com/acme/stash" }; }, async verifyRepository() {} };
@@ -56,7 +56,7 @@ describe("PostgreSQL GitHub Signal acceptance", { skip: databaseUrl ? false : "S
       instance = await startInstance({ database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin",
         githubSignals: new GitHubSignalService(database.developmentIntegrationRepositories(), secret, automations), automations, notifications,
         memberAccess: { async authenticateBearer(value) { return value === "Bearer configurer" ? { accountId: configuringMemberId, sessionId: "configurer" } : undefined; } } });
-      await database.listNotifications(configuringMemberId);
+      await database.workPlanningRepositories().listNotifications(configuringMemberId);
       await sql.query(`CREATE FUNCTION reject_first_automation_notification() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
         RAISE EXCEPTION 'forced notification delivery failure'; END $$;
         CREATE TRIGGER reject_first_automation_notification BEFORE INSERT ON stash_notifications FOR EACH ROW

@@ -474,12 +474,15 @@ export class PostgresDatabase implements DatabaseProbe {
       findWorkflow: this.findWorkflow.bind(this), replaceWorkflow: this.replaceWorkflow.bind(this),
       listBoards: this.listBoards.bind(this), createBoard: this.createBoard.bind(this),
       readBoard: this.readBoard.bind(this), moveTaskOnBoard: this.moveTaskOnBoard.bind(this),
-      saveNotification: this.saveNotification.bind(this),
-      getNotificationPreferences: this.getNotificationPreferences.bind(this),
-      saveNotificationPreferences: this.saveNotificationPreferences.bind(this),
-      listNotifications: this.listNotifications.bind(this), markNotificationRead: this.markNotificationRead.bind(this),
-      claimDigestNotifications: this.claimDigestNotifications.bind(this), getProjectFollow: this.getProjectFollow.bind(this),
-      saveProjectFollow: this.saveProjectFollow.bind(this), listProjectNotificationAudience: this.listProjectNotificationAudience.bind(this),
+      saveNotification: this.#workPlanningAdapter.saveNotification.bind(this.#workPlanningAdapter),
+      getNotificationPreferences: this.#workPlanningAdapter.getNotificationPreferences.bind(this.#workPlanningAdapter),
+      saveNotificationPreferences: this.#workPlanningAdapter.saveNotificationPreferences.bind(this.#workPlanningAdapter),
+      listNotifications: this.#workPlanningAdapter.listNotifications.bind(this.#workPlanningAdapter),
+      markNotificationRead: this.#workPlanningAdapter.markNotificationRead.bind(this.#workPlanningAdapter),
+      claimDigestNotifications: this.#workPlanningAdapter.claimDigestNotifications.bind(this.#workPlanningAdapter),
+      getProjectFollow: this.#workPlanningAdapter.getProjectFollow.bind(this.#workPlanningAdapter),
+      saveProjectFollow: this.#workPlanningAdapter.saveProjectFollow.bind(this.#workPlanningAdapter),
+      listProjectNotificationAudience: this.#workPlanningAdapter.listProjectNotificationAudience.bind(this.#workPlanningAdapter),
       listAutomationState: this.listAutomationState.bind(this), enableAutomation: this.enableAutomation.bind(this),
       reverseAutomation: this.reverseAutomation.bind(this), applySignalAutomations: this.applySignalAutomations.bind(this),
     };
@@ -1934,143 +1937,6 @@ export class PostgresDatabase implements DatabaseProbe {
         resolution === "apply_contribution" ? "note_conflict_contribution_applied" : "note_conflict_kept_current", { kind: "member" });
       return { status: "resolved" as const, note, projection: projectionFor(note) };
     });
-  }
-
-  async saveNotification(delivery: NotificationDelivery) {
-    await this.#ensureNotificationSchema();
-    const result = await this.#kernel.query<any>(`INSERT INTO stash_notifications
-      (id,member_id,workspace_id,project_id,trigger,summary,activity,created_at,delivery)
-      SELECT $1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9 FROM stash_projects project
-      JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
-      WHERE project.id=$4 AND workspace.id=$3 AND (
-        (workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
-        (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
-          WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2)))
-      AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$10) OR
-        (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships actor_membership
-          WHERE actor_membership.organization_id=workspace.organization_owner_id AND actor_membership.account_id=$10)))
-      ON CONFLICT (member_id, activity_id, trigger) DO NOTHING
-      RETURNING *`, [delivery.id, delivery.memberId, delivery.workspaceId, delivery.projectId, delivery.trigger,
-      delivery.summary, JSON.stringify(delivery.activity), delivery.createdAt, delivery.delivery, delivery.activity.actor.localAccountId]);
-    let row = result.rows[0];
-    if (!row) {
-      const existing = await this.#kernel.query<any>(`SELECT * FROM stash_notifications
-        WHERE member_id=$1 AND activity_id=$2 AND trigger=$3`, [delivery.memberId, delivery.activity.id, delivery.trigger]);
-      row = existing.rows[0];
-    }
-    if (!row) throw new Error("notification_recipient_forbidden");
-    return this.#notificationFromRow(row);
-  }
-
-  async listNotifications(memberId: string) {
-    await this.#ensureNotificationSchema();
-    const result = await this.#kernel.query<any>(`SELECT notification.* FROM stash_notifications notification
-      JOIN stash_workspaces workspace ON workspace.id=notification.workspace_id
-      WHERE notification.member_id=$1 AND (
-        (workspace.owner_type='personal' AND workspace.personal_owner_id=$1) OR
-        (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
-          WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$1)))
-      ORDER BY notification.created_at DESC, notification.id DESC`, [memberId]);
-    return result.rows.map((row) => this.#notificationFromRow(row));
-  }
-
-  async markNotificationRead(memberId: string, id: string, readAt: string) {
-    await this.#ensureNotificationSchema();
-    const result = await this.#kernel.query<any>(`UPDATE stash_notifications notification SET read_at=$3
-      FROM stash_workspaces workspace
-      WHERE notification.id=$1 AND notification.member_id=$2 AND workspace.id=notification.workspace_id AND (
-        (workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
-        (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
-          WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2))) RETURNING notification.*`, [id, memberId, readAt]);
-    return result.rows[0] ? this.#notificationFromRow(result.rows[0]) : undefined;
-  }
-
-  async getNotificationPreferences(memberId: string, projectId: string) {
-    await this.#ensureNotificationSchema();
-    const visibility = await this.#kernel.query<any>(`SELECT settings.* FROM stash_projects project
-      JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
-      LEFT JOIN stash_notification_preferences settings ON settings.project_id=project.id AND settings.member_id=$1
-      WHERE project.id=$2 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$1) OR
-        (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
-          WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$1)))`, [memberId, projectId]);
-    const row = visibility.rows[0];
-    if (!row) return undefined;
-    if (!row.member_id) return { activity: "followed", digest: "off" } as NotificationPreferences;
-    return { activity: row.activity, digest: row.digest, ...(row.quiet_start ? { quietHours: { start: row.quiet_start, end: row.quiet_end, timeZone: row.quiet_time_zone } } : {}) };
-  }
-
-  async saveNotificationPreferences(memberId: string, projectId: string, preferences: NotificationPreferences) {
-    await this.#ensureNotificationSchema();
-    const result = await this.#kernel.query<any>(`INSERT INTO stash_notification_preferences
-      (member_id,project_id,activity,digest,quiet_start,quiet_end,quiet_time_zone)
-      SELECT $1,$2,$3,$4,$5,$6,$7 FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
-      WHERE project.id=$2 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$1) OR
-        (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
-          WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$1)))
-      ON CONFLICT (member_id,project_id) DO UPDATE SET activity=EXCLUDED.activity,digest=EXCLUDED.digest,
-        quiet_start=EXCLUDED.quiet_start,quiet_end=EXCLUDED.quiet_end,quiet_time_zone=EXCLUDED.quiet_time_zone RETURNING *`,
-    [memberId, projectId, preferences.activity, preferences.digest, preferences.quietHours?.start ?? null,
-      preferences.quietHours?.end ?? null, preferences.quietHours?.timeZone ?? null]);
-    return result.rowCount ? preferences : undefined;
-  }
-
-  async getProjectFollow(memberId: string, projectId: string) {
-    await this.#ensureNotificationSchema();
-    const result = await this.#kernel.query<{ followed: boolean }>(`SELECT EXISTS (
-      SELECT 1 FROM stash_project_follows follow WHERE follow.member_id=$1 AND follow.project_id=project.id
-    ) AS followed FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
-      WHERE project.id=$2 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$1) OR
-        (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
-          WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$1)))`, [memberId, projectId]);
-    return result.rows[0]?.followed;
-  }
-
-  async saveProjectFollow(memberId: string, projectId: string, followed: boolean) {
-    await this.#ensureNotificationSchema();
-    const visible = await this.#kernel.query(`SELECT 1 FROM stash_projects project JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
-      WHERE project.id=$2 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$1) OR
-        (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
-          WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$1)))`, [memberId, projectId]);
-    if (!visible.rowCount) return undefined;
-    if (followed) await this.#kernel.query(`INSERT INTO stash_project_follows(member_id,project_id,followed_at)
-      VALUES($1,$2,CURRENT_TIMESTAMP) ON CONFLICT(member_id,project_id) DO NOTHING`, [memberId, projectId]);
-    else await this.#kernel.query("DELETE FROM stash_project_follows WHERE member_id=$1 AND project_id=$2", [memberId, projectId]);
-    return followed;
-  }
-
-  async listProjectNotificationAudience(projectId: string, actorId: string) {
-    await this.#ensureNotificationSchema();
-    const result = await this.#kernel.query<{ member_id: string; followed: boolean }>(`SELECT account.id AS member_id,
-      (follow.member_id IS NOT NULL) AS followed FROM stash_projects project
-      JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
-      JOIN stash_accounts account ON (workspace.owner_type='personal' AND account.id=workspace.personal_owner_id) OR
-        (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
-          WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=account.id))
-      LEFT JOIN stash_project_follows follow ON follow.project_id=project.id AND follow.member_id=account.id
-      WHERE project.id=$1 AND account.id<>$2 ORDER BY account.id`, [projectId, actorId]);
-    return result.rows.map((row) => ({ memberId: row.member_id, followed: row.followed }));
-  }
-
-  async claimDigestNotifications(memberId: string, cadence: "daily" | "weekly", since: string, until: string, claimedAt: string) {
-    await this.#ensureNotificationSchema();
-    const result = await this.#kernel.query<any>(`UPDATE stash_notifications notification SET digested_at=$5
-      FROM stash_notification_preferences preference, stash_projects project, stash_workspaces workspace
-      WHERE notification.member_id=$1 AND notification.read_at IS NULL AND notification.digested_at IS NULL
-        AND notification.created_at >= $3 AND notification.created_at <= $4
-        AND preference.member_id=$1 AND preference.project_id=notification.project_id AND preference.digest=$2
-        AND project.id=notification.project_id AND workspace.id=project.workspace_id
-        AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$1) OR
-          (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
-            WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$1)))
-      RETURNING notification.*`, [memberId, cadence, since, until, claimedAt]);
-    return result.rows.map((row) => this.#notificationFromRow(row));
-  }
-
-  #notificationFromRow(row: any): NotificationDelivery {
-    return { schema: "stash.notification.v1", id: row.id, memberId: row.member_id, workspaceId: row.workspace_id,
-      ...(row.project_id ? { projectId: row.project_id } : {}), trigger: row.trigger, summary: row.summary, activity: row.activity, delivery: row.delivery,
-      createdAt: new Date(row.created_at).toISOString(), ...(row.read_at ? { readAt: new Date(row.read_at).toISOString() } : {}),
-      ...(row.digested_at ? { digestedAt: new Date(row.digested_at).toISOString() } : {}) };
   }
 
   async searchWorkspace(memberId: string, workspaceId: string, query: WorkspaceSearchQuery) {

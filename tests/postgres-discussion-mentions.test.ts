@@ -41,12 +41,12 @@ describe("PostgreSQL Discussion mention notifications", { skip: databaseUrl ? fa
           `Review <@${recipientId}> <@${recipientId}> <@${ownerId}> <@${inaccessibleId}>` });
         assert.equal(discussion.status, "created");
       }
-      const inbox = await database.listNotifications(recipientId);
+      const inbox = await database.workPlanningRepositories().listNotifications(recipientId);
       assert.equal(inbox.length, 2); assert.equal(inbox.filter(({ projectId }) => projectId === project.project.id).length, 1);
       assert.equal(inbox.filter(({ projectId }) => projectId === undefined).length, 1);
       assert.ok(inbox.every(({ activity }) => activity.actor.localAccountId === ownerId
         && (activity.after.mentionedMemberIds as string[]).length === 1));
-      assert.deepEqual(await database.listNotifications(ownerId), []);
+      assert.deepEqual(await database.workPlanningRepositories().listNotifications(ownerId), []);
 
       const note = await notes.capture(ownerId, workspace.workspace.id, { projectId: project.project.id, content: "Rollback" });
       assert.equal(note.status, "created"); if (note.status !== "created") return;

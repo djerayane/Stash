@@ -40,7 +40,7 @@ describe("first stable release journey through a running Instance", () => {
     await store.database.createFirstOrganizationOwner({ organizationId, organizationName: "Release Team", ownerId,
       ownerName: "Release Owner", ownerEmail: "owner@release.test", passwordHash: "fixture-only", role: "Owner" });
     const attachments = new LocalAttachmentStorage(store.paths.attachments);
-    const notifications = new NotificationService(store.database);
+    const notifications = new NotificationService(store.database.workPlanningRepositories());
     const automations = new AutomationService(store.database, notifications);
     const githubApp: GitHubApp = { async inspectRepository(input) { return { installationId: input.installationId,
       repositoryId: "987", repositoryUrl: "https://github.com/acme/stash" }; }, async verifyRepository() {} };
