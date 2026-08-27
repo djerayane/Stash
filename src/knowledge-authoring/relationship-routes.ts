@@ -33,10 +33,11 @@ export function relationshipRoutes(relationships: RelationshipQueryService, acce
           if (request.method !== "GET") { response.setHeader("allow", "GET"); json(response, 405, { error: "method_not_allowed", message: "Use GET for relationship maintenance." }); return true; }
           const result = await relationships.maintenance(member.accountId, decodeURIComponent(segments[3]!), {
             ...(url.searchParams.has("limit") ? { limit: Number(url.searchParams.get("limit")) } : {}),
-            ...(url.searchParams.has("cursor") ? { cursor: url.searchParams.get("cursor") } : {}),
+            ...(url.searchParams.has("orphanCursor") ? { orphanCursor: url.searchParams.get("orphanCursor") } : {}),
+            ...(url.searchParams.has("brokenCursor") ? { brokenCursor: url.searchParams.get("brokenCursor") } : {}),
           });
           if (result.status === "found") json(response, 200, { orphans: result.orphans, brokenLinks: result.brokenLinks,
-            ...(result.nextCursor ? { nextCursor: result.nextCursor } : {}) });
+            ...(result.nextCursors ? { nextCursors: result.nextCursors } : {}) });
           else json(response, 403, { error: result.status, message: "This Workspace is unavailable." });
           return true;
         }

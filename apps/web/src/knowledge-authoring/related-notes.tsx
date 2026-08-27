@@ -9,6 +9,7 @@ interface Maintenance {
   orphans: Array<{ id: string; title: string }>;
   brokenLinks: Array<{ id: string; sourceNoteId: string; sourceTitle: string; label: string; targetPath?: string; revision: number;
     candidates: Array<{ id: string; title: string }> }>;
+  nextCursors?: { orphans?: string; brokenLinks?: string };
 }
 
 export function RelatedNotes({ noteId, workspaceId, token, access, fetcher = globalThis.fetch }: {
@@ -20,6 +21,9 @@ export function RelatedNotes({ noteId, workspaceId, token, access, fetcher = glo
   const [repairTargets, setRepairTargets] = useState<Record<string, string>>({});
   const [maintenanceOpen, setMaintenanceOpen] = useState(false); const [status, setStatus] = useState("");
   const [expansionStatus, setExpansionStatus] = useState("");
+  const [maintenancePages, setMaintenancePages] = useState<Maintenance | undefined>(undefined);
+  const [maintenanceStatus, setMaintenanceStatus] = useState("");
+  const [maintenanceFocusId, setMaintenanceFocusId] = useState<string | undefined>(undefined);
   const region = useRef<HTMLElement>(null); const expansionStatusElement = useRef<HTMLParagraphElement>(null);
   const expansionBefore = useRef<Set<string> | undefined>(undefined);
   const client = useQueryClient(); const headers = { authorization: `Bearer ${token}` };
@@ -35,6 +39,24 @@ export function RelatedNotes({ noteId, workspaceId, token, access, fetcher = glo
   const maintenance = useQuery({ queryKey: ["relationship-maintenance", workspaceId], enabled: maintenanceOpen, retry: false,
     queryFn: async () => { const response = await fetcher(`/api/workspaces/${encodeURIComponent(workspaceId)}/relationships/maintenance`, { headers });
       const body = await response.json() as Maintenance & { message?: string }; if (!response.ok) throw new Error(body.message || "Relationship maintenance is unavailable."); return body; } });
+  useEffect(() => { if (maintenance.data) setMaintenancePages(maintenance.data); }, [maintenance.data]);
+  const loadMaintenance = useMutation({ mutationFn: async ({ kind, cursor }: { kind: "orphans" | "brokenLinks"; cursor: string }) => {
+    const parameters = new URLSearchParams({ [kind === "orphans" ? "orphanCursor" : "brokenCursor"]: cursor });
+    const response = await fetcher(`/api/workspaces/${encodeURIComponent(workspaceId)}/relationships/maintenance?${parameters}`, { headers });
+    const body = await response.json() as Maintenance & { message?: string }; if (!response.ok) throw new Error(body.message || "More maintenance results are unavailable.");
+    return { kind, body };
+  }, onSuccess: ({ kind, body }) => {
+    const appended = body[kind]; setMaintenancePages((current) => current ? { ...current,
+      [kind]: [...current[kind], ...appended], nextCursors: { ...current.nextCursors, [kind]: body.nextCursors?.[kind] } } : body);
+    setMaintenanceStatus(appended.length ? `${appended.length} more ${kind === "orphans" ? "orphan Notes" : "broken links"} shown.`
+      : `No more ${kind === "orphans" ? "orphan Notes" : "broken links"}.`);
+    setMaintenanceFocusId(appended[0]?.id ?? "status");
+  } });
+  useEffect(() => { if (!maintenanceFocusId) return;
+    const target = maintenanceFocusId === "status" ? region.current?.querySelector<HTMLElement>("[data-maintenance-status]")
+      : region.current?.querySelector<HTMLElement>(`[data-maintenance-id="${maintenanceFocusId}"]`);
+    target?.focus(); if (target) setMaintenanceFocusId(undefined);
+  }, [maintenanceFocusId, maintenancePages]);
   const repair = useMutation({ mutationFn: async ({ link, targetId }: { link: Maintenance["brokenLinks"][number]; targetId: string }) => {
     if (!link.candidates.some(({ id }) => id === targetId)) throw new Error("No accessible repair choice is available.");
     const response = await fetcher(`/api/notes/${encodeURIComponent(link.sourceNoteId)}/links/${encodeURIComponent(link.id)}/repair`, { method: "PUT",
@@ -68,15 +90,21 @@ export function RelatedNotes({ noteId, workspaceId, token, access, fetcher = glo
     <button aria-expanded={maintenanceOpen} type="button" onClick={() => setMaintenanceOpen((open) => !open)}>Review relationship maintenance</button>
     {maintenanceOpen ? <div className={styles.relationshipMaintenance}>
       {maintenance.isPending ? <p role="status">Checking relationships…</p> : maintenance.isError ? <p role="alert">{maintenance.error.message}</p>
-        : maintenance.data ? <><section><h4>Orphan Notes</h4>{maintenance.data.orphans.length ? <ul>{maintenance.data.orphans.map((note) =>
-          <li key={note.id}><Link to={`/app/notes/${note.id}`}>{note.title}</Link></li>)}</ul> : <p>No orphan Notes.</p>}</section>
-        {access === "edit" ? <section><h4>Broken links</h4>{maintenance.data.brokenLinks.length ? <ul>{maintenance.data.brokenLinks.map((link) => <li key={link.id}>
+        : maintenancePages ? <><section><h4>Orphan Notes</h4>{maintenancePages.orphans.length ? <ul>{maintenancePages.orphans.map((note) =>
+          <li data-maintenance-id={note.id} key={note.id} tabIndex={-1}><Link to={`/app/notes/${note.id}`}>{note.title}</Link></li>)}</ul> : <p>No orphan Notes.</p>}
+          {maintenancePages.nextCursors?.orphans ? <button disabled={loadMaintenance.isPending} type="button" onClick={() => loadMaintenance.mutate({
+            kind: "orphans", cursor: maintenancePages.nextCursors!.orphans! })}>Load more orphan Notes</button> : null}</section>
+        {access === "edit" ? <section><h4>Broken links</h4>{maintenancePages.brokenLinks.length ? <ul>{maintenancePages.brokenLinks.map((link) => <li
+          data-maintenance-id={link.id} key={link.id} tabIndex={-1}>
           <div><strong>{link.label}</strong><small>{link.sourceTitle}{link.targetPath ? ` · ${link.targetPath}` : ""}</small></div>
           {link.candidates.length ? <div className={styles.repairChoice}><label>Repair target<select aria-label={`Repair target for ${link.label}`}
             value={repairTargets[link.id] ?? link.candidates[0]!.id} onChange={(event) => setRepairTargets((current) => ({ ...current, [link.id]: event.target.value }))}>
             {link.candidates.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.title}</option>)}</select></label>
             <button disabled={repair.isPending} type="button" onClick={() => repair.mutate({ link, targetId: repairTargets[link.id] ?? link.candidates[0]!.id })}
-              aria-label={`Repair ${link.label}`}>Repair link</button></div> : <span>No accessible repair choice</span>}</li>)}</ul> : <p>No broken links.</p>}</section> : null}</> : null}
+              aria-label={`Repair ${link.label}`}>Repair link</button></div> : <span>No accessible repair choice</span>}</li>)}</ul> : <p>No broken links.</p>}
+          {maintenancePages.nextCursors?.brokenLinks ? <button disabled={loadMaintenance.isPending} type="button" onClick={() => loadMaintenance.mutate({
+            kind: "brokenLinks", cursor: maintenancePages.nextCursors!.brokenLinks! })}>Load more broken links</button> : null}</section> : null}
+          {maintenanceStatus ? <p data-maintenance-status role="status" tabIndex={-1}>{maintenanceStatus}</p> : null}</> : null}
       {repair.isError ? <p role="alert">{repair.error.message}</p> : null}</div> : null}
     {status ? <p role="status">{status}</p> : null}
   </section>;

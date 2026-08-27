@@ -6,6 +6,6 @@ export interface PostgresPortableProjectionContributor {
   preparePortableObjects(client: PostgresQueryable): Promise<void>;
   importPortableObjects(client: PostgresQueryable, objects: readonly PortableDurableObject[], workspaceId: string): Promise<void>;
   readPortableObjects(client: PostgresQueryable, input: {
-    workspaceId: string; member: boolean; visibleNoteIds: ReadonlySet<string>;
+    workspaceId: string; memberId: string; member: boolean; visibleNoteIds: ReadonlySet<string>;
   }): Promise<PortableDurableObject[]>;
 }

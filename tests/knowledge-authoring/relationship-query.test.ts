@@ -35,14 +35,14 @@ describe("relationship query contracts", () => {
       new URL(`http://stash.test/api/notes/${rootId}/visualizations/22222222-2222-4222-8222-222222222222`))), false);
   });
   test("normalizes a bounded focused query before it reaches persistence", async () => {
-    const received: unknown[] = [];
+    const received: unknown[] = []; const maintenanceReceived: unknown[] = [];
     const repository: RelationshipQueryRepository = {
       async query(_memberId, query) {
         received.push(query);
         return { status: "found", neighborhood: { rootId, depth: query.depth, limit: query.limit,
           direction: query.direction, nodes: [], edges: [], outline: [], hasMore: false } };
       },
-      async maintenance() { return { status: "found", orphans: [], brokenLinks: [] }; },
+      async maintenance(_memberId, _workspaceId, query) { maintenanceReceived.push(query); return { status: "found", orphans: [], brokenLinks: [] }; },
     };
     const service = new RelationshipQueryService(repository);
 
@@ -53,6 +53,11 @@ describe("relationship query contracts", () => {
       relationTypes: ["supports", "untyped"], includeHierarchy: false }]);
     await assert.rejects(() => service.query("member", rootId, { depth: 4 }), InvalidRelationshipQuery);
     await assert.rejects(() => service.query("member", rootId, { limit: 101 }), InvalidRelationshipQuery);
+    await service.maintenance("member", "99999999-9999-4999-8999-999999999999",
+      { limit: 12, orphanCursor: "24", brokenCursor: "36" });
+    assert.deepEqual(maintenanceReceived, [{ limit: 12, orphanOffset: 24, brokenOffset: 36 }]);
+    await assert.rejects(() => service.maintenance("member", "99999999-9999-4999-8999-999999999999",
+      { cursor: "12" }), InvalidRelationshipQuery);
   });
 
   test("normalizes portable Visualization Block state without inventing canonical edges", () => {
@@ -77,6 +82,38 @@ describe("relationship query contracts", () => {
     assert.throws(() => normalizeVisualizationDefinition({ ...definition, query: { kind: "search", input: { text: "all", limit: 20 } } }));
     assert.throws(() => normalizeVisualizationDefinition({ ...definition,
       viewEdges: [definition.viewEdges[0], definition.viewEdges[0]] }));
+
+    const wordCloud = normalizeVisualizationDefinition({ schema: "stash.visualization.v1",
+      id: "44444444-4444-4444-8444-444444444444", kind: "word-cloud",
+      query: { kind: "facet", input: { field: "relationshipType", terms: ["supports"], limit: 40 } },
+      filters: { terms: ["supports"] }, layout: { kind: "word-cloud", minFontSize: 12, maxFontSize: 40 }, viewEdges: [] });
+    assert.equal(wordCloud.query.kind, "facet");
+    assert.deepEqual(normalizeVisualizationDefinition(wordCloud), wordCloud);
+    const aggregateCloud = normalizeVisualizationDefinition({ ...wordCloud, id: "45454545-4545-4545-8545-454545454545",
+      query: { kind: "aggregate", input: { field: "relationshipType", operation: "count", terms: [], limit: 30 } } });
+    assert.equal(aggregateCloud.query.kind, "aggregate");
+
+    const canvas = normalizeVisualizationDefinition({ schema: "stash.visualization.v1",
+      id: "55555555-5555-4555-8555-555555555555", kind: "canvas",
+      query: { kind: "search", input: { text: "decision", terms: ["supports"], limit: 30 } }, filters: { terms: ["supports"] },
+      layout: { kind: "spatial", positions: { [rootId]: { x: 1, y: 2 } } },
+      viewEdges: [{ id: "canvas-edge", sourceNoteId: rootId, targetNoteId: "33333333-3333-4333-8333-333333333333" }] });
+    assert.equal(canvas.query.kind, "search"); assert.deepEqual(normalizeVisualizationDefinition(canvas), canvas);
+    const relationshipCanvas = normalizeVisualizationDefinition({ ...canvas, id: "56565656-5656-4656-8656-565656565656",
+      query: definition.query, filters: definition.filters });
+    assert.equal(relationshipCanvas.query.kind, "relationship");
+    assert.throws(() => normalizeVisualizationDefinition({ ...wordCloud, layout: { kind: "spatial", positions: {} } }));
+    assert.throws(() => normalizeVisualizationDefinition({ ...wordCloud, viewEdges: canvas.viewEdges }));
+    assert.throws(() => normalizeVisualizationDefinition({ ...definition, kind: "word-cloud" }));
+    for (const hostileKind of ["toString", "constructor", "__proto__"])
+      assert.throws(() => normalizeVisualizationDefinition({ ...definition, kind: hostileKind }));
+    const { kind: _kind, ...kindless } = definition;
+    assert.throws(() => normalizeVisualizationDefinition(Object.assign(Object.create({ kind: "local-graph" }), kindless)),
+      "inherited kind values must never satisfy the portable interface");
+    assert.throws(() => normalizeVisualizationDefinition({ ...definition,
+      query: Object.assign(Object.create({ kind: "relationship" }), { input: definition.query.input }) }));
+    assert.throws(() => normalizeVisualizationDefinition({ ...definition,
+      layout: Object.assign(Object.create({ kind: "focused" }), { positions: {} }) }));
   });
 
   test("bounds PostgreSQL traversal rounds and every candidate read", async () => {
@@ -93,11 +130,12 @@ describe("relationship query contracts", () => {
     const repository = new PostgresRelationshipQueryRepository(kernel as never, async () => undefined);
     const result = await repository.query("member", { rootId, depth: 3, limit: 100, direction: "both", includeHierarchy: true });
     assert.equal(result.status, "found");
-    assert.equal(calls.length, 6, "root + at most depth rounds + one continuation probe + bounded edges");
+    const operational = calls.filter(({ sql }) => !sql.includes("CREATE INDEX"));
+    assert.equal(operational.length, 6, "root + at most depth rounds + one continuation probe + bounded edges");
     const bounded = calls.filter(({ sql }) => sql.includes("WITH candidates"));
     assert.equal(bounded.length, 4);
     assert.equal(bounded.every(({ values }) => Number(values[5]) <= 101), true);
-    assert.equal(calls.at(-1)?.values[2], 401, "edge reads are capped independently of graph density");
+    assert.equal(operational.at(-1)?.values[2], 401, "edge reads are capped independently of graph density");
   });
 
   test("filters identities, edges, unresolved targets, and pagination metadata before returning a neighborhood", async () => {
@@ -143,6 +181,24 @@ describe("relationship query contracts", () => {
       const unresolved = await new NoteLinkService(store.database).importUnresolved(ownerId, visibleRoot.node.id,
         { targetPath: "notes/missing.md", candidateNoteIds: [privateNote.node.id], label: "Hidden lead" });
       assert.equal(unresolved.status, "created");
+      const archivedBrokenSource = await notes.create(ownerId, workspaceId, { title: "Archived broken source" });
+      const trashedBrokenSource = await notes.create(ownerId, workspaceId, { title: "Trashed broken source" });
+      const activeWithInactiveTarget = await notes.create(ownerId, workspaceId, { title: "AA active with inactive target" });
+      const inactiveTarget = await notes.create(ownerId, workspaceId, { title: "Archived target" });
+      assert.equal(archivedBrokenSource.status, "created"); assert.equal(trashedBrokenSource.status, "created");
+      assert.equal(activeWithInactiveTarget.status, "created"); assert.equal(inactiveTarget.status, "created");
+      if (archivedBrokenSource.status !== "created" || trashedBrokenSource.status !== "created"
+        || activeWithInactiveTarget.status !== "created" || inactiveTarget.status !== "created") return;
+      const linkService = new NoteLinkService(store.database);
+      assert.equal((await linkService.importUnresolved(ownerId, archivedBrokenSource.node.id,
+        { targetPath: "archived-missing.md", candidateNoteIds: [], label: "Archived unresolved" })).status, "created");
+      assert.equal((await linkService.importUnresolved(ownerId, trashedBrokenSource.node.id,
+        { targetPath: "trashed-missing.md", candidateNoteIds: [], label: "Trashed unresolved" })).status, "created");
+      assert.equal((await notes.createContextLink(ownerId, activeWithInactiveTarget.node.id,
+        { targetNoteId: inactiveTarget.node.id, label: "Soon inactive" })).status, "created");
+      assert.equal((await notes.remove(ownerId, archivedBrokenSource.node.id, "archived")).status, "updated");
+      assert.equal((await notes.remove(ownerId, trashedBrokenSource.node.id, "trashed")).status, "updated");
+      assert.equal((await notes.remove(ownerId, inactiveTarget.node.id, "archived")).status, "updated");
 
       const service = new RelationshipQueryService(store.database.relationshipQueryRepository());
       const guestResult = await service.query(guestId, visibleRoot.node.id,
@@ -175,6 +231,11 @@ describe("relationship query contracts", () => {
       assert.equal(ownerMaintenance.status, "found");
       if (ownerMaintenance.status === "found") {
         assert.equal(ownerMaintenance.orphans.some(({ id }) => id === orphan.node.id), true);
+        assert.equal(ownerMaintenance.orphans.some(({ id }) => id === activeWithInactiveTarget.node.id), true,
+          "a link to an inactive target must not make an active Note appear connected");
+        assert.equal(JSON.stringify(ownerMaintenance).includes(archivedBrokenSource.node.id), false);
+        assert.equal(JSON.stringify(ownerMaintenance).includes(trashedBrokenSource.node.id), false);
+        assert.equal(JSON.stringify(ownerMaintenance).includes(inactiveTarget.node.id), false);
         assert.deepEqual(ownerMaintenance.brokenLinks.map(({ label, targetPath, candidates }) => ({ label, targetPath,
           candidates: candidates.map(({ title }) => title) })), [{ label: "Hidden lead", targetPath: "notes/missing.md", candidates: ["Private strategy"] }]);
       }
@@ -182,16 +243,23 @@ describe("relationship query contracts", () => {
       const blockId = "77777777-7777-4777-8777-777777777777";
       const visualization = new VisualizationBlockService(store.database.visualizationBlockRepository());
       const beforeLinks = await store.upgradeDatabase.query<{ count: number }>("SELECT count(*)::int count FROM stash_note_links");
+      const createSaveKey = "11111111-1111-4111-8111-111111111111";
       const saved = await visualization.save(ownerId, visibleRoot.node.id, {
         schema: "stash.visualization.v1", id: blockId, kind: "local-graph",
-        query: { kind: "relationship", input: { rootId: visibleRoot.node.id, depth: 2, limit: 40, direction: "both", includeHierarchy: true } },
-        filters: { relationTypes: [], direction: "both" }, layout: { kind: "focused", positions: {
+        query: { kind: "relationship", input: { rootId: visibleRoot.node.id, depth: 2, limit: 40, direction: "both",
+          relationTypes: ["supports", "contradicts"], includeHierarchy: true } },
+        filters: { relationTypes: ["supports", "contradicts"], direction: "both" }, layout: { kind: "focused", positions: {
           [visibleRoot.node.id]: { x: 10, y: 20 }, [orphan.node.id]: { x: 30, y: 40 } } },
-        viewEdges: [{ id: "view-edge", sourceNoteId: visibleRoot.node.id, targetNoteId: orphan.node.id },
-          { id: "visible-view-edge", sourceNoteId: visibleRoot.node.id, targetNoteId: visibleChild.node.id }],
-      });
+        viewEdges: [{ id: "view-edge", sourceNoteId: visibleRoot.node.id, targetNoteId: orphan.node.id, relationshipType: "contradicts" },
+          { id: "visible-view-edge", sourceNoteId: visibleRoot.node.id, targetNoteId: visibleChild.node.id, relationshipType: "supports" }],
+      }, undefined, createSaveKey);
       assert.equal(saved.status, "saved");
       if (saved.status !== "saved") return;
+      const duplicateSave = await visualization.save(ownerId, visibleRoot.node.id, saved.block.definition, undefined, createSaveKey);
+      assert.deepEqual(duplicateSave, saved, "the same saved-view command must replay without another revision or Activity");
+      assert.equal((await visualization.save(ownerId, visibleRoot.node.id, { ...saved.block.definition,
+        filters: { relationTypes: ["supports"], direction: "both" } }, undefined, createSaveKey)).status, "idempotency_conflict");
+      assert.equal((await store.upgradeDatabase.query<{ count: number }>("SELECT count(*)::int count FROM stash_workspace_activity WHERE action='visualization_block_created'")).rows[0]!.count, 1);
       assert.equal((await store.upgradeDatabase.query<{ count: number }>("SELECT count(*)::int count FROM stash_note_links")).rows[0]!.count,
         beforeLinks.rows[0]!.count, "saving view-only state must not mutate canonical Note Links");
       const opened = await visualization.read(ownerId, visibleRoot.node.id, blockId);
@@ -199,22 +267,50 @@ describe("relationship query contracts", () => {
       if (opened.status === "found") assert.equal(opened.block.definition.viewEdges.length, 2);
       assert.equal((await visualization.save(ownerId, orphan.node.id, {
         ...saved.block.definition, id: blockId,
-      })).status, "not_found", "a portable block id cannot be rebound to another owner Note");
+      }, undefined, "22222222-2222-4222-8222-222222222222")).status, "not_found", "a portable block id cannot be rebound to another owner Note");
       assert.equal((await visualization.read(ownerId, visibleRoot.node.id, blockId)).status, "found");
       const guestView = await visualization.read(guestId, visibleRoot.node.id, blockId);
       assert.equal(guestView.status, "found");
       if (guestView.status === "found") {
         assert.deepEqual(guestView.block.definition.viewEdges,
-          [{ id: "visible-view-edge", sourceNoteId: visibleRoot.node.id, targetNoteId: visibleChild.node.id }]);
-        assert.deepEqual(Object.keys(guestView.block.definition.layout.positions), [visibleRoot.node.id]);
+          [{ id: "visible-view-edge", sourceNoteId: visibleRoot.node.id, targetNoteId: visibleChild.node.id, relationshipType: "supports" }]);
+        assert.equal("positions" in guestView.block.definition.layout, true);
+        if ("positions" in guestView.block.definition.layout)
+          assert.deepEqual(Object.keys(guestView.block.definition.layout.positions), [visibleRoot.node.id]);
         assert.equal(JSON.stringify(guestView.block).includes(orphan.node.id), false);
+        assert.equal(JSON.stringify(guestView.block).includes("contradicts"), false);
+        assert.equal(JSON.stringify(guestView.block).includes("supports"), true);
       }
-      assert.equal((await visualization.save(guestId, visibleRoot.node.id, saved.block.definition)).status, "not_found");
+      assert.equal((await visualization.save(guestId, visibleRoot.node.id, saved.block.definition, undefined,
+        "33333333-3333-4333-8333-333333333333")).status, "not_found");
+      assert.equal((await visualization.save(guestId, visibleRoot.node.id, saved.block.definition, undefined, createSaveKey)).status, "not_found",
+        "an idempotency receipt must not bypass current save authority");
+      const updated = await visualization.save(ownerId, visibleRoot.node.id, saved.block.definition, 1,
+        "44444444-4444-4444-8444-444444444445");
+      assert.equal(updated.status, "saved");
+      if (updated.status === "saved") assert.equal(updated.block.revision, 2);
+      assert.equal((await store.upgradeDatabase.query<{ count: number }>("SELECT count(*)::int count FROM stash_workspace_activity WHERE action='visualization_block_updated'")).rows[0]!.count, 1);
       const exported = await store.database.readExportSnapshot(ownerId, workspaceId);
       assert.equal(exported.status, "found");
-      if (exported.status === "found") assert.equal(exported.snapshot.durableObjects?.some(({ kind, id, schema }) =>
-        kind === "VisualizationBlock" && id === blockId && schema === "stash.visualization.v1"), true,
-      JSON.stringify(exported.snapshot.durableObjects));
+      if (exported.status === "found") {
+        assert.equal(exported.snapshot.durableObjects?.some(({ kind, id, schema }) =>
+          kind === "VisualizationBlock" && id === blockId && schema === "stash.visualization.v1"), true,
+        JSON.stringify(exported.snapshot.durableObjects));
+        const saveActivities = (exported.snapshot.activities ?? []).filter(({ object }) => object.kind === "VisualizationBlock" && object.id === blockId);
+        assert.deepEqual(saveActivities.map(({ action }) => action), ["visualization_block_created", "visualization_block_updated"]);
+        assert.deepEqual(saveActivities.map(({ actor, cause }) => ({ actor: actor.displayName, cause: cause.kind })),
+          [{ actor: "Ada", cause: "member" }, { actor: "Ada", cause: "member" }]);
+        assert.deepEqual(saveActivities[0]?.before, { present: false });
+        assert.equal((saveActivities[1]?.before as { revision?: number }).revision, 1);
+        assert.equal((saveActivities[1]?.after as { revision?: number }).revision, 2);
+      }
+      const guestExport = await store.database.readExportSnapshot(guestId, workspaceId);
+      assert.equal(guestExport.status, "found");
+      if (guestExport.status === "found") {
+        const guestPortable = guestExport.snapshot.durableObjects?.find(({ kind, id }) => kind === "VisualizationBlock" && id === blockId);
+        assert.equal(JSON.stringify(guestPortable).includes("contradicts"), false);
+        assert.equal(JSON.stringify(guestPortable).includes("supports"), true);
+      }
 
       assert.equal((await visualization.promoteViewEdge(guestId, visibleRoot.node.id, blockId, "view-edge",
         "66666666-6666-4666-8666-666666666666")).status, "not_found");
@@ -234,6 +330,10 @@ describe("relationship query contracts", () => {
         const child = await notes.create(ownerId, workspaceId, { title: `Wide ${String(index).padStart(2, "0")}`, parentId: visibleRoot.node.id });
         assert.equal(child.status, "created");
       }
+      const indexes = await store.upgradeDatabase.query<{ indexname: string }>(`SELECT indexname FROM pg_indexes
+        WHERE indexname IN ('stash_note_links_incoming_active_idx','stash_note_links_workspace_unresolved_idx') ORDER BY indexname`);
+      assert.deepEqual(indexes.rows.map(({ indexname }) => indexname),
+        ["stash_note_links_incoming_active_idx", "stash_note_links_workspace_unresolved_idx"]);
       const firstWidePage = await service.query(ownerId, visibleRoot.node.id,
         { depth: 1, limit: 24, direction: "both", relationTypes: ["not-a-link-type"], includeHierarchy: true });
       assert.equal(firstWidePage.status, "found");
@@ -242,11 +342,12 @@ describe("relationship query contracts", () => {
         { depth: 1, limit: 100, direction: "both", relationTypes: ["not-a-link-type"], includeHierarchy: true });
       assert.equal(expandedWidePage.status, "found");
       if (expandedWidePage.status === "found") assert.equal(expandedWidePage.neighborhood.nodes.length > 25, true);
-      const firstMaintenancePage = await service.maintenance(ownerId, workspaceId, { limit: 10, cursor: "0" });
+      const firstMaintenancePage = await service.maintenance(ownerId, workspaceId, { limit: 10, orphanCursor: "0", brokenCursor: "0" });
       assert.equal(firstMaintenancePage.status, "found");
       if (firstMaintenancePage.status === "found") {
-        assert.equal(firstMaintenancePage.orphans.length, 10); assert.equal(firstMaintenancePage.nextCursor, "10");
-        const secondMaintenancePage = await service.maintenance(ownerId, workspaceId, { limit: 10, cursor: firstMaintenancePage.nextCursor });
+        assert.equal(firstMaintenancePage.orphans.length, 10); assert.equal(firstMaintenancePage.nextCursors?.orphans, "10");
+        const secondMaintenancePage = await service.maintenance(ownerId, workspaceId,
+          { limit: 10, orphanCursor: firstMaintenancePage.nextCursors?.orphans, brokenCursor: "0" });
         assert.equal(secondMaintenancePage.status, "found");
         if (secondMaintenancePage.status === "found") assert.equal(secondMaintenancePage.orphans.some(({ id }) =>
           firstMaintenancePage.orphans.some((first) => first.id === id)), false);

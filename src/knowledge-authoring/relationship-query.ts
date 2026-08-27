@@ -10,15 +10,18 @@ export interface RelationshipMaintenance {
     candidates: ReadonlyArray<{ id: string; title: string }>;
   }>;
 }
-export interface RelationshipMaintenancePage extends RelationshipMaintenance { readonly nextCursor?: string }
-export interface RelationshipMaintenanceQuery { readonly limit: number; readonly offset: number }
+export interface RelationshipMaintenancePage extends RelationshipMaintenance {
+  readonly nextCursors?: { readonly orphans?: string; readonly brokenLinks?: string };
+}
+export interface RelationshipMaintenanceQuery { readonly limit: number; readonly orphanOffset: number; readonly brokenOffset: number }
 
 export interface RelationshipQueryRepository {
   query(memberId: string, query: RelationshipQuery): Promise<
     { status: "found"; neighborhood: RelationshipNeighborhood } | { status: "not_found" }
   >;
   maintenance(memberId: string, workspaceId: string, query: RelationshipMaintenanceQuery): Promise<
-    { status: "found"; orphans: RelationshipMaintenance["orphans"]; brokenLinks: RelationshipMaintenance["brokenLinks"]; nextCursor?: string }
+    { status: "found"; orphans: RelationshipMaintenance["orphans"]; brokenLinks: RelationshipMaintenance["brokenLinks"];
+      nextCursors?: RelationshipMaintenancePage["nextCursors"] }
     | { status: "workspace_forbidden" }
   >;
 }
@@ -53,10 +56,13 @@ export class RelationshipQueryService {
   async maintenance(memberId: string, workspaceId: string, value?: unknown) {
     if (!uuid.test(workspaceId) || value !== undefined && !object(value)) throw new InvalidRelationshipQuery();
     const input = value as Record<string, unknown> | undefined;
-    if (input && !Object.keys(input).every((key) => ["limit", "cursor"].includes(key))) throw new InvalidRelationshipQuery();
-    const limit = input?.limit ?? 24; const cursor = input?.cursor ?? "0";
-    if (!Number.isInteger(limit) || Number(limit) < 1 || Number(limit) > 50 || typeof cursor !== "string" || !/^\d{1,5}$/.test(cursor))
+    if (input && !Object.keys(input).every((key) => ["limit", "orphanCursor", "brokenCursor"].includes(key))) throw new InvalidRelationshipQuery();
+    const limit = input?.limit ?? 24; const orphanCursor = input?.orphanCursor ?? "0"; const brokenCursor = input?.brokenCursor ?? "0";
+    if (!Number.isInteger(limit) || Number(limit) < 1 || Number(limit) > 50
+      || typeof orphanCursor !== "string" || !/^\d{1,5}$/.test(orphanCursor)
+      || typeof brokenCursor !== "string" || !/^\d{1,5}$/.test(brokenCursor))
       throw new InvalidRelationshipQuery();
-    return this.repository.maintenance(memberId, workspaceId, { limit: Number(limit), offset: Number(cursor) });
+    return this.repository.maintenance(memberId, workspaceId,
+      { limit: Number(limit), orphanOffset: Number(orphanCursor), brokenOffset: Number(brokenCursor) });
   }
 }

@@ -4697,7 +4697,7 @@ export class PostgresDatabase implements
       const visibleTaskIds = new Set(taskProjections.map(({ id }) => id));
       const visibleProjectIds = new Set(guestProjectIds);
       const contributedDurable = (await Promise.all(this.#portableProjectionContributors.map((contributor) =>
-        contributor.readPortableObjects(client, { workspaceId, member: permission.member, visibleNoteIds })))).flat();
+        contributor.readPortableObjects(client, { workspaceId, memberId, member: permission.member, visibleNoteIds })))).flat();
       const visibleTasks = permission.member ? taskProjections : taskProjections.map((payload) => ({
         ...payload,
         sourceNoteIds: payload.sourceNoteIds.filter((id) => visibleNoteIds.has(id)),

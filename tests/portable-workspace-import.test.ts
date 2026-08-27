@@ -178,18 +178,29 @@ describe("Portable Workspace import", () => {
     assert.deepEqual(repository.committed?.state.noteLocations[1], source.noteLocations[1]);
     assert.deepEqual(repository.committed?.state.noteLinks[0], source.noteLinks[0]);
   });
-  it("round-trips saved Visualization Block query, layout, filters, and view-only edges", async () => {
+  it("round-trips stable relationship, word-cloud, and canvas Visualization Block definitions", async () => {
     const childId = "99999999-9999-4999-8999-999999999999";
     const blockId = "77777777-7777-4777-8777-777777777777";
     const visualization = { schema: "stash.visualization.v1", id: blockId, workspaceId, ownerNoteId: noteId, revision: 2,
       kind: "local-graph", query: { kind: "relationship", input: { rootId: noteId, depth: 2, limit: 30, direction: "both", relationTypes: ["supports"], includeHierarchy: true } },
       filters: { relationTypes: ["supports"], direction: "outgoing" }, layout: { kind: "focused", positions: { [noteId]: { x: 12, y: 18 } } },
       viewEdges: [{ id: "view-only", sourceNoteId: noteId, targetNoteId: childId, relationshipType: "questions" }] };
+    const wordCloud = { schema: "stash.visualization.v1", id: "76767676-7676-4676-8676-767676767676", workspaceId,
+      ownerNoteId: noteId, revision: 1, kind: "word-cloud",
+      query: { kind: "aggregate", input: { field: "relationshipType", operation: "count", terms: ["supports"], limit: 30 } },
+      filters: { terms: ["supports"] }, layout: { kind: "word-cloud", minFontSize: 12, maxFontSize: 48 }, viewEdges: [] };
+    const canvas = { schema: "stash.visualization.v1", id: "75757575-7575-4575-8575-757575757575", workspaceId,
+      ownerNoteId: noteId, revision: 3, kind: "canvas",
+      query: { kind: "search", input: { text: "decision", terms: ["supports"], limit: 20 } }, filters: { terms: ["supports"] },
+      layout: { kind: "spatial", positions: { [noteId]: { x: 4, y: 8 } } },
+      viewEdges: [{ id: "canvas-view-only", sourceNoteId: noteId, targetNoteId: childId }] };
     const source: PortableWorkspaceExportSnapshot = { ...snapshot,
       notes: [...snapshot.notes, { ...snapshot.notes[0]!, id: childId, content: "# Child" }],
       noteLocations: [...snapshot.noteLocations, { schema: "stash.note-location.v1", noteId: childId, workspaceId,
         path: `notes/${childId}.md`, aliases: [], revision: 1 }],
-      durableObjects: [{ kind: "VisualizationBlock", id: blockId, schema: "stash.visualization.v1", payload: visualization }],
+      durableObjects: [{ kind: "VisualizationBlock", id: blockId, schema: "stash.visualization.v1", payload: visualization },
+        { kind: "VisualizationBlock", id: wordCloud.id, schema: "stash.visualization.v1", payload: wordCloud },
+        { kind: "VisualizationBlock", id: canvas.id, schema: "stash.visualization.v1", payload: canvas }],
     };
     const first = new ImportMemory();
     await new PortableWorkspaceImportService(first, { async put() {}, async get() { return Buffer.alloc(0); }, async delete() {} })
