@@ -15,6 +15,7 @@ import { visualizationRoutes } from "./visualization-routes.js";
 
 export type { Collection, CollectionProperty, CollectionRecord, TutorialContribution, ViewBlock } from "./collections.js";
 export { PostgresTutorialContributionRepository } from "./postgres-tutorial-contribution-repository.js";
+export { PostgresCollectionRepository } from "./postgres-collection-repository.js";
 
 export function knowledgeAuthoringCapability(options: {
   notes: NoteService;

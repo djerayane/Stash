@@ -24,11 +24,12 @@ export function CollectionWorkspace({ noteId, token, editable = true, fetcher = 
   const [relationKind, setRelationKind] = useState<"collection_records" | "notes" | "tasks" | "projects">("notes");
   const [relationCollectionId, setRelationCollectionId] = useState(""); const [viewSourceId, setViewSourceId] = useState("");
   const [impact, setImpact] = useState<CollectionImpact>(); const [destinationNoteId, setDestinationNoteId] = useState("");
+  const [deleteSelection, setDeleteSelection] = useState<string[]>([]); const [deleteConfirmed, setDeleteConfirmed] = useState(false);
   const query = useQuery({ queryKey: ["note-collections", noteId], retry: false, queryFn: async () => {
     const response = await fetcher(`/api/notes/${encodeURIComponent(noteId)}/collections`, { headers: auth(token) });
-    const body = await response.json() as { workspaceId?: string; collections?: Collection[]; views?: ViewBlock[]; message?: string };
+    const body = await response.json() as { workspaceId?: string; collections?: Collection[]; availableCollections?: Collection[]; views?: ViewBlock[]; message?: string };
     if (!response.ok || !body.workspaceId || !body.collections || !body.views) throw new Error(body.message || "Collections are unavailable.");
-    return { workspaceId: body.workspaceId, collections: body.collections, views: body.views };
+    return { workspaceId: body.workspaceId, collections: body.collections, availableCollections: body.availableCollections ?? body.collections, views: body.views };
   } });
   const create = useMutation({ mutationFn: async () => {
     const propertyId = id(); const collectionId = id(); const base = { id: propertyId, name: propertyName.trim(), position: 1 };
@@ -42,8 +43,8 @@ export function CollectionWorkspace({ noteId, token, editable = true, fetcher = 
     const body = await response.json() as { message?: string }; if (!response.ok) throw new Error(body.message || "The Collection could not be created.");
   }, onSuccess: async () => { setCreateOpen(false); setTitle(""); await client.invalidateQueries({ queryKey: ["note-collections", noteId] }); } });
   const createView = useMutation({ mutationFn: async () => {
-    const source = query.data?.collections.find(({ id: collectionId }) => collectionId === viewSourceId);
-    if (!source) throw new Error("Enter a Collection identity available in this Note.");
+    const source = query.data?.availableCollections.find(({ id: collectionId }) => collectionId === viewSourceId);
+    if (!source) throw new Error("Choose an accessible Collection.");
     const view: ViewBlock = { schema: "stash.view-block.v1", id: id(), workspaceId: source.workspaceId, ownerNoteId: noteId,
       blockId: id(), title: `${source.title} view`, definition: { source: { kind: "collection", collectionId: source.id },
         presentation: "table", filters: [], sorts: [], layout: {} } };
@@ -53,16 +54,23 @@ export function CollectionWorkspace({ noteId, token, editable = true, fetcher = 
   }, onSuccess: async () => { setViewSourceId(""); await client.invalidateQueries({ queryKey: ["note-collections", noteId] }); } });
   const preview = useMutation({ mutationFn: async () => { const response = await fetcher(`/api/notes/${encodeURIComponent(noteId)}/collections/impact`,
     { headers: auth(token) }); const body = await response.json() as { impact?: CollectionImpact; message?: string };
-    if (!response.ok || !body.impact) throw new Error(body.message || "Collection impact is unavailable."); return body.impact; }, onSuccess: setImpact });
+    if (!response.ok || !body.impact) throw new Error(body.message || "Collection impact is unavailable."); return body.impact; }, onSuccess: (nextImpact) => {
+    setImpact(nextImpact); setDeleteSelection([]); setDeleteConfirmed(false); } });
   const relocate = useMutation({ mutationFn: async () => { const response = await fetcher(`/api/notes/${encodeURIComponent(noteId)}/collections/relocate`, {
     method: "POST", headers: { ...auth(token), "content-type": "application/json" }, body: JSON.stringify({ destinationNoteId,
       collectionIds: impact?.collections.map(({ id }) => id) ?? [] }) }); const body = await response.json() as { message?: string };
     if (!response.ok) throw new Error(body.message || "Collections could not be relocated."); }, onSuccess: async () => {
     setImpact(undefined); await client.invalidateQueries({ queryKey: ["note-collections", noteId] }); } });
+  const remove = useMutation({ mutationFn: async () => { const response = await fetcher(`/api/notes/${encodeURIComponent(noteId)}/collections/delete`, {
+    method: "POST", headers: { ...auth(token), "content-type": "application/json" }, body: JSON.stringify({ confirmed: true,
+      impactToken: impact?.token, collectionIds: deleteSelection }) }); const body = await response.json() as { message?: string };
+    if (!response.ok) throw new Error(body.message || "Collections could not be permanently deleted."); }, onSuccess: async () => {
+    setImpact(undefined); setDeleteSelection([]); setDeleteConfirmed(false);
+    await client.invalidateQueries({ queryKey: ["note-collections", noteId] }); } });
   if (query.isPending) return <p className={styles.status}>Opening structured knowledge…</p>;
   if (query.isError) return <p role="alert" className={styles.status}>{query.error.message}</p>;
   const collections = query.data.collections; const views = query.data.views;
-  return <section className={styles.workspace} aria-labelledby="collections-heading"><header><div><p>Structured knowledge</p><h2 id="collections-heading">Collections and views</h2></div>
+  return <section className={styles.workspace} aria-labelledby="collections-heading"><header><div><h2 id="collections-heading">Collections and views</h2></div>
     {editable ? <button type="button" onClick={() => setCreateOpen((open) => !open)}>{createOpen ? "Close Collection form" : "New Collection"}</button> : null}</header>
     {createOpen ? <form className={styles.form} onSubmit={(event) => { event.preventDefault(); create.mutate(); }}>
       <label>Collection title<input required value={title} onChange={(event) => setTitle(event.target.value)} /></label>
@@ -73,8 +81,8 @@ export function CollectionWorkspace({ noteId, token, editable = true, fetcher = 
         <option value="notes">Notes</option><option value="tasks">Tasks</option><option value="projects">Projects</option><option value="collection_records">Collection records</option></select></label>
         {relationKind === "collection_records" ? <label>Related Collection identity<input required value={relationCollectionId} onChange={(event) => setRelationCollectionId(event.target.value)} /></label> : null}</> : null}
       <button disabled={create.isPending}>{create.isPending ? "Creating…" : "Create Collection"}</button>{create.isError ? <p role="alert">{create.error.message}</p> : null}</form> : null}
-    {editable ? <div className={styles.viewCreate}><label>Embed an owned Collection<select value={viewSourceId} onChange={(event) => setViewSourceId(event.target.value)}>
-      <option value="">Choose a Collection</option>{collections.map((entry) => <option key={entry.id} value={entry.id}>{entry.title}</option>)}</select></label>
+    {editable ? <div className={styles.viewCreate}><label>Source Collection<select value={viewSourceId} onChange={(event) => setViewSourceId(event.target.value)}>
+      <option value="">Choose an accessible Collection</option>{query.data.availableCollections.map((entry) => <option key={entry.id} value={entry.id}>{entry.title}</option>)}</select></label>
       <button type="button" disabled={!viewSourceId || createView.isPending} onClick={() => createView.mutate()}>Add View Block</button></div> : null}
     {createView.isError ? <p role="alert">{createView.error.message}</p> : null}
     <div className={styles.views}>{views.map((entry) => <SavedCollectionView key={entry.id} initialView={entry} token={token} fetcher={fetcher} />)}
@@ -85,11 +93,22 @@ export function CollectionWorkspace({ noteId, token, editable = true, fetcher = 
     {editable ? <footer className={styles.ownership}><div><strong>Collection ownership</strong><span>Archive keeps records and views. Before trash or permanent removal, relocate or explicitly remove owned Collections after reviewing the impact.</span></div>
       <button type="button" disabled={preview.isPending} onClick={() => preview.mutate()}>Review removal impact</button></footer> : null}
     {impact ? <section className={styles.impact} aria-live="polite"><h3>Removal impact</h3><p>{impact.collections.length} Collections · {impact.collections.reduce((sum, item) => sum + item.recordCount, 0)} records · {impact.relations.reduce((sum, item) => sum + item.referenceCount, 0)} relations · {impact.viewBlocks.length} View Blocks</p>
+      <p>{impact.relations.reduce((sum, item) => sum + item.referenceCount, 0)} direct relation references will be removed.</p>
+      <p>{impact.viewBlocks.length} View Block{impact.viewBlocks.length === 1 ? "" : "s"} will be removed.</p>
       <details><summary>Review affected structured data</summary><ul>{impact.collections.map((item) => <li key={item.id}>{item.title}: {item.recordCount} records</li>)}
+        {impact.relations.map((item) => <li key={`${item.collectionId}-${item.recordId}-${item.propertyId}`}>{item.referenceCount} relation references from record {item.recordId}</li>)}
         {impact.viewBlocks.map((item) => <li key={item.id}>View Block: {item.title}</li>)}</ul></details>
       <form onSubmit={(event) => { event.preventDefault(); relocate.mutate(); }}><label>Relocate to Note identity<input required value={destinationNoteId} onChange={(event) => setDestinationNoteId(event.target.value)} /></label>
         <button disabled={relocate.isPending}>{relocate.isPending ? "Relocating…" : "Relocate Collections"}</button></form>
-      {relocate.isError ? <p role="alert">{relocate.error.message}</p> : null}</section> : null}
+      <form onSubmit={(event) => { event.preventDefault(); remove.mutate(); }}><fieldset><legend>Select every Collection to delete permanently</legend>
+        {impact.collections.map((item) => <label key={item.id}><input type="checkbox" checked={deleteSelection.includes(item.id)}
+          onChange={(event) => setDeleteSelection((selected) => event.target.checked ? [...selected, item.id] : selected.filter((id) => id !== item.id))} />
+          Delete {item.title} and its {item.recordCount} record{item.recordCount === 1 ? "" : "s"}</label>)}</fieldset>
+        <label><input type="checkbox" checked={deleteConfirmed} onChange={(event) => setDeleteConfirmed(event.target.checked)} />
+          I understand this permanently deletes the selected records, relations, and View Blocks</label>
+        <button disabled={remove.isPending || !deleteConfirmed || deleteSelection.length !== impact.collections.length}>
+          {remove.isPending ? "Deleting…" : "Permanently delete selected Collections"}</button></form>
+      {relocate.isError ? <p role="alert">{relocate.error.message}</p> : null}{remove.isError ? <p role="alert">{remove.error.message}</p> : null}</section> : null}
   </section>;
 }
 
@@ -123,7 +142,7 @@ function CollectionView({ view, collection, token, fetcher, persisted }: { view:
     onSuccess: async () => { await Promise.all([client.invalidateQueries({ queryKey: ["collection-view", view.id] }),
       client.invalidateQueries({ queryKey: ["note-collections", view.ownerNoteId] })]); } });
   const focus = (recordId: string) => update({ ...definition, focused: { recordId } });
-  return <article className={styles.viewBlock} aria-labelledby={`view-${view.id}`}><header><div><p>View Block</p><h3 id={`view-${view.id}`}>{view.title}</h3></div>
+  return <article className={styles.viewBlock} aria-labelledby={`view-${view.id}`}><header><div><h3 id={`view-${view.id}`}>{view.title}</h3></div>
     <label>Presentation<select value={definition.presentation} onChange={(event) => update({ ...definition, presentation: event.target.value as ViewPresentation })}>
       <option value="table">Table</option><option value="board">Board</option><option value="list">List</option><option value="calendar">Calendar</option></select></label></header>
     <div className={styles.viewControls}><label>Filter by<select value={definition.filters[0]?.propertyId ?? ""} onChange={(event) => update({ ...definition,
