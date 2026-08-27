@@ -1,11 +1,17 @@
+import { randomUUID } from "node:crypto";
 import type { PostgresKernel, PostgresQueryable } from "../instance-operations/storage/postgres-kernel.js";
-import type { BuiltInOrganizationRole, CustomOrganizationRole } from "../organization-roles.js";
+import type { BuiltInOrganizationRole, CustomOrganizationRole, MemberDeparture } from "../organization-roles.js";
 
 type PrepareOrganizations = (client: PostgresQueryable) => Promise<void>;
 
 /** Identity-access-owned custom Role persistence and administrator policy. */
 export class PostgresOrganizationRoleRepository {
-  constructor(private readonly kernel: PostgresKernel, private readonly prepareOrganizations: PrepareOrganizations) {}
+  constructor(private readonly kernel: PostgresKernel, private readonly prepareOrganizations: PrepareOrganizations,
+    private readonly departure: {
+      prepareAuthority(client:PostgresQueryable):Promise<void>;
+      markFormerAssignments(client:PostgresQueryable,organizationId:string,accountId:string,actorId:string):Promise<string[]>;
+      degradePersonalConnections(client:PostgresQueryable,organizationId:string,accountId:string):Promise<string[]>;
+    }) {}
 
   async prepare(client: PostgresQueryable): Promise<void> {
     await this.prepareOrganizations(client);
@@ -28,6 +34,10 @@ export class PostgresOrganizationRoleRepository {
       );
     `);
   }
+
+  async lockedMemberships(client:PostgresQueryable,organizationId:string){await this.prepareOrganizations(client);return (await client.query<{
+    account_id:string;role:BuiltInOrganizationRole}>("SELECT account_id,role FROM stash_organization_memberships WHERE organization_id=$1 FOR UPDATE",
+  [organizationId])).rows;}
 
   async listCustomRoles(organizationId: string): Promise<CustomOrganizationRole[]> {
     return this.kernel.withSession(async (client) => {
@@ -53,6 +63,34 @@ export class PostgresOrganizationRoleRepository {
       if(target.role==="Owner"&&role!=="Owner"&&memberships.filter((member)=>member.role==="Owner").length===1)return "final_owner" as const;
       await client.query("UPDATE stash_organization_memberships SET role=$3 WHERE organization_id=$1 AND account_id=$2",[organizationId,accountId,role]);
       return "updated" as const;});
+  }
+
+  async removeOrganizationMember(organizationId:string,actorId:string,accountId:string):Promise<
+    {status:"removed";departure:MemberDeparture}|"member_not_found"|"final_owner"|"forbidden">{
+    return this.kernel.transaction(async(client)=>{await this.departure.prepareAuthority(client);
+      const memberships=(await client.query<{account_id:string;role:BuiltInOrganizationRole}>(
+        "SELECT account_id,role FROM stash_organization_memberships WHERE organization_id=$1 FOR UPDATE",[organizationId])).rows;
+      const actorRole=memberships.find((member)=>member.account_id===actorId)?.role;
+      if(actorRole!=="Owner"&&actorRole!=="Admin")return "forbidden";const target=memberships.find((member)=>member.account_id===accountId);
+      if(!target)return "member_not_found";if(target.role==="Owner"&&memberships.filter((member)=>member.role==="Owner").length===1)return "final_owner";
+      if(actorRole==="Admin"&&target.role==="Owner")return "forbidden";await this.removeAssignmentsForMember(client,organizationId,accountId);
+      const affectedTaskIds=await this.departure.markFormerAssignments(client,organizationId,accountId,actorId);
+      await client.query("DELETE FROM stash_organization_memberships WHERE organization_id=$1 AND account_id=$2",[organizationId,accountId]);
+      const authorityTables=await client.query<{tablename:string}>(`SELECT tablename FROM pg_tables WHERE schemaname=current_schema()
+        AND tablename=ANY($1::text[])`,[["stash_sessions","stash_personal_access_tokens"]]);const present=new Set(authorityTables.rows.map(({tablename})=>tablename));
+      const sessions=present.has("stash_sessions")?await client.query("DELETE FROM stash_sessions WHERE account_id=$1",[accountId]):{rowCount:0};
+      const personalTokens=present.has("stash_personal_access_tokens")?await client.query(`UPDATE stash_personal_access_tokens SET revoked_at=CURRENT_TIMESTAMP
+        WHERE organization_id=$1 AND account_id=$2 AND revoked_at IS NULL`,[organizationId,accountId]):{rowCount:0};
+      const grants=await client.query(`UPDATE stash_agent_grants SET revoked_at=CURRENT_TIMESTAMP
+        WHERE organization_id=$1 AND sponsoring_member_id=$2 AND revoked_at IS NULL`,[organizationId,accountId]);
+      const degradedRepositoryConnectionIds=await this.departure.degradePersonalConnections(client,organizationId,accountId);
+      const revokedSessions=sessions.rowCount??0,revokedCredentials=personalTokens.rowCount??0,revokedAgentGrants=grants.rowCount??0;
+      await client.query(`INSERT INTO stash_operator_audit(id,action,actor_account_id,organization_id,target_account_id,occurred_at,before_state,after_state)
+        VALUES($1,'organization_member_departed',$2,$3,$4,CURRENT_TIMESTAMP,$5::jsonb,$6::jsonb)`,[randomUUID(),actorId,organizationId,accountId,
+        JSON.stringify({role:target.role,active:true}),JSON.stringify({active:false,affectedTaskIds,degradedRepositoryConnectionIds,
+          revokedSessions,revokedCredentials,revokedAgentGrants})]);
+      return {status:"removed" as const,departure:{memberId:accountId,affectedTaskIds,revokedSessions,revokedCredentials,revokedAgentGrants,
+        degradedRepositoryConnectionIds}};});
   }
 
   async createCustomRole(organizationId: string, actorId: string, role: CustomOrganizationRole) {

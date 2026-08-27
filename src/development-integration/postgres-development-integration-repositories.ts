@@ -28,6 +28,23 @@ export class PostgresDevelopmentIntegrationRepositories implements DevelopmentIn
   ) {}
 
   organizationRole(...args: Parameters<RepositoryConnectionRepository["organizationRole"]>) { return this.dependencies.organizationRole(...args); }
+  async degradePersonalConnections(client:PostgresQueryable,organizationId:string,accountId:string):Promise<string[]>{
+    const table=await client.query<{exists:boolean}>("SELECT to_regclass('stash_repository_connections') IS NOT NULL AS exists");if(!table.rows[0]?.exists)return [];
+    await this.dependencies.prepareConnections(client);const degraded=await client.query<{id:string}>(`UPDATE stash_repository_connections SET state='degraded'
+      WHERE organization_id=$1 AND created_by_account_id=$2 AND ownership='personal' AND state='active' RETURNING id`,[organizationId,accountId]);
+    const ids=degraded.rows.map(({id})=>id).sort();for(const connectionId of ids){const row=(await client.query<any>(`${repositoryConnectionSelect} WHERE connection.id=$1`,[connectionId])).rows[0];
+      const record=connectionFromRow(row);await this.dependencies.recordConnectionProjection(client,record,await nextConnectionRevision(client,connectionId));}return ids;
+  }
+  async prepareConnectionStateColumns(client:PostgresQueryable):Promise<void>{await client.query(`ALTER TABLE stash_repository_connections
+    ADD COLUMN IF NOT EXISTS ownership TEXT NOT NULL DEFAULT 'organization';ALTER TABLE stash_repository_connections
+    ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'active';UPDATE stash_repository_connections SET ownership='organization'
+    WHERE ownership NOT IN ('organization','personal');UPDATE stash_repository_connections SET state='active' WHERE state NOT IN ('active','degraded');
+    DO $connection_state_constraints$ BEGIN IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='stash_repository_connections'::regclass
+      AND conname='stash_repository_connections_ownership_check') THEN ALTER TABLE stash_repository_connections ADD CONSTRAINT
+      stash_repository_connections_ownership_check CHECK(ownership IN ('organization','personal'));END IF;
+    IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='stash_repository_connections'::regclass
+      AND conname='stash_repository_connections_state_check') THEN ALTER TABLE stash_repository_connections ADD CONSTRAINT
+      stash_repository_connections_state_check CHECK(state IN ('active','degraded'));END IF;END $connection_state_constraints$`);}
   async createRepositoryConnection(actorId: string, record: import("../repository-connections.js").RepositoryConnectionRecord) {
     await this.dependencies.prepareConnections();
     return this.kernel.transaction(async (client) => {

@@ -214,7 +214,7 @@ describe("PostgreSQL structured Task collaboration", { skip: !databaseUrl }, () 
     assert.equal((await fetch(taskBase(departureTask.key), { method: "PATCH",
       headers: { authorization: "Bearer test", "content-type": "application/json" },
       body: JSON.stringify({ assigneeIds: [replacementId] }) })).status, 200);
-    const departure = await database.removeOrganizationMember(owner.organizationId, owner.ownerId, replacementId);
+    const departure = await database.identityAccessRepositories().removeOrganizationMember(owner.organizationId, owner.ownerId, replacementId);
     assert.equal(typeof departure, "object");
     const activityProbe = new Pool({ connectionString: testDatabaseUrl });
     const activity = await activityProbe.query<{ actor_account_id: string; cause: string; before_state: any; after_state: any }>(

@@ -139,7 +139,7 @@ describe("PostgreSQL GitHub Signal acceptance", { skip: databaseUrl ? false : "S
       }
       await sql.query("INSERT INTO stash_accounts(id,name,email,password_hash) VALUES($1,'Katherine','katherine-signals@example.test','test')", [currentOwnerA]);
       await sql.query("INSERT INTO stash_organization_memberships(organization_id,account_id,role) VALUES($1,$2,'Owner')", [orgA, currentOwnerA]);
-      const departure = await database.removeOrganizationMember(orgA, currentOwnerA, ownerA);
+      const departure = await database.identityAccessRepositories().removeOrganizationMember(orgA, currentOwnerA, ownerA);
       assert.equal(typeof departure, "object");
       assert.equal(await connections.attachToProject(currentOwnerA, orgA, departedConnectionId, alpha.projectId), "not_found");
       const targetStatus = await sql.query<{ id: string }>(

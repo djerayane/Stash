@@ -127,6 +127,22 @@ export class PostgresWorkPlanningRepositories implements TaskFromBlockRepository
   ProjectWorkflowRepository, BoardRepository, NotificationRepository, AutomationRepository {
   constructor(private readonly kernel: PostgresKernel, private readonly hooks: WorkPlanningPersistenceHooks) {}
 
+  async markFormerAssignments(client:PostgresQueryable,organizationId:string,accountId:string,actorId:string):Promise<string[]>{
+    const table=await client.query<{exists:boolean}>("SELECT to_regclass('stash_tasks') IS NOT NULL AS exists");if(!table.rows[0]?.exists)return [];
+    await client.query("ALTER TABLE stash_tasks ADD COLUMN IF NOT EXISTS former_assignee_ids JSONB NOT NULL DEFAULT '[]'::jsonb CHECK(jsonb_typeof(former_assignee_ids)='array')");
+    const affected=await client.query<{id:string}>(`SELECT task.id FROM stash_tasks task JOIN stash_workspaces workspace ON task.workspace_id=workspace.id
+      WHERE workspace.owner_type='organization' AND workspace.organization_owner_id=$1 AND task.assignee_ids ? $2 ORDER BY task.id FOR UPDATE OF task`,[organizationId,accountId]);
+    const before=new Map<string,TaskPlanningReadModel>();for(const {id} of affected.rows){const current=await client.query<any>(taskPlanningSelectById,[id,actorId]);
+      if(current.rows[0])before.set(id,readModel(current.rows[0]));}
+    await client.query(`UPDATE stash_tasks task SET former_assignee_ids=CASE WHEN former_assignee_ids ? $2 THEN former_assignee_ids
+      ELSE former_assignee_ids||to_jsonb($2::text) END FROM stash_workspaces workspace WHERE task.workspace_id=workspace.id
+      AND workspace.owner_type='organization' AND workspace.organization_owner_id=$1 AND task.assignee_ids ? $2`,[organizationId,accountId]);
+    const ids=affected.rows.map(({id})=>id).sort();for(const taskId of ids){const refreshed=await client.query<any>(taskPlanningSelectById,[taskId,actorId]);
+      if(!refreshed.rows[0])continue;const taskProjection=projection(refreshed.rows[0]);await this.hooks.recordProjection(client,taskProjection);
+      const previous=before.get(taskId);if(previous)await this.hooks.recordTaskActivity(client,actorId,taskProjection.workspaceId,taskId,
+        "task_departed_assignee_marked",previous,readModel(refreshed.rows[0]));}return ids;
+  }
+
   createTaskFromBlock(memberId: string, noteId: string, blockKey: string, draft: CreateTaskFromBlockDraft): Promise<CreateTaskFromBlockOutcome> {
     return this.createTaskFromSourceBlock(memberId, noteId, blockKey, draft) as Promise<CreateTaskFromBlockOutcome>;
   }
