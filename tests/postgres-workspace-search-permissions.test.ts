@@ -36,7 +36,7 @@ describe("PostgreSQL permission-safe Workspace search", { skip: !databaseUrl }, 
     const notes = new NoteService(database.knowledgeAuthoringRepositories());
     assert.equal((await notes.capture(owner.ownerId, workspace.workspace.id, { projectId: visibleProject.project.id, content: "launch visible" })).status, "created");
     assert.equal((await notes.capture(owner.ownerId, workspace.workspace.id, { projectId: restrictedProject.project.id, content: "launch restricted-secret" })).status, "created");
-    const search = new WorkspaceSearchService(database);
+    const search = new WorkspaceSearchService(database.knowledgeAuthoringRepositories());
     const ownerResults = await search.search(owner.ownerId, workspace.workspace.id, { q: "launch" });
     assert.equal(ownerResults.status, "found"); if (ownerResults.status !== "found") return;
     assert.equal(ownerResults.total, 2);

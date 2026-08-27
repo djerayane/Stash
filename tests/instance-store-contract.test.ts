@@ -69,15 +69,15 @@ function contract(adapter: ContractAdapter): void {
           createdBy: { localAccountId: outsiderId, displayName: "Outsider" } }), "workspace_forbidden");
         assert.equal((await database.listAccessibleWorkspaces(ownerId)).some((workspace: { id: string }) => workspace.id === workspaceId), true);
         assert.equal((await database.listAccessibleWorkspaces(outsiderId)).some((workspace: { id: string }) => workspace.id === workspaceId), false);
-        assert.equal((await database.listNoteHistory(ownerId, noteId)).status, "found");
-        assert.equal((await database.listWorkspaceActivity(ownerId, workspaceId)).status, "found");
+        assert.equal((await database.knowledgeAuthoringRepositories().listNoteHistory(ownerId, noteId)).status, "found");
+        assert.equal((await database.knowledgeAuthoringRepositories().listWorkspaceActivity(ownerId, workspaceId)).status, "found");
 
         const collaboration = new NoteCollaborationService(database.knowledgeAuthoringRepositories()); const update = new Y.Doc(); update.getText("parity").insert(0, "shared");
         assert.equal((await collaboration.apply(ownerId, noteId, Y.encodeStateAsUpdate(update)))?.sequence, 1); update.destroy();
         assert.equal(await collaboration.load(outsiderId, noteId), undefined);
-        const search = await database.searchWorkspace(ownerId, workspaceId, { q: "Parity" });
+        const search = await database.knowledgeAuthoringRepositories().searchWorkspace(ownerId, workspaceId, { q: "Parity" });
         assert.equal(search.status, "found"); if (search.status === "found") assert.equal(search.results.some((result: { id: string }) => result.id === noteId), true);
-        assert.equal((await database.searchWorkspace(outsiderId, workspaceId, { q: "Parity" })).status, "forbidden");
+        assert.equal((await database.knowledgeAuthoringRepositories().searchWorkspace(outsiderId, workspaceId, { q: "Parity" })).status, "forbidden");
 
         const jobId = randomUUID(); await database.enqueueEmailRecovery({ id: jobId, protectedDelivery: "protected", createdAt });
         const claimed = await database.claimEmailRecoveryDelivery(randomUUID(), "2026-08-24T10:10:00.000Z");
@@ -146,9 +146,9 @@ function contract(adapter: ContractAdapter): void {
         const restored = await harness.reopen();
         assert.equal((await restored.identityAccessRepositories().findAccountByEmail(`${ownerId}@example.test`))?.passwordHash, "backup-auth-hash");
         assert.equal((await restored.listAccessibleWorkspaces(ownerId)).some((workspace: { id: string }) => workspace.id === workspaceId), true);
-        assert.equal((await restored.listNoteHistory(ownerId, noteId)).status, "found");
+        assert.equal((await restored.knowledgeAuthoringRepositories().listNoteHistory(ownerId, noteId)).status, "found");
         assert.equal((await restored.knowledgeAuthoringRepositories().loadNoteCollaboration(ownerId, noteId))?.sequence, 1);
-        assert.equal((await restored.searchWorkspace(ownerId, workspaceId, { q: "Restored" })).status, "found");
+        assert.equal((await restored.knowledgeAuthoringRepositories().searchWorkspace(ownerId, workspaceId, { q: "Restored" })).status, "found");
         assert.equal((await restored.claimEmailRecoveryDelivery(randomUUID(), "2026-08-24T10:10:00.000Z"))?.job.id, jobId);
         assert.deepEqual((await new AttachmentService(restored, new LocalAttachmentStorage(harness.attachmentRoot)).get(ownerId, attachment.record.id))?.content, attachmentBytes);
       } finally { await harness.close(); }

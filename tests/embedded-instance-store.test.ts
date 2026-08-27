@@ -75,7 +75,7 @@ describe("embedded Instance store", () => {
       tags: ["release"], createdByMemberId: ownerId, createdAt: "2026-08-24T10:00:00.000Z" },
     { schema: "stash.note.v1", id: noteId, workspaceId, content: "Embedded release plan", tags: ["release"],
       createdAt: "2026-08-24T10:00:00.000Z", createdBy: { localAccountId: ownerId, displayName: "Ada" } }), "created");
-    const search = await database.searchWorkspace(ownerId, workspaceId, { q: "release" });
+    const search = await database.knowledgeAuthoringRepositories().searchWorkspace(ownerId, workspaceId, { q: "release" });
     assert.equal(search.status, "found"); if (search.status === "found") assert.equal(search.results.some((result: WorkspaceSearchResult) => result.id === noteId), true);
     const jobId = "10000000-0000-4000-8000-000000000006"; await database.enqueueEmailRecovery({ id: jobId, protectedDelivery: "protected", createdAt: "2026-08-24T10:00:00.000Z" });
     const claimed = await database.claimEmailRecoveryDelivery("10000000-0000-4000-8000-000000000007", "2026-08-24T10:10:00.000Z");
