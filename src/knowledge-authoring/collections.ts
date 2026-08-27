@@ -1,6 +1,7 @@
 import type { PostgresQueryable } from "../instance-operations/storage/postgres-kernel.js";
 import { normalizeCollection, normalizeViewBlock, normalizeViewDefinition, type Collection as CanonicalCollection,
-  type CollectionRecord as CanonicalRecord, type CollectionPropertyValue, type ViewBlock as CanonicalViewBlock, type ViewDefinition } from "@stash/domain-types";
+  type CollectionProperty as CanonicalProperty, type CollectionRecord as CanonicalRecord, type CollectionPropertyValue,
+  type ViewBlock as CanonicalViewBlock, type ViewDefinition } from "@stash/domain-types";
 import type { CollectionImpact } from "@stash/domain-types";
 
 export type CollectionViewResult =
@@ -17,6 +18,8 @@ export interface CollectionRepository {
   renameCollection(memberId: string, collectionId: string, title: string): Promise<{ status: "updated" } | { status: "collection_not_found" }>;
   renameCollectionProperty(memberId: string, collectionId: string, propertyId: string, name: string): Promise<
     { status: "updated" } | { status: "collection_not_found" | "property_not_found" }>;
+  createCollectionProperty(memberId: string, collectionId: string, property: CanonicalProperty): Promise<
+    { status: "created"; property: CanonicalProperty } | { status: "collection_not_found" | "property_conflict" }>;
   moveCollectionRecord(memberId: string, collectionId: string, recordId: string, beforeId?: string): Promise<
     { status: "moved" } | { status: "collection_not_found" | "record_not_found" | "before_not_found" }>;
   createCollectionRecord(memberId: string, collectionId: string, record: CanonicalRecord): Promise<
@@ -63,6 +66,16 @@ export class CollectionService {
     if (keys.length === 2 && keys.includes("propertyId") && keys.includes("name") && uuid.test(String(input.propertyId)) && text(input.name, 120))
       return this.repository.renameCollectionProperty(memberId, collectionId, String(input.propertyId), String(input.name).trim());
     throw new InvalidCollectionInput();
+  }
+
+  async createProperty(memberId: string, collectionId: string, value: unknown) {
+    if (!uuid.test(collectionId)) throw new InvalidCollectionInput();
+    const current = await this.repository.readCollection(memberId, collectionId);
+    if (current.status !== "found") return current;
+    let normalized: CanonicalCollection;
+    try { normalized = normalizeCollection({ ...current.collection, properties: [...current.collection.properties, value] }); }
+    catch { throw new InvalidCollectionInput(); }
+    return this.repository.createCollectionProperty(memberId, collectionId, normalized.properties.at(-1)!);
   }
 
   moveRecord(memberId: string, collectionId: string, recordId: string, value: unknown) {

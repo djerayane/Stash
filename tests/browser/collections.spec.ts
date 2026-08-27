@@ -96,3 +96,47 @@ test("moves a Collection record without drag and keeps every View control axe-cl
   await view.getByRole("combobox", { name: "Presentation" }).selectOption("table");
   expect((await new AxeBuilder({ page }).include('[aria-labelledby="collections-heading"]').analyze()).violations).toEqual([]);
 });
+
+test("authors properties and typed records, then persists an evaluated filter", async ({ page }) => {
+  const collectionId = "36363636-3636-4636-8636-363636363636"; const titleId = "37373737-3737-4737-8737-373737373737";
+  const firstRecordId = "38383838-3838-4838-8838-383838383838"; const viewId = "39393939-3939-4939-8939-393939393939";
+  await createCollection(page, { schema: "stash.collection.v1", id: collectionId, workspaceId, ownerNoteId: noteId,
+    title: "Browser authoring", properties: [{ id: titleId, name: "Name", type: "text", position: 1 }],
+    records: [{ id: firstRecordId, position: 1, values: { [titleId]: "Existing" } }] });
+  expect((await page.request.post(`/api/notes/${noteId}/view-blocks`, { headers: { authorization: `Bearer ${token}` }, data: {
+    schema: "stash.view-block.v1", id: viewId, workspaceId, ownerNoteId: noteId, blockId: "40404040-4040-4040-8040-404040404040",
+    title: "Browser authoring lens", definition: { source: { kind: "collection", collectionId }, presentation: "table", filters: [], sorts: [], layout: {} },
+  } })).status()).toBe(201);
+
+  await page.goto(`/app/notes/${noteId}`);
+  const authoring = page.getByRole("region", { name: "Browser authoring authoring" });
+  await authoring.getByRole("button", { name: "Add property to Browser authoring" }).press("Enter");
+  await authoring.getByRole("textbox", { name: "New property name" }).fill("Score");
+  await authoring.getByRole("combobox", { name: "New property type" }).selectOption("number");
+  await authoring.getByRole("button", { name: "Save property" }).press("Enter");
+  await expect(authoring.getByRole("textbox", { name: "New property name" })).toHaveCount(0);
+
+  await authoring.getByRole("button", { name: "Add record to Browser authoring" }).press("Enter");
+  await authoring.getByRole("textbox", { name: "Name value" }).fill("Authored");
+  await authoring.getByRole("spinbutton", { name: "Score value" }).fill("7");
+  await authoring.getByRole("button", { name: "Save new record" }).press("Enter");
+  const view = page.getByRole("article").filter({ has: page.getByRole("heading", { name: "Browser authoring lens" }) });
+  await expect(view.getByRole("cell", { name: "Authored" })).toBeVisible();
+  await authoring.getByRole("button", { name: "Edit record 2" }).press("Enter");
+  await authoring.getByRole("spinbutton", { name: "Score value" }).fill("8");
+  await authoring.getByRole("button", { name: "Save record changes" }).press("Enter");
+  await expect(view.getByText("8")).toBeVisible();
+
+  await view.getByRole("combobox", { name: "Filter by" }).selectOption(titleId);
+  await view.getByRole("combobox", { name: "Filter operator" }).selectOption("equals");
+  const filterSaved = page.waitForResponse(async (response) => response.url().endsWith(`/api/view-blocks/${viewId}`)
+    && response.request().method() === "PATCH" && (await response.request().postDataJSON()).filters[0]?.value === "Authored");
+  await view.getByRole("textbox", { name: "Filter value" }).fill("Authored");
+  await expect(view.getByText("Existing")).toHaveCount(0);
+  await filterSaved;
+  await page.reload();
+  const reopened = page.getByRole("article").filter({ has: page.getByRole("heading", { name: "Browser authoring lens" }) });
+  await expect(reopened.getByRole("combobox", { name: "Filter operator" })).toHaveValue("equals");
+  await expect(reopened.getByRole("textbox", { name: "Filter value" })).toHaveValue("Authored");
+  await expect(reopened.getByText("Existing")).toHaveCount(0);
+});

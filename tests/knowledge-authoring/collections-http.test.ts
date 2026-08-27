@@ -49,6 +49,10 @@ describe("Collection HTTP capability", () => {
     const created = await call(`/api/notes/${noteId}/collections`, { method: "POST", body: JSON.stringify({ schema: "stash.collection.v1",
       id: collectionId, workspaceId, ownerNoteId: noteId, title: "Research", properties: [{ id: propertyId, name: "Idea", type: "text", position: 1 }], records: [] }) });
     assert.equal(created.status, 201); assert.equal((await created.json() as any).collection.id, collectionId);
+    const numberPropertyId = "41414141-4141-4141-8141-414141414141";
+    const addedProperty = await call(`/api/collections/${collectionId}/properties`, { method: "POST", body: JSON.stringify({
+      id: numberPropertyId, name: "Priority", type: "number", position: 2 }) });
+    assert.equal(addedProperty.status, 201);
     assert.equal((await call(`/api/notes/${noteId}/collections`, { method: "POST", body: JSON.stringify({ schema: "stash.collection.v1",
       id: "40414243-4445-4647-8849-505152535455", workspaceId, ownerNoteId: noteId, title: "Invalid",
       properties: [{ id: "50515253-5455-4657-8859-606162636465", name: "Formula", type: "formula", position: 1 }], records: [] }) })).status, 422);
