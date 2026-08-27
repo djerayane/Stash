@@ -14,6 +14,7 @@ import { startInstance, type RunningInstance } from "../../src/instance.js";
 import { EmptyCollectionImpactInspector, NoteTreeService } from "../../src/knowledge-authoring/note-tree.js";
 import { noteTreeRoutes } from "../../src/knowledge-authoring/note-tree-routes.js";
 import { relationshipRoutes } from "../../src/knowledge-authoring/relationship-routes.js";
+import { visualizationRoutes } from "../../src/knowledge-authoring/visualization-routes.js";
 import { RelationshipQueryService } from "../../src/knowledge-authoring/relationship-query.js";
 import { VisualizationBlockService } from "../../src/knowledge-authoring/visualization-block.js";
 import { NoteService } from "../../src/notes.js";
@@ -47,7 +48,7 @@ describe("Note Tree HTTP", () => {
       activities: new ActivityService(store.database), discussions: new DiscussionService(store.database), memberAccess: access,
       capabilities: createCapabilityRegistry([{ name: "knowledge-authoring", routes: () => [noteTreeRoutes(new NoteTreeService(
         store.database.noteTreeRepository(), new EmptyCollectionImpactInspector()), access), relationshipRoutes(
-          new RelationshipQueryService(store.database.relationshipQueryRepository()),
+          new RelationshipQueryService(store.database.relationshipQueryRepository()), access), visualizationRoutes(
           new VisualizationBlockService(store.database.visualizationBlockRepository()), access)] }]) });
   });
 
@@ -161,6 +162,19 @@ describe("Note Tree HTTP", () => {
     assert.equal(historyBody.revisions.length >= 1, true);
     assert.equal((await guestRequest(`/api/notes/${child.id}/history/1/restore`, { method: "POST",
       body: JSON.stringify({ expectedRevision: 1, idempotencyKey: "32323232-3232-4232-8232-323232323232" }) })).status, 404);
+
+    const guestBlockId = "34343434-3434-4434-8434-343434343434";
+    const guestDefinition = { schema: "stash.visualization.v1", id: guestBlockId, kind: "local-graph",
+      query: { kind: "relationship", input: { rootId: child.id, depth: 1, limit: 20, direction: "both", includeHierarchy: true } },
+      filters: { relationTypes: [], direction: "both" }, layout: { kind: "focused", positions: {} },
+      viewEdges: [{ id: "guest-visible-edge", sourceNoteId: child.id, targetNoteId: root.id }] };
+    assert.equal((await request(`/api/notes/${child.id}/visualizations/${guestBlockId}`, { method: "PUT",
+      body: JSON.stringify({ definition: guestDefinition }) })).status, 200);
+    assert.equal((await guestRequest(`/api/notes/${child.id}/visualizations/${guestBlockId}`)).status, 200);
+    assert.equal((await guestRequest(`/api/notes/${child.id}/visualizations/${guestBlockId}`, { method: "PUT",
+      body: JSON.stringify({ definition: guestDefinition }) })).status, 404);
+    assert.equal((await guestRequest(`/api/notes/${child.id}/visualizations/${guestBlockId}/view-edges/guest-visible-edge/promote`, { method: "POST",
+      body: JSON.stringify({ idempotencyKey: "35353535-3535-4535-8535-353535353535" }) })).status, 404);
   });
 
   test("serves bounded relationship and portable Visualization Block operations", async () => {
@@ -183,8 +197,8 @@ describe("Note Tree HTTP", () => {
 
     const blockId = "78787878-7878-4878-8878-787878787878";
     const definition = { schema: "stash.visualization.v1", id: blockId, kind: "local-graph",
-      query: { rootId: root.id, depth: 1, limit: 20, direction: "both", includeHierarchy: true },
-      filters: { relationTypes: [], direction: "both" }, layout: { renderer: "focused" },
+      query: { kind: "relationship", input: { rootId: root.id, depth: 1, limit: 20, direction: "both", includeHierarchy: true } },
+      filters: { relationTypes: [], direction: "both" }, layout: { kind: "focused", positions: {} },
       viewEdges: [{ id: "http-view-edge", sourceNoteId: child.id, targetNoteId: root.id, relationshipType: "questions" }] };
     const saved = await request(`/api/notes/${root.id}/visualizations/${blockId}`, { method: "PUT",
       body: JSON.stringify({ definition }) });
@@ -193,7 +207,8 @@ describe("Note Tree HTTP", () => {
     assert.equal((await request(`/api/notes/${root.id}/visualizations/79797979-7979-4979-8979-797979797979`, { method: "PUT",
       body: JSON.stringify({ definition }) })).status, 422);
     assert.equal((await request(`/api/notes/${root.id}/visualizations/${blockId}`)).status, 200);
-    const promoted = await request(`/api/notes/${root.id}/visualizations/${blockId}/view-edges/http-view-edge/promote`, { method: "POST" });
+    const promoted = await request(`/api/notes/${root.id}/visualizations/${blockId}/view-edges/http-view-edge/promote`, { method: "POST",
+      body: JSON.stringify({ idempotencyKey: "89898989-8989-4989-8989-898989898989" }) });
     assert.equal(promoted.status, 201);
     const childContext = await request(`/api/notes/${child.id}/context`);
     assert.equal((await childContext.json() as any).outgoingLinks.some(({ noteId, relationshipType }: any) =>

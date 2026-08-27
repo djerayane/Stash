@@ -7,8 +7,8 @@ export interface VisualizationBlockRepository {
     { status: "saved"; block: SavedVisualizationBlock } | { status: "not_found" } | { status: "changed"; block: SavedVisualizationBlock }>;
   read(memberId: string, noteId: string, blockId: string): Promise<
     { status: "found"; block: SavedVisualizationBlock } | { status: "not_found" }>;
-  promoteViewEdge(memberId: string, noteId: string, blockId: string, edgeId: string): Promise<
-    { status: "promoted"; linkId: string } | { status: "not_found" | "edge_not_found" | "already_linked" }>;
+  promoteViewEdge(memberId: string, noteId: string, blockId: string, edgeId: string, idempotencyKey: string): Promise<
+    { status: "promoted"; linkId: string; activityId: string } | { status: "not_found" | "edge_not_found" | "already_linked" }>;
 }
 
 export class InvalidVisualizationBlock extends Error {}
@@ -24,8 +24,9 @@ export class VisualizationBlockService {
     if (!uuid.test(noteId) || !uuid.test(blockId)) throw new InvalidVisualizationBlock();
     return this.repository.read(memberId, noteId, blockId);
   }
-  async promoteViewEdge(memberId: string, noteId: string, blockId: string, edgeId: string) {
-    if (!uuid.test(noteId) || !uuid.test(blockId) || typeof edgeId !== "string" || !edgeId.trim() || edgeId.length > 120) throw new InvalidVisualizationBlock();
-    return this.repository.promoteViewEdge(memberId, noteId, blockId, edgeId.trim());
+  async promoteViewEdge(memberId: string, noteId: string, blockId: string, edgeId: string, idempotencyKey: unknown) {
+    if (!uuid.test(noteId) || !uuid.test(blockId) || typeof edgeId !== "string" || !edgeId.trim() || edgeId.length > 120
+      || typeof idempotencyKey !== "string" || !uuid.test(idempotencyKey)) throw new InvalidVisualizationBlock();
+    return this.repository.promoteViewEdge(memberId, noteId, blockId, edgeId.trim(), idempotencyKey);
   }
 }

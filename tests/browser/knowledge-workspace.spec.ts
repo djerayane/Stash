@@ -119,6 +119,29 @@ test("related Note navigation has no automatically detectable accessibility viol
   expect((await new AxeBuilder({ page }).include('[aria-label="Related Notes"]').analyze()).violations).toEqual([]);
 });
 
+test("repairs a real unresolved Note link with PUT through the acceptance Instance", async ({ page }) => {
+  await authenticate(page);
+  const repairRequest = page.waitForRequest((request) => /\/api\/notes\/[^/]+\/links\/[^/]+\/repair$/.test(new URL(request.url()).pathname)
+    && request.method() === "PUT");
+  const repairResponse = page.waitForResponse((response) => /\/api\/notes\/[^/]+\/links\/[^/]+\/repair$/.test(new URL(response.url()).pathname)
+    && response.request().method() === "PUT");
+  await page.goto(`/app/notes/${roadmapId}`);
+  await page.getByRole("button", { name: "Open Note context" }).click();
+  const related = page.getByRole("region", { name: "Related Notes" });
+  await related.getByRole("button", { name: "Review relationship maintenance" }).click();
+  await expect(related.getByText("Missing browser evidence", { exact: true })).toBeVisible();
+  await related.getByRole("button", { name: "Repair Missing browser evidence" }).click();
+  expect((await repairRequest).method()).toBe("PUT");
+  expect((await repairResponse).status()).toBe(200);
+  await expect(related.getByText("Missing browser evidence", { exact: true })).toHaveCount(0);
+  const links = await page.request.get(`/api/notes/${roadmapId}/links`,
+    { headers: { authorization: "Bearer browser-acceptance-member-token" } });
+  expect(links.status()).toBe(200);
+  expect((await links.json()).links).toEqual(expect.arrayContaining([
+    expect.objectContaining({ targetNoteId: evidenceId, state: "resolved", revision: 2 }),
+  ]));
+});
+
 test("persists a real Note branch lifecycle through the acceptance Instance", async ({ page }) => {
   await authenticate(page, durableSession);
   page.on("dialog", (dialog) => void dialog.accept());

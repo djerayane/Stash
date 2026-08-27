@@ -387,7 +387,8 @@ function parseState(content: Buffer): PortableWorkspaceCanonicalState {
         throw new InvalidPortableWorkspaceImport("invalid_visualization_block");
       let definition; try { definition=normalizeVisualizationDefinition({ schema:payload.schema,id:payload.id,kind:payload.kind,query:payload.query,
         filters:payload.filters,layout:payload.layout,viewEdges:payload.viewEdges }); } catch { throw new InvalidPortableWorkspaceImport("invalid_visualization_block"); }
-      if(!notes.has(definition.query.rootId)||definition.viewEdges.some((edge)=>!notes.has(edge.sourceNoteId)||!notes.has(edge.targetNoteId)))
+      if(!notes.has(definition.query.input.rootId)||Object.keys(definition.layout.positions).some((id)=>!notes.has(id))
+        ||definition.viewEdges.some((edge)=>!notes.has(edge.sourceNoteId)||!notes.has(edge.targetNoteId)))
         throw new InvalidPortableWorkspaceImport("invalid_visualization_block");
       sanitized={...definition,workspaceId,ownerNoteId:payload.ownerNoteId,revision:payload.revision}; }
     if (item.kind === "Discussion" && (payload.workspaceId !== workspaceId || !object(payload.target)

@@ -5,6 +5,7 @@ import type { PortableNoteProjection } from "../notes.js";
 import { paragraphDocument } from "../rich-text.js";
 import type { PostgresKernel, PostgresQueryable } from "../instance-operations/storage/postgres-kernel.js";
 import type { NoteTreeAccessChange, NoteTreeNode, NoteTreeRepository } from "./note-tree.js";
+import { effectiveNoteReadSql, inheritedProjectGuestSql, workspaceMemberSql } from "./postgres-note-access.js";
 
 type PrepareNotes = (client: PostgresQueryable) => Promise<void>;
 export interface NoteTreeBranchLifecycle {
@@ -12,15 +13,8 @@ export interface NoteTreeBranchLifecycle {
     Promise<"allowed" | "collection_owner_requires_relocation">;
 }
 
-const workspaceMember = (workspace: "workspace" | "stash_workspaces", member = "$2") =>
-  `((${workspace}.owner_type='personal' AND ${workspace}.personal_owner_id=${member}) OR
-    (${workspace}.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
-      WHERE membership.organization_id=${workspace}.organization_owner_id AND membership.account_id=${member})))`;
-
-const inheritedProjectGuest = (note: "note", member = "$2") => `EXISTS(WITH RECURSIVE ancestry AS (
-  SELECT ${note}.id,${note}.parent_id,${note}.project_id UNION ALL
-  SELECT parent.id,parent.parent_id,parent.project_id FROM stash_notes parent JOIN ancestry ON ancestry.parent_id=parent.id
-) SELECT 1 FROM ancestry JOIN stash_project_guests guest ON guest.project_id=ancestry.project_id WHERE guest.account_id=${member})`;
+const workspaceMember = (workspace: "workspace" | "stash_workspaces", member = "$2") => workspaceMemberSql(workspace, member);
+const inheritedProjectGuest = (note: "note", member = "$2") => inheritedProjectGuestSql(note, member);
 
 /** Capability-owned Note Tree persistence over the shared PostgreSQL kernel. */
 export class PostgresNoteTreeRepository implements NoteTreeRepository {
@@ -344,7 +338,7 @@ export class PostgresNoteTreeRepository implements NoteTreeRepository {
         ${workspaceMember("workspace")} AS workspace_access
         FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id=note.workspace_id
         WHERE note.id=$1 AND note.archived_at IS NULL AND note.trashed_at IS NULL AND
-        (${workspaceMember("workspace")} OR ${inheritedProjectGuest("note")})`, [noteId, memberId]);
+        ${effectiveNoteReadSql("note", "workspace", "$2")}`, [noteId, memberId]);
       const access = authorized.rows[0];
       if (!access) return { status: "note_not_found" as const };
       const guestProjects = access.workspace_access ? new Set<string>() : new Set((await client.query<{ project_id: string }>(
@@ -392,7 +386,7 @@ export class PostgresNoteTreeRepository implements NoteTreeRepository {
   async authorizeNote(client: PostgresQueryable, memberId: string, noteId: string): Promise<"edit" | "read" | "none"> {
     const result = await client.query<{ can_edit: boolean; can_read: boolean }>(`SELECT
       ${workspaceMember("workspace")} AS can_edit,
-      (${workspaceMember("workspace")} OR ${inheritedProjectGuest("note")}) AS can_read
+      ${effectiveNoteReadSql("note", "workspace", "$2")} AS can_read
       FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id=note.workspace_id WHERE note.id=$1`, [noteId, memberId]);
     return result.rows[0]?.can_edit ? "edit" : result.rows[0]?.can_read ? "read" : "none";
   }

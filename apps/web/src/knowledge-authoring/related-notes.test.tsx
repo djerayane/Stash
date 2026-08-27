@@ -31,7 +31,7 @@ it("offers bounded progressive relationship navigation with an equivalent keyboa
         label: "Missing source", targetPath: "notes/missing.md", revision: 2, candidates: [
           { id: childId, title: "Evidence" }, { id: alternateId, title: "Alternative evidence" },
         ] }] });
-    if (method === "POST" && path.includes("/repair")) return Response.json({ status: "repaired" });
+    if (method === "PUT" && path.includes("/repair")) return Response.json({ link: { id: "55555555-5555-4555-8555-555555555555" } });
     return new Response(null, { status: 404 });
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
@@ -57,8 +57,37 @@ it("offers bounded progressive relationship navigation with an equivalent keyboa
   expect(within(region).getByRole("link", { name: "Decision" })).toBeVisible();
   fireEvent.change(within(region).getByRole("combobox", { name: "Repair target for Missing source" }), { target: { value: alternateId } });
   fireEvent.click(within(region).getByRole("button", { name: "Repair Missing source" }));
-  await waitFor(() => expect(requests).toContainEqual(expect.objectContaining({ method: "POST",
+  await waitFor(() => expect(requests).toContainEqual(expect.objectContaining({ method: "PUT",
     path: `/api/notes/${noteId}/links/55555555-5555-4555-8555-555555555555/repair`,
     body: { targetNoteId: alternateId, expectedRevision: 2 } })));
   expect(await within(region).findByRole("status")).toHaveTextContent("Link repaired");
+});
+
+it("increases the node budget for wide neighborhoods and focuses the first newly revealed Note", async () => {
+  const neighbors = Array.from({ length: 26 }, (_, index) => ({
+    id: `${String(index + 1).padStart(8, "0")}-7777-4777-8777-777777777777`, title: `Neighbor ${String(index + 1).padStart(2, "0")}`, depth: 1,
+  }));
+  const fetcher = vi.fn<typeof fetch>(async (input) => {
+    const path = String(input);
+    if (path.includes("/relationships?")) {
+      const limit = Number(new URL(path, "http://stash.test").searchParams.get("limit"));
+      const visible = neighbors.slice(0, limit - 1);
+      return Response.json({ rootId: noteId, depth: 1, limit, direction: "both", hasMore: visible.length < neighbors.length,
+        nodes: [{ id: noteId, title: "Research", depth: 0 }, ...visible], edges: [],
+        outline: [{ id: noteId, title: "Research", depth: 0 }, ...visible] });
+    }
+    return Response.json({ orphans: [], brokenLinks: [] });
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}><MemoryRouter><RelatedNotes access="edit" fetcher={fetcher}
+    noteId={noteId} token="member" workspaceId={workspaceId} /></MemoryRouter></QueryClientProvider>);
+
+  const region = await screen.findByRole("region", { name: "Related Notes" });
+  expect(await within(region).findByRole("link", { name: "Neighbor 23" })).toBeVisible();
+  const expand = within(region).getByRole("button", { name: "Expand related Notes" });
+  fireEvent.click(expand);
+  const newlyRevealed = await within(region).findByRole("link", { name: "Neighbor 24" });
+  await waitFor(() => expect(newlyRevealed).toHaveFocus());
+  expect(fetcher).toHaveBeenCalledWith(expect.stringContaining("limit=48"), expect.anything());
+  expect(within(region).queryByRole("button", { name: "Expand related Notes" })).not.toBeInTheDocument();
 });
