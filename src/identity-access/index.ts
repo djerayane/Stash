@@ -39,8 +39,15 @@ export function identityAccessCapability(options: {
   oidcManagement?: OidcManagementService;
   oidcCallbackOrigin?: string;
 }): CapabilityModule {
+  const memberRoutes = () => [
+    ...(options.organizationRoles && options.memberAccess ? [organizationRoleRoutes(options.organizationRoles, options.memberAccess)] : []),
+    ...(options.invitations && options.memberAccess ? [invitationRoutes(options.invitations, options.memberAccess)] : []),
+    ...(options.memberLocalization && options.memberAccess ? [memberLocalizationRoutes(options.memberLocalization, options.memberAccess)] : []),
+    ...(options.importedIdentityAdministration && options.memberAccess ? [importedIdentityAdministrationRoutes(options.importedIdentityAdministration, options.memberAccess)] : []),
+  ];
   return {
     name: "identity-access",
+    memberAccess: options.passwordAuth,
     owns: ["password-auth", "account-registration", ...(options.instanceSetup ? ["instance-setup"] : []),
       ...(options.ownerBootstrap ? ["owner-bootstrap"] : []), ...(options.organizationRoles ? ["organization-roles"] : []),
       ...(options.invitations ? ["invitations"] : []), ...(options.memberLocalization ? ["member-localization"] : []),
@@ -51,13 +58,11 @@ export function identityAccessCapability(options: {
       accountRegistrationRoute(options.accountRegistration, options.reportAuthenticationFailure),
       passwordAuthRoute(options.passwordAuth, options.reportAuthenticationFailure),
       ...(options.instanceAdminToken ? [requireInstanceAdministrator(options.instanceAdminToken, ownerBootstrapRoute(options.ownerBootstrap))] : []),
-      ...(options.organizationRoles && options.memberAccess ? [organizationRoleRoutes(options.organizationRoles, options.memberAccess)] : []),
-      ...(options.invitations && options.memberAccess ? [invitationRoutes(options.invitations, options.memberAccess)] : []),
-      ...(options.memberLocalization && options.memberAccess ? [memberLocalizationRoutes(options.memberLocalization, options.memberAccess)] : []),
-      ...(options.importedIdentityAdministration && options.memberAccess ? [importedIdentityAdministrationRoutes(options.importedIdentityAdministration, options.memberAccess)] : []),
+      ...memberRoutes(),
       ...(options.accountRecovery ? [accountRecoveryRoute(options.accountRecovery, { resolve: (authorization) => options.passwordAuth.authenticateBearer(authorization) })] : []),
       ...(options.oidcManagement ? [oidcManagementRoute(options.oidcManagement, options.passwordAuth)] : []),
       ...(options.oidcAuth && options.oidcCallbackOrigin ? [oidcAuthRoute(options.oidcAuth, options.oidcCallbackOrigin)] : []),
     ],
+    publicRoutes: memberRoutes,
   };
 }

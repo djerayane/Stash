@@ -29,6 +29,10 @@ export function instanceOperationsCapability(options: {
   instanceUpgrades?: InstanceUpgradeService;
   portableWorkspaceImports?: PortableWorkspaceImportService;
 }): CapabilityModule {
+  const memberRoutes = () => options.agentGrants && options.memberAccess
+    ? [agentGrantRoutes(options.agentGrants, options.memberAccess,
+      { ...(options.notes ? { notes: options.notes } : {}), ...(options.tasks ? { tasks: options.tasks } : {}) })]
+    : [];
   return {
     name: "instance-operations",
     owns: ["diagnostics", ...(options.agentGrants ? ["agent-grants"] : []), ...(options.mcpEnabled ? ["mcp"] : []),
@@ -37,8 +41,7 @@ export function instanceOperationsCapability(options: {
     routes: () => [
       diagnosticsSchemaRoute(options.diagnostics),
       requireInstanceAdministrator(options.instanceAdminToken, diagnosticsAdminRoute(options.diagnostics)),
-      ...(options.agentGrants && options.memberAccess ? [agentGrantRoutes(options.agentGrants, options.memberAccess,
-        { ...(options.notes ? { notes: options.notes } : {}), ...(options.tasks ? { tasks: options.tasks } : {}) })] : []),
+      ...memberRoutes(),
       ...(options.mcpEnabled && options.agentGrants ? [mcpRoute(options.agentGrants, true,
         { ...(options.notes ? { notes: options.notes } : {}), ...(options.tasks ? { tasks: options.tasks } : {}) })] : []),
       ...(options.instanceBackups && options.instanceBackupRoot && options.instanceBackupRestoreTarget
@@ -48,5 +51,6 @@ export function instanceOperationsCapability(options: {
       ...(options.portableWorkspaceImports ? [requireInstanceAdministrator(options.instanceAdminToken,
         portableWorkspaceImportRoute(options.portableWorkspaceImports))] : []),
     ],
+    publicRoutes: memberRoutes,
   };
 }

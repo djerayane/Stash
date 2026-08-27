@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:http";
 
 import { startInstance } from "../src/instance.js";
 import { NoteCollaborationService, type CollaborationSnapshot } from "../src/note-collaboration.js";
@@ -460,45 +461,39 @@ console.log(`Browser acceptance Instance listening on ${instance.url}`);
 const firstRunDirectory = await mkdtemp(join(tmpdir(), "stash-browser-first-run-"));
 const firstRunCodec = createAuthenticationSecretCodec(randomBytes(32).toString("base64"));
 let firstRunStore = await EmbeddedInstanceStore.open(firstRunDirectory, firstRunCodec);
-const firstRunAuth = new PasswordAuthService(firstRunStore.database);
-const firstRunSetupRepository = firstRunStore.database.instanceSetupRepository();
-const firstRunSetup = new InstanceSetupService(firstRunSetupRepository,
-  { boundHost: "0.0.0.0", code: "STASH-ONE", output() {} });
-const firstRunNotes = new NoteService(firstRunStore.database);
-const firstRunTasks = new TaskService(firstRunStore.database, firstRunStore.database);
-const firstRunProjects = new WorkspaceProjectService(firstRunStore.database);
-const firstRunAttachments = new LocalAttachmentStorage(firstRunStore.paths.attachments);
-const firstRunCollections = new CollectionService(firstRunStore.database.collectionRepository());
-const firstRunCanonicalTasks = new CanonicalTaskService(firstRunStore.database.canonicalTaskRepository());
-const firstRunNoteLinks = new NoteLinkService(firstRunStore.database);
-const firstRunDiscussions = new DiscussionService(firstRunStore.database);
-const firstRunSearches = new WorkspaceSearchService(firstRunStore.database);
-const firstRunReopenRoute: HttpRoute = {
-  matches(request, url) { return request.method === "POST" && url.pathname === "/api/test/first-run/reopen"; },
-  async handle(request, response) {
-    const member = await firstRunAuth.authenticateBearer(request.headers.authorization);
-    if (!member) { json(response, 401, { error: "unauthorized" }); return true; }
-    await firstRunStore.close();
-    firstRunStore = await EmbeddedInstanceStore.open(firstRunDirectory, firstRunCodec);
-    const durable = await firstRunStore.upgradeDatabase.query<{ count: number }>(
-      "SELECT count(*)::int count FROM stash_notes WHERE created_by_account_id=$1", [member.accountId]);
-    json(response, 200, { status: "reopened", noteCount: durable.rows[0]?.count ?? 0 });
-    return true;
-  },
-};
-const firstRunInstance = await startInstance({ database: firstRunStore.database, host: "0.0.0.0", port: Number.parseInt(process.env.STASH_BROWSER_FIRST_RUN_PORT ?? "4174", 10),
-  instanceAdminToken: "first-run-admin", passwordAuth: firstRunAuth, memberAccess: firstRunAuth, notes: firstRunNotes,
-  noteCollaboration: new NoteCollaborationService(firstRunStore.database), tasks: firstRunTasks, workspaceProjects: firstRunProjects,
-  portableWorkspaceExports: new PortableWorkspaceExportService(firstRunStore.database, firstRunAttachments),
-  capabilities: createCapabilityRegistry([
-    identityAccessCapability({ passwordAuth: firstRunAuth, instanceSetup: firstRunSetup }),
-    knowledgeAuthoringCapability({ notes: firstRunNotes, noteTree: new NoteTreeService(firstRunStore.database.noteTreeRepository(), firstRunStore.database.tutorialContributionRepository()),
-      starterTutorials: new TutorialContributionService(firstRunStore.database.tutorialContributionRepository()), collections: firstRunCollections,
-      noteLinks: firstRunNoteLinks, discussions: firstRunDiscussions, searches: firstRunSearches, portableWorkspaceExports: new PortableWorkspaceExportService(firstRunStore.database, firstRunAttachments), memberAccess: firstRunAuth }),
-    workPlanningCapability({ tasks: firstRunTasks, workspaceProjects: firstRunProjects, memberAccess: firstRunAuth,
-      projectlessTasks: new ProjectlessTaskService(firstRunStore.database.projectlessTaskRepository()), canonicalTasks: firstRunCanonicalTasks }),
-    { name: "journey-verification", routes: () => [firstRunReopenRoute] },
-  ]), webClientRoot: fileURLToPath(new URL("../apps/web/dist", import.meta.url)) });
+let firstRunInstance: Awaited<ReturnType<typeof startInstance>>;
+async function startFirstRunInstance() {
+  const database = firstRunStore.database;
+  const auth = new PasswordAuthService(database);
+  const notes = new NoteService(database);
+  const tasks = new TaskService(database, database);
+  const projects = new WorkspaceProjectService(database);
+  const attachments = new LocalAttachmentStorage(firstRunStore.paths.attachments);
+  return startInstance({ database, host: "0.0.0.0", port: Number.parseInt(process.env.STASH_BROWSER_FIRST_RUN_PORT ?? "4174", 10),
+    instanceAdminToken: "first-run-admin",
+    capabilities: createCapabilityRegistry([
+      identityAccessCapability({ passwordAuth: auth, instanceSetup: new InstanceSetupService(database.instanceSetupRepository(),
+        { boundHost: "0.0.0.0", code: "STASH-ONE", output() {} }) }),
+      knowledgeAuthoringCapability({ notes, noteTree: new NoteTreeService(database.noteTreeRepository(), database.tutorialContributionRepository()),
+        starterTutorials: new TutorialContributionService(database.tutorialContributionRepository()),
+        collections: new CollectionService(database.collectionRepository()), noteLinks: new NoteLinkService(database),
+        discussions: new DiscussionService(database), searches: new WorkspaceSearchService(database),
+        portableWorkspaceExports: new PortableWorkspaceExportService(database, attachments), memberAccess: auth }),
+      workPlanningCapability({ tasks, workspaceProjects: projects, memberAccess: auth,
+        projectlessTasks: new ProjectlessTaskService(database.projectlessTaskRepository()),
+        canonicalTasks: new CanonicalTaskService(database.canonicalTaskRepository()) }),
+    ]), webClientRoot: fileURLToPath(new URL("../apps/web/dist", import.meta.url)) });
+}
+firstRunInstance = await startFirstRunInstance();
+const restartSupervisor = createServer(async (request, response) => {
+  if (request.method !== "POST" || request.url !== "/restart") { response.writeHead(404).end(); return; }
+  await firstRunInstance.close();
+  await firstRunStore.close();
+  firstRunStore = await EmbeddedInstanceStore.open(firstRunDirectory, firstRunCodec);
+  firstRunInstance = await startFirstRunInstance();
+  json(response, 200, { status: "restarted" });
+});
+await new Promise<void>((resolve) => restartSupervisor.listen(4176, "127.0.0.1", resolve));
 console.log(`Fresh browser setup Instance listening on ${firstRunInstance.url}`);
 
 const roleDirectory = await mkdtemp(join(tmpdir(), "stash-browser-role-"));
@@ -534,6 +529,7 @@ async function close() {
   closing = true;
   await instance.close();
   await firstRunInstance.close();
+  await new Promise<void>((resolve, reject) => restartSupervisor.close((error) => error ? reject(error) : resolve()));
   await firstRunStore.close();
   await roleInstance.close();
   await roleStore.close();
