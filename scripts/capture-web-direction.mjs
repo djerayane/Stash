@@ -1,12 +1,14 @@
 import { chromium } from "@playwright/test";
+import { fileURLToPath } from "node:url";
 
-const output = "docs/design/stash-web-direction";
+const output = fileURLToPath(new URL("../docs/design/stash-web-direction", import.meta.url));
 const browser = await chromium.launch();
 const desktop = await browser.newPage({ viewport: { width: 1440, height: 960 }, deviceScaleFactor: 1 });
 await desktop.emulateMedia({ reducedMotion: "reduce" });
 
 await desktop.goto("http://127.0.0.1:4174/sign-in");
 const setup = desktop.getByRole("heading", { name: "Make Stash yours." });
+await desktop.getByRole("heading", { name: /Make Stash yours\.|Sign in to Stash/ }).waitFor({ state: "visible" });
 if (await setup.isVisible()) {
   await desktop.screenshot({ path: `${output}/01-instance-setup.png`, fullPage: true });
   await desktop.getByRole("textbox", { name: "Name" }).fill("Ada Lovelace");
@@ -23,8 +25,17 @@ if (await setup.isVisible()) {
   await desktop.getByRole("button", { name: "Sign in" }).click();
 }
 await desktop.waitForURL(/\/app\//);
+const starterGuide = desktop.getByRole("heading", { name: "Try the pieces together" });
+await starterGuide.waitFor({ state: "visible" });
+await desktop.getByRole("link", { name: /Connect your thinking/ }).waitFor({ state: "visible" });
+await desktop.getByRole("heading", { name: "Task View · First moves" }).waitFor({ state: "visible" });
 await desktop.screenshot({ path: `${output}/02-starter-workspace.png`, fullPage: true });
-await desktop.screenshot({ path: `${output}/05-collections-view-blocks.png`, fullPage: true });
+
+const collectionTitle = desktop.getByRole("textbox", { name: "Collection title" });
+await collectionTitle.waitFor({ state: "visible" });
+await collectionTitle.scrollIntoViewIfNeeded();
+await desktop.getByRole("combobox", { name: "Layout" }).waitFor({ state: "visible" });
+await desktop.screenshot({ path: `${output}/05-collections-view-blocks.png` });
 
 await desktop.goto("http://127.0.0.1:4173/app/notes/99999999-9999-4999-8999-999999999999");
 await desktop.evaluate(() => localStorage.setItem("stash.member-session", JSON.stringify({ token: "browser-acceptance-member-token" })));
@@ -58,3 +69,4 @@ await narrow.getByRole("textbox", { name: "Note content" }).waitFor();
 await narrow.screenshot({ path: `${output}/11-responsive-note.png`, fullPage: true });
 
 await browser.close();
+console.log(`Updated source-truth captures in ${output}`);
