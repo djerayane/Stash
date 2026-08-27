@@ -1,4 +1,5 @@
 import type { PostgresKernel, PostgresQueryable } from "../instance-operations/storage/postgres-kernel.js";
+import type { NoteTreeBranchLifecycle } from "./postgres-note-tree-repository.js";
 import type { NoteTreeImpactInspector } from "./note-tree.js";
 import type { Collection, StarterKnowledgeSetup, TutorialContribution, TutorialContributionRepository, ViewBlock } from "./collections.js";
 
@@ -8,7 +9,7 @@ const member = `(workspace.owner_type='personal' AND workspace.personal_owner_id
     WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2))`;
 
 /** Knowledge-authoring-owned canonical Collection and View Block persistence. */
-export class PostgresTutorialContributionRepository implements TutorialContributionRepository, NoteTreeImpactInspector {
+export class PostgresTutorialContributionRepository implements TutorialContributionRepository, NoteTreeImpactInspector, NoteTreeBranchLifecycle {
   constructor(private readonly kernel: PostgresKernel, private readonly prepareNotes: PrepareNotes) {}
 
   async prepare(client: PostgresQueryable): Promise<void> {
@@ -127,18 +128,42 @@ export class PostgresTutorialContributionRepository implements TutorialContribut
     return "removed" as const;
   }); }
 
-  async inspect(memberId: string, noteIds: readonly string[]): Promise<{ collectionCount: number }> {
+  async inspect(memberId: string, noteIds: readonly string[]): Promise<{
+    collectionCount: number;
+    collectionRelocationRequired?: boolean;
+  }> {
     if (!noteIds.length) return { collectionCount: 0 };
-    return this.kernel.withSession(async (client) => { await this.prepare(client); const result = await client.query(`SELECT COUNT(DISTINCT collection.id)::int count
+    return this.kernel.withSession(async (client) => { await this.prepare(client); const result = await client.query<{ count: number; relocation_required: boolean }>(`SELECT
+      COUNT(DISTINCT collection.id)::int count,
+      COALESCE(bool_or(tutorial.root_note_id IS NULL OR NOT tutorial.root_note_id=ANY($1::uuid[])),FALSE) relocation_required
       FROM stash_collections collection JOIN stash_workspaces workspace ON workspace.id=collection.workspace_id
-      WHERE collection.owner_note_id=ANY($1::uuid[]) AND (${member})`, [noteIds, memberId]); return { collectionCount: result.rows[0]?.count ?? 0 }; });
+      LEFT JOIN stash_starter_tutorials tutorial ON tutorial.collection_id=collection.id
+      WHERE collection.owner_note_id=ANY($1::uuid[]) AND (${member})`, [noteIds, memberId]); return {
+        collectionCount: result.rows[0]?.count ?? 0, collectionRelocationRequired: result.rows[0]?.relocation_required === true,
+      }; });
+  }
+
+  async beforeRemove(client: PostgresQueryable, noteIds: readonly string[]): Promise<"allowed" | "collection_owner_requires_relocation"> {
+    if (!noteIds.length) return "allowed";
+    const relations = await client.query<{ collections: string | null; tutorials: string | null }>(`SELECT
+      to_regclass('stash_collections')::text collections, to_regclass('stash_starter_tutorials')::text tutorials`);
+    if (!relations.rows[0]?.collections) return "allowed";
+    const blocked = relations.rows[0].tutorials
+      ? await client.query(`SELECT 1 FROM stash_collections collection
+          LEFT JOIN stash_starter_tutorials tutorial ON tutorial.collection_id=collection.id
+          WHERE collection.owner_note_id=ANY($1::uuid[])
+            AND (tutorial.root_note_id IS NULL OR NOT tutorial.root_note_id=ANY($1::uuid[])) LIMIT 1`, [noteIds])
+      : await client.query("SELECT 1 FROM stash_collections WHERE owner_note_id=ANY($1::uuid[]) LIMIT 1", [noteIds]);
+    return blocked.rowCount ? "collection_owner_requires_relocation" : "allowed";
   }
 
   private async readWith(client: PostgresQueryable, memberId: string, noteId: string, lock=false): Promise<TutorialContribution|undefined> {
     const metadata = await this.metadata(client, memberId, noteId, lock); if (!metadata) return undefined;
     const collection = await this.collection(client, metadata.collection_id); const viewBlock = await this.view(client, metadata.view_block_id);
     const notes = await client.query<any>(`WITH RECURSIVE branch AS (SELECT id,title,content,parent_id,tree_position,ARRAY[tree_position] ordering FROM stash_notes WHERE id=$1
-      UNION ALL SELECT child.id,child.title,child.content,child.parent_id,child.tree_position,branch.ordering||child.tree_position FROM stash_notes child JOIN branch ON child.parent_id=branch.id)
+      AND archived_at IS NULL AND trashed_at IS NULL
+      UNION ALL SELECT child.id,child.title,child.content,child.parent_id,child.tree_position,branch.ordering||child.tree_position FROM stash_notes child JOIN branch ON child.parent_id=branch.id
+      WHERE child.archived_at IS NULL AND child.trashed_at IS NULL)
       SELECT id,title,content,parent_id FROM branch ORDER BY ordering,id`, [metadata.root_note_id]);
     const ids = notes.rows.map(({id}:any)=>id); const links = await client.query<any>(`SELECT id,source_note_id,target_note_id,label FROM stash_note_links
       WHERE source_note_id=ANY($1::uuid[]) AND target_note_id=ANY($1::uuid[]) ORDER BY id`, [ids]);

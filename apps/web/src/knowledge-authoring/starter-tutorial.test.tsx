@@ -27,7 +27,7 @@ test("renders and edits the starter tutorial contribution", async () => {
   await waitFor(() => expect(requests.some(({ path, init }) => path.endsWith("/starter-tutorial/view") && init?.method === "PUT" && String(init.body).includes("table"))).toBe(true));
   vi.spyOn(window, "confirm").mockReturnValueOnce(true);
   fireEvent.click(screen.getByRole("button", { name: "Remove tutorial" }));
-  expect(await screen.findByText("The starter tutorial and its sample Tasks were permanently removed.")).toBeVisible();
+  expect(await screen.findByText("The starter tutorial and its sample Tasks were permanently removed.")).toHaveFocus();
   expect(screen.queryByRole("button", { name: "Restore Note branch" })).not.toBeInTheDocument();
 });
 

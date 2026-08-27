@@ -32,7 +32,7 @@ import { createAuthenticationSecretCodec } from "../src/authentication-secrets.j
 import { DiscussionService } from "../src/discussions.js";
 import { json, type HttpRoute } from "../src/http-routing.js";
 import { identityAccessCapability } from "../src/identity-access/index.js";
-import { StarterTutorialService } from "../src/identity-access/starter-tutorial.js";
+import { TutorialContributionService } from "../src/knowledge-authoring/collections.js";
 import { knowledgeAuthoringCapability } from "../src/knowledge-authoring/index.js";
 import { workPlanningCapability } from "../src/work-planning/index.js";
 import { ProjectlessTaskService } from "../src/work-planning/projectless-tasks.js";
@@ -427,9 +427,9 @@ const firstRunInstance = await startInstance({ database: firstRunStore.database,
   noteCollaboration: new NoteCollaborationService(firstRunStore.database), tasks: firstRunTasks, workspaceProjects: firstRunProjects,
   portableWorkspaceExports: new PortableWorkspaceExportService(firstRunStore.database, firstRunAttachments),
   capabilities: createCapabilityRegistry([
-    identityAccessCapability({ passwordAuth: firstRunAuth, instanceSetup: firstRunSetup,
-      starterTutorials: new StarterTutorialService(firstRunStore.database.tutorialContributionRepository()), memberAccess: firstRunAuth }),
-    knowledgeAuthoringCapability({ notes: firstRunNotes, noteTree: new NoteTreeService(firstRunStore.database.noteTreeRepository(), firstRunStore.database.tutorialContributionRepository()), memberAccess: firstRunAuth }),
+    identityAccessCapability({ passwordAuth: firstRunAuth, instanceSetup: firstRunSetup }),
+    knowledgeAuthoringCapability({ notes: firstRunNotes, noteTree: new NoteTreeService(firstRunStore.database.noteTreeRepository(), firstRunStore.database.tutorialContributionRepository()),
+      starterTutorials: new TutorialContributionService(firstRunStore.database.tutorialContributionRepository()), memberAccess: firstRunAuth }),
     workPlanningCapability({ tasks: firstRunTasks, workspaceProjects: firstRunProjects, memberAccess: firstRunAuth,
       projectlessTasks: new ProjectlessTaskService(firstRunStore.database.projectlessTaskRepository()) }),
   ]), webClientRoot: fileURLToPath(new URL("../apps/web/dist", import.meta.url)) });

@@ -87,6 +87,8 @@ export function noteTreeRoutes(service: NoteTreeService, access: MemberAccessRes
         }
         const result = await service.remove(member.accountId, noteId, action === "archive" ? "archived" : "trashed");
         if (result.status === "updated") json(response, 200, result);
+        else if (result.status === "collection_owner_requires_relocation") json(response, 409, { error: result.status,
+          message: "Move or remove the owned Collection before removing this Note branch, or remove the complete starter tutorial." });
         else json(response, 404, { error: result.status, message: "This Note branch is unavailable." });
       } catch (error) {
         if (error instanceof InvalidNoteTreeInput || error instanceof URIError) json(response, 422,

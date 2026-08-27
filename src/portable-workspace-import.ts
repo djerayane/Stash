@@ -316,7 +316,8 @@ function parseState(content: Buffer): PortableWorkspaceCanonicalState {
     || task.dependencies !== undefined && (!Array.isArray(task.dependencies) || task.dependencies.some((edge) => !object(edge) || !tasks.has(String(edge.taskId))))
     || task.sourceBlocks !== undefined && (!Array.isArray(task.sourceBlocks) || task.sourceBlocks.some((source) => !object(source)
       || !notes.has(String(source.noteId)) || !uuid.test(String(source.blockId))))
-    || typeof task.status.name !== "string" || !["unstarted","started","completed"].includes(String(task.status.category))
+    || typeof task.status.name !== "string" || !(task.projectId === undefined
+      ? ["unstarted","started","completed","canceled"] : ["unstarted","started","completed"]).includes(String(task.status.category))
     || task.assigneeIds !== undefined && (!Array.isArray(task.assigneeIds) || task.assigneeIds.some((id)=>!uuid.test(String(id))))
     || task.formerAssigneeIds !== undefined && (!Array.isArray(task.formerAssigneeIds) || task.formerAssigneeIds.some((id)=>!uuid.test(String(id))))
     || task.labelNames !== undefined && (!Array.isArray(task.labelNames) || task.labelNames.some((label)=>typeof label!=="string"))
@@ -366,7 +367,7 @@ function parseState(content: Buffer): PortableWorkspaceCanonicalState {
       const positions=new Set<number>(); const names=new Set<string>();
       for(const status of payload.statuses as unknown[]) { exact(status,["id","name","category","position"],"workspace_workflow_status");
         if(!object(status)||!uuid.test(String(status.id))||typeof status.name!=="string"||!status.name.trim()||names.has(status.name)
-          ||!["unstarted","started","completed"].includes(String(status.category))||!Number.isInteger(status.position)||Number(status.position)<1||positions.has(Number(status.position))) throw new InvalidPortableWorkspaceImport("invalid_workspace_workflow");
+          ||!["unstarted","started","completed","canceled"].includes(String(status.category))||!Number.isInteger(status.position)||Number(status.position)<1||positions.has(Number(status.position))) throw new InvalidPortableWorkspaceImport("invalid_workspace_workflow");
         names.add(status.name); positions.add(Number(status.position)); }
       sanitized=structuredClone(payload); }
     if(item.kind==="Collection") { exact(payload,["schema","id","workspaceId","ownerNoteId","title","properties","records"],"collection");

@@ -20,7 +20,7 @@ import { knowledgeAuthoringCapability } from "../../src/knowledge-authoring/inde
 import { NoteTreeService } from "../../src/knowledge-authoring/note-tree.js";
 import { NoteService } from "../../src/notes.js";
 import { PasswordAuthService } from "../../src/password-auth.js";
-import { StarterTutorialService } from "../../src/identity-access/starter-tutorial.js";
+import { TutorialContributionService } from "../../src/knowledge-authoring/collections.js";
 import { PortableWorkspaceExportService } from "../../src/portable-workspace-export.js";
 import { PortableWorkspaceImportService } from "../../src/portable-workspace-import.js";
 import { ProjectlessTaskService } from "../../src/work-planning/projectless-tasks.js";
@@ -204,11 +204,10 @@ describe("fresh Instance setup", () => {
       database: store.database, host: "127.0.0.1", port: 0, instanceAdminToken: "test-admin-token",
       passwordAuth,
       capabilities: createCapabilityRegistry([
-        identityAccessCapability({ passwordAuth, instanceSetup: setup,
-          starterTutorials: new StarterTutorialService(store.database.tutorialContributionRepository()), memberAccess: passwordAuth }),
+        identityAccessCapability({ passwordAuth, instanceSetup: setup }),
         knowledgeAuthoringCapability({ notes: new NoteService(store.database),
           noteTree: new NoteTreeService(store.database.noteTreeRepository(), store.database.tutorialContributionRepository()),
-          memberAccess: passwordAuth }),
+          starterTutorials: new TutorialContributionService(store.database.tutorialContributionRepository()), memberAccess: passwordAuth }),
         workPlanningCapability({ tasks: new TaskService(store.database, store.database), memberAccess: passwordAuth,
           projectlessTasks: new ProjectlessTaskService(store.database.projectlessTaskRepository()) }),
       ]),
@@ -269,6 +268,29 @@ describe("fresh Instance setup", () => {
       source: { kind: "tasks", workspaceId: result.workspaceId, project: "none" },
       definition: { query: { scope: "projectless", titleContains: "" }, layout: "list" },
     });
+    const childPreview = await fetch(`${instance.url}/api/notes/${linkedNode.id}/branch-preview`, {
+      method: "POST", headers: { ...authorization, "content-type": "application/json" }, body: JSON.stringify({ action: "trash" }),
+    });
+    assert.equal(childPreview.status, 200);
+    assert.equal((await childPreview.json() as any).impact.collectionRelocationRequired, true);
+    const rejectedChildArchive = await fetch(`${instance.url}/api/notes/${linkedNode.id}/archive`, { method: "POST", headers: authorization });
+    assert.equal(rejectedChildArchive.status, 409);
+    assert.equal((await rejectedChildArchive.json() as any).error, "collection_owner_requires_relocation");
+    const rejectedChildTrash = await fetch(`${instance.url}/api/notes/${linkedNode.id}/trash`, { method: "POST", headers: authorization });
+    assert.equal(rejectedChildTrash.status, 409);
+    assert.deepEqual(await rejectedChildTrash.json(), { error: "collection_owner_requires_relocation",
+      message: "Move or remove the owned Collection before removing this Note branch, or remove the complete starter tutorial." });
+    assert.equal((await fetch(`${instance.url}/api/notes/${result.starterNoteId}/starter-tutorial`, { headers: authorization })).status, 200);
+
+    const extraChild = await fetch(`${instance.url}/api/workspaces/${result.workspaceId}/note-tree`, {
+      method: "POST", headers: { ...authorization, "content-type": "application/json" },
+      body: JSON.stringify({ title: "Temporary detail", parentId: linkedNode.id }),
+    });
+    assert.equal(extraChild.status, 201); const extraChildId = (await extraChild.json() as { node: { id: string } }).node.id;
+    assert.equal((await fetch(`${instance.url}/api/notes/${extraChildId}/archive`, { method: "POST", headers: authorization })).status, 200);
+    const filteredTutorial = await fetch(`${instance.url}/api/notes/${result.starterNoteId}/starter-tutorial`, { headers: authorization });
+    assert.equal(filteredTutorial.status, 200);
+    assert.equal((await filteredTutorial.json() as any).tutorial.notes.some(({ id }: { id: string }) => id === extraChildId), false);
     const projectlessTasks = await fetch(`${instance.url}/api/workspaces/${result.workspaceId}/tasks?scope=projectless`, { headers: authorization });
     assert.equal(projectlessTasks.status, 200);
     const projectlessBody = await projectlessTasks.json() as { tasks: Array<{ id: string; title: string; status: { id: string; name: string; category: string } }> };
@@ -311,7 +333,7 @@ describe("fresh Instance setup", () => {
       method: "POST", headers: authorization,
     });
     assert.equal(removed.status, 200);
-    assert.equal((await removed.json() as { affectedIds: string[] }).affectedIds.length, 3);
+    assert.equal((await removed.json() as { affectedIds: string[] }).affectedIds.length, 4);
     const emptyTree = await fetch(`${instance.url}/api/workspaces/${result.workspaceId}/note-tree`, { headers: authorization });
     assert.deepEqual((await emptyTree.json() as { nodes: unknown[] }).nodes, []);
     assert.equal((await fetch(`${instance.url}/api/notes/${result.starterNoteId}/starter-tutorial`, { headers: authorization })).status, 404);

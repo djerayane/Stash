@@ -88,7 +88,7 @@ test("@a11y completes protected first-run setup by keyboard and opens the starte
 
   page.once("dialog", (dialog) => void dialog.accept());
   await page.getByRole("button", { name: "Remove tutorial" }).press("Enter");
-  await expect(page.getByText("The starter tutorial and its sample Tasks were permanently removed.")).toBeVisible();
+  await expect(page.getByText("The starter tutorial and its sample Tasks were permanently removed.")).toBeFocused();
   await expect(page.getByRole("button", { name: "Restore Note branch" })).toHaveCount(0);
   const cleanup = await page.evaluate(async ({ starterNoteId }) => {
     const token = JSON.parse(localStorage.getItem("stash.member-session")!).token;

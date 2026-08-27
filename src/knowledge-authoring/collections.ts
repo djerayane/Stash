@@ -39,8 +39,14 @@ export interface TutorialContributionRepository {
   updateViewBlock(memberId: string, noteId: string,
     input: { layout: "list" | "table"; titleContains: string }): Promise<TutorialContribution | undefined>;
   remove(memberId: string, noteId: string): Promise<"removed" | "not_found">;
-  inspect(memberId: string, noteIds: readonly string[]): Promise<{ collectionCount: number }>;
+  inspect(memberId: string, noteIds: readonly string[]): Promise<{
+    collectionCount: number;
+    collectionRelocationRequired?: boolean;
+  }>;
 }
+
+/** The narrow transactional seam identity setup needs from knowledge authoring. */
+export type StarterKnowledgeSeeder = Pick<TutorialContributionRepository, "prepare" | "seed">;
 
 export class InvalidTutorialContributionInput extends Error {}
 
