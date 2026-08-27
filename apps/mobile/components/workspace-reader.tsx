@@ -1,8 +1,9 @@
-import type { MobileCanonicalTask, MobileWorkspaceSnapshot, ViewBlock } from "@stash/domain-types";
+import { isTaskViewPropertyId, type MobileCanonicalTask, type MobileWorkspaceSnapshot, type TaskViewPropertyId, type ViewBlock } from "@stash/domain-types";
 import { useMemo, useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 
 import { colors } from "@/theme/colors";
+import { displayReadableValue, groupReadableRecords, matchesReadableFilter, visibleNoteTree } from "./workspace-reader-model";
 
 type Section = "notes" | "tasks" | "search" | "views";
 
@@ -51,10 +52,9 @@ function NoteTree({ snapshot }: { snapshot: MobileWorkspaceSnapshot }) {
   const notes = new Map(snapshot.notes.map((note) => [note.id, note]));
   const [activeId, setActiveId] = useState(snapshot.noteTree[0]?.id);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
-  const hidden = (id: string) => ancestors(id, snapshot).some((parentId) => collapsed.has(parentId));
   const active = activeId ? notes.get(activeId) : undefined;
   return <View style={{ gap: 10 }}>
-    {snapshot.noteTree.length ? snapshot.noteTree.filter((node) => !hidden(node.id)).map((node) => {
+    {snapshot.noteTree.length ? visibleNoteTree(snapshot.noteTree, collapsed).map((node) => {
       const depth = ancestors(node.id, snapshot).length;
       const isCollapsed = collapsed.has(node.id);
       return <View key={node.id} style={{ flexDirection: "row", gap: 8, marginLeft: Math.min(depth, 3) * 14 }}>
@@ -106,37 +106,33 @@ function ReadableViews({ views, snapshot }: { views: ViewBlock[]; snapshot: Mobi
       const source = view.definition.source;
       const collection = source.kind === "collection" ? snapshot.collections.find(({ id }) => id === source.collectionId) : undefined;
       const tasks = source.kind === "tasks" ? snapshot.tasks.filter((task) => view.definition.filters.every((filter) =>
-        matchesSavedFilter(taskValue(task, filter.propertyId), filter.operator, filter.value))).sort((left, right) => {
+        matchesReadableFilter(taskValue(task, filter.propertyId), filter.operator, filter.value))).sort((left, right) => {
           for (const sort of view.definition.sorts) {
-            const compared = displayValue(taskValue(left, sort.propertyId)).localeCompare(displayValue(taskValue(right, sort.propertyId)));
+            const compared = displayReadableValue(taskValue(left, sort.propertyId)).localeCompare(displayReadableValue(taskValue(right, sort.propertyId)));
             if (compared) return sort.direction === "ascending" ? compared : -compared;
           }
           return left.title.localeCompare(right.title);
         }) : [];
-      const records = collection ? [...collection.records].filter((record) => view.definition.filters.every((filter) => {
-        return matchesSavedFilter(record.values[filter.propertyId], filter.operator, filter.value);
-      })).sort((left, right) => {
-        for (const sort of view.definition.sorts) {
-          const compared = displayValue(left.values[sort.propertyId]).localeCompare(displayValue(right.values[sort.propertyId]));
-          if (compared) return sort.direction === "ascending" ? compared : -compared;
-        }
-        return left.position - right.position;
-      }) : [];
+      const recordGroups = collection ? groupReadableRecords(collection.records, view.definition) : [];
+      const records = recordGroups.flatMap(({ items }) => items);
       const count = source.kind === "tasks" ? tasks.length : records.length;
       return <View key={view.id} style={cardStyle}>
         <Text selectable accessibilityRole="header" style={{ color: colors.label, fontSize: 17, fontWeight: "700" }}>{view.title}</Text>
         <Text selectable style={{ color: colors.secondaryLabel }}>{view.definition.presentation} view · {count} item{count === 1 ? "" : "s"}</Text>
         {tasks.map((task) => <View key={task.id} style={{ gap: 3, paddingVertical: 7 }}>
           {view.definition.groupBy ? <Text selectable style={{ color: colors.secondaryLabel, fontWeight: "600" }}>
-            {displayValue(taskValue(task, view.definition.groupBy)) || "No value"}
+            {displayReadableValue(taskValue(task, view.definition.groupBy)) || "No value"}
           </Text> : null}
           <Text selectable style={{ color: colors.label, fontWeight: "600" }}>{task.title}</Text>
           <Text selectable style={{ color: colors.secondaryLabel }}>{task.status.name} · {task.projectKeys.map(({ key }) => key).join(" · ") || "No Project"}</Text>
         </View>)}
-        {collection && records.map((record) => <View key={record.id} style={{ gap: 3, paddingVertical: 7 }}>
-          {collection.properties.map((property) => <Text selectable key={property.id} style={{ color: colors.label }}>
-            <Text style={{ fontWeight: "600" }}>{property.name}: </Text>{displayValue(record.values[property.id]) || "—"}
-          </Text>)}
+        {collection && recordGroups.map((group, index) => <View key={group.label ?? `all-${index}`} accessibilityRole="summary" style={{ gap: 5 }}>
+          {group.label ? <Text selectable accessibilityRole="header" style={{ color: colors.secondaryLabel, fontWeight: "700" }}>{group.label}</Text> : null}
+          {group.items.map((record) => <View key={record.id} style={{ gap: 3, paddingVertical: 7 }}>
+            {collection.properties.map((property) => <Text selectable key={property.id} style={{ color: colors.label }}>
+              <Text style={{ fontWeight: "600" }}>{property.name}: </Text>{displayReadableValue(record.values[property.id]) || "—"}
+            </Text>)}
+          </View>)}
         </View>)}
         {!count ? <Text selectable style={{ color: colors.secondaryLabel }}>No items match this saved view.</Text> : null}
         <Text selectable style={{ color: colors.secondaryLabel, lineHeight: 21 }}>Layout authoring remains on desktop.</Text>
@@ -145,31 +141,20 @@ function ReadableViews({ views, snapshot }: { views: ViewBlock[]; snapshot: Mobi
   </View>;
 }
 
-function displayValue(value: unknown): string {
-  if (value === undefined || value === null) return "";
-  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
-  if (Array.isArray(value)) return value.map((entry) => typeof entry === "object" && entry && "fallback" in entry ? String(entry.fallback) : String(entry)).join(", ");
-  if (typeof value === "object" && "start" in value) return String(value.start);
-  return "";
-}
-
 function taskValue(task: MobileCanonicalTask, propertyId: string): unknown {
-  if (propertyId === "task:title") return task.title;
-  if (propertyId === "task:description") return task.description;
-  if (propertyId === "task:status") return task.status.id;
-  if (propertyId === "task:assignee") return task.assigneeIds;
-  if (propertyId === "task:project") return task.projectKeys.map(({ key }) => key);
-  return undefined;
+  if (!isTaskViewPropertyId(propertyId)) return undefined;
+  return canonicalTaskViewValue(task, propertyId);
 }
 
-function matchesSavedFilter(value: unknown, operator: ViewBlock["definition"]["filters"][number]["operator"], expected: unknown) {
-  const empty = value === undefined || value === null || value === "" || Array.isArray(value) && !value.length;
-  if (operator === "is_empty") return empty;
-  if (operator === "is_not_empty") return !empty;
-  const comparable = displayValue(value).toLocaleLowerCase(); const target = displayValue(expected).toLocaleLowerCase();
-  if (operator === "equals") return Array.isArray(value) ? value.map(displayValue).some((entry) => entry.toLocaleLowerCase() === target) : comparable === target;
-  if (operator === "not_equals") return Array.isArray(value) ? value.map(displayValue).every((entry) => entry.toLocaleLowerCase() !== target) : comparable !== target;
-  return comparable.includes(target);
+function canonicalTaskViewValue(task: MobileCanonicalTask, propertyId: TaskViewPropertyId): unknown {
+  switch (propertyId) {
+    case "task:title": return task.title;
+    case "task:description": return task.description;
+    case "task:status": return task.status.id;
+    case "task:assignee": return task.assigneeIds;
+    case "task:project": return task.projectKeys.map(({ key }) => key);
+    default: { const exhaustive: never = propertyId; return exhaustive; }
+  }
 }
 
 function ancestors(id: string, snapshot: MobileWorkspaceSnapshot) {

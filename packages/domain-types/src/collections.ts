@@ -44,6 +44,12 @@ export interface CollectionImpact {
   readonly token: string;
 }
 
+export const taskViewPropertyIds = ["task:title", "task:description", "task:status", "task:assignee", "task:project"] as const;
+export type TaskViewPropertyId = (typeof taskViewPropertyIds)[number];
+export function isTaskViewPropertyId(value: string): value is TaskViewPropertyId {
+  return (taskViewPropertyIds as readonly string[]).includes(value);
+}
+
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const plain = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value)
   && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
@@ -169,18 +175,19 @@ export function normalizeViewDefinition(value: unknown): ViewDefinition {
   else invalidView();
   const filters = value.filters.map((filter): ViewFilter => {
     if (!plain(filter) || !exact(filter, ["propertyId", "operator"], ["value"])
-      || !uuid.test(String(filter.propertyId)) && !/^task:(?:title|status|assignee|due_date)$/.test(String(filter.propertyId))
+      || !uuid.test(String(filter.propertyId)) && !isTaskViewPropertyId(String(filter.propertyId))
       || !["equals", "not_equals", "contains", "is_empty", "is_not_empty"].includes(String(filter.operator))
       || ["is_empty", "is_not_empty"].includes(String(filter.operator)) === Object.hasOwn(filter, "value")) invalidView();
     return { propertyId: String(filter.propertyId), operator: filter.operator as ViewFilter["operator"],
       ...(Object.hasOwn(filter, "value") ? { value: portableJson(filter.value) as CollectionPropertyValue } : {}) };
   });
   const sorts = value.sorts.map((sort): ViewSort => {
-    if (!plain(sort) || !exact(sort, ["propertyId", "direction"]) || !uuid.test(String(sort.propertyId))
+    if (!plain(sort) || !exact(sort, ["propertyId", "direction"])
+      || !uuid.test(String(sort.propertyId)) && !isTaskViewPropertyId(String(sort.propertyId))
       || !["ascending", "descending"].includes(String(sort.direction))) invalidView();
     return { propertyId: String(sort.propertyId), direction: sort.direction as ViewSort["direction"] };
   });
-  if (value.groupBy !== undefined && !uuid.test(String(value.groupBy))) invalidView();
+  if (value.groupBy !== undefined && !uuid.test(String(value.groupBy)) && !isTaskViewPropertyId(String(value.groupBy))) invalidView();
   let focused: ViewDefinition["focused"];
   if (value.focused !== undefined) {
     if (!plain(value.focused) || !exact(value.focused, ["recordId"]) || !uuid.test(String(value.focused.recordId))) invalidView();
