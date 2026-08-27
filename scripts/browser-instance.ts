@@ -289,7 +289,7 @@ const browserWorkspaceWorkflow = { schema: "stash.workspace-workflow.v1" as cons
   { id: "43434343-4343-4343-8343-434343434343", name: "Done", category: "completed" as const, position: 3 },
 ] };
 let browserCanonicalTasks: CanonicalTask[] = [{ schema: "stash.task.v1", id: task.id, workspaceId: browserWorkspaceId,
-  title: task.title, description: "", status: browserWorkspaceWorkflow.statuses[0]!, assigneeIds: [browserMemberId],
+  title: task.title, description: "", revision:1,status: browserWorkspaceWorkflow.statuses[0]!, assigneeIds: [browserMemberId],
   projectAssociations: [projectId], projectKeys: [{ projectId, key: task.key }], keyAliases: [], sourceNoteIds: [], sourceBlocks: [],
   createdBy: task.createdBy, createdAt: task.createdAt }];
 const browserCanonicalTaskService = new CanonicalTaskService({
@@ -298,13 +298,13 @@ const browserCanonicalTaskService = new CanonicalTaskService({
   async workspaceWorkflow(memberId, workspaceId) { return memberId === browserMemberId && workspaceId === browserWorkspaceId
     ? { status: "found" as const, workflow: browserWorkspaceWorkflow } : { status: "workspace_not_found" as const }; },
   async createTask(memberId, workspaceId, input) { if (memberId !== browserMemberId || workspaceId !== browserWorkspaceId) return { status: "workspace_not_found" as const };
-    const created: CanonicalTask = { schema: "stash.task.v1", id: crypto.randomUUID(), workspaceId, title: input.title, description: input.description,
+    const created: CanonicalTask = { schema: "stash.task.v1", id: crypto.randomUUID(), workspaceId, title: input.title, description: input.description,revision:1,
       status: browserWorkspaceWorkflow.statuses[0]!, assigneeIds: [], projectAssociations: [], projectKeys: [], keyAliases: [], sourceNoteIds: [], sourceBlocks: [],
       ...(input.parentTaskId ? { parentTaskId: input.parentTaskId } : {}), createdBy: task.createdBy, createdAt: new Date().toISOString() };
     browserCanonicalTasks = [...browserCanonicalTasks, created]; return { status: "created" as const, task: created }; },
   async updateTask(_memberId, taskId, input) { const found = browserCanonicalTasks.find((item) => item.id === taskId); if (!found) return { status: "task_not_found" as const };
     const status = input.statusId ? browserWorkspaceWorkflow.statuses.find((item) => item.id === input.statusId) : found.status;
-    if (!status) return { status: "invalid_reference" as const }; const updated = { ...found, ...input, status };
+    if (!status) return { status: "invalid_reference" as const }; const updated = { ...found, ...input, status,revision:found.revision+1 };
     browserCanonicalTasks = browserCanonicalTasks.map((item) => item.id === taskId ? updated : item); return { status: "updated" as const, task: updated }; },
   async associateTask() { return { status: "task_not_found" as const }; }, async setTaskParent() { return { status: "task_not_found" as const }; },
   async resolveTaskKey() { return { status: "task_not_found" as const }; },

@@ -2,7 +2,7 @@ export type StatusCategory = "unstarted" | "started" | "completed";
 export interface WorkspaceWorkflow { schema: "stash.workspace-workflow.v1"; workspaceId: string;
   statuses: Array<{ id: string; name: string; category: StatusCategory; position: number }> }
 export interface CanonicalTask {
-  schema: "stash.task.v1"; id: string; workspaceId: string; title: string; description: string;
+  schema: "stash.task.v1"; id: string; workspaceId: string; title: string; description: string; revision: number;
   status: WorkspaceWorkflow["statuses"][number]; assigneeIds: string[]; parentTaskId?: string;
   projectAssociations: string[]; projectKeys: Array<{ projectId: string; key: string }>;
   keyAliases: Array<{ projectId: string; key: string }>; sourceNoteIds: string[];
@@ -10,11 +10,12 @@ export interface CanonicalTask {
   createdBy: { localAccountId: string; displayName: string }; createdAt: string;
 }
 export type TaskResult = { status: "created" | "updated"; task: CanonicalTask; audienceBroadenedProjectIds?: string[] }
+  | { status: "conflict"; task: CanonicalTask; operationId: string; baseRevision: number; changes: CanonicalTaskChanges }
   | { status: "audience_broadening"; projectIds: string[]; memberIds: string[]; impactToken: string }
   | { status: "workspace_not_found" | "task_not_found" | "invalid_reference" | "cycle" | "forbidden" };
 export interface CanonicalTaskRepository {
   createTask(memberId: string, workspaceId: string, input: { title: string; description: string; parentTaskId?: string; projectIds: string[] }): Promise<TaskResult>;
-  updateTask(memberId: string, taskId: string, input: { title?: string; description?: string; statusId?: string }): Promise<TaskResult>;
+  updateTask(memberId: string, taskId: string, input: CanonicalTaskChanges, operation?: { operationId: string; baseRevision: number }): Promise<TaskResult>;
   associateTask(memberId: string, taskId: string, projectIds: string[], impactToken?: string): Promise<TaskResult>;
   setTaskParent(memberId: string, taskId: string, parentTaskId?: string): Promise<TaskResult>;
   resolveTaskKey(memberId: string, projectId: string, key: string): Promise<{ status: "found"; task: CanonicalTask } | { status: "task_not_found" }>;
@@ -24,6 +25,7 @@ export interface CanonicalTaskRepository {
   listProjectTasks(memberId: string, projectId: string): Promise<{ status: "found"; tasks: CanonicalTask[] } | { status: "project_not_found" }>;
   listTasks(memberId: string, workspaceId: string): Promise<{ status: "found"; tasks: CanonicalTask[]; workflow: WorkspaceWorkflow } | { status: "workspace_not_found" }>;
 }
+export interface CanonicalTaskChanges { title?: string; description?: string; statusId?: string }
 
 export class InvalidCanonicalTaskInput extends Error {}
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -47,14 +49,18 @@ export class CanonicalTaskService {
       ...(typeof value.parentTaskId === "string" ? { parentTaskId: value.parentTaskId } : {}), projectIds: projects(value.projectIds)! });
   }
   update(memberId: string, taskId: string, value: unknown) {
-    if (!uuid.test(taskId) || !object(value) || !Object.keys(value).length
-      || Object.keys(value).some((key) => !["title", "description", "statusId"].includes(key))
-      || value.title !== undefined && (typeof value.title !== "string" || !value.title.trim() || value.title.trim().length > 500)
-      || value.description !== undefined && (typeof value.description !== "string" || value.description.length > 20_000)
-      || value.statusId !== undefined && !uuid.test(String(value.statusId))) throw new InvalidCanonicalTaskInput();
-    return this.repository.updateTask(memberId, taskId, { ...(typeof value.title === "string" ? { title: value.title.trim() } : {}),
-      ...(typeof value.description === "string" ? { description: value.description } : {}),
-      ...(typeof value.statusId === "string" ? { statusId: value.statusId } : {}) });
+    if (!uuid.test(taskId) || !object(value)) throw new InvalidCanonicalTaskInput();
+    const envelope="changes" in value; const changes=envelope?value.changes:value;
+    if (!object(changes) || !Object.keys(changes).length || Object.keys(changes).some((key)=>!["title","description","statusId"].includes(key))
+      || changes.title!==undefined&&(typeof changes.title!=="string"||!changes.title.trim()||changes.title.trim().length>500)
+      || changes.description!==undefined&&(typeof changes.description!=="string"||changes.description.length>20_000)
+      || changes.statusId!==undefined&&!uuid.test(String(changes.statusId))
+      || envelope&&(Object.keys(value).some((key)=>!["operationId","baseRevision","changes"].includes(key))
+        ||typeof value.operationId!=="string"||!uuid.test(value.operationId)||!Number.isSafeInteger(value.baseRevision)||Number(value.baseRevision)<1))
+      throw new InvalidCanonicalTaskInput();
+    const normalized={...(typeof changes.title==="string"?{title:changes.title.trim()}:{}),
+      ...(typeof changes.description==="string"?{description:changes.description}:{}),...(typeof changes.statusId==="string"?{statusId:changes.statusId}:{})};
+    return this.repository.updateTask(memberId,taskId,normalized,envelope?{operationId:value.operationId as string,baseRevision:value.baseRevision as number}:undefined);
   }
   associate(memberId: string, taskId: string, value: unknown) {
     if (!uuid.test(taskId) || !object(value) || Object.keys(value).some((key) => !["projectIds","impactToken"].includes(key))
