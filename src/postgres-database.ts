@@ -1,6 +1,7 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { ClientSessionPrincipal, DatabaseProbe } from "./instance.js";
-import { noteOperationDigest, type NoteConflictResolution, type NoteEditBatch, type NoteEditConflict, type NoteRecord, type NoteRepository, type NoteTriageChange, type NoteTriageResult, type PortableExportTaskProjection, type PortableNoteLinkProjection, type PortableNoteProjection, type PortableNoteStateProjection, type PortableTaskProjection, type TaskCreation } from "./notes.js";
+import { noteOperationDigest, type NoteRecord, type NoteRepository, type NoteTriageResult, type PortableNoteProjection,
+  type PortableNoteStateProjection } from "./notes.js";
 import { isRichTextDocument, markdownToRichText, paragraphDocument, richTextToMarkdown } from "./rich-text.js";
 import type { BootstrapRecord, OwnerBootstrapRepository } from "./owner-bootstrap.js";
 import type { PasswordAuthRepository } from "./password-auth.js";
@@ -24,7 +25,7 @@ import type {
 } from "./workspaces-projects.js";
 import type { MemberLocalizationPreferences, MemberLocalizationRepository } from "./member-localization.js";
 import type { PortableRepositoryConnectionProjection, RepositoryConnectionRecord } from "./repository-connections.js";
-import { taskEditDigest, type CreateTaskFromBlockDraft, type CreateTaskFromBlockOutcome, type CreateWorkspaceTaskFromBlockOutcome, type LinkedTaskReadModel, type StructuredTaskEditRepository, type TaskEditBatch, type TaskEditConflict, type TaskFromBlockRepository, type TaskMoveActivity, type TaskMoveRepository, type TaskPlanningReadModel, type TaskPlanningRepository, type TaskPlanningUpdate, type TaskSourceBlockReference } from "./tasks.js";
+import type { StructuredTaskEditRepository, TaskFromBlockRepository, TaskMoveRepository, TaskPlanningRepository } from "./tasks.js";
 import type { AttachmentRecord, AttachmentRepository, PortableAttachmentProjection } from "./attachments.js";
 import type { MobileCaptureRepository } from "./mobile-captures.js";
 import type { CreateDiscussionWorkDraft, DiscussionDraft, DiscussionMessage, DiscussionRecord, DiscussionRepository, DiscussionTarget, DiscussionWorkActivity, DiscussionWorkOutcome, PortableDiscussionProjection, PortableDiscussionTarget, PortableDiscussionWorkLinkProjection } from "./discussions.js";
@@ -33,10 +34,8 @@ import type { PortableWorkspaceExportRepository, PortableWorkspaceExportSnapshot
 import type { ImportTransformation, PortableWorkspaceImportBundle, PortableWorkspaceImportReport, PortableWorkspaceImportRepository } from "./portable-workspace-import.js";
 import type { Board, BoardRepository } from "./boards.js";
 import type { NoteLinkRecord, NoteLinkRepository, NoteLocationRecord, PortableNoteLinkStateProjection, PortableNoteLocationProjection } from "./note-links.js";
-import type { ActivityCause, ActivityRecord, ActivityRepository, NoteHistoryRevision } from "./activity.js";
-import type { DevelopmentArtifact, GitHubArtifactRepository } from "./github-artifacts.js";
-import type { GitHubSignal } from "./github-signals.js";
-import { assignmentNotificationInputs, directMentionMemberIds, directMentionNotificationInputs, notificationDeliveryMode, requestedReviewNotificationInput, type NotificationDelivery, type NotificationPreferences, type NotificationRepository } from "./notifications.js";
+import type { ActivityCause, ActivityRepository } from "./activity.js";
+import type { NotificationRepository } from "./notifications.js";
 import type { AutomationRepository } from "./automations.js";
 import * as Y from "yjs";
 import { prosemirrorJSONToYDoc, yDocToProsemirrorJSON } from "y-prosemirror";
@@ -60,7 +59,6 @@ import type { RelationshipQueryRepository } from "./knowledge-authoring/relation
 import { PostgresVisualizationBlockRepository } from "./knowledge-authoring/postgres-visualization-block-repository.js";
 import type { VisualizationBlockRepository } from "./knowledge-authoring/visualization-block.js";
 import { PostgresKnowledgeAuthoringRepositories } from "./knowledge-authoring/postgres-knowledge-authoring-repositories.js";
-import { effectiveNoteReadSql, workspaceMemberSql } from "./knowledge-authoring/postgres-note-access.js";
 import type { PostgresPortableProjectionContributor } from "./instance-operations/storage/portable-projection-contributor.js";
 import { PostgresProjectlessTaskRepository } from "./work-planning/postgres-projectless-task-repository.js";
 import { PostgresProjectPermissionRepository } from "./work-planning/postgres-project-permission-repository.js";
@@ -106,85 +104,6 @@ const repositoryConnectionSelect = `SELECT connection.id, connection.organizatio
   connection.ownership, connection.state,
   ARRAY(SELECT project_id FROM stash_repository_connection_projects link WHERE link.connection_id = connection.id ORDER BY project_id) AS project_ids
   FROM stash_repository_connections connection`;
-const taskPlanningSelect = `SELECT task.*, COALESCE(workspace_status.name,status.name) AS status_name,
-  COALESCE(workspace_status.category,status.category) AS status_category,
-  creator.name AS created_by_name,
-  ARRAY(SELECT source.note_id FROM stash_task_note_sources source WHERE source.task_id = task.id ORDER BY source.note_id) AS source_note_ids,
-  COALESCE((SELECT jsonb_agg(jsonb_build_object('noteId', source.note_id, 'blockId', source.block_id) ORDER BY source.note_id, source.block_id)
-    FROM stash_task_block_sources source WHERE source.task_id = task.id), '[]'::jsonb) AS source_blocks,
-  COALESCE((SELECT jsonb_agg(jsonb_build_object('projectId', alias.project_id, 'key', alias.task_key) ORDER BY alias.created_at)
-    FROM stash_task_key_aliases alias WHERE alias.task_id = task.id), '[]'::jsonb) AS key_aliases
-  , COALESCE((SELECT jsonb_agg(jsonb_build_object('projectId', association.project_id, 'key', association.task_key) ORDER BY association.project_id)
-    FROM stash_task_projects association WHERE association.task_id = task.id), '[]'::jsonb) AS project_keys
-  , COALESCE((SELECT jsonb_agg(relation ORDER BY relation->>'taskId', relation->>'type') FROM (
-      SELECT jsonb_build_object('taskId', edge.prerequisite_task_id, 'type', 'depends_on') AS relation
-      FROM stash_task_dependencies edge WHERE edge.dependent_task_id = task.id
-      UNION ALL
-      SELECT jsonb_build_object('taskId', edge.dependent_task_id, 'type', 'required_by') AS relation
-      FROM stash_task_dependencies edge WHERE edge.prerequisite_task_id = task.id
-    ) visible_dependencies), '[]'::jsonb) AS dependencies
-  , COALESCE((SELECT jsonb_agg(jsonb_build_object('code', 'incomplete_dependency', 'taskId', prerequisite.id)
-      ORDER BY prerequisite.id)
-      FROM stash_task_dependencies edge
-      JOIN stash_tasks prerequisite ON prerequisite.id = edge.prerequisite_task_id
-      JOIN stash_workflow_statuses prerequisite_status ON prerequisite_status.id = prerequisite.workflow_status_id
-      WHERE edge.dependent_task_id = task.id AND prerequisite_status.category <> 'completed'), '[]'::jsonb) AS dependency_warnings
-  FROM stash_tasks task
-  LEFT JOIN stash_workflow_statuses status ON status.id = task.workflow_status_id
-  LEFT JOIN stash_workspace_workflow_statuses workspace_status ON workspace_status.id = task.workspace_workflow_status_id
-  JOIN stash_accounts creator ON creator.id = task.created_by_account_id
-  JOIN stash_workspaces workspace ON workspace.id = task.workspace_id
-  WHERE (task.project_id = $1 AND task.task_key = $2 OR EXISTS (SELECT 1 FROM stash_task_projects association
-      WHERE association.task_id=task.id AND association.project_id=$1 AND association.task_key=$2) OR EXISTS (SELECT 1 FROM stash_task_key_aliases alias
-      WHERE alias.task_id = task.id AND alias.project_id = $1 AND alias.task_key = $2))
-    AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $3)
-      OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
-        WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $3))
-      OR EXISTS (SELECT 1 FROM stash_project_guests guest JOIN stash_task_projects association ON association.project_id=guest.project_id
-        WHERE association.task_id=task.id AND guest.account_id=$3))`;
-const taskPlanningSelectById = taskPlanningSelect
-  .replace(/\(task\.project_id = \$1[\s\S]*?alias\.task_key = \$2\)\)/, "task.id = $1")
-  .replaceAll("$3", "$2");
-
-function taskProjectionFromRow(row: any): PortableExportTaskProjection {
-  return {
-    schema: "stash.task.v1", id: row.id, workspaceId: row.workspace_id, ...(row.project_id ? { projectId: row.project_id } : {}),
-    ...(row.task_key ? { key: row.task_key } : {}), ...(row.project_keys?.length ? { projectKeys: row.project_keys,
-      projectAssociations: row.project_keys.map((entry: any) => entry.projectId) } : {}),
-    ...(row.key_aliases?.length ? { keyAliases: row.key_aliases } : {}), title: row.title,
-    status: { id: row.workspace_workflow_status_id ?? row.workflow_status_id, name: row.status_name, category: row.status_category },
-    assigneeIds: row.assignee_ids ?? [], ...(row.former_assignee_ids?.length ? { formerAssigneeIds: row.former_assignee_ids } : {}),
-    priority: row.priority ?? "none", labelNames: row.label_names ?? [],
-    ...(row.due_date ? { dueDate: typeof row.due_date === "string" ? row.due_date : row.due_date.toISOString().slice(0, 10) } : {}),
-    ...(row.estimate === null || row.estimate === undefined ? {} : { estimate: Number(row.estimate) }),
-    linkedNoteIds: row.linked_note_ids ?? [], dependencies: row.dependencies ?? [], developmentLinks: row.development_links ?? [],
-    sourceNoteIds: row.source_note_ids ?? [], ...(row.source_blocks?.length ? { sourceBlocks: row.source_blocks } : {}),
-    createdAt: new Date(row.created_at).toISOString(),
-    createdBy: { localAccountId: row.created_by_account_id, displayName: row.created_by_name },
-  };
-}
-
-function formerAssignmentsAfterUpdate(
-  previousFormerAssigneeIds: readonly string[],
-  nextAssigneeIds: readonly string[],
-  assigneesWereUpdated: boolean,
-): string[] {
-  if (!assigneesWereUpdated) return [...previousFormerAssigneeIds];
-  const removedEveryFormerAssignee = previousFormerAssigneeIds.every((id) => !nextAssigneeIds.includes(id));
-  const hasReplacementAssignee = nextAssigneeIds.some((id) => !previousFormerAssigneeIds.includes(id));
-  return removedEveryFormerAssignee && hasReplacementAssignee ? [] : [...previousFormerAssigneeIds];
-}
-
-function taskPlanningReadModelFromRow(row: any): TaskPlanningReadModel {
-  return { ...taskProjectionFromRow(row), revision: Number(row.revision), dependencyWarnings: row.dependency_warnings ?? [] } as TaskPlanningReadModel;
-}
-
-function taskConflictFromRow(row: any): TaskEditConflict {
-  return { id: row.id, taskId: row.task_id, baseRevision: row.base_revision, currentRevision: row.current_revision,
-    fields: row.fields, contribution: row.contribution, createdAt: new Date(row.created_at).toISOString(),
-    createdBy: { displayName: row.created_by_display_name, attribution: "recorded" },
-    ...(row.resolved_at ? { resolvedAt: new Date(row.resolved_at).toISOString(), resolution: row.resolution } : {}) };
-}
 export { collaborativeDocumentFromRichText, richTextFromCollaborativeDocument, validatedRichTextFromCollaborativeDocument } from "./knowledge-authoring/collaborative-document.js";
 
 export class PostgresDatabase implements DatabaseProbe {
@@ -238,7 +157,7 @@ export class PostgresDatabase implements DatabaseProbe {
         assignCustomRole: (...args) => this.#organizationRoleRepository.assignCustomRole(...args),
         revokeCustomRole: (...args) => this.#organizationRoleRepository.revokeCustomRole(...args),
       },
-      prepareNotifications: (client) => this.#ensureNotificationSchema(client),
+      prepareNotifications: (client) => this.#workPlanningAdapter.prepareNotifications(client),
       recordActivityProjection: (client, activity) => this.#recordPortableProjection(client, "Activity", activity.id, activity.schema, activity),
       prepareWorkspaceImport: (client) => this.#ensureWorkspaceImportSchema(client),
       mapImportedIdentity: (input) => this.#knowledgeAuthoringAdapter.mapImportedIdentity(input),
@@ -268,6 +187,34 @@ export class PostgresDatabase implements DatabaseProbe {
     this.#visualizationBlockRepository = new PostgresVisualizationBlockRepository(this.#kernel,
       (client) => this.#noteTreeRepository.prepare(client));
     this.#portableProjectionContributors = [this.#visualizationBlockRepository];
+    this.#workPlanningAdapter = new PostgresWorkPlanningRepositories(this.#kernel, {
+      prepare: async (client) => {
+        await this.#ensureNoteSchema(client);
+        await this.#canonicalTaskRepository.prepare(client);
+        await this.#identityAccessAdapter.prepareInvitations(client);
+      },
+      recordProjection: (client, task) => this.#recordPortableProjection(client, "Task", task.id, task.schema, task),
+      recordWorkflowProjection: (client, workflow) => this.#recordPortableProjection(client, "Workflow", workflow.projectId, workflow.schema, workflow),
+      recordBoardProjection: (client, board) => this.#recordPortableProjection(client, "Board", board.id, board.schema, board),
+      recordAgentAudit: (client, memberId, workspaceId, taskId, cause) =>
+        this.#recordAgentExecutionAudit(client, memberId, workspaceId, "agent_task_updated", taskId, cause),
+      prepareAutomationDependencies: (client) => this.#ensureGitHubSignalSchema(client),
+      recordIdentifiedNoteBlock: async (client, memberId, beforeRow, afterRow, projection) => {
+        await this.#recordPortableProjection(client, "Note", projection.id, projection.schema, projection);
+        await this.#knowledgeAuthoringAdapter.recordNoteRevisionAndActivity(client, memberId,
+          this.#noteFromRow(beforeRow), this.#noteFromRow(afterRow),
+          "note_block_identified", { kind: "member" });
+      },
+      recordTaskSourceActivity: (client, memberId, workspaceId, task) =>
+        this.#knowledgeAuthoringAdapter.recordDomainActivity(client, memberId, workspaceId,
+          "Task", task.id, "task_created_from_block", {}, task),
+      ensureCanonicalWorkflow: (client, workspaceId) => this.#canonicalTaskRepository.ensureWorkflow(client, workspaceId),
+      recordStructuredAgentAudit: (client, memberId, workspaceId, taskId, cause) =>
+        this.#recordAgentExecutionAudit(client, memberId, workspaceId, "agent_proposal_task_applied", taskId, cause),
+      recordActivityProjection: (client, activity) =>
+        this.#recordPortableProjection(client, "Activity", activity.id, activity.schema, activity),
+      prepareDiscussionScope: (client) => this.#knowledgeAuthoringAdapter.prepareDiscussions(client),
+    });
     this.#knowledgeAuthoringAdapter = new PostgresKnowledgeAuthoringRepositories(this.#kernel, {
       prepare: (client) => this.#ensureNoteSchema(client),
       prepareInvitations: (client) => this.#identityAccessAdapter.prepareInvitations(client),
@@ -292,60 +239,10 @@ export class PostgresDatabase implements DatabaseProbe {
       prepareHistory: (client) => this.#ensureNoteHistorySchema(client),
       prepareWorkspaceProjects: (client) => this.#identityAccessAdapter.prepareRegistration(client),
       recordProjection: (client, kind, id, schema, projection) => this.#recordPortableProjection(client, kind, id, schema, projection),
-      authorizeNote: (client, memberId, noteId) => this.#authorizeNote(client, memberId, noteId),
-      recordNoteRevisionAndActivity: (client, memberId, before, after, action, cause) =>
-        this.#recordNoteRevisionAndActivity(client, memberId, before, after, action, cause),
       recordInitialNoteLocation: (client, noteId, workspaceId) => this.#recordInitialNoteLocation(client, noteId, workspaceId),
-      recordDiscussionMentionNotifications: (client, memberId, discussion, message) =>
-        this.#recordDiscussionMentionNotifications(client, memberId, discussion, message),
-      recordProjectActivityNotifications: (client, activity) => this.#recordProjectActivityNotifications(client, activity),
-      recordDomainActivity: (client, memberId, workspaceId, kind, objectId, action, before, after) =>
-        this.#recordDomainActivity(client, memberId, workspaceId, kind, objectId, action, before, after),
-      recordCreatedNote: async (client, memberId, note, projection, cause) => {
-        await this.#recordInitialNoteLocation(client, note.id, note.workspaceId);
-        await this.#recordPortableProjection(client, "Note", note.id, "stash.note.v1", projection);
-        await this.#recordNoteRevisionAndActivity(client, memberId, undefined, note, "note_created", cause);
-      },
       recordAgentAudit: (client, memberId, note, cause) =>
         this.#recordAgentExecutionAudit(client, memberId, note.workspaceId, "agent_note_created", note.id, cause),
-    });
-    this.#workPlanningAdapter = new PostgresWorkPlanningRepositories(this.#kernel, {
-      prepare: async (client) => {
-        await this.#ensureNoteSchema(client);
-        await this.#canonicalTaskRepository.prepare(client);
-        await this.#identityAccessAdapter.prepareInvitations(client);
-      },
-      recordProjection: (client, task) => this.#recordPortableProjection(client, "Task", task.id, task.schema, task),
-      recordWorkflowProjection: (client, workflow) => this.#recordPortableProjection(client, "Workflow", workflow.projectId, workflow.schema, workflow),
-      recordBoardProjection: (client, board) => this.#recordPortableProjection(client, "Board", board.id, board.schema, board),
-      recordBoardTaskActivity: (client, memberId, workspaceId, taskId, before, after) =>
-        this.#recordTaskActivity(client, memberId, workspaceId, taskId, "task_status_changed", before, after),
-      recordActivity: (client, memberId, workspaceId, taskId, before, after, cause) =>
-        this.#recordTaskActivity(client, memberId, workspaceId, taskId, "task_planning_updated", before, after, cause),
-      recordAgentAudit: (client, memberId, workspaceId, taskId, cause) =>
-        this.#recordAgentExecutionAudit(client, memberId, workspaceId, "agent_task_updated", taskId, cause),
-      recordAssignmentNotifications: (client, projectId, activity, before, after) =>
-        this.#recordAssignmentNotifications(client, projectId, activity, before, after),
-      prepareAutomationDependencies: (client) => this.#ensureGitHubSignalSchema(client),
-      recordAutomationActivity: (client, memberId, workspaceId, taskId, action, before, after, cause) =>
-        this.#recordTaskActivity(client, memberId, workspaceId, taskId, action, before, after, cause),
-      persistAutomationFailureActivity: (client, activity) => this.#persistTaskActivity(client, activity),
-      recordIdentifiedNoteBlock: async (client, memberId, beforeRow, afterRow, projection) => {
-        await this.#recordPortableProjection(client, "Note", projection.id, projection.schema, projection);
-        await this.#recordNoteRevisionAndActivity(client, memberId, this.#noteFromRow(beforeRow), this.#noteFromRow(afterRow),
-          "note_block_identified", { kind: "member" });
-      },
-      recordTaskSourceActivity: (client, memberId, workspaceId, task) =>
-        this.#recordDomainActivity(client, memberId, workspaceId, "Task", task.id, "task_created_from_block", {}, task),
-      ensureCanonicalWorkflow: (client, workspaceId) => this.#canonicalTaskRepository.ensureWorkflow(client, workspaceId),
-      recordTaskActivity: (client, memberId, workspaceId, taskId, action, before, after, cause) =>
-        this.#recordTaskActivity(client, memberId, workspaceId, taskId, action, before, after, cause),
-      recordStructuredAgentAudit: (client, memberId, workspaceId, taskId, cause) =>
-        this.#recordAgentExecutionAudit(client, memberId, workspaceId, "agent_proposal_task_applied", taskId, cause),
-      recordActivityProjection: (client, activity) =>
-        this.#recordPortableProjection(client, "Activity", activity.id, activity.schema, activity),
-      recordProjectActivityNotifications: (client, activity) => this.#recordProjectActivityNotifications(client, activity),
-    });
+    }, this.#workPlanningAdapter);
     this.#developmentIntegrationAdapter = new PostgresDevelopmentIntegrationRepositories(this.#kernel, {
       organizationRole: (organizationId, accountId) => this.#identityAccessAdapter.organizationRole(organizationId, accountId),
       prepareConnections: (client) => this.#ensureRepositoryConnectionSchema(client),
@@ -358,10 +255,7 @@ export class PostgresDatabase implements DatabaseProbe {
           title: result.task.title, ...(result.task.developmentLinks ? { developmentLinks: result.task.developmentLinks } : {}) } }
           : { status: result.status };
       },
-      linkArtifact: (memberId, projectId, taskKey, artifact) => this.#linkDevelopmentArtifact(memberId, projectId, taskKey, artifact),
-      linkSignalArtifact: (client, taskId, signal, confirmingMemberId, organizationId) =>
-        this.#linkSignalArtifact(client, taskId, signal, confirmingMemberId, organizationId),
-    });
+    }, this.#workPlanningAdapter);
   }
 
   noteTreeRepository(): NoteTreeRepository {
@@ -421,7 +315,8 @@ export class PostgresDatabase implements DatabaseProbe {
     const prepare = async (client: PostgresQueryable) => {
       await this.#identityAccessAdapter.prepareRegistration(client);
       await this.#identityAccessAdapter.prepareOidc(client); await this.#identityAccessAdapter.prepareRecovery(client);
-      await this.#ensureRepositoryConnectionSchema(client); await this.#ensureGitHubSignalSchema(client); await this.#ensureNotificationSchema(client);
+      await this.#ensureRepositoryConnectionSchema(client); await this.#ensureGitHubSignalSchema(client);
+      await this.#workPlanningAdapter.prepareNotifications(client);
       await this.#identityAccessAdapter.prepareLocalization(client);
       await this.#ensureNoteSchema(client); await this.#noteTreeRepository.prepare(client);
       await this.#workPlanningAdapter.prepareBoards(client); await this.#ensureAttachmentSchema(client);
@@ -495,46 +390,6 @@ export class PostgresDatabase implements DatabaseProbe {
 
   async close(): Promise<void> {
     await this.#kernel.close();
-  }
-
-  async #linkDevelopmentArtifact(memberId: string, projectId: string, taskKey: string, artifact: DevelopmentArtifact) {
-    return this.#withTransaction(async (client) => {
-      await this.#ensureNoteSchema(client); await this.#identityAccessAdapter.prepareInvitations(client);
-      const current = await client.query<any>(`${taskPlanningSelect} FOR UPDATE OF task`, [projectId, taskKey, memberId]);
-      const row = current.rows[0]; if (!row) return "forbidden" as const;
-      const writable = await client.query(`SELECT 1 FROM stash_workspaces workspace WHERE workspace.id = $1
-        AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2)
-          OR (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
-            WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2))) FOR UPDATE`, [row.workspace_id, memberId]);
-      if (!writable.rowCount) return "forbidden" as const;
-      await this.#persistTaskDevelopmentArtifact(client, row, memberId, artifact, "task_planning_updated", { kind: "member" });
-      return "linked" as const;
-    });
-  }
-
-  async #linkSignalArtifact(client: PostgresQueryable, taskId: string, signal: GitHubSignal, confirmingMemberId?: string, organizationId?: string) {
-    const actor = confirmingMemberId ? { id: confirmingMemberId, cause: { kind: "member" } as ActivityCause }
-      : (await client.query<{ id: string }>(`SELECT membership.account_id AS id FROM stash_organization_memberships membership
-        WHERE membership.organization_id=$1 AND membership.role='Owner' ORDER BY membership.account_id LIMIT 1`, [organizationId])).rows[0];
-    if (!actor) return;
-    const task = await client.query<any>(`${taskPlanningSelectById} FOR UPDATE OF task`, [taskId, actor.id]);
-    const row = task.rows[0]; if (!row) return;
-    await this.#persistTaskDevelopmentArtifact(client, row, actor.id, signal, "task_development_signal_linked",
-      confirmingMemberId ? { kind: "member" } : { kind: "signal", signalId: signal.id });
-  }
-
-  async #persistTaskDevelopmentArtifact(client: PostgresQueryable, row: any, actorId: string,
-    artifact: Pick<DevelopmentArtifact, "kind" | "url">, action: string, cause: ActivityCause) {
-    const before = taskPlanningReadModelFromRow(row); const links = before.developmentLinks ?? [];
-    if (links.some(({ url }) => url === artifact.url)) return;
-    const revision = Number(row.revision) + 1;
-    await client.query(`UPDATE stash_tasks SET development_links=$2::jsonb, revision=$3,
-      field_revisions=jsonb_set(field_revisions,'{developmentLinks}',to_jsonb($3::int),true) WHERE id=$1`,
-    [row.id, JSON.stringify([...links, { provider: "github", kind: artifact.kind, url: artifact.url }]), revision]);
-    const saved = await client.query<any>(taskPlanningSelectById, [row.id, actorId]);
-    const after = taskPlanningReadModelFromRow(saved.rows[0]);
-    await this.#recordPortableProjection(client, "Task", after.id, after.schema, taskProjectionFromRow(saved.rows[0]));
-    await this.#recordTaskActivity(client, actorId, after.workspaceId, after.id, action, before, after, cause);
   }
 
   async #verifyAuthenticationKey(transactionClient?: PostgresQueryable): Promise<void> {
@@ -688,48 +543,6 @@ export class PostgresDatabase implements DatabaseProbe {
     };
     if (transactionClient) await prepare(transactionClient);
     else await this.#kernel.transaction(prepare);
-  }
-
-  async #ensureNotificationSchema(transactionClient?: PostgresQueryable): Promise<void> {
-    const prepare = async (client: PostgresQueryable) => {
-      await this.#identityAccessAdapter.prepareRegistration(client);
-      await client.query(`CREATE TABLE IF NOT EXISTS stash_notification_preferences (
-        member_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
-        project_id UUID NOT NULL REFERENCES stash_projects(id) ON DELETE CASCADE,
-        activity TEXT NOT NULL CHECK (activity IN ('all','followed','muted')),
-        digest TEXT NOT NULL CHECK (digest IN ('off','daily','weekly')),
-        quiet_start TEXT, quiet_end TEXT, quiet_time_zone TEXT,
-        CHECK ((quiet_start IS NULL AND quiet_end IS NULL AND quiet_time_zone IS NULL) OR
-          (quiet_start IS NOT NULL AND quiet_end IS NOT NULL AND quiet_time_zone IS NOT NULL)),
-        PRIMARY KEY (member_id,project_id)
-      );
-      CREATE TABLE IF NOT EXISTS stash_project_follows (
-        member_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
-        project_id UUID NOT NULL REFERENCES stash_projects(id) ON DELETE CASCADE,
-        followed_at TIMESTAMPTZ NOT NULL,
-        PRIMARY KEY (member_id,project_id)
-      );
-      CREATE TABLE IF NOT EXISTS stash_notifications (
-        id UUID PRIMARY KEY,
-        member_id UUID NOT NULL REFERENCES stash_accounts(id) ON DELETE CASCADE,
-        workspace_id UUID NOT NULL REFERENCES stash_workspaces(id) ON DELETE CASCADE,
-        project_id UUID NOT NULL REFERENCES stash_projects(id) ON DELETE CASCADE,
-        trigger TEXT NOT NULL CHECK (trigger IN ('direct_mention','assignment','requested_review','automation_failure','followed_change')),
-        summary TEXT NOT NULL,
-        activity JSONB NOT NULL,
-        activity_id TEXT GENERATED ALWAYS AS (activity->>'id') STORED,
-        created_at TIMESTAMPTZ NOT NULL,
-        delivery TEXT NOT NULL CHECK (delivery IN ('immediate','quiet_hours')),
-        read_at TIMESTAMPTZ,
-        digested_at TIMESTAMPTZ,
-        UNIQUE (member_id,activity_id,trigger)
-      );
-      ALTER TABLE stash_notifications ADD COLUMN IF NOT EXISTS digested_at TIMESTAMPTZ;
-      ALTER TABLE stash_notifications ALTER COLUMN project_id DROP NOT NULL;
-      CREATE INDEX IF NOT EXISTS stash_notifications_member_created_idx ON stash_notifications(member_id,created_at DESC)`);
-    };
-    if (transactionClient) await prepare(transactionClient);
-    else await this.#kernel.withSession(prepare);
   }
 
   async #ensureNoteSchema(client: PostgresQueryable): Promise<void> {
@@ -1110,202 +923,6 @@ export class PostgresDatabase implements DatabaseProbe {
       ON CONFLICT (note_id,revision) DO NOTHING`);
   }
 
-  async #recordNoteRevisionAndActivity(client: PostgresQueryable, memberId: string, before: NoteRecord | undefined,
-    note: NoteRecord, action: string, cause: ActivityCause): Promise<ActivityRecord> {
-    await this.#ensureNoteHistorySchema(client);
-    if (before) await client.query(`INSERT INTO stash_note_history
-      (note_id,workspace_id,revision,content,document,actor_account_id,cause,recorded_at)
-      VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8) ON CONFLICT (note_id,revision) DO NOTHING`, [before.id,
-      before.workspaceId,before.revision,before.content,JSON.stringify(before.document),before.createdByMemberId,
-      JSON.stringify({ kind: "migration", source: "existing_note" }),before.createdAt]);
-    const actor = await client.query<{ name: string }>("SELECT name FROM stash_accounts WHERE id=$1", [memberId]);
-    if (!actor.rows[0]) throw new Error("member_identity_unavailable");
-    const occurredAt = new Date().toISOString();
-    const activity: ActivityRecord = { schema: "stash.activity.v1", id: randomUUID(), workspaceId: note.workspaceId,
-      object: { kind: "Note", id: note.id }, action,
-      actor: { localAccountId: memberId, displayName: actor.rows[0].name }, cause, occurredAt,
-      before: before ? { revision: before.revision, content: before.content } : {},
-      after: { revision: note.revision, content: note.content } };
-    await client.query(`INSERT INTO stash_note_history
-      (note_id,workspace_id,revision,content,document,actor_account_id,cause,recorded_at)
-      VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8) ON CONFLICT (note_id,revision) DO NOTHING`,
-      [note.id, note.workspaceId, note.revision, note.content, JSON.stringify(note.document), memberId, JSON.stringify(cause), occurredAt]);
-    await client.query(`INSERT INTO stash_workspace_activity
-      (id,workspace_id,object_kind,object_id,action,actor_account_id,cause,occurred_at,before_state,after_state)
-      VALUES ($1,$2,'Note',$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb)`, [activity.id, note.workspaceId, note.id, action,
-      memberId, JSON.stringify(cause), occurredAt, JSON.stringify(activity.before), JSON.stringify(activity.after)]);
-    await this.#recordPortableProjection(client, "Activity", activity.id, activity.schema, activity);
-    if (JSON.stringify(activity.before) !== JSON.stringify(activity.after)) await this.#recordProjectActivityNotifications(client, activity);
-    return activity;
-  }
-
-  async #recordTaskActivity(client: PostgresQueryable, memberId: string, workspaceId: string, taskId: string,
-    action: string, before: TaskPlanningReadModel, after: TaskPlanningReadModel, cause: ActivityCause = { kind: "member" }): Promise<ActivityRecord> {
-    const actor = await client.query<{ name: string }>("SELECT name FROM stash_accounts WHERE id=$1", [memberId]);
-    if (!actor.rows[0]) throw new Error("member_identity_unavailable");
-    const activity: ActivityRecord = { schema: "stash.activity.v1", id: randomUUID(), workspaceId,
-      object: { kind: "Task", id: taskId }, action, actor: { localAccountId: memberId, displayName: actor.rows[0].name },
-      cause, occurredAt: new Date().toISOString(), before: { ...before }, after: { ...after } };
-    await this.#persistTaskActivity(client, activity);
-    return activity;
-  }
-
-  async #persistTaskActivity(client: PostgresQueryable, activity: ActivityRecord): Promise<void> {
-    if (activity.object.kind !== "Task") throw new Error("task_activity_object_required");
-    await client.query(`INSERT INTO stash_workspace_activity
-      (id,workspace_id,object_kind,object_id,action,actor_account_id,cause,occurred_at,before_state,after_state)
-      VALUES ($1,$2,'Task',$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb)`, [activity.id, activity.workspaceId, activity.object.id, activity.action,
-      activity.actor.localAccountId, JSON.stringify(activity.cause), activity.occurredAt, JSON.stringify(activity.before), JSON.stringify(activity.after)]);
-    await this.#recordPortableProjection(client, "Activity", activity.id, activity.schema, activity);
-    if (activity.action !== "automation_execution_failed" && JSON.stringify(activity.before) !== JSON.stringify(activity.after)) {
-      await this.#recordProjectActivityNotifications(client, activity);
-    }
-  }
-
-  async #recordProjectActivityNotifications(client: PostgresQueryable, activity: ActivityRecord): Promise<void> {
-    await this.#ensureNoteSchema(client);
-    await this.#knowledgeAuthoringAdapter.prepareDiscussions(client);
-    await this.#ensureNotificationSchema(client);
-    const scope = await client.query<any>(`WITH activity_scope AS (
-      SELECT COALESCE(task.project_id, note.project_id, location_note.project_id, link_note.project_id,
-        discussion_task.project_id, discussion_note.project_id) AS project_id
-      FROM (SELECT 1) seed
-      LEFT JOIN stash_tasks task ON $2='Task' AND task.id=$1
-      LEFT JOIN stash_notes note ON $2='Note' AND note.id=$1
-      LEFT JOIN stash_notes location_note ON $2='NoteLocation' AND location_note.id=$1
-      LEFT JOIN stash_note_links link ON $2='NoteLink' AND link.id=$1
-      LEFT JOIN stash_notes link_note ON link_note.id=link.source_note_id
-      LEFT JOIN stash_discussions discussion ON $2='Discussion' AND discussion.id=$1
-      LEFT JOIN stash_tasks discussion_task ON discussion_task.id=discussion.task_id
-      LEFT JOIN stash_notes discussion_note ON discussion_note.id=discussion.note_id
-    ) SELECT scope.project_id, account.id AS member_id,
-      COALESCE(preference.activity,'followed') AS activity_preference, COALESCE(preference.digest,'off') AS digest,
-      preference.quiet_start, preference.quiet_end, preference.quiet_time_zone
-      FROM activity_scope scope JOIN stash_projects project ON project.id=scope.project_id
-      JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
-      JOIN stash_accounts account ON (workspace.owner_type='personal' AND account.id=workspace.personal_owner_id) OR
-        (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
-          WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=account.id))
-      LEFT JOIN stash_notification_preferences preference ON preference.project_id=project.id AND preference.member_id=account.id
-      LEFT JOIN stash_project_follows follow ON follow.project_id=project.id AND follow.member_id=account.id
-      WHERE account.id<>$3 AND COALESCE(preference.activity,'followed')<>'muted'
-        AND (COALESCE(preference.activity,'followed')='all' OR follow.member_id IS NOT NULL)
-      ORDER BY account.id`, [activity.object.id, activity.object.kind, activity.actor.localAccountId]);
-    for (const recipient of scope.rows) {
-      const preferences: NotificationPreferences = { activity: recipient.activity_preference, digest: recipient.digest,
-        ...(recipient.quiet_start ? { quietHours: { start: recipient.quiet_start, end: recipient.quiet_end, timeZone: recipient.quiet_time_zone } } : {}) };
-      await client.query(`INSERT INTO stash_notifications
-        (id,member_id,workspace_id,project_id,trigger,summary,activity,created_at,delivery)
-        VALUES($1,$2,$3,$4,'followed_change',$5,$6::jsonb,$7,$8)
-        ON CONFLICT(member_id,activity_id,trigger) DO NOTHING`, [randomUUID(), recipient.member_id, activity.workspaceId,
-        recipient.project_id, `${activity.actor.displayName} changed ${activity.object.kind === "Note" ? "a Note" : activity.object.kind === "Task" ? "a Task" : "Project content"}`, JSON.stringify(activity), activity.occurredAt,
-        notificationDeliveryMode(new Date(activity.occurredAt), preferences)]);
-    }
-  }
-
-  async #recordAssignmentNotifications(client: PostgresQueryable, projectId: string, activity: ActivityRecord,
-    before: { assigneeIds?: string[] }, after: { assigneeIds?: string[]; key?: string; title?: string }): Promise<void> {
-    const inputs = assignmentNotificationInputs(activity, projectId, before, after);
-    if (!inputs.length) return;
-    await this.#ensureNotificationSchema(client);
-    for (const input of inputs) {
-      await client.query(`DELETE FROM stash_notifications WHERE member_id=$1 AND activity_id=$2 AND trigger='followed_change'`,
-        [input.memberId, activity.id]);
-      const settings = await client.query<any>(`SELECT preference.* FROM stash_projects project
-        JOIN stash_workspaces workspace ON workspace.id=project.workspace_id
-        LEFT JOIN stash_notification_preferences preference ON preference.project_id=project.id AND preference.member_id=$1
-        WHERE project.id=$2 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$1) OR
-          (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
-            WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$1)))`, [input.memberId, projectId]);
-      if (!settings.rowCount) throw new Error("notification_recipient_forbidden");
-      const row = settings.rows[0];
-      const preferences: NotificationPreferences = row.member_id ? { activity: row.activity, digest: row.digest,
-        ...(row.quiet_start ? { quietHours: { start: row.quiet_start, end: row.quiet_end, timeZone: row.quiet_time_zone } } : {}) }
-        : { activity: "followed", digest: "off" };
-      await client.query(`INSERT INTO stash_notifications
-        (id,member_id,workspace_id,project_id,trigger,summary,activity,created_at,delivery)
-        VALUES ($1,$2,$3,$4,'assignment',$5,$6::jsonb,$7,$8)
-        ON CONFLICT (member_id,activity_id,trigger) DO NOTHING`, [randomUUID(), input.memberId, activity.workspaceId,
-        projectId, input.summary, JSON.stringify(activity), activity.occurredAt,
-        notificationDeliveryMode(new Date(activity.occurredAt), preferences)]);
-    }
-  }
-
-  async #recordDiscussionMentionNotifications(client: PostgresQueryable, memberId: string, discussion: DiscussionRecord,
-    message: DiscussionMessage): Promise<void> {
-    const requestedMemberIds = directMentionMemberIds(message.content).filter((id) => id !== memberId);
-    if (!requestedMemberIds.length) return;
-    const scope = await client.query<{ project_id: string | null }>(`SELECT COALESCE(task.project_id,note.project_id) AS project_id
-      FROM stash_discussions discussion
-      LEFT JOIN stash_tasks task ON task.id=discussion.task_id
-      LEFT JOIN stash_notes note ON note.id=discussion.note_id
-      WHERE discussion.id=$1`, [discussion.id]);
-    if (!scope.rows[0]) return;
-    const projectId = scope.rows[0].project_id;
-    const recipients = await client.query<{ id: string }>(`SELECT account.id FROM stash_accounts account
-      JOIN stash_workspaces workspace ON workspace.id=$2
-      WHERE account.id=ANY($1::uuid[]) AND account.id<>$3 AND (
-        (workspace.owner_type='personal' AND workspace.personal_owner_id=account.id) OR
-        (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
-          WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=account.id)))
-      AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM stash_projects project WHERE project.id=$4 AND project.workspace_id=workspace.id))
-      ORDER BY account.id`, [requestedMemberIds, discussion.workspaceId, memberId, projectId]);
-    if (!recipients.rowCount) return;
-    const activity: ActivityRecord = { schema: "stash.activity.v1", id: message.id, workspaceId: discussion.workspaceId,
-      object: { kind: "Discussion", id: discussion.id }, action: "discussion_message_mentioned_members", actor: message.author,
-      cause: { kind: "member" }, occurredAt: message.createdAt, before: {},
-      after: { messageId: message.id, mentionedMemberIds: recipients.rows.map(({ id }) => id) } };
-    await client.query(`INSERT INTO stash_workspace_activity
-      (id,workspace_id,object_kind,object_id,action,actor_account_id,cause,occurred_at,before_state,after_state)
-      VALUES($1,$2,'Discussion',$3,$4,$5,'member',$6,$7::jsonb,$8::jsonb) ON CONFLICT (id) DO NOTHING`,
-    [activity.id, activity.workspaceId, discussion.id, activity.action, memberId, activity.occurredAt,
-      JSON.stringify(activity.before), JSON.stringify(activity.after)]);
-    await this.#recordPortableProjection(client, "Activity", activity.id, activity.schema, activity);
-    if (projectId) await this.#recordProjectActivityNotifications(client, activity);
-    await this.#ensureNotificationSchema(client);
-    const inputs = projectId ? directMentionNotificationInputs(activity, projectId, recipients.rows.map(({ id }) => id))
-      : recipients.rows.map(({ id }) => ({ memberId: id, trigger: "direct_mention" as const,
-        summary: `${activity.actor.displayName} mentioned you in a Discussion`, activity }));
-    for (const input of inputs) {
-      if (projectId) await client.query(`DELETE FROM stash_notifications WHERE member_id=$1 AND activity_id=$2 AND trigger='followed_change'`,
-        [input.memberId, activity.id]);
-      const settings = projectId ? await client.query<any>(`SELECT preference.* FROM stash_notification_preferences preference
-        WHERE preference.project_id=$2 AND preference.member_id=$1`, [input.memberId, projectId]) : { rows: [] };
-      const row = settings.rows[0];
-      const preferences: NotificationPreferences = row ? { activity: row.activity, digest: row.digest,
-        ...(row.quiet_start ? { quietHours: { start: row.quiet_start, end: row.quiet_end, timeZone: row.quiet_time_zone } } : {}) }
-        : { activity: "followed", digest: "off" };
-      await client.query(`INSERT INTO stash_notifications
-        (id,member_id,workspace_id,project_id,trigger,summary,activity,created_at,delivery)
-        VALUES($1,$2,$3,$4,'direct_mention',$5,$6::jsonb,$7,$8)
-        ON CONFLICT (member_id,activity_id,trigger) DO NOTHING`, [randomUUID(), input.memberId, activity.workspaceId,
-        projectId, input.summary, JSON.stringify(activity), activity.occurredAt,
-        notificationDeliveryMode(new Date(activity.occurredAt), preferences)]);
-    }
-  }
-
-  async #recordDomainActivity(client: PostgresQueryable, memberId: string, workspaceId: string,
-    kind: ActivityRecord["object"]["kind"], objectId: string, action: string, before: object, after: object): Promise<void> {
-    const actor=await client.query<{name:string}>("SELECT name FROM stash_accounts WHERE id=$1",[memberId]);
-    if(!actor.rows[0]) throw new Error("member_identity_unavailable");
-    const activity:ActivityRecord={schema:"stash.activity.v1",id:randomUUID(),workspaceId,object:{kind,id:objectId},action,
-      actor:{localAccountId:memberId,displayName:actor.rows[0].name},cause:{kind:"member"},occurredAt:new Date().toISOString(),
-      before:{...before},after:{...after}};
-    await client.query(`INSERT INTO stash_workspace_activity
-      (id,workspace_id,object_kind,object_id,action,actor_account_id,cause,occurred_at,before_state,after_state)
-      VALUES($1,$2,$3,$4,$5,$6,'member',$7,$8::jsonb,$9::jsonb)`,[activity.id,workspaceId,kind,objectId,action,memberId,
-      activity.occurredAt,JSON.stringify(activity.before),JSON.stringify(activity.after)]);
-    await this.#recordPortableProjection(client,"Activity",activity.id,activity.schema,activity);
-    if (JSON.stringify(activity.before) !== JSON.stringify(activity.after)) await this.#recordProjectActivityNotifications(client, activity);
-  }
-
-  async #authorizeNote(client: PostgresQueryable, memberId: string, noteId: string): Promise<"edit" | "read" | "none"> {
-    const result = await client.query<{ can_edit: boolean; can_read: boolean }>(`SELECT
-      ${workspaceMemberSql("workspace", "$2")} AS can_edit,
-      ${effectiveNoteReadSql("note", "workspace", "$2")} AS can_read
-      FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id=note.workspace_id WHERE note.id=$1`, [noteId, memberId]);
-    return result.rows[0]?.can_edit ? "edit" : result.rows[0]?.can_read ? "read" : "none";
-  }
 }
 
 function hasDependencyCycle(taskIds: ReadonlySet<string>, edges: ReadonlyArray<{ dependent_task_id: string; prerequisite_task_id: string }>): boolean {

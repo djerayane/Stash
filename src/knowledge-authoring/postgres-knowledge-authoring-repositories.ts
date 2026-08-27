@@ -17,6 +17,10 @@ import { InvalidCollaborationUpdate, type CollaborationSnapshot } from "../note-
 import { collaborativeDocumentFromRichText, validatedRichTextFromCollaborativeDocument } from "./collaborative-document.js";
 import type { WorkspaceSearchFacet, WorkspaceSearchKind, WorkspaceSearchQuery, WorkspaceSearchResult } from "../workspace-search.js";
 import type { PostgresKernel, PostgresQueryable } from "../instance-operations/storage/postgres-kernel.js";
+import { directMentionMemberIds, directMentionNotificationInputs, notificationDeliveryMode,
+  type NotificationPreferences } from "../notifications.js";
+import type { PostgresWorkPlanningRepositories } from "../work-planning/postgres-work-planning-repositories.js";
+import { workspaceMemberSql } from "./postgres-note-access.js";
 
 interface PostgresKnowledgeAuthoringHooks {
   prepare(client: PostgresQueryable): Promise<void>;
@@ -37,21 +41,7 @@ interface PostgresKnowledgeAuthoringHooks {
   prepareHistory(client: PostgresQueryable): Promise<void>;
   prepareWorkspaceProjects(client: PostgresQueryable): Promise<void>;
   recordProjection(client: PostgresQueryable, kind: any, id: string, schema: any, projection: any): Promise<void>;
-  authorizeNote(client: PostgresQueryable, memberId: string, noteId: string): Promise<"edit" | "read" | "none">;
-  recordNoteRevisionAndActivity(client: PostgresQueryable, memberId: string, before: NoteRecord | undefined, after: NoteRecord,
-    action: string, cause: ActivityCause): Promise<ActivityRecord>;
   recordInitialNoteLocation(client: PostgresQueryable, noteId: string, workspaceId: string): Promise<void>;
-  recordDiscussionMentionNotifications(client: PostgresQueryable, memberId: string, discussion: DiscussionRecord, message: DiscussionMessage): Promise<void>;
-  recordProjectActivityNotifications(client: PostgresQueryable, activity: any): Promise<void>;
-  recordDomainActivity(client: PostgresQueryable, memberId: string, workspaceId: string, kind: any, objectId: string,
-    action: string, before: object, after: object): Promise<void>;
-  recordCreatedNote(
-    client: PostgresQueryable,
-    memberId: string,
-    note: NoteRecord,
-    projection: PortableNoteProjection,
-    cause: ActivityCause,
-  ): Promise<void>;
   recordAgentAudit(
     client: PostgresQueryable,
     memberId: string,
@@ -91,7 +81,121 @@ function portableExportNoteProjection(payload: PortableNoteProjection | Portable
 
 /** PostgreSQL implementation of the Knowledge Authoring persistence seam. */
 export class PostgresKnowledgeAuthoringRepositories {
-  constructor(private readonly kernel: PostgresKernel, private readonly hooks: PostgresKnowledgeAuthoringHooks) {}
+  constructor(private readonly kernel: PostgresKernel, private readonly hooks: PostgresKnowledgeAuthoringHooks,
+    private readonly activityNotifications: Pick<PostgresWorkPlanningRepositories,
+      "prepareNotifications" | "recordProjectActivityNotifications">) {}
+
+  async authorizeNote(client: PostgresQueryable, memberId: string, noteId: string): Promise<"edit" | "read" | "none"> {
+    const result = await client.query<{ can_edit: boolean; can_read: boolean }>(`SELECT
+      ${workspaceMemberSql("workspace", "$2")} AS can_edit,
+      ${effectiveNoteReadSql("note", "workspace", "$2")} AS can_read
+      FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id=note.workspace_id WHERE note.id=$1`, [noteId, memberId]);
+    return result.rows[0]?.can_edit ? "edit" : result.rows[0]?.can_read ? "read" : "none";
+  }
+
+  async recordNoteRevisionAndActivity(client: PostgresQueryable, memberId: string, before: NoteRecord | undefined,
+    note: NoteRecord, action: string, cause: ActivityCause): Promise<ActivityRecord> {
+    await this.hooks.prepareHistory(client);
+    if (before) await client.query(`INSERT INTO stash_note_history
+      (note_id,workspace_id,revision,content,document,actor_account_id,cause,recorded_at)
+      VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8) ON CONFLICT (note_id,revision) DO NOTHING`, [before.id,
+      before.workspaceId,before.revision,before.content,JSON.stringify(before.document),before.createdByMemberId,
+      JSON.stringify({ kind: "migration", source: "existing_note" }),before.createdAt]);
+    const actor = await client.query<{ name: string }>("SELECT name FROM stash_accounts WHERE id=$1", [memberId]);
+    if (!actor.rows[0]) throw new Error("member_identity_unavailable");
+    const occurredAt = new Date().toISOString();
+    const activity: ActivityRecord = { schema: "stash.activity.v1", id: randomUUID(), workspaceId: note.workspaceId,
+      object: { kind: "Note", id: note.id }, action,
+      actor: { localAccountId: memberId, displayName: actor.rows[0].name }, cause, occurredAt,
+      before: before ? { revision: before.revision, content: before.content } : {},
+      after: { revision: note.revision, content: note.content } };
+    await client.query(`INSERT INTO stash_note_history
+      (note_id,workspace_id,revision,content,document,actor_account_id,cause,recorded_at)
+      VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8) ON CONFLICT (note_id,revision) DO NOTHING`,
+      [note.id, note.workspaceId, note.revision, note.content, JSON.stringify(note.document), memberId, JSON.stringify(cause), occurredAt]);
+    await client.query(`INSERT INTO stash_workspace_activity
+      (id,workspace_id,object_kind,object_id,action,actor_account_id,cause,occurred_at,before_state,after_state)
+      VALUES ($1,$2,'Note',$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb)`, [activity.id, note.workspaceId, note.id, action,
+      memberId, JSON.stringify(cause), occurredAt, JSON.stringify(activity.before), JSON.stringify(activity.after)]);
+    await this.hooks.recordProjection(client, "Activity", activity.id, activity.schema, activity);
+    if (JSON.stringify(activity.before) !== JSON.stringify(activity.after))
+      await this.activityNotifications.recordProjectActivityNotifications(client, activity);
+    return activity;
+  }
+
+  async recordDomainActivity(client: PostgresQueryable, memberId: string, workspaceId: string,
+    kind: ActivityRecord["object"]["kind"], objectId: string, action: string, before: object, after: object): Promise<void> {
+    const actor=await client.query<{name:string}>("SELECT name FROM stash_accounts WHERE id=$1",[memberId]);
+    if(!actor.rows[0]) throw new Error("member_identity_unavailable");
+    const activity:ActivityRecord={schema:"stash.activity.v1",id:randomUUID(),workspaceId,object:{kind,id:objectId},action,
+      actor:{localAccountId:memberId,displayName:actor.rows[0].name},cause:{kind:"member"},occurredAt:new Date().toISOString(),
+      before:{...before},after:{...after}};
+    await client.query(`INSERT INTO stash_workspace_activity
+      (id,workspace_id,object_kind,object_id,action,actor_account_id,cause,occurred_at,before_state,after_state)
+      VALUES($1,$2,$3,$4,$5,$6,'member',$7,$8::jsonb,$9::jsonb)`,[activity.id,workspaceId,kind,objectId,action,memberId,
+      activity.occurredAt,JSON.stringify(activity.before),JSON.stringify(activity.after)]);
+    await this.hooks.recordProjection(client,"Activity",activity.id,activity.schema,activity);
+    if (JSON.stringify(activity.before) !== JSON.stringify(activity.after))
+      await this.activityNotifications.recordProjectActivityNotifications(client, activity);
+  }
+
+  async recordDiscussionMentionNotifications(client: PostgresQueryable, memberId: string, discussion: DiscussionRecord,
+    message: DiscussionMessage): Promise<void> {
+    const requestedMemberIds = directMentionMemberIds(message.content).filter((id) => id !== memberId);
+    if (!requestedMemberIds.length) return;
+    const scope = await client.query<{ project_id: string | null }>(`SELECT COALESCE(task.project_id,note.project_id) AS project_id
+      FROM stash_discussions discussion LEFT JOIN stash_tasks task ON task.id=discussion.task_id
+      LEFT JOIN stash_notes note ON note.id=discussion.note_id WHERE discussion.id=$1`, [discussion.id]);
+    if (!scope.rows[0]) return;
+    const projectId = scope.rows[0].project_id;
+    const recipients = await client.query<{ id: string }>(`SELECT account.id FROM stash_accounts account
+      JOIN stash_workspaces workspace ON workspace.id=$2
+      WHERE account.id=ANY($1::uuid[]) AND account.id<>$3 AND (
+        (workspace.owner_type='personal' AND workspace.personal_owner_id=account.id) OR
+        (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=account.id)))
+      AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM stash_projects project WHERE project.id=$4 AND project.workspace_id=workspace.id))
+      ORDER BY account.id`, [requestedMemberIds, discussion.workspaceId, memberId, projectId]);
+    if (!recipients.rowCount) return;
+    const activity: ActivityRecord = { schema: "stash.activity.v1", id: message.id, workspaceId: discussion.workspaceId,
+      object: { kind: "Discussion", id: discussion.id }, action: "discussion_message_mentioned_members", actor: message.author,
+      cause: { kind: "member" }, occurredAt: message.createdAt, before: {},
+      after: { messageId: message.id, mentionedMemberIds: recipients.rows.map(({ id }) => id) } };
+    await client.query(`INSERT INTO stash_workspace_activity
+      (id,workspace_id,object_kind,object_id,action,actor_account_id,cause,occurred_at,before_state,after_state)
+      VALUES($1,$2,'Discussion',$3,$4,$5,'member',$6,$7::jsonb,$8::jsonb) ON CONFLICT (id) DO NOTHING`,
+      [activity.id, activity.workspaceId, discussion.id, activity.action, memberId, activity.occurredAt,
+        JSON.stringify(activity.before), JSON.stringify(activity.after)]);
+    await this.hooks.recordProjection(client, "Activity", activity.id, activity.schema, activity);
+    if (projectId) await this.activityNotifications.recordProjectActivityNotifications(client, activity);
+    await this.activityNotifications.prepareNotifications(client);
+    const inputs = projectId ? directMentionNotificationInputs(activity, projectId, recipients.rows.map(({ id }) => id))
+      : recipients.rows.map(({ id }) => ({ memberId: id, trigger: "direct_mention" as const,
+        summary: `${activity.actor.displayName} mentioned you in a Discussion`, activity }));
+    for (const input of inputs) {
+      if (projectId) await client.query("DELETE FROM stash_notifications WHERE member_id=$1 AND activity_id=$2 AND trigger='followed_change'",
+        [input.memberId, activity.id]);
+      const settings = projectId ? await client.query<any>(`SELECT preference.* FROM stash_notification_preferences preference
+        WHERE preference.project_id=$2 AND preference.member_id=$1`, [input.memberId, projectId]) : { rows: [] };
+      const row = settings.rows[0];
+      const preferences: NotificationPreferences = row ? { activity: row.activity, digest: row.digest,
+        ...(row.quiet_start ? { quietHours: { start: row.quiet_start, end: row.quiet_end, timeZone: row.quiet_time_zone } } : {}) }
+        : { activity: "followed", digest: "off" };
+      await client.query(`INSERT INTO stash_notifications
+        (id,member_id,workspace_id,project_id,trigger,summary,activity,created_at,delivery)
+        VALUES($1,$2,$3,$4,'direct_mention',$5,$6::jsonb,$7,$8)
+        ON CONFLICT (member_id,activity_id,trigger) DO NOTHING`, [randomUUID(), input.memberId, activity.workspaceId,
+        projectId, input.summary, JSON.stringify(activity), activity.occurredAt,
+        notificationDeliveryMode(new Date(activity.occurredAt), preferences)]);
+    }
+  }
+
+  private async recordCreatedNote(client: PostgresQueryable, memberId: string, note: NoteRecord,
+    projection: PortableNoteProjection, cause: ActivityCause): Promise<void> {
+    await this.hooks.recordInitialNoteLocation(client, note.id, note.workspaceId);
+    await this.hooks.recordProjection(client, "Note", note.id, "stash.note.v1", projection);
+    await this.recordNoteRevisionAndActivity(client, memberId, undefined, note, "note_created", cause);
+  }
 
   async triageNote(memberId: string, workspaceId: string, noteId: string, change: NoteTriageChange) {
     return this.kernel.transaction(async (client) => {
@@ -126,7 +230,7 @@ export class PostgresKnowledgeAuthoringRepositories {
       return { status: "project_forbidden" as const };
     const before = await client.query<any>("SELECT project_id,tags FROM stash_notes WHERE id=$1", [noteId]);
     await client.query("UPDATE stash_notes SET project_id=$2,tags=$3::jsonb WHERE id=$1", [noteId, change.note.projectId, JSON.stringify(change.note.tags)]);
-    await this.hooks.recordDomainActivity(client, memberId, workspaceId, "Note", noteId, "note_organized",
+    await this.recordDomainActivity(client, memberId, workspaceId, "Note", noteId, "note_organized",
       { projectId: before.rows[0]?.project_id ?? null, tags: before.rows[0]?.tags ?? [] }, { projectId: change.note.projectId, tags: change.note.tags });
     return { result: change };
   }
@@ -134,7 +238,7 @@ export class PostgresKnowledgeAuthoringRepositories {
   private async archiveInboxNote(client: PostgresQueryable, memberId: string, workspaceId: string, noteId: string,
     change: Extract<NoteTriageChange, { kind: "archived" }>) {
     await client.query("UPDATE stash_notes SET archived_at=$2 WHERE id=$1", [noteId, change.note.archivedAt]);
-    await this.hooks.recordDomainActivity(client, memberId, workspaceId, "Note", noteId, "note_archived", { archivedAt: null }, { archivedAt: change.note.archivedAt });
+    await this.recordDomainActivity(client, memberId, workspaceId, "Note", noteId, "note_archived", { archivedAt: null }, { archivedAt: change.note.archivedAt });
     return { result: change };
   }
 
@@ -144,7 +248,7 @@ export class PostgresKnowledgeAuthoringRepositories {
       return { status: "target_note_not_found" as const };
     await client.query("INSERT INTO stash_note_links (id,workspace_id,source_note_id,target_note_id) VALUES ($1,$2,$3,$4)",
       [change.link.id, workspaceId, noteId, change.link.targetNoteId]);
-    await this.hooks.recordDomainActivity(client, memberId, workspaceId, "NoteLink", change.link.id, "note_link_created", {}, change.link);
+    await this.recordDomainActivity(client, memberId, workspaceId, "NoteLink", change.link.id, "note_link_created", {}, change.link);
     return { result: change };
   }
 
@@ -156,7 +260,7 @@ export class PostgresKnowledgeAuthoringRepositories {
     await client.query("INSERT INTO stash_tasks (id,workspace_id,project_id,task_key,workflow_status_id,title,created_by_account_id,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
       [task.id, workspaceId, task.projectId, task.key, task.status.id, task.title, memberId, task.createdAt]);
     await client.query("INSERT INTO stash_task_note_sources (task_id,note_id) VALUES ($1,$2)", [change.task.id, noteId]);
-    await this.hooks.recordDomainActivity(client, memberId, workspaceId, "Task", task.id, "task_created_from_inbox", {}, task);
+    await this.recordDomainActivity(client, memberId, workspaceId, "Task", task.id, "task_created_from_inbox", {}, task);
     return { result: { kind: "task_created" as const, task, projections: [task] as [PortableTaskProjection] } };
   }
 
@@ -233,7 +337,7 @@ export class PostgresKnowledgeAuthoringRepositories {
         [note.id, note.workspaceId, note.projectId ?? null, note.content, JSON.stringify(note.document), note.revision,
           JSON.stringify(note.tags), note.reminder?.at ?? null, note.createdByMemberId, note.createdAt],
       );
-      await this.hooks.recordCreatedNote(client, memberId, note, projection, cause);
+      await this.recordCreatedNote(client, memberId, note, projection, cause);
       if (cause.kind === "agent") await this.hooks.recordAgentAudit(client, memberId, note, cause);
       if (operation) await client.query(`INSERT INTO stash_note_capture_operation_receipts
         (account_id,operation_id,workspace_id,payload_digest,note_id) VALUES ($1,$2,$3,$4,$5)`,
@@ -264,7 +368,7 @@ export class PostgresKnowledgeAuthoringRepositories {
         (id, workspace_id, project_id, content, document, revision, tags, reminder_at, created_by_account_id, created_at)
         VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7::jsonb,$8,$9,$10)`, [note.id, note.workspaceId, note.projectId ?? null,
         note.content, JSON.stringify(note.document), note.revision, JSON.stringify(note.tags), note.reminder?.at ?? null, memberId, note.createdAt]);
-      await this.hooks.recordCreatedNote(client, memberId, note, projection, { kind: "member" });
+      await this.recordCreatedNote(client, memberId, note, projection, { kind: "member" });
       await client.query("INSERT INTO stash_mobile_capture_receipts (account_id, client_capture_id, note_id, payload_digest) VALUES ($1,$2,$3,$4)",
         [memberId, clientCaptureId, note.id, payloadDigest]);
       return { status: "created", noteId: note.id };
@@ -367,7 +471,7 @@ export class PostgresKnowledgeAuthoringRepositories {
 
 async findNoteForMember(memberId: string, noteId: string): Promise<NoteRecord | undefined> {
     await this.hooks.prepare(this.kernel);
-    if (await this.hooks.authorizeNote(this.kernel, memberId, noteId) === "none") return undefined;
+    if (await this.authorizeNote(this.kernel, memberId, noteId) === "none") return undefined;
     const result = await this.kernel.query<{
       id: string; workspace_id: string; project_id: string | null; content: string; document: NoteRecord["document"];
       revision: number; tags: string[]; reminder_at: Date | null; created_by_account_id: string; created_at: Date;
@@ -407,7 +511,7 @@ async moveNote(memberId: string, noteId: string, expectedRevision: number, path:
         aliases: [...new Set([...current.aliases.filter((alias) => alias !== path), current.path])], revision: current.revision + 1 };
       const projection: PortableNoteLocationProjection = { schema: "stash.note-location.v1", ...location };
       await this.hooks.recordProjection(client, "NoteLocation", noteId, projection.schema, projection);
-      await this.hooks.recordDomainActivity(client,memberId,current.workspaceId,"NoteLocation",noteId,"note_moved",current,location);
+      await this.recordDomainActivity(client,memberId,current.workspaceId,"NoteLocation",noteId,"note_moved",current,location);
       return { status: "moved" as const, location };
     });
   }
@@ -431,7 +535,7 @@ async createNoteLink(memberId: string, link: NoteLinkRecord, _projection: Portab
       if (!inserted.rowCount) return { status: "already_linked" as const };
       const projection: PortableNoteLinkStateProjection = { schema: "stash.note-link.v2", ...saved };
       await this.hooks.recordProjection(client, "NoteLink", saved.id, projection.schema, projection);
-      await this.hooks.recordDomainActivity(client,memberId,saved.workspaceId,"NoteLink",saved.id,"note_link_created",{},saved);
+      await this.recordDomainActivity(client,memberId,saved.workspaceId,"NoteLink",saved.id,"note_link_created",{},saved);
       return { status: "created" as const, link: saved };
     });
   }
@@ -454,7 +558,7 @@ async createImportedNoteLink(memberId: string, link: NoteLinkRecord, _projection
       [saved.id, saved.workspaceId, saved.sourceNoteId, saved.targetPath, candidateIds, saved.label]);
       const projection: PortableNoteLinkStateProjection = { schema: "stash.note-link.v2", ...saved };
       await this.hooks.recordProjection(client, "NoteLink", saved.id, projection.schema, projection);
-      await this.hooks.recordDomainActivity(client,memberId,saved.workspaceId,"NoteLink",saved.id,"note_link_imported",{},saved);
+      await this.recordDomainActivity(client,memberId,saved.workspaceId,"NoteLink",saved.id,"note_link_imported",{},saved);
       return { status: "created" as const, link: saved };
     });
   }
@@ -514,7 +618,7 @@ async repairNoteLink(memberId: string, sourceNoteId: string, linkId: string, tar
       await client.query("UPDATE stash_note_links SET target_note_id=$2,target_path=$3,candidate_note_ids='{}'::uuid[],revision=revision+1 WHERE id=$1", [linkId, targetNoteId, target.rows[0].portable_path]);
       const projection: PortableNoteLinkStateProjection = { schema: "stash.note-link.v2", ...repaired };
       await this.hooks.recordProjection(client, "NoteLink", linkId, projection.schema, projection);
-      await this.hooks.recordDomainActivity(client,memberId,current.workspaceId,"NoteLink",linkId,"note_link_repaired",current,repaired);
+      await this.recordDomainActivity(client,memberId,current.workspaceId,"NoteLink",linkId,"note_link_repaired",current,repaired);
       return { status: "repaired" as const, link: repaired };
     });
   }
@@ -592,7 +696,7 @@ async repairNoteLink(memberId: string, sourceNoteId: string, linkId: string, tar
       await client.query("UPDATE stash_notes SET content=$2, document=$3::jsonb, revision=$4 WHERE id=$1", [noteId, note.content, JSON.stringify(document), note.revision]);
       for (const operation of pending) await client.query("INSERT INTO stash_note_operations (note_id,operation_id,base_revision,applied_revision,block_key,operation_digest) VALUES ($1,$2,$3,$4,$5,$6)", [noteId, operation.id, batch.baseRevision, note.revision, operation.blockKey, noteOperationDigest(operation)]);
       await this.hooks.recordProjection(client, "Note", note.id, "stash.note.v1", projection);
-      await this.hooks.recordNoteRevisionAndActivity(client, memberId, current, note, "note_edited", { kind: "member" });
+      await this.recordNoteRevisionAndActivity(client, memberId, current, note, "note_edited", { kind: "member" });
       return { status: "updated" as const, note, projection };
     });
   }
@@ -700,7 +804,7 @@ async repairNoteLink(memberId: string, sourceNoteId: string, linkId: string, tar
       }
       await client.query(`UPDATE stash_note_edit_conflicts SET resolved_at = CURRENT_TIMESTAMP, resolution = $3,
         resolved_by_account_id = $4 WHERE id = $1 AND note_id = $2`, [conflictId, noteId, resolution, memberId]);
-      await this.hooks.recordNoteRevisionAndActivity(client, memberId, current, note,
+      await this.recordNoteRevisionAndActivity(client, memberId, current, note,
         resolution === "apply_contribution" ? "note_conflict_contribution_applied" : "note_conflict_kept_current", { kind: "member" });
       return { status: "resolved" as const, note, projection: projectionFor(note) };
     });
@@ -710,7 +814,7 @@ async repairNoteLink(memberId: string, sourceNoteId: string, linkId: string, tar
   async loadNoteCollaboration(memberId: string, noteId: string): Promise<CollaborationSnapshot | undefined> {
     return this.kernel.transaction(async (client) => {
       await this.ensureCollaborationSchema(client);
-      const access = await this.hooks.authorizeNote(client, memberId, noteId);
+      const access = await this.authorizeNote(client, memberId, noteId);
       if (access === "none") return undefined;
       let row = (await client.query<any>(`SELECT note_id,sequence,update,updated_at,updated_by_account_id
         FROM stash_note_collaboration WHERE note_id=$1`, [noteId])).rows[0];
@@ -724,7 +828,7 @@ async repairNoteLink(memberId: string, sourceNoteId: string, linkId: string, tar
   async appendNoteCollaboration(memberId: string, noteId: string, update: Uint8Array): Promise<CollaborationSnapshot | undefined> {
     return this.kernel.transaction(async (client) => {
       await this.ensureCollaborationSchema(client); await this.hooks.prepareHistory(client);
-      if (await this.hooks.authorizeNote(client, memberId, noteId) !== "edit") return undefined;
+      if (await this.authorizeNote(client, memberId, noteId) !== "edit") return undefined;
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`note-collaboration:${noteId}`]);
       const noteRow = (await client.query<any>(`SELECT note.*, creator.name AS creator_name FROM stash_notes note
         JOIN stash_accounts creator ON creator.id=note.created_by_account_id WHERE note.id=$1 FOR UPDATE OF note`, [noteId])).rows[0];
@@ -761,7 +865,7 @@ async repairNoteLink(memberId: string, sourceNoteId: string, linkId: string, tar
         createdBy: { localAccountId: before.createdByMemberId, displayName: noteRow.creator_name },
         ...(note.projectId ? { projectId: note.projectId } : {}), ...(note.reminder ? { reminder: note.reminder } : {}) };
       await this.hooks.recordProjection(client, "Note", note.id, projection.schema, projection);
-      await this.hooks.recordNoteRevisionAndActivity(client, memberId, before, note, "note_edited", { kind: "member" });
+      await this.recordNoteRevisionAndActivity(client, memberId, before, note, "note_edited", { kind: "member" });
       return { noteId: row.note_id, sequence: Number(row.sequence), update: new Uint8Array(row.update),
         updatedAt: new Date(row.updated_at).toISOString(), updatedByMemberId: row.updated_by_account_id, access: "edit" };
     });
@@ -815,7 +919,7 @@ async repairNoteLink(memberId: string, sourceNoteId: string, linkId: string, tar
         workspaceId = taskRow.workspace_id;
         target = draft.target;
       } else {
-        const noteAccess = await this.hooks.authorizeNote(client, memberId, draft.target.noteId);
+        const noteAccess = await this.authorizeNote(client, memberId, draft.target.noteId);
         if (noteAccess === "none") return { status: "target_not_found" as const };
         if (noteAccess === "read") return { status: "forbidden" as const };
         const note = await client.query<any>(`SELECT note.*, creator.name AS created_by_name
@@ -848,7 +952,7 @@ async repairNoteLink(memberId: string, sourceNoteId: string, linkId: string, tar
               ...(row.reminder_at ? { reminder: { at: new Date(row.reminder_at).toISOString() } } : {}) };
             await this.hooks.recordProjection(client, "Note", draft.target.noteId, "stash.note.v1", noteProjection);
             row.content = content; row.revision = Number(row.revision) + 1;
-            await this.hooks.recordNoteRevisionAndActivity(client, memberId, before, noteFromRow(row),
+            await this.recordNoteRevisionAndActivity(client, memberId, before, noteFromRow(row),
               "note_block_identified", { kind: "member" });
           }
           target = { kind: "block", noteId: draft.target.noteId, blockId };
@@ -865,7 +969,7 @@ async repairNoteLink(memberId: string, sourceNoteId: string, linkId: string, tar
         VALUES ($1,$2,$3,$4,$5)`, [first.id, discussion.id, first.content, first.author.localAccountId, first.createdAt]);
       const projection = this.portableDiscussion(discussion);
       await this.hooks.recordProjection(client, "Discussion", discussion.id, projection.schema, projection);
-      await this.hooks.recordDiscussionMentionNotifications(client, memberId, discussion, first);
+      await this.recordDiscussionMentionNotifications(client, memberId, discussion, first);
       return { status: "created" as const, discussion, projection };
     });
   }
@@ -883,7 +987,7 @@ async repairNoteLink(memberId: string, sourceNoteId: string, linkId: string, tar
   async listNoteDiscussions(memberId: string, noteId: string) {
     return this.kernel.withSession(async (client) => {
       await this.ensureDiscussionSchema(client);
-      const access = await this.hooks.authorizeNote(client, memberId, noteId);
+      const access = await this.authorizeNote(client, memberId, noteId);
       if (access === "none") return { status: "not_found" as const };
       const ids = await client.query<{ id: string }>("SELECT id FROM stash_discussions WHERE note_id = $1 ORDER BY created_at, id", [noteId]);
       const discussions: DiscussionRecord[] = [];
@@ -921,7 +1025,7 @@ async repairNoteLink(memberId: string, sourceNoteId: string, linkId: string, tar
   async listBlockDiscussions(memberId: string, noteId: string, blockKey: string) {
     return this.kernel.withSession(async (client) => {
       await this.ensureDiscussionSchema(client);
-      const access = await this.hooks.authorizeNote(client, memberId, noteId);
+      const access = await this.authorizeNote(client, memberId, noteId);
       if (access === "none") return { status: "not_found" as const };
       const note = await client.query<any>("SELECT document FROM stash_notes WHERE id = $1", [noteId]);
       if (!note.rowCount) return { status: "not_found" as const };
@@ -953,7 +1057,7 @@ async repairNoteLink(memberId: string, sourceNoteId: string, linkId: string, tar
       discussion.messages.push(message);
       const projection = this.portableDiscussion(discussion);
       await this.hooks.recordProjection(client, "Discussion", discussionId, projection.schema, projection);
-      await this.hooks.recordDiscussionMentionNotifications(client, memberId, discussion, message);
+      await this.recordDiscussionMentionNotifications(client, memberId, discussion, message);
       return { status: "updated" as const, discussion, projection };
     });
   }
@@ -1008,7 +1112,7 @@ async repairNoteLink(memberId: string, sourceNoteId: string, linkId: string, tar
         const projection = { schema: "stash.note.v1" as const, id: draft.workId, workspaceId: discussion.workspaceId,
           content, tags: [], createdAt: draft.createdAt, createdBy: draft.createdBy };
         await this.hooks.recordProjection(client, "Note", draft.workId, projection.schema, projection);
-        await this.hooks.recordNoteRevisionAndActivity(client, memberId, undefined, { id: draft.workId, workspaceId: discussion.workspaceId,
+        await this.recordNoteRevisionAndActivity(client, memberId, undefined, { id: draft.workId, workspaceId: discussion.workspaceId,
           content, document, revision: 1, tags: [], createdByMemberId: memberId,
           createdAt: draft.createdAt }, "note_created", { kind: "member" });
         work = { kind: "note", id: draft.workId, workspaceId: discussion.workspaceId, content,
@@ -1045,7 +1149,7 @@ async repairNoteLink(memberId: string, sourceNoteId: string, linkId: string, tar
         activity.object.kind, activity.object.id, activity.action, memberId, activity.cause.kind, activity.occurredAt,
         JSON.stringify(activity.before), JSON.stringify(activity.after)]);
       await this.hooks.recordProjection(client, "Activity", activity.id, activity.schema, activity);
-      await this.hooks.recordProjectActivityNotifications(client, activity);
+      await this.activityNotifications.recordProjectActivityNotifications(client, activity);
       const outcome = { status: "created" as const, work, activity, projections: [workProjection, link, activity] };
       await client.query("INSERT INTO stash_discussion_work_receipts (account_id,idempotency_key,fingerprint,outcome) VALUES ($1,$2,$3,$4::jsonb)",
         [memberId, draft.idempotencyKey, fingerprint, JSON.stringify(outcome)]);
@@ -1096,7 +1200,7 @@ async repairNoteLink(memberId: string, sourceNoteId: string, linkId: string, tar
     const row = result.rows[0];
     if (!row) return undefined;
     if (row.target_kind === "note" || row.target_kind === "block") {
-      if (await this.hooks.authorizeNote(client, memberId, row.note_id) === "none") return undefined;
+      if (await this.authorizeNote(client, memberId, row.note_id) === "none") return undefined;
     } else {
       const taskAccess = await client.query(`SELECT 1 FROM stash_tasks task JOIN stash_workspaces workspace ON workspace.id=task.workspace_id
         WHERE task.id=$1 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR EXISTS (
@@ -1283,7 +1387,7 @@ async repairNoteLink(memberId: string, sourceNoteId: string, linkId: string, tar
     return this.kernel.withSession(async (client) => {
       await this.hooks.prepareHistory(client);
       await this.hooks.backfillLegacyNoteHistory(client);
-      const access = await this.hooks.authorizeNote(client, memberId, noteId);
+      const access = await this.authorizeNote(client, memberId, noteId);
       if (access === "none") return { status: "not_found" as const };
       const rows = await client.query<any>(`SELECT history.*, actor.name AS actor_name FROM stash_note_history history
         JOIN stash_accounts actor ON actor.id=history.actor_account_id
@@ -1300,7 +1404,7 @@ async repairNoteLink(memberId: string, sourceNoteId: string, linkId: string, tar
     return this.kernel.transaction(async (client) => {
       await this.hooks.prepareHistory(client);
       await this.hooks.backfillLegacyNoteHistory(client);
-      if (await this.hooks.authorizeNote(client, memberId, noteId) !== "edit") return { status: "not_found" as const };
+      if (await this.authorizeNote(client, memberId, noteId) !== "edit") return { status: "not_found" as const };
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [noteId, idempotencyKey]);
       const found = await client.query<any>(`SELECT note.*, creator.name AS creator_name FROM stash_notes note
         JOIN stash_accounts creator ON creator.id=note.created_by_account_id
@@ -1332,7 +1436,7 @@ async repairNoteLink(memberId: string, sourceNoteId: string, linkId: string, tar
       const projection = { schema: "stash.note.v2" as const, note: (({ createdByMemberId: _, ...publicNote }) => publicNote)(note),
         createdBy: { localAccountId: row.created_by_account_id, displayName: row.creator_name } };
       await this.hooks.recordProjection(client, "Note", noteId, "stash.note.v2", projection);
-      const activity = await this.hooks.recordNoteRevisionAndActivity(client, memberId, before, note, "note_restored",
+      const activity = await this.recordNoteRevisionAndActivity(client, memberId, before, note, "note_restored",
         { kind: "member", restorationOfRevision: targetRevision });
       const restoreResult = { revision: note.revision, content: note.content, document: note.document };
       await client.query("INSERT INTO stash_note_restore_receipts (note_id,idempotency_key,target_revision,activity_id,restore_result) VALUES ($1,$2,$3,$4,$5::jsonb)",
