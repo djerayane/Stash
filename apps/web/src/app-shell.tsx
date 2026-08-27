@@ -12,13 +12,14 @@ import { MemberAdministrationPage, type OrganizationAdministration } from "./mem
 import { ProjectNotificationsPage } from "./project-notifications";
 import { ImportedIdentitiesPage } from "./imported-identities";
 import { MemberSettingsPage, OrganizationSettingsPage, WorkspaceDataPage } from "./product-settings";
-import { ActivityPage, BoardsPage, DiscussionsPage, InboxPage, NoteHistoryPage, NotificationsPage, ProjectGatewayPage, SearchPage } from "./core-workflows";
+import { ActivityPage, BoardsPage, DiscussionsPage, InboxPage, NoteHistoryPage, NotificationsPage, SearchPage } from "./core-workflows";
 import { AgentGrantsPage } from "./agent-grants";
 import { NoteTree } from "./knowledge-authoring/note-tree";
 import { NoteWorkspace } from "./knowledge-authoring/note-workspace";
 import { SetupPage } from "./identity-access/setup-page";
 import type { InstanceSetupState } from "./identity-access/setup-state";
 import { ProjectBrowser } from "./work-planning/project-browser";
+import { TasksPage } from "./work-planning/tasks-page";
 
 export type SessionState =
   | { readonly status: "loading" }
@@ -275,7 +276,7 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
           <Route path="/app/notes" element={<NoteTree token={session.token ?? ""} variant="page" workspaceId={activeWorkspace.id ?? ""} />} />
           <Route path="/app/notes/new" element={<Navigate replace to="/app/notes" />} />
           <Route path="/app/notes/:noteId/history" element={<NoteHistoryPage token={session.token ?? ""} />} />
-          <Route path="/app/tasks" element={<ProjectGatewayPage workspaceId={activeWorkspace.id ?? ""} token={session.token ?? ""} />} />
+          <Route path="/app/tasks" element={<TasksPage workspaceId={activeWorkspace.id ?? ""} memberId={session.member.id} token={session.token ?? ""} />} />
           <Route path="/app/projects" element={<ProjectBrowser token={session.token ?? ""} onOpenProject={(projectId) => navigate(`/app/projects/${encodeURIComponent(projectId)}/boards`)} />} />
           <Route path="/app/projects/:projectId/boards" element={<BoardsPage token={session.token ?? ""} />} />
           <Route path="/app/projects/:projectId/boards/:boardId" element={<BoardsPage token={session.token ?? ""} />} />

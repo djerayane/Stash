@@ -5,13 +5,17 @@ import type { CollectionProperty as CanonicalProperty } from "@stash/domain-type
 import type { CollectionRepository, CollectionViewResult } from "./collections.js";
 
 type PrepareNotes = (client: PostgresQueryable) => Promise<void>;
+export type TaskViewSource = (memberId: string, workspaceId: string) => Promise<
+  { status: "found"; tasks: readonly unknown[]; workflow?: {statuses:readonly unknown[]} } | { status: "workspace_not_found" }
+>;
 const member = `(workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
   (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
     WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2))`;
 
 /** Focused canonical Collection and View Block persistence over the shared Postgres kernel. */
 export class PostgresCollectionRepository implements CollectionRepository {
-  constructor(private readonly kernel: PostgresKernel, private readonly prepareNotes: PrepareNotes) {}
+  constructor(private readonly kernel: PostgresKernel, private readonly prepareNotes: PrepareNotes,
+    private readonly taskViewSource?: TaskViewSource) {}
 
   async prepare(client: PostgresQueryable): Promise<void> {
     await this.prepareNotes(client);
@@ -250,12 +254,11 @@ export class PostgresCollectionRepository implements CollectionRepository {
           collection: await this.permissionFilteredCollection(client, memberId,
             await this.canonicalCollection(client, view.definition.source.collectionId)) } };
       }
-      const workspace = await client.query(`SELECT workspace.id FROM stash_workspaces workspace WHERE workspace.id=$1 AND
-        ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR (workspace.owner_type='organization' AND EXISTS
-          (SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2)))`,
-      [view.definition.source.workspaceId, memberId]);
-      if (!workspace.rowCount) return { status: "source_unavailable" as const };
-      return { status: "found" as const, view, source: { kind: "tasks" as const, records: [] } };
+      if (!this.taskViewSource) return { status: "source_unavailable" as const };
+      const tasks = await this.taskViewSource(memberId, view.definition.source.workspaceId);
+      if (tasks.status !== "found") return { status: "source_unavailable" as const };
+      return { status: "found" as const, view, source: { kind: "tasks" as const, records: tasks.tasks,
+        statuses: tasks.workflow?.statuses ?? [] } };
     });
   }
 

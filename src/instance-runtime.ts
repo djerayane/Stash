@@ -58,6 +58,7 @@ import { RelationshipQueryService } from "./knowledge-authoring/relationship-que
 import { VisualizationBlockService } from "./knowledge-authoring/visualization-block.js";
 import { workPlanningCapability } from "./work-planning/index.js";
 import { ProjectlessTaskService } from "./work-planning/projectless-tasks.js";
+import { CanonicalTaskService } from "./work-planning/canonical-tasks.js";
 
 function required(environment: NodeJS.ProcessEnv, name: string): string {
   const value = environment[name]?.trim();
@@ -140,6 +141,7 @@ export async function composeInstanceRuntime(environment: NodeJS.ProcessEnv): Pr
   const starterTutorials = new TutorialContributionService(database.tutorialContributionRepository());
   const collections = new CollectionService(database.collectionRepository());
   const projectlessTasks = new ProjectlessTaskService(database.projectlessTaskRepository());
+  const canonicalTasks = new CanonicalTaskService(database.canonicalTaskRepository());
   const repositoryConnections = githubApp ? new RepositoryConnectionService(database, githubApp) : undefined;
   const githubArtifacts = githubApp ? new GitHubArtifactService(database, githubApp) : undefined;
   const githubSignals = githubWebhookSecret ? new GitHubSignalService(database, githubWebhookSecret, automations) : undefined;
@@ -150,7 +152,7 @@ export async function composeInstanceRuntime(environment: NodeJS.ProcessEnv): Pr
       database.tutorialContributionRepository()), starterTutorials, collections,
       relationships: new RelationshipQueryService(database.relationshipQueryRepository()),
       visualizations: new VisualizationBlockService(database.visualizationBlockRepository()), memberAccess: passwordAuth }),
-    workPlanningCapability({ tasks, workspaceProjects, projectlessTasks, memberAccess: passwordAuth }),
+    workPlanningCapability({ tasks, workspaceProjects, projectlessTasks, canonicalTasks, memberAccess: passwordAuth }),
     developmentIntegrationCapability({ memberAccess: passwordAuth,
       ...(repositoryConnections ? { repositoryConnections } : {}), ...(githubArtifacts ? { githubArtifacts } : {}),
       ...(githubSignals ? { githubSignals } : {}) }),

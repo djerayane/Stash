@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { Collection, CollectionImpact, CollectionProperty, CollectionPropertyType, CollectionPropertyValue, ViewBlock, ViewDefinition, ViewPresentation } from "@stash/domain-types";
 
 import { evaluateCollectionView, updateBoardGroup } from "./views/view-model";
+import { TaskView, type TaskViewRecord } from "../shared/task-view";
 import { TableView } from "./views/table-view";
 import { BoardView } from "./views/board-view";
 import { ListView } from "./views/list-view";
@@ -202,13 +203,33 @@ function CollectionAuthoring({ collection, token, fetcher, noteId }: { collectio
 function SavedCollectionView({ initialView, token, fetcher }: { initialView: ViewBlock; token: string; fetcher: typeof fetch }) {
   const query = useQuery({ queryKey: ["collection-view", initialView.id], retry: false, queryFn: async () => {
     const response = await fetcher(`/api/view-blocks/${encodeURIComponent(initialView.id)}`, { headers: auth(token) });
-    const body = await response.json() as { view?: ViewBlock; source?: { kind: "collection"; collection: Collection }; message?: string };
-    if (!response.ok || !body.view || body.source?.kind !== "collection") throw new Error(body.message || "This View source is unavailable.");
-    return { view: body.view, collection: body.source.collection };
+    const body = await response.json() as { view?: ViewBlock; source?: { kind: "collection"; collection: Collection } | {kind:"tasks";records:TaskViewRecord[];statuses:Array<{id:string;name:string}>}; message?: string };
+    if (!response.ok || !body.view || !body.source) throw new Error(body.message || "This View source is unavailable.");
+    return { view: body.view, source: body.source };
   } });
   if (query.isPending) return <p className={styles.status}>Opening {initialView.title}…</p>;
   if (query.isError) return <section className={styles.unavailable} role="status"><h3>View unavailable</h3><p>{query.error.message}</p></section>;
-  return <CollectionView view={query.data.view} collection={query.data.collection} token={token} fetcher={fetcher} persisted />;
+  return query.data.source.kind==="collection" ? <CollectionView view={query.data.view} collection={query.data.source.collection} token={token} fetcher={fetcher} persisted />
+    : <TaskViewBlock view={query.data.view} tasks={query.data.source.records} statuses={query.data.source.statuses} token={token} fetcher={fetcher}/>;
+}
+
+function TaskViewBlock({view,tasks,statuses,token,fetcher}:{view:ViewBlock;tasks:TaskViewRecord[];statuses:Array<{id:string;name:string}>;token:string;fetcher:typeof fetch}){
+  const client=useQueryClient(); const [definition,setDefinition]=useState(view.definition); const [title,setTitle]=useState("");
+  const save=useMutation({mutationFn:async(next:ViewDefinition)=>{const response=await fetcher(`/api/view-blocks/${encodeURIComponent(view.id)}`,
+    {method:"PATCH",headers:{...auth(token),"content-type":"application/json"},body:JSON.stringify(next)});if(!response.ok)throw new Error("The View could not be saved.");}});
+  const create=useMutation({mutationFn:async()=>{if(definition.source.kind!=="tasks")return;const response=await fetcher(`/api/workspaces/${encodeURIComponent(definition.source.workspaceId)}/canonical-tasks`,
+    {method:"POST",headers:{...auth(token),"content-type":"application/json"},body:JSON.stringify({title})});if(!response.ok)throw new Error("The Task could not be created.");},
+    onSuccess:async()=>{setTitle("");await client.invalidateQueries({queryKey:["collection-view",view.id]});}});
+  const move=useMutation({mutationFn:async({id,statusId}:{id:string;statusId:string})=>{const response=await fetcher(`/api/canonical-tasks/${encodeURIComponent(id)}`,
+    {method:"PATCH",headers:{...auth(token),"content-type":"application/json"},body:JSON.stringify({statusId})});if(!response.ok)throw new Error("The Task status could not be changed.");},
+    onSuccess:async()=>client.invalidateQueries({queryKey:["collection-view",view.id]})});
+  const update=(presentation:ViewPresentation)=>{const next={...definition,presentation};setDefinition(next);save.mutate(next);};
+  return <article className={styles.viewBlock}><header><h3>{view.title}</h3><label>Presentation<select value={definition.presentation} onChange={(event)=>update(event.target.value as ViewPresentation)}>
+    <option value="table">Table</option><option value="board">Board</option><option value="list">List</option><option value="calendar">Calendar</option></select></label></header>
+    <form className={styles.form} onSubmit={(event)=>{event.preventDefault();if(title.trim())create.mutate();}}><label>New Task<input required value={title} onChange={(event)=>setTitle(event.target.value)}/></label><button>Create Task here</button></form>
+    <section aria-label={`${definition.presentation} Task view`}><TaskView tasks={tasks} definition={definition}
+      statuses={statuses} onStatusChange={(task,statusId)=>move.mutate({id:task.id,statusId})}/></section>
+    {create.isError||save.isError||move.isError?<p role="alert">{(create.error||save.error||move.error)?.message}</p>:null}</article>;
 }
 
 function CollectionView({ view, collection, token, fetcher, persisted }: { view: ViewBlock; collection: Collection; token: string;

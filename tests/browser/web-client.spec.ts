@@ -293,8 +293,8 @@ test("configures followed Project notifications by keyboard without accessibilit
 test("discovers Projects without raw identifiers and navigates implemented shell actions", async ({ page }) => {
   await installMemberSession(page);
   await page.goto("/app/tasks");
-  await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveValue("88888888-8888-4888-8888-888888888888");
-  await expect(page.getByRole("button", { name: /Stash/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Tasks", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Create Task" })).toBeVisible();
   await page.getByRole("link", { name: "Capture" }).click();
   await expect(page).toHaveURL(/\/app\/inbox$/);
   await expect.poll(() => page.evaluate(() => localStorage.getItem("stash.last-active-context:88888888-8888-4888-8888-888888888888"))).toBe("/app/inbox");

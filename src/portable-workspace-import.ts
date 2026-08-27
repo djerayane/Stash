@@ -307,7 +307,7 @@ function parseState(content: Buffer): PortableWorkspaceCanonicalState {
     if (typeof note.content !== "string" || !note.content.length
     || !Array.isArray(note.tags) || !note.tags.every((tag) => typeof tag === "string") || !timestamp(note.createdAt)
     || note.projectId !== undefined && !projects.has(String(note.projectId))) throw new InvalidPortableWorkspaceImport("invalid_note"); }
-  for (const task of value.tasks) { exact(task,["schema","id","workspaceId","projectId","title","key","status","keyAliases","sourceNoteIds","createdAt","createdBy","sourceBlocks","assigneeIds","formerAssigneeIds","priority","labelNames","dueDate","estimate","linkedNoteIds","dependencies","developmentLinks"],"task");
+  for (const task of value.tasks) { exact(task,["schema","id","workspaceId","projectId","title","description","key","status","keyAliases","projectAssociations","projectKeys","parentTaskId","sourceNoteIds","createdAt","createdBy","sourceBlocks","assigneeIds","formerAssigneeIds","priority","labelNames","dueDate","estimate","linkedNoteIds","dependencies","developmentLinks"],"task");
     exactIdentity(task.createdBy,"task_creator"); exact(task.status,["id","name","category"],"task_status");
     if (task.projectId !== undefined && !projects.has(String(task.projectId)) || typeof task.title !== "string" || !task.title
     || task.key !== undefined && typeof task.key !== "string" || task.projectId === undefined !== (task.key === undefined)
@@ -325,10 +325,16 @@ function parseState(content: Buffer): PortableWorkspaceCanonicalState {
     || task.priority !== undefined && !["none","low","medium","high","urgent"].includes(String(task.priority))
     || task.dueDate !== undefined && !timestamp(task.dueDate) || task.estimate !== undefined && (!Number.isFinite(task.estimate) || Number(task.estimate)<0)
     || task.keyAliases !== undefined && (!Array.isArray(task.keyAliases) || task.keyAliases.some((alias) => !object(alias)
-      || !projects.has(String(alias.projectId)) || typeof alias.key !== "string")))
+      || !projects.has(String(alias.projectId)) || typeof alias.key !== "string"))
+    || task.description !== undefined && typeof task.description !== "string"
+    || task.parentTaskId !== undefined && (!uuid.test(String(task.parentTaskId)) || !tasks.has(String(task.parentTaskId)) || task.parentTaskId === task.id)
+    || task.projectAssociations !== undefined && (!Array.isArray(task.projectAssociations) || task.projectAssociations.some((id) => !projects.has(String(id))))
+    || task.projectKeys !== undefined && (!Array.isArray(task.projectKeys) || task.projectKeys.some((entry) => !object(entry)
+      || !projects.has(String(entry.projectId)) || typeof entry.key !== "string")))
     throw new InvalidPortableWorkspaceImport("invalid_task"); }
   for (const task of value.tasks) {
     for (const alias of task.keyAliases ?? []) exact(alias,["projectId","key"],"task_key_alias");
+    for (const projectKey of task.projectKeys ?? []) exact(projectKey,["projectId","key"],"task_project_key");
     for (const source of task.sourceBlocks ?? []) exact(source,["noteId","blockId"],"task_source_block");
     for (const edge of task.dependencies ?? []) { exact(edge,["taskId","type"],"task_dependency"); if(!["depends_on","required_by"].includes(String(edge.type))) throw new InvalidPortableWorkspaceImport("invalid_task_dependency"); }
     for (const link of task.developmentLinks ?? []) { exact(link,["provider","url","kind"],"task_development_link"); if(typeof link.provider!=="string"||typeof link.url!=="string"||!["branch","commit","pull_request"].includes(String(link.kind))) throw new InvalidPortableWorkspaceImport("invalid_task_development_link"); }
@@ -353,9 +359,11 @@ function parseState(content: Buffer): PortableWorkspaceCanonicalState {
       || item.payload.id !== undefined && item.payload.id !== item.id) throw new InvalidPortableWorkspaceImport("unsupported_durable_object");
     const payload = item.payload;
     let sanitized: unknown;
-    if (item.kind === "Project") { exact(payload,["schema","id","workspaceId","name","key","createdBy"],"project"); exactIdentity(payload.createdBy,"project_creator");
+    if (item.kind === "Project") { exact(payload,["schema","id","workspaceId","name","key","createdBy","parentProjectId"],"project"); exactIdentity(payload.createdBy,"project_creator");
+      if (payload.parentProjectId !== undefined && (!uuid.test(String(payload.parentProjectId)) || !projects.has(String(payload.parentProjectId)) || payload.parentProjectId === payload.id)) throw new InvalidPortableWorkspaceImport("invalid_project");
       if (payload.workspaceId !== workspaceId || payload.id !== item.id || typeof payload.name !== "string" || typeof payload.key !== "string") throw new InvalidPortableWorkspaceImport("invalid_project");
-      sanitized={schema:payload.schema,id:payload.id,workspaceId:payload.workspaceId,name:payload.name,key:payload.key,createdBy:{...payload.createdBy}}; }
+      sanitized={schema:payload.schema,id:payload.id,workspaceId:payload.workspaceId,name:payload.name,key:payload.key,createdBy:{...payload.createdBy},
+        ...(payload.parentProjectId ? {parentProjectId:payload.parentProjectId} : {})}; }
     if (item.kind === "Workflow" && (!projects.has(String(payload.projectId)) || !Array.isArray(payload.statuses)
       || payload.statuses.some((status) => !object(status) || !uuid.test(String(status.id)) || typeof status.name !== "string"
         || !["unstarted", "started", "completed"].includes(String(status.category)) || !Number.isInteger(status.position) || typeof status.archived !== "boolean")))
@@ -443,6 +451,10 @@ function parseState(content: Buffer): PortableWorkspaceCanonicalState {
         throw new InvalidPortableWorkspaceImport("invalid_repository_connection"); sanitized=structuredClone(payload); }
     sanitizedDurable.push({kind:String(item.kind),id:String(item.id),schema:String(item.schema),payload:sanitized!});
   }
+  const parentByProject = new Map(sanitizedDurable.filter(({kind})=>kind==="Project").map((item)=>
+    [item.id,(item.payload as {parentProjectId?:string}).parentProjectId]));
+  for (const projectId of parentByProject.keys()) { const seen=new Set<string>(); let cursor:string|undefined=projectId;
+    while(cursor){if(seen.has(cursor))throw new InvalidPortableWorkspaceImport("invalid_project");seen.add(cursor);cursor=parentByProject.get(cursor);} }
   const importedCollections = new Map(sanitizedDurable.filter(({ kind }) => kind === "Collection")
     .map((item) => [item.id, item.payload as ReturnType<typeof normalizeCollection>]));
   for (const item of sanitizedDurable.filter(({ kind }) => kind === "ViewBlock")) {
