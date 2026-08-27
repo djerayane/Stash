@@ -212,7 +212,8 @@ export async function startInstance(options: InstanceOptions): Promise<RunningIn
   });
   diagnostics.record({ kind: "instance_started", occurredAt: new Date().toISOString() });
   const acceleration = options.acceleration ?? createOptionalRedisAcceleration();
-  const memberAccess = options.capabilities ? memberAccessFromCapabilities(options.capabilities) : options.memberAccess ?? options.passwordAuth;
+  const memberAccess = (options.capabilities ? memberAccessFromCapabilities(options.capabilities) : undefined)
+    ?? options.memberAccess ?? options.passwordAuth;
   const capabilityRegistry = options.capabilities ?? { modules: [] };
   const capabilityRouteOwnership = new Set(capabilityRegistry.modules.flatMap(({ owns }) => [...(owns ?? [])]));
   const ownsRoute = (feature: string) => capabilityRouteOwnership.has(feature);
