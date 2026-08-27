@@ -37,7 +37,7 @@ describe("PostgreSQL Note collaboration", { skip: databaseUrl ? false : "STASH_T
       [editorId, `editor-${randomUUID()}@example.test`, readerId, `reader-${randomUUID()}@example.test`]);
     await probe.query("INSERT INTO stash_organization_memberships(organization_id,account_id,role) VALUES($1,$2,'Member')", [owner.organizationId, editorId]);
     await probe.query("INSERT INTO stash_project_guests(project_id,account_id) VALUES($1,$2)", [project.project.id, readerId]);
-    const collaboration = new NoteCollaborationService(database);
+    const collaboration = new NoteCollaborationService(database.knowledgeAuthoringRepositories());
     assert.ok(await collaboration.load(readerId, captured.note.id));
     const denied = new Y.Doc(); denied.getText("note").insert(0, "denied");
     assert.equal(await collaboration.apply(readerId, captured.note.id, Y.encodeStateAsUpdate(denied)), undefined); denied.destroy();
