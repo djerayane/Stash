@@ -1,9 +1,10 @@
 import type { ActivityCause } from "../activity.js";
 import { noteOperationDigest, type NoteConflictResolution, type NoteEditBatch, type NoteEditConflict } from "../notes.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { NoteRecord, NoteRepository, NoteTriageChange, NoteTriageResult, PortableNoteProjection, PortableTaskProjection, TaskCreation } from "../notes.js";
-import { richTextToMarkdown } from "../rich-text.js";
+import { paragraphDocument, richTextToMarkdown } from "../rich-text.js";
 import { initialWorkflowStatus, type ProjectWorkflow, type WorkflowStatus } from "../project-workflows.js";
+import type { CreateDiscussionWorkDraft, DiscussionDraft, DiscussionMessage, DiscussionRecord, DiscussionTarget, DiscussionWorkActivity, DiscussionWorkOutcome, PortableDiscussionProjection, PortableDiscussionTarget, PortableDiscussionWorkLinkProjection } from "../discussions.js";
 import type { AttachmentRecord, PortableAttachmentProjection } from "../attachments.js";
 import type { NoteLinkRecord, NoteLocationRecord, PortableNoteLinkStateProjection, PortableNoteLocationProjection } from "../note-links.js";
 import * as Y from "yjs";
@@ -21,6 +22,9 @@ interface PostgresKnowledgeAuthoringHooks {
   authorizeNote(client: PostgresQueryable, memberId: string, noteId: string): Promise<"edit" | "read" | "none">;
   recordNoteRevisionAndActivity(client: PostgresQueryable, memberId: string, before: NoteRecord | undefined, after: NoteRecord,
     action: string, cause: ActivityCause): Promise<unknown>;
+  recordInitialNoteLocation(client: PostgresQueryable, noteId: string, workspaceId: string): Promise<void>;
+  recordDiscussionMentionNotifications(client: PostgresQueryable, memberId: string, discussion: DiscussionRecord, message: DiscussionMessage): Promise<void>;
+  recordProjectActivityNotifications(client: PostgresQueryable, activity: any): Promise<void>;
   recordDomainActivity(client: PostgresQueryable, memberId: string, workspaceId: string, kind: any, objectId: string,
     action: string, before: object, after: object): Promise<void>;
   recordCreatedNote(
@@ -764,6 +768,356 @@ async repairNoteLink(memberId: string, sourceNoteId: string, linkId: string, tar
 
   async prepareCollaboration(client: PostgresQueryable): Promise<void> {
     await this.ensureCollaborationSchema(client);
+  }
+
+
+  async createDiscussion(memberId: string, draft: DiscussionDraft) {
+    return this.kernel.transaction(async (client) => {
+      await this.ensureDiscussionSchema(client);
+      let workspaceId: string;
+      let target: DiscussionTarget;
+      if (draft.target.kind === "task") {
+        const task = await client.query<{ workspace_id: string; can_write: boolean; guest_can_read: boolean }>(`SELECT task.workspace_id,
+          ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR EXISTS (
+            SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id = workspace.organization_owner_id
+              AND membership.account_id = $2)) AS can_write,
+          EXISTS (SELECT 1 FROM stash_project_guests guest WHERE guest.project_id = task.project_id AND guest.account_id = $2) AS guest_can_read
+          FROM stash_tasks task JOIN stash_workspaces workspace ON workspace.id = task.workspace_id
+          WHERE task.id = $1 FOR UPDATE OF task`, [draft.target.taskId, memberId]);
+        const taskRow = task.rows[0];
+        if (!taskRow) return { status: "target_not_found" as const };
+        if (!taskRow.can_write) return { status: taskRow.guest_can_read ? "forbidden" as const : "target_not_found" as const };
+        workspaceId = taskRow.workspace_id;
+        target = draft.target;
+      } else {
+        const noteAccess = await this.hooks.authorizeNote(client, memberId, draft.target.noteId);
+        if (noteAccess === "none") return { status: "target_not_found" as const };
+        if (noteAccess === "read") return { status: "forbidden" as const };
+        const note = await client.query<any>(`SELECT note.*, creator.name AS created_by_name
+          FROM stash_notes note
+          JOIN stash_accounts creator ON creator.id = note.created_by_account_id
+          WHERE note.id = $1 FOR UPDATE OF note`, [draft.target.noteId]);
+        const row = note.rows[0];
+        if (!row) return { status: "target_not_found" as const };
+        workspaceId = row.workspace_id;
+        if (draft.target.kind === "note") target = draft.target;
+        else {
+          const blockTarget = draft.target;
+          const blocks = Array.isArray(row.document?.blocks) ? row.document.blocks as Array<{ blockKey?: string; id?: string }> : [];
+          const matches = blocks.filter((block) => block.blockKey === blockTarget.blockKey);
+          if (matches.length !== 1) return { status: "target_not_found" as const };
+          const block = matches[0]!;
+          const blockId = block.id ?? randomUUID();
+          if (block.id && blocks.filter((candidate) => candidate.id === blockId).length !== 1)
+            return { status: "ambiguous_block" as const };
+          if (!block.id) {
+            const before = noteFromRow(row);
+            block.id = blockId;
+            const content = richTextToMarkdown(row.document);
+            await client.query("UPDATE stash_notes SET document = $2::jsonb, content = $3, revision = revision + 1 WHERE id = $1",
+              [draft.target.noteId, JSON.stringify(row.document), content]);
+            const noteProjection = { schema: "stash.note.v1" as const, id: draft.target.noteId, workspaceId,
+              content, tags: row.tags, createdAt: new Date(row.created_at).toISOString(),
+              createdBy: { localAccountId: row.created_by_account_id, displayName: row.created_by_name },
+              ...(row.project_id ? { projectId: row.project_id } : {}),
+              ...(row.reminder_at ? { reminder: { at: new Date(row.reminder_at).toISOString() } } : {}) };
+            await this.hooks.recordProjection(client, "Note", draft.target.noteId, "stash.note.v1", noteProjection);
+            row.content = content; row.revision = Number(row.revision) + 1;
+            await this.hooks.recordNoteRevisionAndActivity(client, memberId, before, noteFromRow(row),
+              "note_block_identified", { kind: "member" });
+          }
+          target = { kind: "block", noteId: draft.target.noteId, blockId };
+        }
+      }
+      const discussion: DiscussionRecord = { ...draft, workspaceId, target };
+      await client.query(`INSERT INTO stash_discussions
+        (id, workspace_id, target_kind, note_id, block_id, task_id, created_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7)`, [discussion.id, workspaceId, target.kind,
+        target.kind === "note" || target.kind === "block" ? target.noteId : null,
+        target.kind === "block" ? target.blockId : null, target.kind === "task" ? target.taskId : null, discussion.createdAt]);
+      const first = discussion.messages[0]!;
+      await client.query(`INSERT INTO stash_discussion_messages (id, discussion_id, content, author_account_id, created_at)
+        VALUES ($1,$2,$3,$4,$5)`, [first.id, discussion.id, first.content, first.author.localAccountId, first.createdAt]);
+      const projection = this.portableDiscussion(discussion);
+      await this.hooks.recordProjection(client, "Discussion", discussion.id, projection.schema, projection);
+      await this.hooks.recordDiscussionMentionNotifications(client, memberId, discussion, first);
+      return { status: "created" as const, discussion, projection };
+    });
+  }
+
+
+  async findDiscussion(memberId: string, discussionId: string) {
+    return this.kernel.withSession(async (client) => {
+      await this.ensureDiscussionSchema(client);
+      const discussion = await this.readDiscussion(client, memberId, discussionId, false);
+      return discussion ? { status: "found" as const, discussion } : { status: "not_found" as const };
+    });
+  }
+
+
+  async listNoteDiscussions(memberId: string, noteId: string) {
+    return this.kernel.withSession(async (client) => {
+      await this.ensureDiscussionSchema(client);
+      const access = await this.hooks.authorizeNote(client, memberId, noteId);
+      if (access === "none") return { status: "not_found" as const };
+      const ids = await client.query<{ id: string }>("SELECT id FROM stash_discussions WHERE note_id = $1 ORDER BY created_at, id", [noteId]);
+      const discussions: DiscussionRecord[] = [];
+      for (const { id } of ids.rows) {
+        const discussion = await this.readDiscussion(client, memberId, id, false);
+        if (discussion) discussions.push(discussion);
+      }
+      return { status: "found" as const, access, discussions };
+    });
+  }
+
+
+  async listTaskDiscussions(memberId: string, taskId: string) {
+    return this.kernel.withSession(async (client) => {
+      await this.ensureDiscussionSchema(client);
+      const access = await client.query<{ can_write: boolean }>(`SELECT ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR EXISTS (
+          SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id = workspace.organization_owner_id
+            AND membership.account_id = $2)) AS can_write FROM stash_tasks task JOIN stash_workspaces workspace ON workspace.id = task.workspace_id
+        WHERE task.id = $1 AND (((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR EXISTS (
+          SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id = workspace.organization_owner_id
+            AND membership.account_id = $2)) OR EXISTS (
+          SELECT 1 FROM stash_project_guests guest WHERE guest.project_id = task.project_id AND guest.account_id = $2))`, [taskId, memberId]);
+      if (!access.rowCount) return { status: "not_found" as const };
+      const ids = await client.query<{ id: string }>("SELECT id FROM stash_discussions WHERE task_id = $1 ORDER BY created_at, id", [taskId]);
+      const discussions: DiscussionRecord[] = [];
+      for (const { id } of ids.rows) {
+        const discussion = await this.readDiscussion(client, memberId, id, false);
+        if (discussion) discussions.push(discussion);
+      }
+      return { status: "found" as const, access: access.rows[0]!.can_write ? "edit" as const : "read" as const, discussions };
+    });
+  }
+
+
+  async listBlockDiscussions(memberId: string, noteId: string, blockKey: string) {
+    return this.kernel.withSession(async (client) => {
+      await this.ensureDiscussionSchema(client);
+      const access = await this.hooks.authorizeNote(client, memberId, noteId);
+      if (access === "none") return { status: "not_found" as const };
+      const note = await client.query<any>("SELECT document FROM stash_notes WHERE id = $1", [noteId]);
+      if (!note.rowCount) return { status: "not_found" as const };
+      const blocks = Array.isArray(note.rows[0].document?.blocks) ? note.rows[0].document.blocks as Array<{ blockKey?: string; id?: string }> : [];
+      const matches = blocks.filter((block) => block.blockKey === blockKey);
+      if (matches.length !== 1 || typeof matches[0]!.id !== "string"
+        || blocks.filter((block) => block.id === matches[0]!.id).length !== 1) return { status: "not_found" as const };
+      const ids = await client.query<{ id: string }>(`SELECT id FROM stash_discussions
+        WHERE target_kind = 'block' AND note_id = $1 AND block_id = $2 ORDER BY created_at, id`, [noteId, matches[0]!.id]);
+      const discussions: DiscussionRecord[] = [];
+      for (const { id } of ids.rows) {
+        const discussion = await this.readDiscussion(client, memberId, id, false);
+        if (discussion?.target.kind === "block") discussions.push(discussion);
+      }
+      return { status: "found" as const, access, discussions };
+    });
+  }
+
+
+  async addMessage(memberId: string, discussionId: string, message: DiscussionMessage) {
+    return this.kernel.transaction(async (client) => {
+      await this.ensureDiscussionSchema(client);
+      const discussion = await this.readDiscussion(client, memberId, discussionId, true);
+      if (!discussion) return { status: "not_found" as const };
+      if (!await this.canWriteDiscussion(client, memberId, discussion.workspaceId)) return { status: "forbidden" as const };
+      if (discussion.resolvedAt) return { status: "resolved" as const };
+      await client.query(`INSERT INTO stash_discussion_messages (id, discussion_id, content, author_account_id, created_at)
+        VALUES ($1,$2,$3,$4,$5)`, [message.id, discussionId, message.content, message.author.localAccountId, message.createdAt]);
+      discussion.messages.push(message);
+      const projection = this.portableDiscussion(discussion);
+      await this.hooks.recordProjection(client, "Discussion", discussionId, projection.schema, projection);
+      await this.hooks.recordDiscussionMentionNotifications(client, memberId, discussion, message);
+      return { status: "updated" as const, discussion, projection };
+    });
+  }
+
+
+  async resolveDiscussion(memberId: string, discussionId: string, resolvedAt: string) {
+    return this.kernel.transaction(async (client) => {
+      await this.ensureDiscussionSchema(client);
+      const discussion = await this.readDiscussion(client, memberId, discussionId, true);
+      if (!discussion) return { status: "not_found" as const };
+      if (!await this.canWriteDiscussion(client, memberId, discussion.workspaceId)) return { status: "forbidden" as const };
+      if (discussion.resolvedAt) return { status: "already_resolved" as const, discussion };
+      await client.query("UPDATE stash_discussions SET resolved_at = $2 WHERE id = $1", [discussionId, resolvedAt]);
+      discussion.resolvedAt = resolvedAt;
+      const projection = this.portableDiscussion(discussion);
+      await this.hooks.recordProjection(client, "Discussion", discussionId, projection.schema, projection);
+      return { status: "resolved" as const, discussion, projection };
+    });
+  }
+
+
+  async createWorkFromMessages(memberId: string, discussionId: string, draft: CreateDiscussionWorkDraft): Promise<DiscussionWorkOutcome> {
+    return this.kernel.transaction(async (client) => {
+      await this.ensureDiscussionSchema(client);
+      const discussion = await this.readDiscussion(client, memberId, discussionId, true);
+      if (!discussion) return { status: "not_found" as const };
+      if (!await this.canWriteDiscussion(client, memberId, discussion.workspaceId)) return { status: "forbidden" as const };
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [memberId, draft.idempotencyKey]);
+      const fingerprint = createHash("sha256").update(JSON.stringify({ discussionId, kind: draft.kind,
+        messageIds: draft.messageIds, ...(draft.kind === "task" ? { projectId: draft.projectId, title: draft.title } : {}) })).digest("hex");
+      const receipt = await client.query<{ fingerprint: string; outcome: DiscussionWorkOutcome }>(
+        "SELECT fingerprint, outcome FROM stash_discussion_work_receipts WHERE account_id = $1 AND idempotency_key = $2 FOR UPDATE",
+        [memberId, draft.idempotencyKey],
+      );
+      if (receipt.rows[0]) return receipt.rows[0].fingerprint === fingerprint
+        ? { ...(receipt.rows[0].outcome as Extract<DiscussionWorkOutcome, { status: "created" }>), status: "duplicate" as const }
+        : { status: "idempotency_conflict" as const };
+      const selectedIds = new Set(draft.messageIds);
+      const selectedMessages = discussion.messages.filter(({ id }) => selectedIds.has(id));
+      if (selectedMessages.length !== draft.messageIds.length) return { status: "message_not_found" as const };
+
+      let work: Extract<DiscussionWorkOutcome, { status: "created" }>["work"];
+      let workProjection: { schema: "stash.note.v1" | "stash.task.v1" };
+      if (draft.kind === "note") {
+        const content = selectedMessages.map(({ content }) => content).join("\n\n");
+        const document = paragraphDocument(content, randomUUID());
+        await client.query(`INSERT INTO stash_notes
+          (id, workspace_id, project_id, content, document, revision, tags, reminder_at, created_by_account_id, created_at)
+          VALUES ($1,$2,NULL,$3,$4::jsonb,1,'[]'::jsonb,NULL,$5,$6)`,
+        [draft.workId, discussion.workspaceId, content, JSON.stringify(document), memberId, draft.createdAt]);
+        await this.hooks.recordInitialNoteLocation(client, draft.workId, discussion.workspaceId);
+        const projection = { schema: "stash.note.v1" as const, id: draft.workId, workspaceId: discussion.workspaceId,
+          content, tags: [], createdAt: draft.createdAt, createdBy: draft.createdBy };
+        await this.hooks.recordProjection(client, "Note", draft.workId, projection.schema, projection);
+        await this.hooks.recordNoteRevisionAndActivity(client, memberId, undefined, { id: draft.workId, workspaceId: discussion.workspaceId,
+          content, document, revision: 1, tags: [], createdByMemberId: memberId,
+          createdAt: draft.createdAt }, "note_created", { kind: "member" });
+        work = { kind: "note", id: draft.workId, workspaceId: discussion.workspaceId, content,
+          source: { discussionId, messageIds: selectedMessages.map(({ id }) => id) } };
+        workProjection = { schema: projection.schema };
+      } else {
+        const project = await client.query("SELECT 1 FROM stash_projects WHERE id = $1 AND workspace_id = $2", [draft.projectId, discussion.workspaceId]);
+        if (!project.rowCount) return { status: "project_forbidden" as const };
+        const projection = await this.createTask(client, { id: draft.workId, workspaceId: discussion.workspaceId,
+          projectId: draft.projectId, title: draft.title, sourceNoteIds: [], createdAt: draft.createdAt, createdBy: draft.createdBy });
+        await client.query("INSERT INTO stash_tasks (id, workspace_id, project_id, task_key, workflow_status_id, title, created_by_account_id, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+          [projection.id, projection.workspaceId, projection.projectId, projection.key, projection.status.id, projection.title, memberId, projection.createdAt]);
+        await this.hooks.recordProjection(client, "Task", projection.id, projection.schema, projection);
+        work = { kind: "task", id: projection.id, workspaceId: projection.workspaceId, projectId: projection.projectId,
+          title: projection.title, key: projection.key, source: { discussionId, messageIds: selectedMessages.map(({ id }) => id) } };
+        workProjection = { schema: projection.schema };
+      }
+      const link: PortableDiscussionWorkLinkProjection = { schema: "stash.discussion-work-link.v1", id: draft.linkId,
+        workspaceId: discussion.workspaceId, discussionId, work: { kind: work.kind, id: work.id },
+        selectedMessages, createdAt: draft.createdAt, createdBy: draft.createdBy };
+      await client.query(`INSERT INTO stash_discussion_work_links
+        (id, discussion_id, work_kind, note_id, task_id, selected_message_ids, created_by_account_id, created_at)
+        VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8)`, [draft.linkId, discussionId, work.kind,
+        work.kind === "note" ? work.id : null, work.kind === "task" ? work.id : null,
+        JSON.stringify(link.selectedMessages.map(({ id }) => id)), memberId, draft.createdAt]);
+      await this.hooks.recordProjection(client, "DiscussionWorkLink", link.id, link.schema, link);
+      const activity: DiscussionWorkActivity = { schema: "stash.activity.v1", id: randomUUID(), workspaceId: discussion.workspaceId,
+        action: "discussion_work_created", object: { kind: work.kind === "note" ? "Note" : "Task", id: work.id },
+        actor: draft.createdBy, cause: { kind: "member" }, occurredAt: draft.createdAt,
+        before: { discussionId, selectedMessageIds: selectedMessages.map(({ id }) => id) }, after: work };
+      await client.query(`INSERT INTO stash_workspace_activity
+        (id, workspace_id, object_kind, object_id, action, actor_account_id, cause, occurred_at, before_state, after_state)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb)`, [activity.id, activity.workspaceId,
+        activity.object.kind, activity.object.id, activity.action, memberId, activity.cause.kind, activity.occurredAt,
+        JSON.stringify(activity.before), JSON.stringify(activity.after)]);
+      await this.hooks.recordProjection(client, "Activity", activity.id, activity.schema, activity);
+      await this.hooks.recordProjectActivityNotifications(client, activity);
+      const outcome = { status: "created" as const, work, activity, projections: [workProjection, link, activity] };
+      await client.query("INSERT INTO stash_discussion_work_receipts (account_id,idempotency_key,fingerprint,outcome) VALUES ($1,$2,$3,$4::jsonb)",
+        [memberId, draft.idempotencyKey, fingerprint, JSON.stringify(outcome)]);
+      return outcome;
+    });
+  }
+
+
+  private async ensureDiscussionSchema(client: PostgresQueryable): Promise<void> {
+    await this.hooks.prepare(client);
+    await client.query(`CREATE TABLE IF NOT EXISTS stash_discussions (
+      id UUID PRIMARY KEY, workspace_id UUID NOT NULL REFERENCES stash_workspaces(id),
+      target_kind TEXT NOT NULL CHECK (target_kind IN ('note','block','task')),
+      note_id UUID REFERENCES stash_notes(id), block_id UUID, task_id UUID REFERENCES stash_tasks(id),
+      created_at TIMESTAMPTZ NOT NULL, resolved_at TIMESTAMPTZ,
+      CHECK ((target_kind = 'note' AND note_id IS NOT NULL AND block_id IS NULL AND task_id IS NULL)
+        OR (target_kind = 'block' AND note_id IS NOT NULL AND block_id IS NOT NULL AND task_id IS NULL)
+        OR (target_kind = 'task' AND note_id IS NULL AND block_id IS NULL AND task_id IS NOT NULL))
+    )`);
+    await client.query(`CREATE TABLE IF NOT EXISTS stash_discussion_messages (
+      id UUID PRIMARY KEY, discussion_id UUID NOT NULL REFERENCES stash_discussions(id) ON DELETE CASCADE,
+      content TEXT NOT NULL CHECK (char_length(content) BETWEEN 1 AND 20000),
+      author_account_id UUID NOT NULL REFERENCES stash_accounts(id), created_at TIMESTAMPTZ NOT NULL
+    )`);
+    await client.query(`CREATE TABLE IF NOT EXISTS stash_discussion_work_links (
+      id UUID PRIMARY KEY, discussion_id UUID NOT NULL REFERENCES stash_discussions(id) ON DELETE RESTRICT,
+      work_kind TEXT NOT NULL CHECK (work_kind IN ('note','task')),
+      note_id UUID REFERENCES stash_notes(id) ON DELETE RESTRICT, task_id UUID REFERENCES stash_tasks(id) ON DELETE RESTRICT,
+      selected_message_ids JSONB NOT NULL, created_by_account_id UUID NOT NULL REFERENCES stash_accounts(id), created_at TIMESTAMPTZ NOT NULL,
+      CHECK ((work_kind = 'note' AND note_id IS NOT NULL AND task_id IS NULL)
+        OR (work_kind = 'task' AND note_id IS NULL AND task_id IS NOT NULL))
+    )`);
+    await client.query(`CREATE TABLE IF NOT EXISTS stash_discussion_work_receipts (
+      account_id UUID NOT NULL REFERENCES stash_accounts(id), idempotency_key UUID NOT NULL,
+      fingerprint TEXT NOT NULL, outcome JSONB NOT NULL, PRIMARY KEY (account_id, idempotency_key)
+    )`);
+  }
+
+  async prepareDiscussions(client: PostgresQueryable): Promise<void> {
+    await this.ensureDiscussionSchema(client);
+  }
+
+
+  private async readDiscussion(client: PostgresQueryable, memberId: string, discussionId: string, lock: boolean): Promise<DiscussionRecord | undefined> {
+    const result = await client.query<any>(`SELECT discussion.*, note.document FROM stash_discussions discussion
+      LEFT JOIN stash_notes note ON note.id = discussion.note_id
+      WHERE discussion.id = $1${lock ? " FOR UPDATE OF discussion" : ""}`, [discussionId]);
+    const row = result.rows[0];
+    if (!row) return undefined;
+    if (row.target_kind === "note" || row.target_kind === "block") {
+      if (await this.hooks.authorizeNote(client, memberId, row.note_id) === "none") return undefined;
+    } else {
+      const taskAccess = await client.query(`SELECT 1 FROM stash_tasks task JOIN stash_workspaces workspace ON workspace.id=task.workspace_id
+        WHERE task.id=$1 AND ((workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR EXISTS (
+          SELECT 1 FROM stash_organization_memberships membership WHERE membership.organization_id=workspace.organization_owner_id
+            AND membership.account_id=$2) OR EXISTS (
+          SELECT 1 FROM stash_project_guests guest WHERE guest.project_id=task.project_id AND guest.account_id=$2))`, [row.task_id, memberId]);
+      if (!taskAccess.rowCount) return undefined;
+    }
+    const messages = await client.query<any>(`SELECT message.id, message.content, message.created_at,
+      account.id AS author_id, account.name AS author_name FROM stash_discussion_messages message
+      JOIN stash_accounts account ON account.id = message.author_account_id
+      WHERE message.discussion_id = $1 ORDER BY message.created_at, message.id`, [discussionId]);
+    let target: DiscussionTarget;
+    if (row.target_kind === "task") target = { kind: "task", taskId: row.task_id };
+    else if (row.target_kind === "note") target = { kind: "note", noteId: row.note_id };
+    else {
+      const matches = Array.isArray(row.document?.blocks)
+        ? row.document.blocks.filter((block: { id?: string }) => block.id === row.block_id).length : 0;
+      target = { kind: "block", noteId: row.note_id, blockId: row.block_id,
+        state: matches === 1 ? "attached" : matches > 1 ? "ambiguous" : "block_missing" };
+    }
+    return { id: row.id, workspaceId: row.workspace_id, target,
+      messages: messages.rows.map((message: any) => ({ id: message.id, content: message.content,
+        author: { localAccountId: message.author_id, displayName: message.author_name },
+        createdAt: new Date(message.created_at).toISOString() })),
+      createdAt: new Date(row.created_at).toISOString(), ...(row.resolved_at ? { resolvedAt: new Date(row.resolved_at).toISOString() } : {}) };
+  }
+
+
+  private async canWriteDiscussion(client: PostgresQueryable, memberId: string, workspaceId: string): Promise<boolean> {
+    const result = await client.query(`SELECT 1 FROM stash_workspaces workspace WHERE workspace.id = $1
+      AND ((workspace.owner_type = 'personal' AND workspace.personal_owner_id = $2) OR
+        (workspace.owner_type = 'organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
+          WHERE membership.organization_id = workspace.organization_owner_id AND membership.account_id = $2)))`,
+    [workspaceId, memberId]);
+    return result.rowCount === 1;
+  }
+
+
+  private portableDiscussion(discussion: DiscussionRecord): PortableDiscussionProjection {
+    const target: PortableDiscussionTarget = discussion.target.kind === "block"
+      ? { kind: "block", noteId: discussion.target.noteId, blockId: discussion.target.blockId }
+      : discussion.target;
+    return { schema: "stash.discussion.v1", id: discussion.id, workspaceId: discussion.workspaceId,
+      target, messages: discussion.messages, createdAt: discussion.createdAt,
+      ...(discussion.resolvedAt ? { resolvedAt: discussion.resolvedAt } : {}) };
   }
 }
 

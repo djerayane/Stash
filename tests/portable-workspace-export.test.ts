@@ -224,7 +224,7 @@ describe("PostgreSQL readable export wiring", { skip: postgresUrl ? false : "STA
         createdAt: "2026-08-23T12:00:00.000Z",
       });
       assert.equal(mobileNote.status, "created");
-      const discussions = new DiscussionService(database);
+      const discussions = new DiscussionService(database.knowledgeAuthoringRepositories());
       const discussion = await discussions.create(ownerId, { target: { kind: "note", noteId: visibleNote.note.id }, message: "Preserve this" });
       assert.equal(discussion.status, "created"); if (discussion.status !== "created") return;
       const discussionNote = await discussions.createWork(ownerId, discussion.discussion.id, { kind: "note",
