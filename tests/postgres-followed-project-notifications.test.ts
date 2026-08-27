@@ -28,18 +28,18 @@ describe("PostgreSQL followed Project notifications", { skip: databaseUrl ? fals
       const workspaces = new WorkspaceProjectService(database); const workspace = await workspaces.createWorkspace(ownerId,
         { name: "Follow", owner: { type: "organization", organizationId } }); assert.equal(workspace.status, "created"); if (workspace.status !== "created") return;
       const project = await workspaces.createProject(ownerId, workspace.workspace.id, { name: "Delivery", key: "DEL" }); assert.equal(project.status, "created"); if (project.status !== "created") return;
-      assert.equal(await database.saveProjectFollow(recipientId, project.project.id, true), true);
-      assert.equal(await database.saveProjectFollow(followerId, project.project.id, true), true);
-      await database.saveNotificationPreferences(recipientId, project.project.id, { activity: "followed", digest: "off" });
+      assert.equal(await database.workPlanningRepositories().saveProjectFollow!(recipientId, project.project.id, true), true);
+      assert.equal(await database.workPlanningRepositories().saveProjectFollow!(followerId, project.project.id, true), true);
+      await database.workPlanningRepositories().saveNotificationPreferences(recipientId, project.project.id, { activity: "followed", digest: "off" });
       const created = await new NoteService(database.knowledgeAuthoringRepositories()).capture(ownerId, workspace.workspace.id, { projectId: project.project.id, content: "Canonical change" });
-      assert.equal(created.status, "created"); const inbox = await database.listNotifications(recipientId);
+      assert.equal(created.status, "created"); const inbox = await database.workPlanningRepositories().listNotifications(recipientId);
       assert.equal(inbox.length, 1); assert.equal(inbox[0]?.trigger, "followed_change"); assert.equal(inbox[0]?.activity.object.kind, "Note");
       assert.equal(inbox[0]?.activity.actor.localAccountId, ownerId);
       if (created.status === "created") {
         const discussion = await new DiscussionService(database).create(ownerId, { target: { kind: "note", noteId: created.note.id },
           message: `Review this <@${recipientId}>` }); assert.equal(discussion.status, "created");
-        const mentioned = (await database.listNotifications(recipientId)).filter(({ activity: item }) => item.action === "discussion_message_mentioned_members");
-        const follower = (await database.listNotifications(followerId)).filter(({ activity: item }) => item.action === "discussion_message_mentioned_members");
+        const mentioned = (await database.workPlanningRepositories().listNotifications(recipientId)).filter(({ activity: item }) => item.action === "discussion_message_mentioned_members");
+        const follower = (await database.workPlanningRepositories().listNotifications(followerId)).filter(({ activity: item }) => item.action === "discussion_message_mentioned_members");
         assert.deepEqual(mentioned.map(({ trigger }) => trigger), ["direct_mention"], "the mentioned Member receives only the specific trigger");
         assert.deepEqual(follower.map(({ trigger }) => trigger), ["followed_change"], "other Project followers receive the canonical Discussion Activity");
       }
@@ -48,13 +48,13 @@ describe("PostgreSQL followed Project notifications", { skip: databaseUrl ? fals
         const task = await tasks.createFromBlock(ownerId, created.note.id, blockKey, { projectId: project.project.id, title: "Assign once" });
         assert.equal(task.status, "created"); if (task.status === "created") {
           await tasks.updateByKey(ownerId, project.project.id, task.task.key, { assigneeIds: [recipientId] });
-          const deliveries = await database.listNotifications(recipientId); const assigned = deliveries.filter(({ activity }) => activity.after.assigneeIds !== undefined);
+          const deliveries = await database.workPlanningRepositories().listNotifications(recipientId); const assigned = deliveries.filter(({ activity }) => activity.after.assigneeIds !== undefined);
           assert.equal(assigned.length, 1); assert.equal(assigned[0]?.trigger, "assignment",
             "the specific assignment trigger replaces followed_change for the same Member and Activity");
         }
       }
       await sql.query("DELETE FROM stash_organization_memberships WHERE organization_id=$1 AND account_id=$2", [organizationId, recipientId]);
-      assert.deepEqual(await database.listNotifications(recipientId), [], "revoked Project access hides prior delivery");
+      assert.deepEqual(await database.workPlanningRepositories().listNotifications(recipientId), [], "revoked Project access hides prior delivery");
     } finally { await database.close().catch(() => undefined); await sql.end();
       await administration.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined); await administration.end(); }
   });
