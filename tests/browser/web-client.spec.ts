@@ -164,7 +164,7 @@ test("restores an anonymous deep link after authentication", async ({ page }) =>
 
   await expect(page).toHaveURL(/\/app\/tasks\?assigned=me$/);
   await expect(page.getByRole("heading", { name: "Tasks", exact: true })).toBeVisible();
-  await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveValue("88888888-8888-4888-8888-888888888888");
+  await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveCount(0);
   await expect(page.getByText("Forged Workspace")).toHaveCount(0);
 });
 
