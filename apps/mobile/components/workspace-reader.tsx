@@ -9,7 +9,7 @@ import {
   groupReadableRecords,
   matchesReadableFilter,
   readablePresentationName,
-  readableTaskGroupLabel,
+  readableTaskGroup,
   visibleNoteTree,
 } from "./workspace-reader-model";
 
@@ -153,7 +153,7 @@ function ReadableViews({ views, snapshot }: { views: ViewBlock[]; snapshot: Mobi
           <Text selectable style={{ color: colors.secondaryLabel }}>{sourceDescription}</Text>
           <Text selectable style={{ color: colors.secondaryLabel }}>{count} {itemName}{count === 1 ? "" : "s"}{view.definition.focused ? " · Focused record" : ""}</Text>
         </View>
-        {taskGroups.map((group, index) => <View key={group.label ?? `tasks-${index}`} style={{ gap: stashTheme.spacing.sm }}>
+        {taskGroups.map((group, index) => <View key={group.key ?? `tasks-${index}`} style={{ gap: stashTheme.spacing.sm }}>
           {group.label ? <Text selectable accessibilityRole="header"
             style={{ color: colors.secondaryLabel, fontWeight: "700" }}>{group.label}</Text> : null}
           {group.items.map((task) => <View key={task.id} style={recordStyle}>
@@ -191,13 +191,14 @@ function ReadableViews({ views, snapshot }: { views: ViewBlock[]; snapshot: Mobi
 }
 
 function groupTasksForReading(tasks: MobileCanonicalTask[], groupBy: string | undefined, snapshot: MobileWorkspaceSnapshot) {
-  if (!groupBy || !isTaskViewPropertyId(groupBy)) return [{ label: undefined, items: tasks }];
-  const groups = new Map<string, MobileCanonicalTask[]>();
+  if (!groupBy || !isTaskViewPropertyId(groupBy)) return [{ key: undefined, label: undefined, items: tasks }];
+  const groups = new Map<string, { key: string; label: string; items: MobileCanonicalTask[] }>();
   for (const task of tasks) {
-    const label = readableTaskGroupLabel(task, groupBy, snapshot.workflow.statuses);
-    groups.set(label, [...(groups.get(label) ?? []), task]);
+    const presentation = readableTaskGroup(task, groupBy, snapshot.workflow.statuses, snapshot.members);
+    const group = groups.get(presentation.key);
+    groups.set(presentation.key, { key: presentation.key, label: presentation.label, items: [...(group?.items ?? []), task] });
   }
-  return [...groups].map(([label, items]) => ({ label, items }));
+  return [...groups.values()];
 }
 
 function taskValue(task: MobileCanonicalTask, propertyId: string): unknown {

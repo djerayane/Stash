@@ -295,7 +295,8 @@ let browserCanonicalTasks: CanonicalTask[] = [{ schema: "stash.task.v1", id: tas
   createdBy: task.createdBy, createdAt: task.createdAt }];
 const browserCanonicalTaskService = new CanonicalTaskService({
   async listTasks(memberId, workspaceId) { return memberId === browserMemberId && workspaceId === browserWorkspaceId
-    ? { status: "found" as const, tasks: browserCanonicalTasks, workflow: browserWorkspaceWorkflow } : { status: "workspace_not_found" as const }; },
+    ? { status: "found" as const, tasks: browserCanonicalTasks, workflow: browserWorkspaceWorkflow,
+      members: [{ id: browserMemberId, name: "Browser Member" }] } : { status: "workspace_not_found" as const }; },
   async workspaceWorkflow(memberId, workspaceId) { return memberId === browserMemberId && workspaceId === browserWorkspaceId
     ? { status: "found" as const, workflow: browserWorkspaceWorkflow } : { status: "workspace_not_found" as const }; },
   async createTask(memberId, workspaceId, input) { if (memberId !== browserMemberId || workspaceId !== browserWorkspaceId) return { status: "workspace_not_found" as const };

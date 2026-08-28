@@ -264,6 +264,7 @@ export class MobileCaptureClient {
     if (!pairing?.memberId || !this.#store.loadWorkspaceSnapshot) return undefined;
     const snapshot = await this.#store.loadWorkspaceSnapshot(pairingScope(pairing));
     if (!snapshot) return undefined;
+    const normalized = normalizeMobileWorkspaceSnapshot(snapshot);
     const pending = (await this.#store.listMutations()).filter((mutation): mutation is Extract<MobileSyncMutation,
       { kind: "canonical_task_edit" }> => mutation.kind === "canonical_task_edit" && samePairingIdentity(mutation.origin, pairing));
     return pending.reduce((current, mutation) => ({ ...current, tasks: current.tasks.map((task) => {
@@ -273,7 +274,7 @@ export class MobileCaptureClient {
       return { ...task, status,
         ...(mutation.changes.title !== undefined ? { title: mutation.changes.title } : {}),
         ...(mutation.changes.assigneeIds !== undefined ? { assigneeIds: [...mutation.changes.assigneeIds] } : {}) };
-    }) }), structuredClone(snapshot));
+    }) }), normalized);
   }
 
   async refreshWorkspace(signal?: AbortSignal): Promise<MobileWorkspaceSnapshot> {
@@ -300,7 +301,8 @@ export class MobileCaptureClient {
         ...(task.revision === undefined ? {} : { revision: task.revision }) })); const workflow = taskBody.workflow;
       if (!workflow || typeof workflow !== "object") throw new Error("Workspace refresh returned an invalid Workflow.");
       const snapshot = normalizeMobileWorkspaceSnapshot({ schema: "stash.mobile-workspace.v1", workspaceId: pairing.workspaceId,
-        refreshedAt: new Date(this.#now()).toISOString(), noteTree, notes, tasks, workflow, collections, viewBlocks,
+        refreshedAt: new Date(this.#now()).toISOString(), noteTree, notes, tasks, workflow,
+        ...(taskBody.members === undefined ? {} : { members: requiredArray(taskBody.members, "Members") }), collections, viewBlocks,
         search: [...notes.map((note: any) => ({ id: String(note.id), kind: "note" as const, title: String(note.title ?? note.content?.split("\n")[0] ?? "Untitled"), excerpt: String(note.content ?? "").slice(0, 240) })),
           ...tasks.map((task: any) => ({ id: String(task.id), kind: "task" as const, title: String(task.title), excerpt: String(task.description ?? "").slice(0, 240) })),
           ...collections.map((collection: any) => ({ id: String(collection.id), kind: "collection" as const, title: String(collection.title) }))] });

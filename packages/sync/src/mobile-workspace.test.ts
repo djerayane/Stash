@@ -27,22 +27,24 @@ describe("mobile workspace synchronization", () => {
       const path = new URL(String(input)).pathname;
       if (path.endsWith("/note-tree")) return Response.json({ nodes: [{ id: noteId, workspaceId, title: "Inbox", position: "a", childCount: 0 }] });
       if (path.endsWith("/canonical-tasks")) return Response.json({ tasks: [{ schema: "stash.task.v1", id: taskId, workspaceId, title: "Review", description: "", revision: 2,
-        status: { id: memberId, name: "Todo", category: "unstarted", position: 1 }, assigneeIds: [], projectKeys: [], sourceNoteIds: [] }],
+        status: { id: memberId, name: "Todo", category: "unstarted", position: 1 }, assigneeIds: [memberId], projectKeys: [], sourceNoteIds: [] }],
         workflow: { schema: "stash.workspace-workflow.v1", workspaceId,
-          statuses: [{ id: memberId, name: "Todo", category: "unstarted", position: 1 }] } });
+          statuses: [{ id: memberId, name: "Todo", category: "unstarted", position: 1 }] },
+        members: [{ id: memberId, name: "Ada Lovelace" }] });
       if (path === `/api/notes/${noteId}`) return Response.json({ note: { id: noteId, workspaceId, title: "Inbox", content: "Offline", revision: 1 } });
       if (path.endsWith("/collections")) return Response.json({ collections: [], views: [] });
       throw new TypeError("offline");
     });
     const first = new MobileCaptureClient(store(state), fetch, { now: () => Date.parse("2026-08-27T10:00:00.000Z") });
-    await expect(first.refreshWorkspace()).resolves.toMatchObject({ schema: "stash.mobile-workspace.v1", notes: [{ content: "Offline" }] });
+    await expect(first.refreshWorkspace()).resolves.toMatchObject({ schema: "stash.mobile-workspace.v1", notes: [{ content: "Offline" }],
+      members: [{ id: memberId, name: "Ada Lovelace" }] });
     const restarted = new MobileCaptureClient(store(state), async () => { throw new TypeError("offline"); });
     await expect(restarted.cachedWorkspace()).resolves.toEqual(state.snapshot);
   });
 
   it("reconciles pairing-scoped pending canonical Task changes over the offline snapshot after restart", async () => {
     const base = { schema: "stash.mobile-workspace.v1" as const, workspaceId, refreshedAt: "2026-08-27T10:00:00.000Z",
-      noteTree: [], notes: [], collections: [], viewBlocks: [], search: [], workflow: { schema: "stash.workspace-workflow.v1" as const,
+      noteTree: [], notes: [], members: [], collections: [], viewBlocks: [], search: [], workflow: { schema: "stash.workspace-workflow.v1" as const,
         workspaceId, statuses: [{ id: memberId, name: "Todo", category: "unstarted", position: 1 }] },
       tasks: [{ schema: "stash.task.v1" as const, id: taskId, workspaceId, title: "Review", description: "", revision: 2,
         status: { id: memberId, name: "Todo", category: "unstarted", position: 1 }, assigneeIds: [], projectKeys: [], sourceNoteIds: [] }] };
@@ -52,6 +54,16 @@ describe("mobile workspace synchronization", () => {
     const restarted = new MobileCaptureClient(store(state), async () => { throw new TypeError("offline"); });
     await expect(restarted.cachedWorkspace()).resolves.toMatchObject({ tasks: [{ title: "Offline review", assigneeIds: [memberId] }] });
     expect(state.snapshot.tasks[0]!.title).toBe("Review");
+  });
+
+  it("upgrades a legacy encrypted Workspace snapshot without Member presentation metadata", async () => {
+    const legacy = { schema: "stash.mobile-workspace.v1" as const, workspaceId,
+      refreshedAt: "2026-08-27T10:00:00.000Z", noteTree: [], notes: [], collections: [], viewBlocks: [], search: [],
+      workflow: { schema: "stash.workspace-workflow.v1" as const, workspaceId, statuses: [] }, tasks: [] };
+    const state = { snapshot: legacy as unknown as MobileWorkspaceSnapshot, mutations: [] as MobileSyncMutation[] };
+    const restarted = new MobileCaptureClient(store(state), async () => { throw new TypeError("offline"); });
+
+    await expect(restarted.cachedWorkspace()).resolves.toMatchObject({ members: [] });
   });
 
   it("queues and synchronizes a canonical Task edit by stable Task id", async () => {
@@ -90,8 +102,11 @@ describe("mobile workspace synchronization", () => {
   it("demonstrates offline capture, local canonical update, synchronization, and stable identity reconciliation", async () => {
     const statusId = "66666666-6666-4666-8666-666666666666";
     const snapshot: MobileWorkspaceSnapshot = { schema: "stash.mobile-workspace.v1", workspaceId,
-      refreshedAt: "2026-08-27T10:00:00.000Z", noteTree: [], notes: [], collections: [], viewBlocks: [], search: [],
-      workflow: { schema: "stash.workspace-workflow.v1", workspaceId, statuses: [{ id: statusId, name: "Done", category: "completed", position: 1 }] },
+      refreshedAt: "2026-08-27T10:00:00.000Z", noteTree: [], notes: [], members: [], collections: [], viewBlocks: [], search: [],
+      workflow: { schema: "stash.workspace-workflow.v1", workspaceId, statuses: [
+        { id: memberId, name: "Todo", category: "unstarted", position: 1 },
+        { id: statusId, name: "Done", category: "completed", position: 2 },
+      ] },
       tasks: [{ schema: "stash.task.v1", id: taskId, workspaceId, title: "Ship mobile", description: "", revision: 3,
         status: { id: memberId, name: "Todo", category: "unstarted", position: 1 }, assigneeIds: [],
         projectKeys: [{ projectId: noteId, key: "MOB-7" }], sourceNoteIds: [] }] };

@@ -3,6 +3,7 @@ import type {
   CollectionRecord,
   MobileCanonicalTask,
   MobileNoteTreeNode,
+  MobileWorkspaceMember,
   MobileWorkspaceWorkflow,
   TaskViewPropertyId,
   ViewFilter,
@@ -79,12 +80,17 @@ export function groupReadableRecords(records: readonly CollectionRecord[], defin
   return [...groups].map(([label, items]) => ({ label, items }));
 }
 
-export function readableTaskGroupLabel(task: MobileCanonicalTask, propertyId: TaskViewPropertyId,
-  statuses: MobileWorkspaceWorkflow["statuses"]): string {
-  if (propertyId === "task:status") return statuses.find(({ id }) => id === task.status.id)?.name ?? task.status.name;
-  if (propertyId === "task:assignee") return task.assigneeIds.length
-    ? `${task.assigneeIds.length} assignee${task.assigneeIds.length === 1 ? "" : "s"}` : "Unassigned";
-  if (propertyId === "task:project") return task.projectKeys.map(({ key }) => key).join(", ") || "No Project";
-  if (propertyId === "task:title") return task.title;
-  return task.description || "No value";
+export function readableTaskGroup(task: MobileCanonicalTask, propertyId: TaskViewPropertyId,
+  statuses: MobileWorkspaceWorkflow["statuses"], members: readonly MobileWorkspaceMember[]): { key: string; label: string } {
+  if (propertyId === "task:status") return { key: task.status.id,
+    label: statuses.find(({ id }) => id === task.status.id)?.name ?? task.status.name };
+  if (propertyId === "task:assignee") {
+    const memberIds = [...new Set(task.assigneeIds)].sort();
+    const names = memberIds.map((id) => members.find((member) => member.id === id)?.name ?? "Unknown Member");
+    return { key: memberIds.join("|"), label: names.join(", ") || "Unassigned" };
+  }
+  if (propertyId === "task:project") return { key: task.projectKeys.map(({ projectId }) => projectId).sort().join("|"),
+    label: task.projectKeys.map(({ key }) => key).join(", ") || "No Project" };
+  if (propertyId === "task:title") return { key: task.title, label: task.title };
+  return { key: task.description, label: task.description || "No value" };
 }

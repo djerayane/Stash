@@ -9,6 +9,7 @@ export interface CanonicalTask {
   sourceBlocks: Array<{ noteId: string; blockId: string }>;
   createdBy: { localAccountId: string; displayName: string }; createdAt: string;
 }
+export interface CanonicalMemberPresentation { id: string; name: string }
 export type TaskResult = { status: "created" | "updated"; task: CanonicalTask; audienceBroadenedProjectIds?: string[] }
   | { status: "conflict"; task: CanonicalTask; operationId: string; baseRevision: number; changes: CanonicalTaskChanges }
   | { status: "audience_broadening"; projectIds: string[]; memberIds: string[]; impactToken: string }
@@ -23,7 +24,8 @@ export interface CanonicalTaskRepository {
   configureWorkflow(memberId: string, workspaceId: string, statuses: WorkspaceWorkflow["statuses"]): Promise<{ status: "updated"; workflow: WorkspaceWorkflow } | { status: "workspace_not_found" | "invalid_reference" }>;
   setProjectParent(memberId: string, projectId: string, parentProjectId?: string): Promise<{ status: "updated" } | { status: "project_not_found" | "invalid_reference" | "cycle" }>;
   listProjectTasks(memberId: string, projectId: string): Promise<{ status: "found"; tasks: CanonicalTask[] } | { status: "project_not_found" }>;
-  listTasks(memberId: string, workspaceId: string): Promise<{ status: "found"; tasks: CanonicalTask[]; workflow: WorkspaceWorkflow } | { status: "workspace_not_found" }>;
+  listTasks(memberId: string, workspaceId: string): Promise<{ status: "found"; tasks: CanonicalTask[]; workflow: WorkspaceWorkflow;
+    members: CanonicalMemberPresentation[] } | { status: "workspace_not_found" }>;
 }
 export interface CanonicalTaskChanges { title?: string; description?: string; statusId?: string }
 

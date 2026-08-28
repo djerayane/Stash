@@ -322,7 +322,7 @@ describe("offline mobile capture synchronization", () => {
     const firstStore = new EncryptedStateMobileCaptureStore(repository, testCipher);
     const snapshot: MobileWorkspaceSnapshot = {
       schema: "stash.mobile-workspace.v1", workspaceId, refreshedAt: "2026-08-28T10:00:00.000Z",
-      noteTree: [], notes: [], tasks: [], collections: [], viewBlocks: [], search: [],
+      noteTree: [], notes: [], tasks: [], members: [], collections: [], viewBlocks: [], search: [],
       workflow: { schema: "stash.workspace-workflow.v1", workspaceId, statuses: [] },
     };
 

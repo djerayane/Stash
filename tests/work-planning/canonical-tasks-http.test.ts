@@ -38,8 +38,12 @@ test("serves authenticated canonical Workspace Tasks with stable error semantics
   const created = await call(`/api/workspaces/${workspaceId}/canonical-tasks`, { method: "POST", body: JSON.stringify({ title: "Projectless work" }) });
   assert.equal(created.status, 201); const task = (await created.json() as any).task;
   assert.deepEqual(task.projectAssociations, []); assert.equal(task.projectKeys.length, 0);
+  await store.upgradeDatabase.query("UPDATE stash_tasks SET assignee_ids=$2::jsonb WHERE id=$1", [task.id, JSON.stringify([ownerId])]);
   const list = await call(`/api/workspaces/${workspaceId}/canonical-tasks`); assert.equal(list.status, 200);
-  assert.equal((await list.json() as any).tasks[0].id, task.id);
+  const listBody = await list.json() as any;
+  assert.equal(listBody.tasks[0].id, task.id);
+  assert.deepEqual(listBody.members, [{ id: ownerId, name: "Ada" }],
+    "the canonical read model includes only Member presentation data referenced by visible Tasks");
   const workflow = await call(`/api/workspaces/${workspaceId}/workflow`); assert.equal(workflow.status, 200);
   const started = (await workflow.json() as any).workflow.statuses.find(({ category }: any) => category === "started");
   const moved = await call(`/api/canonical-tasks/${task.id}`, { method: "PATCH", body: JSON.stringify({ statusId: started.id }) });

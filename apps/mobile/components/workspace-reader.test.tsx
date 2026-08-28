@@ -12,6 +12,8 @@ const statusPropertyId = "55555555-5555-4555-8555-555555555555";
 const researchRecordId = "66666666-6666-4666-8666-666666666666";
 const taskId = "99999999-9999-4999-8999-999999999999";
 const statusId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const adaId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+const graceId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 
 afterEach(cleanup);
 
@@ -19,6 +21,7 @@ const snapshot: MobileWorkspaceSnapshot = {
   schema: "stash.mobile-workspace.v1",
   workspaceId,
   refreshedAt: "2026-08-28T10:00:00.000Z",
+  members: [],
   noteTree: [{ id: noteId, workspaceId, title: "Research notes", position: "a", childCount: 0 }],
   notes: [{ id: noteId, workspaceId, title: "Research notes", content: "Source notes", revision: 1 }],
   tasks: [{ schema: "stash.task.v1", id: taskId, workspaceId, title: "Prepare interview summary", description: "",
@@ -79,5 +82,25 @@ describe("WorkspaceReader", () => {
     expect(screen.getByRole("heading", { name: "Interview synthesis" })).toBeTruthy();
     expect(screen.getByLabelText("Status: In progress")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Ready for review" })).toBeTruthy();
+  });
+
+  it("keeps different single-assignee Task groups distinct and names their Members", () => {
+    const assignedSnapshot = {
+      ...snapshot,
+      members: [{ id: adaId, name: "Ada Lovelace" }, { id: graceId, name: "Grace Hopper" }],
+      tasks: [
+        { ...snapshot.tasks[0]!, assigneeIds: [adaId] },
+        { ...snapshot.tasks[0]!, id: "ffffffff-ffff-4fff-8fff-ffffffffffff", title: "Validate compiler", assigneeIds: [graceId] },
+      ],
+      viewBlocks: [{ ...snapshot.viewBlocks[1]!, definition: {
+        ...snapshot.viewBlocks[1]!.definition, groupBy: "task:assignee" as const,
+      } }],
+    };
+    render(<WorkspaceReader snapshot={assignedSnapshot} pendingTaskIds={new Set()} onUpdateTaskStatus={vi.fn()} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Views" }));
+
+    expect(screen.getByRole("heading", { name: "Ada Lovelace" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Grace Hopper" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "1 assignee" })).toBeNull();
   });
 });
