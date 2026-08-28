@@ -103,4 +103,45 @@ describe("WorkspaceReader", () => {
     expect(screen.getByRole("heading", { name: "Grace Hopper" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "1 assignee" })).toBeNull();
   });
+
+  it("disambiguates different assignee groups whose Members share one name", () => {
+    const assignedSnapshot = {
+      ...snapshot,
+      members: [{ id: adaId, name: "Alex Smith" }, { id: graceId, name: "Alex Smith" }],
+      tasks: [
+        { ...snapshot.tasks[0]!, assigneeIds: [adaId] },
+        { ...snapshot.tasks[0]!, id: "ffffffff-ffff-4fff-8fff-ffffffffffff", title: "Validate compiler", assigneeIds: [graceId] },
+      ],
+      viewBlocks: [{ ...snapshot.viewBlocks[1]!, definition: {
+        ...snapshot.viewBlocks[1]!.definition, groupBy: "task:assignee" as const,
+      } }],
+    };
+    render(<WorkspaceReader snapshot={assignedSnapshot} pendingTaskIds={new Set()} onUpdateTaskStatus={vi.fn()} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Views" }));
+
+    expect(screen.getByRole("heading", { name: "Alex Smith · 1 of 2" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Alex Smith · 2 of 2" })).toBeTruthy();
+    expect(screen.queryByText(new RegExp(adaId))).toBeNull();
+    expect(screen.queryByText(new RegExp(graceId))).toBeNull();
+  });
+
+  it("disambiguates repeated unknown assignee groups without exposing their IDs", () => {
+    const assignedSnapshot = {
+      ...snapshot,
+      tasks: [
+        { ...snapshot.tasks[0]!, assigneeIds: [adaId] },
+        { ...snapshot.tasks[0]!, id: "ffffffff-ffff-4fff-8fff-ffffffffffff", title: "Validate compiler", assigneeIds: [graceId] },
+      ],
+      viewBlocks: [{ ...snapshot.viewBlocks[1]!, definition: {
+        ...snapshot.viewBlocks[1]!.definition, groupBy: "task:assignee" as const,
+      } }],
+    };
+    render(<WorkspaceReader snapshot={assignedSnapshot} pendingTaskIds={new Set()} onUpdateTaskStatus={vi.fn()} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Views" }));
+
+    expect(screen.getByRole("heading", { name: "Unknown Member · 1 of 2" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Unknown Member · 2 of 2" })).toBeTruthy();
+    expect(screen.queryByText(new RegExp(adaId))).toBeNull();
+    expect(screen.queryByText(new RegExp(graceId))).toBeNull();
+  });
 });

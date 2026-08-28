@@ -198,7 +198,18 @@ function groupTasksForReading(tasks: MobileCanonicalTask[], groupBy: string | un
     const group = groups.get(presentation.key);
     groups.set(presentation.key, { key: presentation.key, label: presentation.label, items: [...(group?.items ?? []), task] });
   }
-  return [...groups.values()];
+  const grouped = [...groups.values()];
+  if (groupBy !== "task:assignee") return grouped;
+  const totals = new Map<string, number>();
+  for (const group of grouped) totals.set(group.label, (totals.get(group.label) ?? 0) + 1);
+  const occurrences = new Map<string, number>();
+  return grouped.map((group) => {
+    const total = totals.get(group.label) ?? 1;
+    if (total === 1) return group;
+    const occurrence = (occurrences.get(group.label) ?? 0) + 1;
+    occurrences.set(group.label, occurrence);
+    return { ...group, label: `${group.label} · ${occurrence} of ${total}` };
+  });
 }
 
 function taskValue(task: MobileCanonicalTask, propertyId: string): unknown {

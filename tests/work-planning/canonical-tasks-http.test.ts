@@ -16,6 +16,7 @@ import { WorkspaceProjectService, type MemberAccessResolver } from "../../src/wo
 
 let store: EmbeddedInstanceStore; let instance: RunningInstance; let workspaceId: string;
 const ownerId = "61616161-6161-4161-8161-616161616161";
+const guestId = "63636363-6363-4363-8363-636363636363";
 before(async () => {
   store = await EmbeddedInstanceStore.open(await temporaryTestDirectory("stash-task-http-"),
     createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
@@ -23,7 +24,11 @@ before(async () => {
     ownerId, ownerName: "Ada", ownerEmail: "tasks-http@example.test", passwordHash: "test", role: "Owner" });
   const workspace = await new WorkspaceProjectService(store.database.identityAccessRepositories()).createWorkspace(ownerId, { name: "Notebook", owner: { type: "personal" } });
   assert.equal(workspace.status, "created"); if (workspace.status !== "created") throw new Error("setup failed"); workspaceId = workspace.workspace.id;
-  const access: MemberAccessResolver = { async authenticateBearer(header) { return header === "Bearer owner" ? { accountId: ownerId, sessionId: "session" } : undefined; } };
+  const access: MemberAccessResolver = { async authenticateBearer(header) {
+    if (header === "Bearer owner") return { accountId: ownerId, sessionId: "session" };
+    if (header === "Bearer guest") return { accountId: guestId, sessionId: "guest-session" };
+    return undefined;
+  } };
   instance = await startInstance({ database: store.database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin", memberAccess: access,
     capabilities: createCapabilityRegistry([{ name: "work-planning", routes: () => [canonicalTaskRoutes(
       new CanonicalTaskService(store.database.canonicalTaskRepository()), access)] }]) });
@@ -67,4 +72,35 @@ test("preserves an offline canonical Task contribution across divergent synchron
     baseRevision:preserved.task.revision,changes:localEnvelope.changes})});
   assert.equal(reconciled.status,200);const finalTask=(await reconciled.json() as any).task;
   assert.equal(finalTask.id,original.id);assert.equal(finalTask.title,"Offline local title");assert.equal(finalTask.description,"Desktop detail");assert.equal(finalTask.revision,3);
+});
+
+test("returns Member metadata only for Tasks visible to a Project Guest", async () => {
+  const visibleAssigneeId = "64646464-6464-4464-8464-646464646464";
+  const hiddenAssigneeId = "65656565-6565-4565-8565-656565656565";
+  await store.upgradeDatabase.query(`INSERT INTO stash_accounts(id,name,email,password_hash) VALUES
+    ($1,'Grace Guest','guest-tasks-http@example.test','test'),
+    ($2,'Visible Assignee','visible-tasks-http@example.test','test'),
+    ($3,'Hidden Assignee','hidden-tasks-http@example.test','test')`, [guestId, visibleAssigneeId, hiddenAssigneeId]);
+  const projects = new WorkspaceProjectService(store.database.identityAccessRepositories());
+  const visibleProject = await projects.createProject(ownerId, workspaceId, { name: "Visible", key: "VIS" });
+  const hiddenProject = await projects.createProject(ownerId, workspaceId, { name: "Hidden", key: "HID" });
+  assert.equal(visibleProject.status, "created"); assert.equal(hiddenProject.status, "created");
+  if (visibleProject.status !== "created" || hiddenProject.status !== "created") return;
+  const visibleResponse = await call(`/api/workspaces/${workspaceId}/canonical-tasks`, { method: "POST",
+    body: JSON.stringify({ title: "Guest-visible work", projectIds: [visibleProject.project.id] }) });
+  const hiddenResponse = await call(`/api/workspaces/${workspaceId}/canonical-tasks`, { method: "POST",
+    body: JSON.stringify({ title: "Owner-only work", projectIds: [hiddenProject.project.id] }) });
+  assert.equal(visibleResponse.status, 201); assert.equal(hiddenResponse.status, 201);
+  const visibleTask = (await visibleResponse.json() as any).task; const hiddenTask = (await hiddenResponse.json() as any).task;
+  await store.upgradeDatabase.query("UPDATE stash_tasks SET assignee_ids=$2::jsonb WHERE id=$1", [visibleTask.id, JSON.stringify([visibleAssigneeId])]);
+  await store.upgradeDatabase.query("UPDATE stash_tasks SET assignee_ids=$2::jsonb WHERE id=$1", [hiddenTask.id, JSON.stringify([hiddenAssigneeId])]);
+  await store.upgradeDatabase.query("INSERT INTO stash_project_guests(project_id,account_id) VALUES($1,$2)", [visibleProject.project.id, guestId]);
+
+  const response = await fetch(`${instance.url}/api/workspaces/${workspaceId}/canonical-tasks`, {
+    headers: { authorization: "Bearer guest" },
+  });
+  assert.equal(response.status, 200); const body = await response.json() as any;
+  assert.deepEqual(body.tasks.map(({ id }: any) => id), [visibleTask.id]);
+  assert.deepEqual(body.members, [{ id: visibleAssigneeId, name: "Visible Assignee" }]);
+  assert.doesNotMatch(JSON.stringify(body), new RegExp(`${hiddenAssigneeId}|Hidden Assignee`));
 });
