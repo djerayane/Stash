@@ -10,6 +10,8 @@
 .field { display: grid; gap: .35rem; color: var(--stash-color-muted); font-size: .78rem; font-weight: 650; }
 .field :where(input, select, textarea) { min-height: var(--stash-control-height); padding: .65rem .75rem; color: var(--stash-color-ink); background: var(--stash-color-surface); border: 1px solid var(--stash-border-subtle); border-radius: var(--stash-radius-control); }
 .field small { color: var(--stash-color-faint); font-weight: 450; line-height: 1.45; }
+.filterDisclosure summary { width: max-content; min-height: var(--stash-control-height); display: flex; align-items: center; padding: .6rem .8rem; color: var(--stash-color-ink); background: var(--stash-color-surface); border: 1px solid var(--stash-border-subtle); border-radius: var(--stash-radius-control); font-size: .8rem; font-weight: 680; cursor: pointer; }
+.filterDisclosure summary:focus-visible { outline: 3px solid var(--stash-color-focus); outline-offset: 2px; }
 .notice { padding: .8rem 1rem; color: var(--stash-color-muted); border-left: 2px solid var(--stash-border-strong); background: color-mix(in srgb, var(--stash-color-surface) 74%, transparent); line-height: 1.5; }
 .success { color: var(--stash-color-sage-deep); border-left-color: var(--stash-color-success); background: var(--stash-color-success-surface); }
 .attention { color: var(--stash-color-ink); border-left-color: var(--stash-color-accent); }

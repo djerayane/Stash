@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes, HTMLAttributes, LabelHTMLAttributes, ReactNode } from "react";
+import type { ButtonHTMLAttributes, DetailsHTMLAttributes, HTMLAttributes, LabelHTMLAttributes, ReactNode } from "react";
 
 import styles from "./control.module.css";
 
@@ -30,6 +30,14 @@ export interface FieldProps extends LabelHTMLAttributes<HTMLLabelElement> { labe
 
 export function Field({ label, hint, children, className, ...props }: FieldProps) {
   return <label {...props} className={[styles.field, className].filter(Boolean).join(" ")}><span>{label}</span>{children}{hint ? <small>{hint}</small> : null}</label>;
+}
+
+export interface FilterDisclosureProps extends Omit<DetailsHTMLAttributes<HTMLDetailsElement>, "open"> { children: ReactNode; }
+
+export function FilterDisclosure({ children, className, ...props }: FilterDisclosureProps) {
+  return <details {...props} aria-label="Filters" className={[styles.filterDisclosure, className].filter(Boolean).join(" ")} open role="group">
+    <summary>Filters</summary>{children}
+  </details>;
 }
 
 export function StatusNotice({ tone = "neutral", className, ...props }: HTMLAttributes<HTMLDivElement> & { tone?: "neutral" | "success" | "attention" | "error" }) {

@@ -1,7 +1,7 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { Button, Field, IconButton, StatusNotice } from "./control";
+import { Button, Field, FilterDisclosure, IconButton, StatusNotice } from "./control";
 
 describe("shared controls", () => {
   it("keeps pending actions named and unavailable", () => {
@@ -23,6 +23,18 @@ describe("shared controls", () => {
 
     expect(screen.getByText("Title").closest("label")).toHaveAttribute("data-source", "collection");
     expect(screen.getByText("Title").closest("label")).toHaveClass("consumer");
+  });
+
+  it("exposes the common Filters disclosure without hiding consumer content", () => {
+    render(<FilterDisclosure className="consumer"><Button variant="secondary">My Tasks</Button></FilterDisclosure>);
+
+    const summary = screen.getByText("Filters", { selector: "summary" });
+    const disclosure = screen.getByRole("group", { name: "Filters" });
+    expect(disclosure).toHaveClass("consumer");
+    expect(disclosure).toHaveAttribute("open");
+    expect(screen.getByRole("button", { name: "My Tasks" })).toBeVisible();
+    fireEvent.click(summary);
+    expect(disclosure).not.toHaveAttribute("open");
   });
 
   it("requires icon controls to expose their action", () => {

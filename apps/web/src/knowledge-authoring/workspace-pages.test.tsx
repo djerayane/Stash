@@ -42,6 +42,11 @@ describe("core React workflows", () => {
     expect(container.querySelectorAll("h1")).toHaveLength(1);
     expect(screen.getByRole("group", { name: "Filters" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Clear filters" })).toHaveAttribute("data-variant", "secondary");
+    const query = screen.getByRole("searchbox", { name: "Search this view" });
+    expect(query.closest("label")?.querySelector("span")).toHaveTextContent("Search this view");
+    for (const label of ["Project", "Object type", "Author", "Assignee", "Status", "From", "To"]) {
+      expect(screen.getByLabelText(label).closest("label")?.querySelector("span")).toHaveTextContent(label);
+    }
   });
 
   it("does not animate search results when reduced motion is requested", async () => {

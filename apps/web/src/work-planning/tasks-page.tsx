@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import styles from "./tasks-page.module.css";
 import { TaskView } from "../shared/task-view";
-import { Button, Field, StatusNotice } from "../ui/control";
+import { Button, Field, FilterDisclosure, StatusNotice } from "../ui/control";
 
 type Task = { id: string; title: string; status: { id: string; name: string; category: string }; assigneeIds: string[];
   projectKeys: Array<{ projectId: string; key: string }>; projectAssociations: string[]; parentTaskId?: string };
@@ -35,7 +35,7 @@ export function TasksPage({ workspaceId, memberId, token, fetcher = globalThis.f
     <form onSubmit={(event) => { event.preventDefault(); if (title.trim()) create.mutate(); }}><Field label="New Task">
       <input id="new-task" maxLength={500} onChange={(event) => setTitle(event.target.value)} placeholder="What needs doing?" required value={title} />
       </Field><Button pending={create.isPending} pendingLabel="Creating Task">Create Task</Button></form></header>
-    <nav aria-label="Task controls"><details aria-label="Filters" className={styles.filterDisclosure} open role="group"><summary>Filters</summary><div className={styles.filters}><Button aria-pressed={mine} onClick={() => setMine((value) => !value)} type="button" variant="secondary">{mine ? "My Tasks" : "All Tasks"}</Button></div></details>
+    <nav aria-label="Task controls"><FilterDisclosure className={styles.filterDisclosure}><div className={styles.filters}><Button aria-pressed={mine} onClick={() => setMine((value) => !value)} type="button" variant="secondary">{mine ? "My Tasks" : "All Tasks"}</Button></div></FilterDisclosure>
       <div aria-label="View" className={styles.viewControls} role="group"><span>View</span>{(["list", "board", "table", "calendar"] as const).map((item) => <Button
       aria-pressed={view === item} key={item} onClick={() => setView(item)} type="button" variant="secondary">{item[0]!.toUpperCase() + item.slice(1)}</Button>)}</div></nav>
     {query.isPending ? <StatusNotice>Loading Tasks…</StatusNotice> : query.isError ? <StatusNotice tone="error"><strong>Tasks are unavailable.</strong><p>{query.error.message}</p><p>Your Task view and draft are preserved. Try loading the same view again.</p><Button type="button" variant="secondary" onClick={() => void query.refetch()}>Try again</Button></StatusNotice>

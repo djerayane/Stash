@@ -47,6 +47,12 @@ test("keeps topbar actions visible and keyboard focus distinct at a narrow viewp
 test("navigates canonical Tasks, Notes, Boards, Discussions, notifications, and Activity through the running Instance", async ({ page }) => {
   await authenticate(page);
   await page.goto("/app/tasks"); await expect(page.getByRole("heading", { name: "Tasks", exact: true })).toBeVisible();
+  const taskFilters = page.getByRole("group", { name: "Filters" });
+  const taskFilterSummary = taskFilters.getByText("Filters", { exact: true });
+  await expect(taskFilters).toHaveAttribute("open", "");
+  await taskFilterSummary.focus(); await expect(taskFilterSummary).toBeFocused();
+  await taskFilterSummary.press("Enter"); await expect(taskFilters).not.toHaveAttribute("open");
+  await taskFilterSummary.press("Space"); await expect(taskFilters).toHaveAttribute("open", "");
   await page.getByRole("button", { name: "Board" }).press("Enter"); await expect(page.getByRole("region", { name: "board Task view" })).toBeVisible();
   await page.goto("/app/notes");
   await expect(page.getByRole("heading", { name: "Note Tree" }).last()).toBeVisible();
