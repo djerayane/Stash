@@ -14,4 +14,4 @@ Domain documentation uses the single-context layout. See `docs/agents/domain.md`
 
 ### UI work
 
-For any UI or UX design, implementation, modification, or review, you must read and follow the `gpt-taste` skill at `/Users/imnibis/.agents/skills/gpt-taste/SKILL.md` before taking action.
+For any UI or UX design, implementation, modification, or review, you must read and follow both the `gpt-taste` skill at `/Users/imnibis/.agents/skills/gpt-taste/SKILL.md` and the `frontend-design` skill at `/Users/imnibis/.codex/plugins/cache/claude-plugins-official/frontend-design/local/skills/frontend-design/SKILL.md` before taking action.
