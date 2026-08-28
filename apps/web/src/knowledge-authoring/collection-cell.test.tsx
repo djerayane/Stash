@@ -11,13 +11,23 @@ const dateProperty: CollectionProperty = { id: "33333333-3333-4333-8333-33333333
 
 describe("Collection cell editing", () => {
   it("round-trips date-only values and timed instants without applying the timezone twice", () => {
-    const dateOnly = dateValueDraft({ start: "2026-08-28", includeTime: false }, 120);
+    const dateOnly = dateValueDraft({ start: "2026-08-28", end: "2026-08-30", includeTime: false }, 120);
     const timed = dateValueDraft({ start: "2026-08-28T09:00:00.000Z", includeTime: true }, 120);
 
-    expect(dateOnly).toEqual({ kind: "date_time", value: "2026-08-28", includeTime: false });
-    expect(dateDraftValue(dateOnly, 120)).toEqual({ start: "2026-08-28", includeTime: false });
-    expect(timed).toEqual({ kind: "date_time", value: "2026-08-28T11:00", includeTime: true });
+    expect(dateOnly).toMatchObject({ kind: "date_time", value: "2026-08-28", end: "2026-08-30", includeTime: false });
+    expect(dateDraftValue(dateOnly, 120)).toEqual({ start: "2026-08-28", end: "2026-08-30", includeTime: false });
+    expect(timed).toMatchObject({ kind: "date_time", value: "2026-08-28T11:00", includeTime: true });
     expect(dateDraftValue(timed, 120)).toEqual({ start: "2026-08-28T09:00:00.000Z", includeTime: true });
+  });
+
+  it("preserves a range end and the later instant through a daylight-saving overlap", () => {
+    const laterOccurrence = dateValueDraft({ start: "2026-10-25T01:30:00.000Z", end: "2026-10-26T09:00:00.000Z", includeTime: true }, 60);
+
+    expect(laterOccurrence).toMatchObject({ value: "2026-10-25T02:30", end: "2026-10-26T09:00:00.000Z", offsetMinutes: 60 });
+    expect(dateDraftValue(laterOccurrence, 60)).toEqual({ start: "2026-10-25T01:30:00.000Z", end: "2026-10-26T09:00:00.000Z", includeTime: true });
+    expect(dateDraftValue({ ...laterOccurrence, value: "2026-10-25T02:45" }, 60)).toEqual({
+      start: "2026-10-25T01:45:00.000Z", end: "2026-10-26T09:00:00.000Z", includeTime: true,
+    });
   });
 
   it("keeps the entered draft after repeated save failures and disables editing while a save is pending", async () => {
@@ -57,5 +67,19 @@ describe("Collection cell editing", () => {
     render(<CollectionCell property={dateProperty} value={{ start: "2026-08-28", includeTime: false }} recordLabel="Milestone"
       editable={false} onSave={vi.fn()} onNavigate={vi.fn()} />);
     expect(screen.getByText("2026-08-28")).toBeVisible();
+  });
+
+  it("restores the saved date draft when Escape is pressed on Include time", () => {
+    render(<CollectionCell property={dateProperty} value={{ start: "2026-08-28", includeTime: false }} recordLabel="Milestone"
+      editable onSave={vi.fn()} onNavigate={vi.fn()} />);
+    const includeTime = screen.getByRole("checkbox", { name: "Include time for When, Milestone" });
+
+    fireEvent.click(includeTime);
+    expect(screen.getByLabelText("When, Milestone")).toHaveAttribute("type", "datetime-local");
+    fireEvent.keyDown(includeTime, { key: "Escape" });
+
+    expect(includeTime).not.toBeChecked();
+    expect(screen.getByLabelText("When, Milestone")).toHaveAttribute("type", "date");
+    expect(screen.getByLabelText("When, Milestone")).toHaveValue("2026-08-28");
   });
 });

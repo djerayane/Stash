@@ -31,15 +31,17 @@ describe("Collection view model", () => {
   });
 
   it("produces the same canonical value patch for drag and keyboard board movement", () => {
-    expect(updateBoardGroup(collection, definition, "77777777-7777-4777-8777-777777777777", "later"))
+    expect(updateBoardGroup(collection, definition, "77777777-7777-4777-8777-777777777777", "ready", "later"))
       .toEqual({ recordId: "77777777-7777-4777-8777-777777777777", values: { [statusId]: "later" } });
-    expect(() => updateBoardGroup(collection, { ...definition, groupBy: undefined }, collection.records[0]!.id, "later"))
+    expect(() => updateBoardGroup(collection, { ...definition, groupBy: undefined }, collection.records[0]!.id, "ready", "later"))
       .toThrow(/board_group_unavailable/);
     const multi: Collection = { ...collection, properties: collection.properties.map((property) => property.id === statusId
       ? { id: property.id, name: property.name, position: property.position, type: "multi_select" as const,
-        options: "options" in property ? property.options : [] } : property) };
-    expect(updateBoardGroup(multi, definition, collection.records[0]!.id, "later"))
-      .toEqual({ recordId: collection.records[0]!.id, values: { [statusId]: ["later"] } });
+        options: [{ id: "ready", name: "Ready" }, { id: "blocked", name: "Blocked" }, { id: "done", name: "Done" }] } : property),
+      records: collection.records.map((record, index) => index === 0
+        ? { ...record, values: { ...record.values, [statusId]: ["ready", "blocked"] } } : record) };
+    expect(updateBoardGroup(multi, definition, multi.records[0]!.id, "ready", "done"))
+      .toEqual({ recordId: multi.records[0]!.id, values: { [statusId]: ["blocked", "done"] } });
   });
 
   it("requests presentation prerequisites in context", () => {

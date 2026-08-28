@@ -246,6 +246,10 @@ describe("Collection workspace", () => {
     expect(within(secondView).queryByText("Map constraints")).not.toBeInTheDocument();
     expect(within(firstView).queryByRole("button", { name: "Collection actions" })).not.toBeInTheDocument();
     expect(within(firstView).queryByRole("button", { name: "Edit Status property" })).not.toBeInTheDocument();
+    const viewName = within(firstView).getByRole("textbox", { name: "Idea, Map constraints" }) as HTMLInputElement;
+    viewName.focus(); viewName.setSelectionRange(viewName.value.length, viewName.value.length);
+    fireEvent.keyDown(viewName, { key: "ArrowRight" });
+    expect(within(firstView).getByRole("combobox", { name: "Status, Map constraints" })).toHaveFocus();
   });
 
   it("prevents every persisted View mutation when the workspace is read-only", async () => {

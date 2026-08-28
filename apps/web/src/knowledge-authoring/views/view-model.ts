@@ -48,13 +48,19 @@ export function evaluateCollectionView(collection: Collection, definition: ViewD
   return { records, groups: [...grouped].map(([key, recordIds]) => ({ key, label: key === "ungrouped" ? "No value" : key, recordIds })) };
 }
 
-export function updateBoardGroup(collection: Collection, definition: ViewDefinition, recordId: string, groupValue: CollectionPropertyValue) {
+export function updateBoardGroup(collection: Collection, definition: ViewDefinition, recordId: string,
+  sourceGroupValue: CollectionPropertyValue, destinationGroupValue: CollectionPropertyValue) {
   if (!definition.groupBy) throw new Error("board_group_unavailable");
   const property = collection.properties.find(({ id }) => id === definition.groupBy);
-  if (!collection.records.some(({ id }) => id === recordId) || !property)
+  const record = collection.records.find(({ id }) => id === recordId);
+  if (!record || !property)
     throw new Error("board_group_unavailable");
-  const value = property.type === "multi_select" ? [String(groupValue)]
-    : property.type === "checkbox" ? groupValue === true || groupValue === "true" : groupValue;
+  const current = property.type === "multi_select" && Array.isArray(record.values[property.id])
+    ? record.values[property.id] as readonly string[] : [];
+  const destination = String(destinationGroupValue);
+  const value = property.type === "multi_select"
+    ? [...current.filter((optionId) => optionId !== String(sourceGroupValue) && optionId !== destination), destination]
+    : property.type === "checkbox" ? destinationGroupValue === true || destinationGroupValue === "true" : destinationGroupValue;
   return { recordId, values: { [definition.groupBy]: value } };
 }
 

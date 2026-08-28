@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { PostgresKernel, PostgresQueryable } from "../instance-operations/storage/postgres-kernel.js";
 import { effectiveNoteReadSql } from "./postgres-note-access.js";
 import { normalizeCollection, type Collection as CanonicalCollection, type CollectionImpact, type CollectionPropertyImpact,
@@ -271,13 +272,20 @@ export class PostgresCollectionRepository implements CollectionRepository {
     });
   }
 
-  async createCollectionRecord(memberId: string, collectionId: string, record: CanonicalRecord): Promise<
-    { status: "created"; record: CanonicalRecord } | { status: "collection_not_found" | "record_conflict" }> {
+  async createCollectionRecord(memberId: string, collectionId: string, input: unknown): Promise<
+    { status: "created"; record: CanonicalRecord } | { status: "collection_not_found" | "record_conflict" | "invalid_record" }> {
     return this.kernel.transaction(async (client) => {
       await this.prepare(client);
       if (!(await client.query(`SELECT collection.id FROM stash_collections collection JOIN stash_workspaces workspace
         ON workspace.id=collection.workspace_id WHERE collection.id=$1 AND (${member}) FOR UPDATE OF collection`, [collectionId, memberId])).rowCount)
         return { status: "collection_not_found" as const };
+      const current = await this.canonicalCollection(client, collectionId); const candidate = input as Partial<CanonicalRecord>;
+      if (current.records.some(({ id, position }) => id === candidate.id || position === candidate.position))
+        return { status: "record_conflict" as const };
+      let normalized: CanonicalCollection;
+      try { normalized = normalizeCollection({ ...current, records: [...current.records, input] }); }
+      catch { return { status: "invalid_record" as const }; }
+      const record = normalized.records.at(-1)!;
       try {
         await client.query("INSERT INTO stash_collection_records(id,collection_id,position) VALUES($1,$2,$3)", [record.id, collectionId, record.position]);
         for (const [propertyId, value] of Object.entries(record.values)) await client.query(`INSERT INTO stash_collection_record_values
@@ -531,9 +539,10 @@ export class PostgresCollectionRepository implements CollectionRepository {
     }
     const affectedRelations = propertyType === "relation" ? values.rows.reduce((count, row) =>
       count + (Array.isArray(row.value) ? row.value.length : 0), 0) : 0;
-    const token = encodeURIComponent(JSON.stringify({ collectionId, propertyId, propertyType,
+    const impactState = JSON.stringify({ collectionId, propertyId, propertyType,
       values: values.rows.map(({ record_id, value }) => [record_id, value]),
-      views: affectedViews.map(({ id, definition }) => [id, definition]) }));
+      views: affectedViews.map(({ id, definition }) => [id, definition]) });
+    const token = `sha256:${createHash("sha256").update(impactState).digest("base64url")}`;
     return { impact: { collectionId, propertyId, affectedValues: values.rows.length, affectedRelations,
       affectedViews: affectedViews.length, token }, affectedViewIds: affectedViews.map(({ id }) => id) };
   }

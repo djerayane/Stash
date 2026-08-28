@@ -17,6 +17,13 @@ async function createCollection(page: Page, input: Record<string, unknown>, owne
   expect(response.status()).toBe(201);
 }
 
+async function createView(page: Page, input: Record<string, unknown>, ownerNoteId = noteId) {
+  const response = await page.request.post(`/api/notes/${ownerNoteId}/view-blocks`, {
+    headers: { authorization: `Bearer ${token}` }, data: input,
+  });
+  expect(response.status()).toBe(201);
+}
+
 test("creates and edits a Collection without leaving its table", async ({ page }) => {
   await page.goto(`/app/notes/${noteId}`);
   const created = page.waitForResponse((response) => response.url().endsWith(`/api/notes/${noteId}/collections`)
@@ -103,6 +110,32 @@ test("inserts a canonical view from another Note and reviews deletion impact", a
   await expect(dialog.getByText("1 inserted view will be removed.")).toBeVisible();
   await dialog.getByRole("button", { name: "Cancel deletion" }).press("Enter");
   await expect(collection.getByRole("button", { name: "Collection actions" })).toBeFocused();
+});
+
+test("keeps keyboard focus and multi-select Board moves within one saved View", async ({ page }) => {
+  const collectionId = "41414141-4141-4141-8141-414141414141"; const titleId = "42424242-4242-4242-8242-424242424242";
+  const statusId = "43434343-4343-4343-8343-434343434343"; const recordId = "44444444-4444-4444-8444-444444444444";
+  const viewId = "45454545-4545-4545-8545-454545454545";
+  await createCollection(page, { schema: "stash.collection.v1", id: collectionId, workspaceId, ownerNoteId: noteId,
+    title: "Keyboard source", properties: [{ id: titleId, name: "Name", type: "text", position: 1 },
+      { id: statusId, name: "Status", type: "multi_select", position: 2, options: [
+        { id: "open", name: "Open" }, { id: "blocked", name: "Blocked" }, { id: "done", name: "Done" },
+      ] }], records: [{ id: recordId, position: 1, values: { [titleId]: "Scoped record", [statusId]: ["open", "blocked"] } }] });
+  await createView(page, { schema: "stash.view-block.v1", id: viewId, workspaceId, ownerNoteId: noteId,
+    blockId: "46464646-4646-4646-8646-464646464646", title: "Scoped lens",
+    definition: { source: { kind: "collection", collectionId }, presentation: "table", filters: [], sorts: [], groupBy: statusId, layout: {} } });
+  await page.goto(`/app/notes/${noteId}`);
+  const savedView = page.getByRole("region", { name: "Scoped lens" }); const name = savedView.getByRole("textbox", { name: "Name, Scoped record" });
+  await name.focus(); await name.evaluate((element) => (element as HTMLInputElement).setSelectionRange(13, 13)); await name.press("ArrowRight");
+  await expect(savedView.getByRole("listbox", { name: "Status, Scoped record" })).toBeFocused();
+
+  const viewSave = page.waitForResponse((response) => response.url().endsWith(`/api/view-blocks/${viewId}`) && response.request().method() === "PATCH");
+  await savedView.getByRole("button", { name: "Board" }).press("Enter"); expect((await viewSave).status()).toBe(200);
+  const recordSave = page.waitForResponse((response) => response.url().endsWith(`/api/collections/${collectionId}/records/${recordId}`)
+    && response.request().method() === "PATCH");
+  await savedView.getByRole("region", { name: "Open" }).getByRole("button", { name: "Move Scoped record to Done" }).press("Enter");
+  const saved = await recordSave; expect(saved.status()).toBe(200);
+  expect(saved.request().postDataJSON()).toEqual({ values: { [statusId]: ["blocked", "done"] } });
 });
 
 test("keeps direct Collection controls keyboard-ready, narrow, reduced-motion, and axe-clean @a11y", async ({ page }) => {

@@ -173,6 +173,21 @@ describe("Collection contracts", () => {
           affectedViews: deleted.impact.affectedViews }, { affectedValues: 1, affectedRelations: 0, affectedViews: 1 });
       }
 
+      const archiveId = "31313131-3131-4131-8131-313131313131"; const maximumText = "x".repeat(20_000);
+      assert.equal((await service.createProperty(ownerId, collection.id,
+        { id: archiveId, name: "Archive", type: "text", position: 2 })).status, "created");
+      for (const [index, recordId] of [
+        "32323232-3232-4232-8232-323232323232", "33333333-3333-4333-8333-333333333333",
+        "34343434-3434-4434-8434-343434343434", "35353535-3535-4535-8535-353535353535",
+      ].entries()) assert.equal((await service.createRecord(ownerId, collection.id, { id: recordId, position: index + 2,
+        values: { [nameId]: `Large ${index + 1}`, [archiveId]: maximumText } })).status, "created");
+      const archivePreview = await service.previewPropertyRemoval(ownerId, collection.id, archiveId);
+      assert.equal(archivePreview.status, "found"); if (archivePreview.status !== "found") return;
+      assert.ok(Buffer.byteLength(archivePreview.impact.token, "utf8") <= 100);
+      assert.ok(Buffer.byteLength(JSON.stringify({ impactToken: archivePreview.impact.token }), "utf8") < 64 * 1024);
+      assert.equal((await service.deleteProperty(ownerId, collection.id, archiveId,
+        { impactToken: archivePreview.impact.token })).status, "updated");
+
       const scoreId = "26262626-2626-4626-8626-262626262626";
       assert.equal((await service.createProperty(ownerId, collection.id,
         { id: scoreId, name: "Score", type: "number", position: 2 })).status, "created");
@@ -199,6 +214,18 @@ describe("Collection contracts", () => {
       assert.equal(raced.some(({ status }) => status === "invalid_property" || status === "invalid_record"), true);
       const afterRace = await service.read(ownerId, collection.id); assert.equal(afterRace.status, "found");
       if (afterRace.status === "found") assert.doesNotThrow(() => normalizeCollection(afterRace.collection));
+      const choiceId = "36363636-3636-4636-8636-363636363636";
+      assert.equal((await service.createProperty(ownerId, collection.id, { id: choiceId, name: "Choice", type: "single_select", position: 4,
+        options: [{ id: "keep", name: "Keep" }, { id: "drop", name: "Drop" }] })).status, "created");
+      const createRace = await Promise.all([
+        service.updateProperty(ownerId, collection.id, choiceId, { options: [{ id: "keep", name: "Keep" }] }),
+        service.createRecord(ownerId, collection.id, { id: "37373737-3737-4737-8737-373737373737", position: 6,
+          values: { [nameId]: "Created concurrently", [choiceId]: "drop" } }),
+      ]);
+      assert.equal(createRace.filter(({ status }) => status === "updated" || status === "created").length, 1);
+      assert.equal(createRace.some(({ status }) => status === "invalid_property" || status === "invalid_record"), true);
+      const afterCreateRace = await service.read(ownerId, collection.id); assert.equal(afterCreateRace.status, "found");
+      if (afterCreateRace.status === "found") assert.doesNotThrow(() => normalizeCollection(afterCreateRace.collection));
       const raceView = normalizeViewBlock({ ...view, id: "29292929-2929-4929-8929-292929292929",
         blockId: "30303030-3030-4030-8030-303030303030", title: "Current stage",
         definition: { ...view.definition, filters: [{ propertyId: stageId, operator: "equals", value: "open" }],

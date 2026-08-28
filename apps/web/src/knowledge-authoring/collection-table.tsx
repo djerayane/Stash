@@ -34,7 +34,8 @@ export function CollectionTable({ collection, view: persistedView, sourceNoteTit
   const canManageCollection = editable && canonicalActions;
   const [definition, setDefinition] = useState<ViewDefinition>(persistedView?.definition ?? defaultDefinition(collection));
   const [title, setTitle] = useState(collection.title); const [propertyMenu, setPropertyMenu] = useState<CollectionProperty | "new">();
-  const propertyTrigger = useRef<HTMLButtonElement>(null); const moreTrigger = useRef<HTMLButtonElement>(null); const saveQueue = useRef(Promise.resolve());
+  const collectionRoot = useRef<HTMLElement>(null); const propertyTrigger = useRef<HTMLButtonElement>(null);
+  const moreTrigger = useRef<HTMLButtonElement>(null); const saveQueue = useRef(Promise.resolve());
   const [newRecord, setNewRecord] = useState(false); const [newValues, setNewValues] = useState<Record<string, CollectionCellDraft>>({});
   const [actionsOpen, setActionsOpen] = useState(false); const [moveOpen, setMoveOpen] = useState(false); const [destination, setDestination] = useState("");
   const [impact, setImpact] = useState<CollectionImpact>(); const [deleteOpen, setDeleteOpen] = useState(false); const [pending, setPending] = useState(false);
@@ -68,7 +69,7 @@ export function CollectionTable({ collection, view: persistedView, sourceNoteTit
   const focusCell = (row: number, column: number, direction: "left" | "right" | "up" | "down") => {
     const nextRow = Math.max(0, Math.min(collection.records.length - 1, row + (direction === "up" ? -1 : direction === "down" ? 1 : 0)));
     const nextColumn = Math.max(0, Math.min(visibleProperties.length - 1, column + (direction === "left" ? -1 : direction === "right" ? 1 : 0)));
-    document.querySelector<HTMLElement>(`[data-collection-cell="${collection.id}-${nextRow}-${nextColumn}"] input, [data-collection-cell="${collection.id}-${nextRow}-${nextColumn}"] select`)?.focus();
+    collectionRoot.current?.querySelector<HTMLElement>(`[data-collection-cell="${collection.id}-${nextRow}-${nextColumn}"] input, [data-collection-cell="${collection.id}-${nextRow}-${nextColumn}"] select`)?.focus();
   };
   const createRecord = async () => { setPending(true); setError(""); const values = Object.fromEntries(collection.properties.map((property) =>
     [property.id, collectionDraftValue(property, newValues[property.id] ?? collectionValueDraft(property))]));
@@ -117,7 +118,7 @@ export function CollectionTable({ collection, view: persistedView, sourceNoteTit
   const viewTotal = impact?.viewBlocks.filter((item) => !item.collectionId || item.collectionId === collection.id).length ?? 0;
   const selectedImpact = impact?.collections.find(({ id }) => id === collection.id);
   const sectionTitle = persistedView?.title ?? (title || collection.title);
-  return <section className={styles.collection} aria-label={sectionTitle} data-collection-id={collection.id}
+  return <section ref={collectionRoot} className={styles.collection} aria-label={sectionTitle} data-collection-id={collection.id}
     data-density={String(definition.layout.density ?? "comfortable")}>
     <header className={styles.collectionHeader}>{persistedView ? <div className={styles.viewIdentity}><h3>{persistedView.title}</h3>
       <p>View of {collection.title} · From {sourceNoteTitle ?? "Another Note"}</p></div> : <input className={styles.collectionTitle} aria-label="Collection title" value={title}
@@ -152,7 +153,8 @@ export function CollectionTable({ collection, view: persistedView, sourceNoteTit
         : <tr className={styles.newRecordAction}><td colSpan={visibleProperties.length + 1}><button type="button" onClick={() => setNewRecord(true)}>New record</button></td></tr> : null}
     </tbody></table></div>
       : definition.presentation === "board" ? <BoardView title={sectionTitle} collection={collection} records={evaluated.records} definition={definition}
-        editable={editable} onFocus={focusRecord} onMove={async (recordId, value) => { const patch = updateBoardGroup(collection, definition, recordId, value);
+        editable={editable} onFocus={focusRecord} onMove={async (recordId, source, destination) => {
+          const patch = updateBoardGroup(collection, definition, recordId, source, destination);
           const [[propertyId, canonicalValue]] = Object.entries(patch.values); await saveCell(recordId, propertyId!, canonicalValue!); }} />
         : definition.presentation === "list" ? <ListView title={sectionTitle} collection={collection} records={evaluated.records} editable={editable} onFocus={focusRecord} />
           : <CalendarView title={sectionTitle} collection={collection} records={evaluated.records} definition={definition} editable={editable} onFocus={focusRecord} />}

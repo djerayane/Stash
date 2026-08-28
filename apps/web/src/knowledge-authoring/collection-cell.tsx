@@ -7,6 +7,10 @@ export interface CollectionDateDraft {
   kind: "date_time";
   value: string;
   includeTime: boolean;
+  end?: string;
+  offsetMinutes?: number;
+  sourceStart?: string;
+  sourceWallValue?: string;
 }
 
 export type CollectionCellDraft = string | boolean | string[] | CollectionDateDraft;
@@ -19,23 +23,31 @@ export function dateValueDraft(value?: CollectionPropertyValue, timezoneOffsetMi
   if (!value || typeof value !== "object" || Array.isArray(value) || !("start" in value))
     return { kind: "date_time", value: "", includeTime: false };
   if (!value.includeTime || value.start.length === 10)
-    return { kind: "date_time", value: value.start.slice(0, 10), includeTime: false };
+    return { kind: "date_time", value: value.start.slice(0, 10), ...(value.end ? { end: value.end } : {}), includeTime: false };
   const instant = new Date(value.start);
   const offset = timezoneOffsetMinutes ?? localOffsetMinutes(instant);
-  return { kind: "date_time", value: new Date(instant.getTime() + offset * 60_000).toISOString().slice(0, 16), includeTime: true };
+  const wallValue = new Date(instant.getTime() + offset * 60_000).toISOString().slice(0, 16);
+  return { kind: "date_time", value: wallValue, ...(value.end ? { end: value.end } : {}), includeTime: true,
+    offsetMinutes: offset, sourceStart: value.start, sourceWallValue: wallValue };
 }
 
 export function dateDraftValue(draft: CollectionDateDraft, timezoneOffsetMinutes?: number): CollectionPropertyValue {
   if (!draft.value) return null;
-  if (!draft.includeTime) return { start: draft.value.slice(0, 10), includeTime: false };
+  if (!draft.includeTime) return { start: draft.value.slice(0, 10), ...(draft.end ? { end: draft.end } : {}), includeTime: false };
   const parts = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(draft.value);
   if (!parts) return null;
   const [, year, month, day, hour, minute] = parts;
-  const wallClockUtc = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute));
-  const offset = timezoneOffsetMinutes ?? localOffsetMinutes(new Date(
-    Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute),
-  ));
-  return { start: new Date(wallClockUtc - offset * 60_000).toISOString(), includeTime: true };
+  if (draft.sourceStart && draft.value === draft.sourceWallValue)
+    return { start: draft.sourceStart, ...(draft.end ? { end: draft.end } : {}), includeTime: true };
+  const values = [Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute)] as const;
+  const wallClockUtc = Date.UTC(...values);
+  const storedOffset = draft.offsetMinutes; const storedInstant = storedOffset === undefined ? undefined : new Date(wallClockUtc - storedOffset * 60_000);
+  const storedOffsetIsValid = storedInstant !== undefined && storedInstant.getFullYear() === values[0]
+    && storedInstant.getMonth() === values[1] && storedInstant.getDate() === values[2]
+    && storedInstant.getHours() === values[3] && storedInstant.getMinutes() === values[4];
+  const offset = timezoneOffsetMinutes !== undefined ? storedOffset ?? timezoneOffsetMinutes
+    : storedOffsetIsValid ? storedOffset! : localOffsetMinutes(new Date(...values));
+  return { start: new Date(wallClockUtc - offset * 60_000).toISOString(), ...(draft.end ? { end: draft.end } : {}), includeTime: true };
 }
 
 export function collectionValueDraft(property: CollectionProperty, value?: CollectionPropertyValue): CollectionCellDraft {
@@ -113,7 +125,7 @@ export function CollectionDraftControl({ property, value, label, autoFocus, disa
       <input ref={controlRef as React.RefObject<HTMLInputElement>} aria-label={label} disabled={disabled}
         type={date.includeTime ? "datetime-local" : "date"} value={date.value}
         onChange={(event) => onChange({ ...date, value: event.target.value })} onKeyDown={keyDown} />
-      <label><input type="checkbox" checked={date.includeTime} disabled={disabled} onChange={(event) => {
+      <label><input type="checkbox" checked={date.includeTime} disabled={disabled} onKeyDown={keyDown} onChange={(event) => {
         const includeTime = event.target.checked;
         onChange({ ...date, includeTime, value: includeTime ? `${date.value.slice(0, 10)}T00:00` : date.value.slice(0, 10) });
       }} />Include time for {label}</label>

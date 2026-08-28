@@ -36,8 +36,8 @@ export interface CollectionRepository {
     | { status: "collection_not_found" | "property_not_found" | "primary_property_required" }>;
   moveCollectionRecord(memberId: string, collectionId: string, recordId: string, beforeId?: string): Promise<
     { status: "moved" } | { status: "collection_not_found" | "record_not_found" | "before_not_found" }>;
-  createCollectionRecord(memberId: string, collectionId: string, record: CanonicalRecord): Promise<
-    { status: "created"; record: CanonicalRecord } | { status: "collection_not_found" | "record_conflict" }>;
+  createCollectionRecord(memberId: string, collectionId: string, record: unknown): Promise<
+    { status: "created"; record: CanonicalRecord } | { status: "collection_not_found" | "record_conflict" | "invalid_record" }>;
   updateCollectionRecordValues(memberId: string, collectionId: string, recordId: string,
     values: Readonly<Record<string, CollectionPropertyValue>>): Promise<
     { status: "updated"; record: CanonicalRecord }
@@ -140,14 +140,10 @@ export class CollectionService {
     return this.repository.moveCollectionRecord(memberId, collectionId, recordId, typeof beforeId === "string" ? beforeId : undefined);
   }
 
-  async createRecord(memberId: string, collectionId: string, value: unknown) {
-    if (!uuid.test(collectionId)) throw new InvalidCollectionInput();
-    const current = await this.repository.readCollection(memberId, collectionId);
-    if (current.status !== "found") return current;
-    let normalized: CanonicalCollection;
-    try { normalized = normalizeCollection({ ...current.collection, records: [...current.collection.records, value] }); }
-    catch { throw new InvalidCollectionInput(); }
-    return this.repository.createCollectionRecord(memberId, collectionId, normalized.records.at(-1)!);
+  createRecord(memberId: string, collectionId: string, value: unknown) {
+    if (!uuid.test(collectionId) || !value || typeof value !== "object" || Array.isArray(value)
+      || Object.keys(value).some((key) => !["id", "position", "values"].includes(key))) throw new InvalidCollectionInput();
+    return this.repository.createCollectionRecord(memberId, collectionId, value);
   }
 
   async updateRecord(memberId: string, collectionId: string, recordId: string, value: unknown) {
