@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode } from "react";
+import type { ButtonHTMLAttributes, HTMLAttributes, LabelHTMLAttributes, ReactNode } from "react";
 
 import styles from "./control.module.css";
 
@@ -8,9 +8,16 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   pendingLabel?: string;
 }
 
-export function Button({ variant = "primary", pending = false, pendingLabel = "Working", children, className, disabled, ...props }: ButtonProps) {
+function pendingAction(children: ReactNode) {
+  if (typeof children !== "string") return "Working";
+  if (children === "Save") return "Saving";
+  if (children.startsWith("Save ")) return `Saving ${children.slice(5)}`;
+  return `${children} in progress`;
+}
+
+export function Button({ variant = "primary", pending = false, pendingLabel, children, className, disabled, ...props }: ButtonProps) {
   return <button {...props} className={[styles.button, styles[variant], className].filter(Boolean).join(" ")}
-    disabled={disabled || pending} aria-busy={pending || undefined}>{pending ? pendingLabel : children}</button>;
+    data-variant={variant} disabled={disabled || pending} aria-busy={pending || undefined}>{pending ? pendingLabel ?? pendingAction(children) : children}</button>;
 }
 
 export interface IconButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> { label: string; }
@@ -19,10 +26,10 @@ export function IconButton({ label, className, type = "button", ...props }: Icon
   return <button {...props} type={type} aria-label={label} className={[styles.iconButton, className].filter(Boolean).join(" ")} />;
 }
 
-export interface FieldProps { label: string; hint?: string; children: ReactNode; }
+export interface FieldProps extends LabelHTMLAttributes<HTMLLabelElement> { label: string; hint?: string; children: ReactNode; }
 
-export function Field({ label, hint, children }: FieldProps) {
-  return <label className={styles.field}><span>{label}</span>{children}{hint ? <small>{hint}</small> : null}</label>;
+export function Field({ label, hint, children, className, ...props }: FieldProps) {
+  return <label {...props} className={[styles.field, className].filter(Boolean).join(" ")}><span>{label}</span>{children}{hint ? <small>{hint}</small> : null}</label>;
 }
 
 export function StatusNotice({ tone = "neutral", className, ...props }: HTMLAttributes<HTMLDivElement> & { tone?: "neutral" | "success" | "attention" | "error" }) {

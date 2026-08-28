@@ -3,7 +3,7 @@
   --stash-color-canvas: #f4f1e9;
   --stash-color-canvas-deep: #e9e5dc;
   --stash-color-surface: #fffdf8;
-  --stash-color-ink: #20211f;
+  --stash-color-ink: #181a18;
   --stash-color-muted: #62645f;
   --stash-color-faint: #6d6f69;
   --stash-color-accent: #bf381f;
@@ -27,6 +27,7 @@
   --stash-color-success: #67745f;
   --stash-color-success-surface: #e1e5dc;
   --stash-shadow-paper: 0 1.1rem 3.6rem rgb(54 49 41 / 7%), 0 .15rem .5rem rgb(54 49 41 / 5%);
+  --stash-elevation-surface: 0 1.1rem 3.6rem rgb(54 49 41 / 7%), 0 .15rem .5rem rgb(54 49 41 / 5%);
   --stash-space-1: 0.25rem;
   --stash-space-2: 0.5rem;
   --stash-space-3: 0.75rem;
@@ -44,4 +45,7 @@
   --stash-ease-standard: cubic-bezier(.2, .8, .2, 1);
   --stash-font-sans: Geist, ui-sans-serif, system-ui, sans-serif;
   --stash-font-display: Geist, ui-sans-serif, system-ui, sans-serif;
+  --stash-type-caption: 0.75rem;
+  --stash-type-body: 1rem;
+  --stash-type-title: clamp(2.4rem, 5vw, 5.2rem);
 }

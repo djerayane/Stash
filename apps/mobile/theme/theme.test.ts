@@ -8,6 +8,7 @@ describe("Stash mobile theme", () => {
     expect(stashTheme.colors.surface).toBe("#fffdf8");
     expect(stashTheme.colors.ink).toBe("#181a18");
     expect(stashTheme.colors.accent).toBe("#bf381f");
+    expect(stashTheme.colors.sage).toBe("#929b88");
     expect(stashTheme.colors.accent).not.toBe("#2463eb");
   });
 

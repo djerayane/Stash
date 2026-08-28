@@ -8,6 +8,7 @@ export const stashTheme = Object.freeze({
     accent: "#bf381f",
     accentPressed: "#aa2e19",
     accentContrast: "#ffffff",
+    sage: "#929b88",
     success: "#67745f",
     successSurface: "#e1e5dc",
     rule: "#d8d3c9",
