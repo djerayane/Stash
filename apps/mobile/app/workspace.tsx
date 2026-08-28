@@ -2,11 +2,13 @@ import type { MobileCanonicalTask, MobileWorkspaceSnapshot } from "@stash/domain
 import { MobileCaptureClient } from "@stash/sync";
 import { useFocusEffect } from "expo-router";
 import { useCallback, useMemo, useState } from "react";
-import { RefreshControl, ScrollView, Text, View, useColorScheme } from "react-native";
+import { RefreshControl, useColorScheme } from "react-native";
 
+import { MobileStatusNotice, mobileStatusVariantForMessage } from "@/components/mobile-status-notice";
+import { Screen } from "@/components/screen";
 import { WorkspaceReader } from "@/components/workspace-reader";
 import { SecureMobileCaptureStore } from "@/src/secure-mobile-store";
-import { colors } from "@/theme/colors";
+import { stashTheme } from "@/theme/theme";
 
 export default function WorkspaceScreen() {
   useColorScheme();
@@ -42,9 +44,9 @@ export default function WorkspaceScreen() {
     if (result.status === "synced") { await loadPending(); setMessage("Task update synchronized."); }
   };
 
-  return <ScrollView contentInsetAdjustmentBehavior="automatic" refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} />}
-    contentContainerStyle={{ padding: 20, gap: 18 }}>
-    <View accessibilityLiveRegion="polite"><Text selectable style={{ color: colors.secondaryLabel, lineHeight: 21 }}>{message}</Text></View>
+  return <Screen refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh}
+    tintColor={stashTheme.colors.accent} colors={[stashTheme.colors.accent]} />}>
+    <MobileStatusNotice variant={mobileStatusVariantForMessage(message)} message={message} />
     {snapshot ? <WorkspaceReader snapshot={snapshot} pendingTaskIds={pending} onUpdateTaskStatus={updateTaskStatus} /> : null}
-  </ScrollView>;
+  </Screen>;
 }

@@ -7,7 +7,7 @@ import { Text, View } from "react-native";
 
 import type { MobileCapture } from "@stash/domain-types";
 import { NativeActionButton } from "@/components/native-controls";
-import { colors } from "@/theme/colors";
+import { stashTheme } from "@/theme/theme";
 import { MAX_VOICE_DURATION_SECONDS, readBoundedOriginal } from "@/src/media-input";
 
 type MediaInput = { kind: "photo" | "file" | "voice"; filename: string; contentType: string; base64: string };
@@ -70,10 +70,10 @@ export function MediaCaptureControls({ onPicked, onError }: {
     await recorder.prepareToRecordAsync();
     recorder.record({ forDuration: MAX_VOICE_DURATION_SECONDS });
   });
-  return <View accessibilityRole="summary" style={{ gap: 10 }}>
-    <Text selectable style={{ color: colors.secondaryLabel }}>Original photos, files, and voice stay encrypted here until they reach your Workspace. Voice stops after five minutes.</Text>
-    <NativeActionButton label="Choose photo" disabled={busy || recording.isRecording} onPress={choosePhoto} />
-    <NativeActionButton label="Choose file" disabled={busy || recording.isRecording} onPress={chooseFile} />
-    <NativeActionButton label={recording.isRecording ? "Stop and save voice" : "Record voice"} disabled={busy} onPress={toggleRecording} />
+  return <View accessibilityRole="summary" accessibilityLabel="Add original media" style={{ gap: stashTheme.spacing.sm }}>
+    <Text selectable style={{ color: stashTheme.colors.secondaryInk, lineHeight: 20 }}>Original photos, files, and voice stay encrypted here until they reach your Workspace. Voice stops after five minutes.</Text>
+    <NativeActionButton variant="secondary" label="Choose photo" disabled={busy || recording.isRecording} onPress={choosePhoto} />
+    <NativeActionButton variant="secondary" label="Choose file" disabled={busy || recording.isRecording} onPress={chooseFile} />
+    <NativeActionButton variant="secondary" label={recording.isRecording ? "Stop and save voice" : "Record voice"} disabled={busy} onPress={toggleRecording} />
   </View>;
 }

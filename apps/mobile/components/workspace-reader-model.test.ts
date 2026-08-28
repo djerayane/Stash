@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { groupReadableRecords, visibleNoteTree } from "./workspace-reader-model";
+import {
+  displayCollectionPropertyValue,
+  groupReadableRecords,
+  readablePresentationName,
+  visibleNoteTree,
+} from "./workspace-reader-model";
 
 describe("mobile Workspace reader model", () => {
   it("hides descendants when a Note branch is collapsed", () => {
@@ -25,5 +30,23 @@ describe("mobile Workspace reader model", () => {
     expect(groups.map(({ label, items }) => [label, items.map(({ id }) => id)])).toEqual([
       ["Doing", ["second"]], ["Todo", ["first"]],
     ]);
+  });
+
+  it("limits a focused Collection view to its canonical record", () => {
+    const records = [
+      { id: "first", position: 1, values: { title: "Alpha" } },
+      { id: "second", position: 2, values: { title: "Beta" } },
+    ];
+    expect(groupReadableRecords(records, {
+      filters: [], sorts: [], focused: { recordId: "second" },
+    }).flatMap(({ items }) => items.map(({ id }) => id))).toEqual(["second"]);
+  });
+
+  it("uses readable presentation and typed property values", () => {
+    expect(readablePresentationName("table")).toBe("Table");
+    expect(displayCollectionPropertyValue({
+      id: "status", name: "Status", position: 2, type: "single_select",
+      options: [{ id: "doing", name: "In progress" }],
+    }, "doing")).toBe("In progress");
   });
 });

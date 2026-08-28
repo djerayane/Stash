@@ -1,11 +1,31 @@
-import type { CollectionRecord, MobileNoteTreeNode, ViewFilter, ViewSort } from "@stash/domain-types";
+import type {
+  CollectionProperty,
+  CollectionRecord,
+  MobileNoteTreeNode,
+  ViewFilter,
+  ViewPresentation,
+  ViewSort,
+} from "@stash/domain-types";
 
 export function displayReadableValue(value: unknown): string {
   if (value === undefined || value === null) return "";
-  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (typeof value === "string" || typeof value === "number") return String(value);
   if (Array.isArray(value)) return value.map((entry) => typeof entry === "object" && entry && "fallback" in entry ? String(entry.fallback) : String(entry)).join(", ");
   if (typeof value === "object" && "start" in value) return String(value.start);
   return "";
+}
+
+export function displayCollectionPropertyValue(property: CollectionProperty, value: unknown): string {
+  if (property.type === "single_select" || property.type === "multi_select") {
+    const values = Array.isArray(value) ? value : value === undefined || value === null ? [] : [value];
+    return values.map((entry) => property.options.find(({ id }) => id === entry)?.name ?? displayReadableValue(entry)).join(", ");
+  }
+  return displayReadableValue(value);
+}
+
+export function readablePresentationName(presentation: ViewPresentation): string {
+  return ({ table: "Table", board: "Board", list: "List", calendar: "Calendar" } as const)[presentation];
 }
 
 export function matchesReadableFilter(value: unknown, operator: ViewFilter["operator"], expected: unknown) {
@@ -32,9 +52,10 @@ export function visibleNoteTree(nodes: readonly MobileNoteTreeNode[], collapsed:
 }
 
 export function groupReadableRecords(records: readonly CollectionRecord[], definition: {
-  filters: readonly ViewFilter[]; sorts: readonly ViewSort[]; groupBy?: string;
+  filters: readonly ViewFilter[]; sorts: readonly ViewSort[]; groupBy?: string; focused?: { readonly recordId: string };
 }) {
-  const visible = [...records].filter((record) => definition.filters.every((filter) =>
+  const visible = [...records].filter((record) => (!definition.focused || definition.focused.recordId === record.id)
+    && definition.filters.every((filter) =>
     matchesReadableFilter(record.values[filter.propertyId], filter.operator, filter.value))).sort((left, right) => {
       for (const sort of definition.sorts) {
         const compared = displayReadableValue(left.values[sort.propertyId]).localeCompare(displayReadableValue(right.values[sort.propertyId]));

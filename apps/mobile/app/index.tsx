@@ -3,16 +3,18 @@ import * as Linking from "expo-linking";
 import { File } from "expo-file-system";
 import NetInfo from "@react-native-community/netinfo";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AppState, Pressable, ScrollView, Text, TextInput, View, useColorScheme } from "react-native";
+import { AppState, Pressable, Text, View, useColorScheme } from "react-native";
 
 import { MobileCaptureClient } from "@stash/sync";
 import type { MobileCaptureOptions } from "@stash/domain-types";
 import { SecureMobileCaptureStore } from "../src/secure-mobile-store";
-import { NativeActionButton, NativeToggle } from "@/components/native-controls";
+import { NativeActionButton } from "@/components/native-controls";
 import { NativeChoice } from "@/components/native-choice";
-import { StatusFeedback } from "@/components/status-feedback";
+import { CaptureComposer } from "@/components/capture-composer";
 import { MediaCaptureControls } from "@/components/media-capture-controls";
-import { colors } from "@/theme/colors";
+import { MobileStatusNotice, mobileStatusVariantForMessage } from "@/components/mobile-status-notice";
+import { Screen } from "@/components/screen";
+import { stashTheme } from "@/theme/theme";
 import { presentMobileSyncResult } from "@/src/sync-status";
 import {
   captureOptionsErrorMessage,
@@ -142,7 +144,7 @@ export default function CaptureScreen() {
         await client.captureChecklist(title, items, structure());
       } else await client.captureText(content, structure());
       if (!mounted.current) return;
-      setContent(""); setStatus("Saved securely on this device.");
+      setContent(""); setStatus("Saved on this device.");
       const result = await client.sync();
       if (!mounted.current) return;
       setStatus(await syncStatus(result));
@@ -162,42 +164,47 @@ export default function CaptureScreen() {
     return capture;
   };
 
-  return (
-    <ScrollView contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled"
-      contentContainerStyle={{ padding: 20, gap: 20 }}>
-      <StatusFeedback message={status} />
-      <Link href="/pairing" asChild>
-        <Pressable accessibilityRole="link" style={{ minHeight: 44, justifyContent: "center" }}>
-          <Text style={{ color: colors.accent, fontSize: 16 }}>Pair or update Instance</Text>
-        </Pressable>
-      </Link>
-      <Link href="/workspace" asChild>
-        <Pressable accessibilityRole="link" style={{ minHeight: 44, justifyContent: "center" }}>
-          <Text style={{ color: colors.accent, fontSize: 16 }}>Open offline Workspace</Text>
-        </Pressable>
-      </Link>
-      <View style={{ gap: 10 }}>
-        <TextInput
-          accessibilityLabel={checklist ? "Checklist title and items" : "Note text"}
-          multiline autoFocus value={content} onChangeText={setContent}
-          placeholder={checklist ? "Title, then one item per line" : "What do you want to remember?"}
-          style={{ minHeight: 190, borderWidth: 1, borderColor: colors.separator, color: colors.label, backgroundColor: colors.background, borderRadius: 18,
-            borderCurve: "continuous", padding: 16, fontSize: 18, lineHeight: 26, textAlignVertical: "top" }}
-        />
-        <NativeToggle label={checklist ? "Checklist capture" : "Text capture"} value={checklist} onChange={setChecklist} />
-      </View>
-      <MediaCaptureControls onPicked={saveMedia} onError={setStatus} />
-      {quarantinedShares ? <NativeActionButton label={`Discard ${quarantinedShares} blocked shared item${quarantinedShares === 1 ? "" : "s"}`}
-        onPress={discardQuarantinedShares} /> : null}
-      {options.projects.length ? <NativeChoice label="Project" value={projectId} onChange={setProjectId}
-        items={options.projects.map(({ id, name }) => ({ value: id, label: name }))} /> : null}
-      {options.tags.length ? <NativeChoice label="Tag" value={tag} onChange={setTag}
-        items={options.tags.map((value) => ({ value, label: value }))} /> : null}
-      {options.reminders.length ? <NativeChoice label="Reminder" value={reminderOffset?.toString()} onChange={(value) => setReminderOffset(value ? Number(value) : undefined)}
-        items={options.reminders.map(({ offsetMinutes, label }) => ({ value: offsetMinutes.toString(), label }))} /> : null}
-      {optionsError ? <NativeActionButton label="Retry loading options" onPress={() => setOptionsReload((value) => value + 1)} /> : null}
-      <NativeActionButton label={optionsLoading ? "Loading capture options" : "Save capture"}
-        disabled={optionsLoading || optionsError || !content.trim()} onPress={save} />
-    </ScrollView>
-  );
+  const structureControls = <>
+    {options.projects.length ? <NativeChoice label="Project" value={projectId} onChange={setProjectId}
+      items={options.projects.map(({ id, name }) => ({ value: id, label: name }))} /> : null}
+    {options.tags.length ? <NativeChoice label="Tag" value={tag} onChange={setTag}
+      items={options.tags.map((value) => ({ value, label: value }))} /> : null}
+    {options.reminders.length ? <NativeChoice label="Reminder" value={reminderOffset?.toString()} onChange={(value) => setReminderOffset(value ? Number(value) : undefined)}
+      items={options.reminders.map(({ offsetMinutes, label }) => ({ value: offsetMinutes.toString(), label }))} /> : null}
+    {!optionsLoading && !options.projects.length && !options.tags.length && !options.reminders.length
+      ? <Text selectable style={{ color: stashTheme.colors.secondaryInk, lineHeight: 21 }}>No optional structure is available from this Workspace.</Text> : null}
+  </>;
+
+  return <Screen bottomAction={<NativeActionButton label={optionsLoading ? "Loading capture options" : "Save capture"}
+    disabled={optionsLoading || optionsError || !content.trim()} onPress={save} />}>
+    <MobileStatusNotice variant={mobileStatusVariantForMessage(status)} message={status} />
+    <View role="navigation" accessibilityLabel="Capture destinations" style={{ flexDirection: "row", gap: stashTheme.spacing.sm }}>
+      <DestinationLink href="/workspace" label="Open Workspace" />
+      <DestinationLink href="/pairing" label="Pair Instance" />
+    </View>
+    {optionsError ? <NativeActionButton variant="secondary" label="Retry loading options" onPress={() => setOptionsReload((value) => value + 1)} /> : null}
+    {quarantinedShares ? <NativeActionButton variant="secondary" label={`Discard ${quarantinedShares} blocked shared item${quarantinedShares === 1 ? "" : "s"}`}
+      onPress={discardQuarantinedShares} /> : null}
+    <CaptureComposer content={content} checklist={checklist} onContentChange={setContent} onChecklistChange={setChecklist}
+      media={<MediaCaptureControls onPicked={saveMedia} onError={setStatus} />} structure={structureControls} />
+  </Screen>;
+}
+
+function DestinationLink({ href, label }: { href: "/workspace" | "/pairing"; label: string }) {
+  return <Link href={href} asChild>
+    <Pressable accessibilityRole="link" style={({ pressed }) => ({
+      minHeight: stashTheme.controlHeight,
+      flex: 1,
+      alignItems: "center",
+      justifyContent: "center",
+      paddingHorizontal: stashTheme.spacing.sm,
+      borderRadius: stashTheme.radius.control,
+      borderCurve: "continuous",
+      borderWidth: 1,
+      borderColor: stashTheme.colors.rule,
+      backgroundColor: pressed ? stashTheme.colors.canvasDeep : stashTheme.colors.surface,
+    })}>
+      <Text style={{ color: stashTheme.colors.ink, fontSize: stashTheme.type.caption, fontWeight: "600" }}>{label}</Text>
+    </Pressable>
+  </Link>;
 }

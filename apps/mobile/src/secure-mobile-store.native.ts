@@ -2,6 +2,7 @@ import { AESEncryptionKey, AESSealedData, aesDecryptAsync, aesEncryptAsync } fro
 import * as SecureStore from "expo-secure-store";
 import * as SQLite from "expo-sqlite";
 import { EncryptedStateMobileCaptureStore, type CiphertextStateRepository, type MobileCipher } from "./encrypted-mobile-store";
+import { decodeBase64 } from "./native-crypto-format";
 
 const encryptionKeyName = "stash.mobile.encryption-key.v1";
 let platformEncryptionKey: Promise<AESEncryptionKey> | undefined;
@@ -14,6 +15,6 @@ class SQLiteCiphertextRepository implements CiphertextStateRepository {
 class PlatformBackedAesCipher implements MobileCipher {
   async #loadKey() { return platformEncryptionKey ??= (async () => { const existing = await SecureStore.getItemAsync(encryptionKeyName); if (existing) return AESEncryptionKey.import(existing, "base64"); const key = await AESEncryptionKey.generate(); await SecureStore.setItemAsync(encryptionKeyName, await key.encoded("base64"), { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY }); return key; })(); }
   async encrypt(value: string) { return (await aesEncryptAsync(new TextEncoder().encode(value), await this.#loadKey())).combined("base64") as Promise<string>; }
-  async decrypt(value: string) { return new TextDecoder().decode(await aesDecryptAsync(AESSealedData.fromCombined(value), await this.#loadKey()) as Uint8Array); }
+  async decrypt(value: string) { return new TextDecoder().decode(await aesDecryptAsync(AESSealedData.fromCombined(decodeBase64(value)), await this.#loadKey()) as Uint8Array); }
 }
 export class SecureMobileCaptureStore extends EncryptedStateMobileCaptureStore { constructor() { super(new SQLiteCiphertextRepository(), new PlatformBackedAesCipher()); } }
