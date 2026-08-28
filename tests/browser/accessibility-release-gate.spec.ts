@@ -130,6 +130,22 @@ test("@a11y keeps required Member flows reflowed, named, and axe-clean at 320 CS
   await expect(move).toBeFocused();
 });
 
+test("@a11y keeps direct Collection authoring named and inside the page viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await authenticate(page);
+  await page.goto("/app/notes/99999999-9999-4999-8999-999999999999");
+
+  await expectNoHorizontalPageScroll(page, "Note workspace before Collection authoring");
+  await page.getByRole("button", { name: "New collection" }).press("Enter");
+  const collection = page.getByRole("region", { name: "Untitled collection" });
+  await expect(collection.getByRole("textbox", { name: "Collection title" })).toBeFocused();
+  await expect(collection.getByRole("button", { name: "Add property" })).toBeVisible();
+  await expect(collection.getByRole("button", { name: "New record" })).toBeVisible();
+  await expectNoHorizontalPageScroll(page, "direct Collection controls at 390 CSS pixels");
+  await expectWcag22Aa(page, "direct Collection authoring");
+});
+
 test("@a11y focuses failed settings updates and successful import status", async ({ page }) => {
   await authenticate(page);
   await page.emulateMedia({ reducedMotion: "reduce" });
@@ -158,6 +174,17 @@ test("@a11y focuses failed settings updates and successful import status", async
   await page.getByRole("button", { name: "Validate and import" }).press("Enter");
   await expect(page.getByRole("status", { name: "Import result" })).toBeFocused();
   await expectWcag22Aa(page, "Workspace import result");
+});
+
+test("@a11y loads acceptance Settings without an unavailable placeholder", async ({ page }) => {
+  await authenticate(page);
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("/app/settings");
+  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "Locale" })).toHaveValue("en");
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expectNoHorizontalPageScroll(page, "acceptance Settings");
+  await expectWcag22Aa(page, "acceptance Settings");
 });
 
 test("@a11y keeps Instance Backup verification and confirmation keyboard-operable", async ({ page }) => {

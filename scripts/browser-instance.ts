@@ -44,6 +44,7 @@ import { NoteService } from "../src/notes.js";
 import { NoteLinkService } from "../src/note-links.js";
 import { RelationshipQueryService } from "../src/knowledge-authoring/relationship-query.js";
 import { relationshipRoutes } from "../src/knowledge-authoring/relationship-routes.js";
+import { MemberLocalizationService, type MemberLocalizationPreferences } from "../src/member-localization.js";
 
 const noteId = "99999999-9999-4999-8999-999999999999";
 const secondNoteId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -230,6 +231,11 @@ const browserMemberAccess = {
     return accountId ? { accountId, sessionId: `session-${accountId}` } : browserPasswordAuth.authenticateBearer(authorization);
   },
 };
+const browserLocalizationPreferences = new Map<string, MemberLocalizationPreferences>();
+const browserMemberLocalization = new MemberLocalizationService({
+  async findMemberLocalizationPreferences(memberId) { return browserLocalizationPreferences.get(memberId); },
+  async saveMemberLocalizationPreferences(memberId, preferences) { browserLocalizationPreferences.set(memberId, preferences); },
+});
 
 const browserTreeDirectory = await mkdtemp(join(tmpdir(), "stash-browser-note-tree-"));
 const browserTreeCodec = createAuthenticationSecretCodec(randomBytes(32).toString("base64"));
@@ -372,6 +378,7 @@ const instance = await startInstance({
   oidcCallbackOrigin: "http://127.0.0.1:4173",
   allowInsecureOidcCallbackOriginForTest: true,
   memberAccess: browserMemberAccess,
+  memberLocalization: browserMemberLocalization,
   noteLinks: browserNoteLinks,
   workspaceProjects: new WorkspaceProjectService({ async findPortableMemberIdentity() { return { localAccountId: browserMemberId, displayName: "Browser Member" }; }, async canCreateProject(memberId, workspaceId) { return memberId === browserMemberId && workspaceId === browserWorkspaceId; }, async createWorkspace() { return { status: "organization_forbidden" }; }, async createProject(memberId, record) { if (memberId !== browserMemberId || record.workspaceId !== browserWorkspaceId) return "workspace_forbidden"; browserProjects = [...browserProjects, record]; return "created"; }, async listAccessibleWorkspaces() { return [{ id: browserWorkspaceId, name: "Acceptance Workspace", ownerType: "organization" as const, projects: browserProjects }, { id: "77777777-7777-4777-8777-777777777777", name: "Shared Workspace", ownerType: "organization" as const, projects: [{ id: "66666666-6666-4666-8666-666666666665", workspaceId: "77777777-7777-4777-8777-777777777777", createdByMemberId: browserMemberId, name: "Shared roadmap", key: "SHARED" }] }]; } }),
   notes: { async listInbox(memberId: string, workspaceId: string) { return memberId === browserMemberId && workspaceId === browserWorkspaceId ? { status: "found", notes: inboxNotes } : { status: "workspace_forbidden" }; },
@@ -480,6 +487,7 @@ async function startFirstRunInstance() {
         { boundHost: "0.0.0.0", code: "STASH-ONE", output() {} }) }),
       knowledgeAuthoringCapability({ notes, noteTree: new NoteTreeService(database.noteTreeRepository(), database.tutorialContributionRepository()),
         starterTutorials: new TutorialContributionService(database.tutorialContributionRepository()),
+        noteCollaboration: new NoteCollaborationService(database.knowledgeAuthoringRepositories()),
         collections: new CollectionService(database.collectionRepository()), noteLinks: new NoteLinkService(database.knowledgeAuthoringRepositories()),
         discussions: new DiscussionService(database.knowledgeAuthoringRepositories()), searches: new WorkspaceSearchService(database.knowledgeAuthoringRepositories()),
         portableWorkspaceExports: new PortableWorkspaceExportService(database.knowledgeAuthoringRepositories(), attachments), memberAccess: auth }),

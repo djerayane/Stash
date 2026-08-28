@@ -263,7 +263,7 @@ test("a read-only Guest gets an axe-clean non-editable Note without local retrie
   await page.goto(`/app/notes/${noteId}`);
   const editor = page.getByRole("textbox", { name: "Note content" });
   await expect(editor).toHaveAttribute("contenteditable", "false");
-  await expect(page.getByRole("status")).toHaveText("Read-only Note");
+  await expect(page.locator('[role="status"]').filter({ hasText: "Read-only Note" })).toHaveText("Read-only Note");
   for (const control of await page.getByRole("toolbar", { name: "Text formatting" }).getByRole("button").all()) await expect(control).toBeDisabled();
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 });

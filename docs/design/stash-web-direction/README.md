@@ -1,6 +1,6 @@
 # Stash web direction
 
-These references are captures of the implemented acceptance application, not speculative mockups. Build the web client, then keep `pnpm exec tsx scripts/browser-instance.ts` running: that single harness starts the seeded acceptance Instance on port 4173 and the fresh/setup Instance on port 4174. In another terminal, run `node scripts/capture-web-direction.mjs` from the repository root. The capture script claims the fresh Instance when needed (using `STASH_SETUP_CODE`, or the harness default) and signs in when it is already claimed. Captures use reduced motion so each image records a stable rendered state.
+These references are captures of the implemented acceptance application, not speculative mockups. Build the web client, then start a fresh `pnpm exec tsx scripts/browser-instance.ts`: that single harness starts the seeded acceptance Instance on port 4173 and the unclaimed setup Instance on port 4174. In another terminal, run `node scripts/capture-web-direction.mjs` once from the repository root. Restart the harness before repeating the capture so `01-instance-setup.png` always comes from a genuinely unclaimed Instance. The script uses fixed acceptance data and reduced motion, and refuses to write a reference while a page contains a visible alert, busy state, loading placeholder, or page-level horizontal overflow.
 
 The visual system is warm paper and ivory content surfaces, carbon navigation, editorial Geist typography, and vermilion reserved for focus, state, and consequential actions. Inbox, Note Tree, Search, and Tasks form the primary hierarchy. Projects and Activity are secondary; Collections live with their defining Note; collaboration stays in the closed-by-default Note context.
 
@@ -10,7 +10,7 @@ The visual system is warm paper and ivory content surfaces, carbon navigation, e
 | `02-starter-workspace.png` | The real starter Note branch after atomic setup and authentication. |
 | `03-note-tree-editor.png` | Desktop Note Tree, Collection workspace, and rich Note editor. |
 | `04-links-backlinks.png` | Open contextual drawer with breadcrumbs, links, backlinks, maintenance, and related-Note outline. |
-| `05-collections-view-blocks.png` | Editable starter Collection and reusable Task View Block. |
+| `05-collections-view-blocks.png` | Direct Collection creation with an inline property and record, plus an inserted canonical view from another Note. |
 | `06-tasks.png` | Workspace-owned Tasks destination and saved view controls. |
 | `07-nested-projects.png` | Secondary nested Project navigation and creation authority. |
 | `08-contextual-collaboration.png` | Discussion attached to its Note, visible only after opening context. |
