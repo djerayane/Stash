@@ -49,6 +49,29 @@ test("offers link, callout, and Workspace Attachment authoring controls", async 
   await expect(page.getByRole("link", { name: "Design brief" })).toHaveAttribute("href", "./attachments/attachment-id/design.pdf");
 });
 
+test("keeps visible toolbar command labels inside their controls", async ({ page }) => {
+  await page.goto(`/app/notes/${noteId}`);
+  const toolbar = page.getByRole("toolbar", { name: "Text formatting" });
+  await expect(toolbar.getByRole("button", { name: "Insert Workspace Attachment" })).toBeVisible();
+  const overflowing = await toolbar.getByRole("button").evaluateAll((buttons) => buttons
+    .filter((button) => button.scrollWidth > button.clientWidth)
+    .map((button) => ({ name: button.getAttribute("aria-label") ?? button.textContent?.trim() ?? "unnamed", clientWidth: button.clientWidth, scrollWidth: button.scrollWidth, width: getComputedStyle(button).width })));
+  expect(overflowing).toEqual([]);
+});
+
+test("keeps an arbitrary Note title within three lines at narrow width", async ({ page }) => {
+  const longTitle = "Release collaboration strategy for every regional launch team and every carefully preserved decision";
+  await page.route((url) => url.pathname === `/api/notes/${noteId}`, (route) => route.fulfill({ json: {
+    id: noteId, revision: 1, content: longTitle, document: { type: "doc", blocks: [{ type: "paragraph", blockKey: "title-wrap-seed", content: [{ text: "Body" }] }] },
+  } }));
+  await page.setViewportSize({ width: 320, height: 740 });
+  await page.goto(`/app/notes/${noteId}`);
+  const heading = page.getByRole("heading", { name: longTitle });
+  await expect(heading).toBeVisible();
+  const renderedLines = await heading.evaluate((title) => Math.round(title.clientHeight / Number.parseFloat(getComputedStyle(title).lineHeight)));
+  expect(renderedLines).toBeLessThanOrEqual(3);
+});
+
 test("preserves every checklist item and callout paragraph with stable identities", async ({ page }) => {
   await page.goto(`/app/notes/${richNoteId}`);
   const editor = page.getByRole("textbox", { name: "Note content" });

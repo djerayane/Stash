@@ -40,6 +40,14 @@ async function mockKnowledgeApi(page: Page) {
     breadcrumbs: [{ id: roadmapId, title: "Release collaboration plan" }],
     outgoingLinks: [{ id: "link-1", noteId: evidenceId, title: "Authoritative second Note", label: "Evidence", relationshipType: "supports" }],
     backlinks: [{ id: "link-2", noteId: evidenceId, title: "Authoritative second Note", label: "References" }], projectIds: [], projects: [] } }));
+  await page.route("**/api/notes/*/starter-tutorial", (route) => route.fulfill({ json: { tutorial: {
+    workspaceId, rootNoteId: roadmapId,
+    notes: [{ id: roadmapId, title: "Release collaboration plan", content: "Guide" }, { id: evidenceId, parentId: roadmapId, title: "Authoritative second Note", content: "Evidence" }],
+    links: [],
+    collection: { schema: "stash.collection.v1", id: "collection-1", workspaceId, ownerNoteId: roadmapId, title: "Release evidence", properties: [{ id: "property-1", name: "Evidence", type: "text", position: 1 }], records: [{ id: "record-1", position: 1, values: { "property-1": "Decision log" } }] },
+    viewBlock: { schema: "stash.view-block.v1", id: "view-1", workspaceId, ownerNoteId: roadmapId, blockId: "view-1", title: "Release moves", definition: { source: { kind: "tasks", workspaceId }, presentation: "list", filters: [], sorts: [], layout: {} } },
+  } } }));
+  await page.route("**/api/workspaces/*/tasks?scope=projectless", (route) => route.fulfill({ json: { tasks: [] } }));
   await page.route("**/api/notes/*/branch-preview", async (route) => { const body = route.request().postDataJSON();
     requests.push({ path: new URL(route.request().url()).pathname, body }); await route.fulfill({ json: { impact: { noteId: roadmapId,
       title: "Release collaboration plan", descendantCount: 1, descendants: [{ noteId: evidenceId, title: "Authoritative second Note" }],
@@ -77,12 +85,18 @@ test("authors and recovers knowledge through the keyboard-accessible Note worksp
   const tree = page.getByRole("tree", { name: "Note Tree" });
   await expect(tree).toBeVisible();
   await expect(page.getByRole("complementary", { name: "Note context" })).toHaveCount(0);
-  await tree.getByRole("treeitem", { name: "Release collaboration plan" }).focus();
+  await expect(page.getByRole("heading", { name: "Try the pieces together" })).toBeVisible();
+  await expect(page.getByText("Working guide", { exact: true })).toBeHidden();
+  const roadmap = tree.getByRole("treeitem", { name: "Release collaboration plan" });
+  await roadmap.focus();
+  await expect.poll(() => roadmap.getByText("Release collaboration plan", { exact: true }).evaluate((title) => title.clientWidth)).toBeGreaterThan(32);
+  await expect.poll(() => roadmap.evaluate((row) => row.scrollWidth <= row.clientWidth)).toBe(true);
   await page.keyboard.press("ArrowDown");
   await expect(tree.getByRole("treeitem", { name: "Authoritative second Note" })).toBeFocused();
   const addChild = tree.getByRole("button", { name: "Add child to Release collaboration plan" });
   await addChild.focus(); await page.keyboard.press("Enter"); await expect(page.getByRole("textbox", { name: "Child Note title" })).toBeFocused();
-  const addSibling = tree.getByRole("button", { name: "Add sibling to Release collaboration plan" });
+  await roadmap.getByText("More actions for Release collaboration plan", { exact: true }).click();
+  const addSibling = roadmap.getByRole("group", { name: "More actions for Release collaboration plan" }).getByRole("button", { name: "Add sibling to Release collaboration plan" });
   await addSibling.focus(); await page.keyboard.press("Space"); await expect(page.getByRole("textbox", { name: "Sibling Note title" })).toBeFocused();
 
   await page.getByRole("button", { name: "Open Note context" }).click();
@@ -168,7 +182,8 @@ test("persists a real Note branch lifecycle through the acceptance Instance", as
   await page.getByRole("textbox", { name: "Child Note title" }).fill("Browser observations");
   await page.getByRole("button", { name: "Create child Note" }).click();
   const observations = sidebarTree.getByRole("treeitem", { name: "Browser observations" }); await expect(observations).toHaveAttribute("aria-level", "2");
-  await guide.getByRole("button", { name: /Nest Browser field guide under Release collaboration plan/ }).click();
+  await guide.getByText("More actions for Browser field guide", { exact: true }).click();
+  await guide.getByRole("group", { name: "More actions for Browser field guide" }).getByRole("button", { name: /Nest Browser field guide under Release collaboration plan/ }).click();
   await expect(guide).toHaveAttribute("aria-level", "2"); await expect(observations).toHaveAttribute("aria-level", "3");
 
   const childUrl = page.url(); await guide.getByText("Browser field guide", { exact: true }).click(); await expect(page).not.toHaveURL(childUrl);
@@ -273,8 +288,10 @@ test("keeps the Note Tree usable at a narrow viewport with non-pointer creation 
   page.on("dialog", (dialog) => void dialog.accept());
   await page.goto("/app/notes");
   const tree = page.getByRole("tree", { name: "Note Tree" }); await expect(tree).toBeVisible();
-  await tree.getByRole("treeitem", { name: "Authoritative second Note" }).focus();
-  await tree.getByRole("button", { name: "Move Authoritative second Note to root" }).click();
+  const evidence = tree.getByRole("treeitem", { name: "Authoritative second Note" });
+  await evidence.focus();
+  await evidence.getByText("More actions for Authoritative second Note", { exact: true }).click();
+  await evidence.getByRole("group", { name: "More actions for Authoritative second Note" }).getByRole("button", { name: "Move Authoritative second Note to root" }).click();
   await page.getByRole("button", { name: "Create root Note" }).last().click();
   await page.getByRole("textbox", { name: "Root Note title" }).fill("Field observations");
   await page.getByRole("button", { name: "Create root Note" }).last().click();

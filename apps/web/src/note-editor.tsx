@@ -309,7 +309,7 @@ function NoteEditorDocument({ noteId, memberId, fetcher = globalThis.fetch, toke
           <Tabs.Trigger className={styles.modeTrigger} disabled={!documentReady} value="rich" onClick={() => changeEditorMode("rich")}>Rich text</Tabs.Trigger>
           <Tabs.Trigger className={styles.modeTrigger} disabled={!documentReady} value="markdown" onClick={() => changeEditorMode("markdown")}>Markdown source</Tabs.Trigger>
         </Tabs.List>
-      <Tabs.Content value="rich"><div className={styles.toolbar} role="toolbar" aria-label="Text formatting">
+      <Tabs.Content value="rich"><div className={styles.toolbar} role="toolbar" aria-label="Text formatting" tabIndex={canEdit ? undefined : 0}>
         <IconButton disabled={!canEdit} label="Bold" aria-pressed={editor?.isActive("bold") ?? false} onClick={() => editor?.chain().focus().toggleBold().run()}>B</IconButton>
         <IconButton disabled={!canEdit} label="Italic" aria-pressed={editor?.isActive("italic") ?? false} onClick={() => editor?.chain().focus().toggleItalic().run()}>I</IconButton>
         <IconButton disabled={!canEdit} label="Heading" aria-pressed={editor?.isActive("heading", { level: 2 }) ?? false} onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()}>H2</IconButton>

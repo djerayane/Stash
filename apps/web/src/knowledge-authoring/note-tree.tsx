@@ -141,11 +141,16 @@ export function NoteTree({ workspaceId, token, activeNoteId, fetcher = globalThi
           <span className={styles.noteTitle}>{node.title}</span>
           <span className={styles.itemActions}>
             <IconButton label={`Add child to ${node.title}`} onClick={(event) => { event.stopPropagation(); setSiblingOf(undefined); setChildOf(node.id); setChildTitle(""); }}><span aria-hidden="true">+</span></IconButton>
-            <IconButton label={`Add sibling to ${node.title}`} onClick={(event) => { event.stopPropagation(); setChildOf(undefined); setSiblingOf(node.id); setSiblingTitle(""); }}><span aria-hidden="true">＋</span></IconButton>
-            {node.parentId ? <IconButton label={`Move ${node.title} to root`} onClick={(event) => { event.stopPropagation(); move.mutate({ noteId: node.id, destination: {} }); }}><span aria-hidden="true">↖</span></IconButton> : null}
-            {previous ? <IconButton label={`Move ${node.title} before ${previous.title}`} onClick={(event) => { event.stopPropagation(); move.mutate({ noteId: node.id, destination: { ...(node.parentId ? { parentId: node.parentId } : {}), beforeId: previous.id } }); }}><span aria-hidden="true">↑</span></IconButton> : null}
-            {previous ? <IconButton label={`Nest ${node.title} under ${previous.title}`} onClick={(event) => { event.stopPropagation(); move.mutate({ noteId: node.id, destination: { parentId: previous.id } }); }}><span aria-hidden="true">→</span></IconButton> : null}
-            {siblingsOf(node).at(-1)?.id !== node.id ? <IconButton label={`Move ${node.title} down`} onClick={(event) => { event.stopPropagation(); move.mutate({ noteId: node.id, destination: destinationAfter(node) }); }}><span aria-hidden="true">↓</span></IconButton> : null}
+            <details className={styles.actionMenu} onClick={(event) => event.stopPropagation()}>
+              <summary>More actions for {node.title}</summary>
+              <div aria-label={`More actions for ${node.title}`} role="group">
+                <IconButton label={`Add sibling to ${node.title}`} onClick={(event) => { event.stopPropagation(); setChildOf(undefined); setSiblingOf(node.id); setSiblingTitle(""); }}><span aria-hidden="true">＋</span></IconButton>
+                {node.parentId ? <IconButton label={`Move ${node.title} to root`} onClick={(event) => { event.stopPropagation(); move.mutate({ noteId: node.id, destination: {} }); }}><span aria-hidden="true">↖</span></IconButton> : null}
+                {previous ? <IconButton label={`Move ${node.title} before ${previous.title}`} onClick={(event) => { event.stopPropagation(); move.mutate({ noteId: node.id, destination: { ...(node.parentId ? { parentId: node.parentId } : {}), beforeId: previous.id } }); }}><span aria-hidden="true">↑</span></IconButton> : null}
+                {previous ? <IconButton label={`Nest ${node.title} under ${previous.title}`} onClick={(event) => { event.stopPropagation(); move.mutate({ noteId: node.id, destination: { parentId: previous.id } }); }}><span aria-hidden="true">→</span></IconButton> : null}
+                {siblingsOf(node).at(-1)?.id !== node.id ? <IconButton label={`Move ${node.title} down`} onClick={(event) => { event.stopPropagation(); move.mutate({ noteId: node.id, destination: destinationAfter(node) }); }}><span aria-hidden="true">↓</span></IconButton> : null}
+              </div>
+            </details>
           </span>
           {childOf === node.id ? <form className={styles.inlineCreate} onSubmit={(event) => { event.preventDefault(); event.stopPropagation(); if (childTitle.trim()) create.mutate({ title: childTitle.trim(), parentId: node.id }); }} onClick={(event) => event.stopPropagation()}>
             <Field label="Child Note title"><input autoFocus value={childTitle} onChange={(event) => setChildTitle(event.target.value)} /></Field>

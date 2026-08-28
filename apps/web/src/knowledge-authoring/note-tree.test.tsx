@@ -52,6 +52,9 @@ it("creates children and offers keyboard and pointer alternatives for moving Not
   render(wrapper(<NoteTree activeNoteId={evidenceId} fetcher={fetcher} token="member" workspaceId={workspaceId} />));
   expect(await screen.findByRole("tree", { name: "Note Tree" })).toBeInTheDocument();
   expect(screen.getByRole("treeitem", { name: "Evidence" })).toHaveAttribute("aria-current", "page");
+  const researchActions = within(screen.getByRole("treeitem", { name: "Research" }));
+  expect(researchActions.getByRole("button", { name: "Add child to Research" })).toBeInTheDocument();
+  expect(researchActions.getByText("More actions for Research", { selector: "summary" })).toBeInTheDocument();
 
   const roadmapItem = screen.getByRole("treeitem", { name: "Roadmap" });
   const evidenceItem = screen.getByRole("treeitem", { name: "Evidence" });

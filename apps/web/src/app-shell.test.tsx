@@ -91,6 +91,15 @@ test("reveals Organization administration only from server-provided scope", () =
   expect(within(navigation).getByRole("link", { name: "Imported identities" })).toBeInTheDocument();
 });
 
+test("marks only the nested administration destination as current", async () => {
+  renderShell("/app/settings/organization", { ...member, organizationAdministrations: [{ organizationId: "org-1", organizationName: "Acme", members: [] }] });
+  expect(await screen.findByRole("heading", { name: "Authority should be explicit." })).toBeInTheDocument();
+  const navigation = screen.getByRole("navigation", { name: "Workspace" });
+  const current = within(navigation).getAllByRole("link").filter((link) => link.getAttribute("aria-current") === "page");
+  expect(current).toHaveLength(1);
+  expect(current[0]).toHaveAccessibleName("Organization");
+});
+
 test("derives identity labels and initials with explicit fallbacks", () => {
   expect(displayLabel("  Project Atlas  ", "Personal workspace")).toBe("Project Atlas");
   expect(displayLabel("   ", "Personal workspace")).toBe("Personal workspace");
@@ -157,6 +166,11 @@ test("exposes the implemented search, capture, and notification actions", async 
   expect(within(globalActions).getByRole("link", { name: "Capture" })).toBeInTheDocument();
   expect(within(globalActions).queryByRole("button", { name: /Note context|Archive Note|trash/i })).not.toBeInTheDocument();
   expect(within(globalActions).queryByRole("link", { name: /history/i })).not.toBeInTheDocument();
+  expect(within(globalActions).queryByRole("link", { name: "Stash" })).not.toBeInTheDocument();
+  expect(within(globalActions).queryByRole("button", { name: "More" })).not.toBeInTheDocument();
+  const mobileNavigation = screen.getByRole("navigation", { name: "Mobile Workspace" });
+  expect(within(mobileNavigation).getByRole("link", { name: "Stash" })).toHaveAttribute("href", "/app");
+  expect(within(mobileNavigation).getByText("More", { selector: "summary" })).toBeInTheDocument();
 });
 
 test("offers password, passkey, recovery code, email recovery, and OIDC sign-in", async () => {
