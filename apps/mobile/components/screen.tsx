@@ -1,5 +1,5 @@
 import type { ReactElement, ReactNode } from "react";
-import { ScrollView, Text, View, type RefreshControlProps } from "react-native";
+import { KeyboardAvoidingView, ScrollView, Text, View, type RefreshControlProps } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { stashTheme } from "@/theme/theme";
@@ -32,7 +32,9 @@ export function Screen({ title, children, bottomAction, refreshControl, scrollab
     paddingLeft: stashTheme.spacing.lg + insets.left,
   };
 
-  return <View style={{ flex: 1, backgroundColor: stashTheme.colors.canvas }}>
+  return <KeyboardAvoidingView testID="screen-keyboard-avoiding-view"
+    behavior={process.env.EXPO_OS === "ios" ? "padding" : undefined}
+    style={{ flex: 1, backgroundColor: stashTheme.colors.canvas }}>
     {scrollable
       ? <ScrollView contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled"
         refreshControl={refreshControl} contentContainerStyle={contentStyle}>{content}</ScrollView>
@@ -48,5 +50,5 @@ export function Screen({ title, children, bottomAction, refreshControl, scrollab
     }}>
       <View style={{ width: "100%", maxWidth: 680, alignSelf: "center" }}>{bottomAction}</View>
     </View> : null}
-  </View>;
+  </KeyboardAvoidingView>;
 }

@@ -1,8 +1,7 @@
 import { Text, View } from "react-native";
 
+import type { MobileStatusVariant } from "@/src/mobile-status-presentation";
 import { stashTheme } from "@/theme/theme";
-
-export type MobileStatusVariant = "saved" | "waiting" | "synchronized" | "attention" | "error";
 
 const defaultMessages: Record<MobileStatusVariant, string> = {
   saved: "Saved on this device",
@@ -14,20 +13,11 @@ const defaultMessages: Record<MobileStatusVariant, string> = {
 
 const variants = {
   saved: { backgroundColor: stashTheme.colors.successSurface, marker: stashTheme.colors.success, color: stashTheme.colors.ink },
-  waiting: { backgroundColor: stashTheme.colors.canvasDeep, marker: stashTheme.colors.sage, color: stashTheme.colors.ink },
-  synchronized: { backgroundColor: stashTheme.colors.successSurface, marker: stashTheme.colors.success, color: stashTheme.colors.ink },
+  waiting: { backgroundColor: stashTheme.colors.canvasDeep, marker: stashTheme.colors.secondaryInk, color: stashTheme.colors.ink },
+  synchronized: { backgroundColor: stashTheme.colors.successSurface, marker: stashTheme.colors.sage, color: stashTheme.colors.ink },
   attention: { backgroundColor: stashTheme.colors.canvasDeep, marker: stashTheme.colors.accent, color: stashTheme.colors.ink },
   error: { backgroundColor: stashTheme.colors.canvasDeep, marker: stashTheme.colors.error, color: stashTheme.colors.error },
 } as const;
-
-export function mobileStatusVariantForMessage(message: string): MobileStatusVariant {
-  const value = message.toLocaleLowerCase();
-  if (/needs attention|needs your attention|blocked|conflict/.test(value)) return "attention";
-  if (/could not|failed|denied|invalid|not saved|pair the app/.test(value)) return "error";
-  if (/synchronized|synchronization complete/.test(value)) return "synchronized";
-  if (/saved (securely )?on this device|showing the workspace saved on this device/.test(value)) return "saved";
-  return "waiting";
-}
 
 export function MobileStatusNotice({ variant, message }: { variant: MobileStatusVariant; message?: string }) {
   const style = variants[variant];
@@ -42,7 +32,8 @@ export function MobileStatusNotice({ variant, message }: { variant: MobileStatus
     borderCurve: "continuous",
     backgroundColor: style.backgroundColor,
   }}>
-    <View accessibilityElementsHidden style={{ width: 7, height: 7, borderRadius: 999, backgroundColor: style.marker }} />
+    <View testID="mobile-status-marker" accessibilityElementsHidden
+      style={{ width: 7, height: 7, borderRadius: 999, backgroundColor: style.marker }} />
     <Text selectable style={{ flex: 1, color: style.color, fontSize: stashTheme.type.caption, lineHeight: 18 }}>
       {message ?? defaultMessages[variant]}
     </Text>

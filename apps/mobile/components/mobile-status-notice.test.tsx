@@ -1,7 +1,7 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { MobileStatusNotice, mobileStatusVariantForMessage } from "./mobile-status-notice";
+import { MobileStatusNotice } from "./mobile-status-notice";
 
 afterEach(cleanup);
 
@@ -11,10 +11,11 @@ describe("MobileStatusNotice", () => {
     expect(screen.getByRole("status").textContent).toContain("Saved on this device");
   });
 
-  it("maps synchronization messages to distinct semantic states", () => {
-    expect(mobileStatusVariantForMessage("Workspace synchronized.")).toBe("synchronized");
-    expect(mobileStatusVariantForMessage("Saved securely. Synchronization will retry.")).toBe("waiting");
-    expect(mobileStatusVariantForMessage("One shared item needs attention.")).toBe("attention");
-    expect(mobileStatusVariantForMessage("The capture could not be saved.")).toBe("error");
+  it("uses Sage only for settled synchronization and a neutral marker while waiting", () => {
+    const { rerender } = render(<MobileStatusNotice variant="synchronized" />);
+    expect(getComputedStyle(screen.getByTestId("mobile-status-marker")).backgroundColor).toBe("rgb(146, 155, 136)");
+
+    rerender(<MobileStatusNotice variant="waiting" />);
+    expect(getComputedStyle(screen.getByTestId("mobile-status-marker")).backgroundColor).toBe("rgb(98, 100, 95)");
   });
 });

@@ -26,9 +26,10 @@ describe("mobile Workspace reader model", () => {
     const groups = groupReadableRecords(records, {
       filters: [{ propertyId: "title", operator: "not_equals", value: "Archive" }],
       sorts: [{ propertyId: "title", direction: "descending" }], groupBy: "status",
-    });
+    }, [{ id: "status", name: "Status", position: 2, type: "single_select",
+      options: [{ id: "doing", name: "In progress" }, { id: "todo", name: "Not started" }] }]);
     expect(groups.map(({ label, items }) => [label, items.map(({ id }) => id)])).toEqual([
-      ["Doing", ["second"]], ["Todo", ["first"]],
+      ["In progress", ["second"]], ["Not started", ["first"]],
     ]);
   });
 

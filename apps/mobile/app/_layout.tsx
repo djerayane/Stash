@@ -1,10 +1,12 @@
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
+import { randomUUID } from "expo-crypto";
 
-import { ensureDomException } from "@/src/native-runtime";
+import { ensureCryptoRandomUuid, ensureDomException } from "@/src/native-runtime";
 import { stashTheme } from "@/theme/theme";
 
 ensureDomException(globalThis);
+ensureCryptoRandomUuid(globalThis, randomUUID);
 
 export default function RootLayout() {
   return <>

@@ -10,6 +10,8 @@ const collectionId = "33333333-3333-4333-8333-333333333333";
 const namePropertyId = "44444444-4444-4444-8444-444444444444";
 const statusPropertyId = "55555555-5555-4555-8555-555555555555";
 const researchRecordId = "66666666-6666-4666-8666-666666666666";
+const taskId = "99999999-9999-4999-8999-999999999999";
+const statusId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
 afterEach(cleanup);
 
@@ -19,8 +21,11 @@ const snapshot: MobileWorkspaceSnapshot = {
   refreshedAt: "2026-08-28T10:00:00.000Z",
   noteTree: [{ id: noteId, workspaceId, title: "Research notes", position: "a", childCount: 0 }],
   notes: [{ id: noteId, workspaceId, title: "Research notes", content: "Source notes", revision: 1 }],
-  tasks: [],
-  workflow: { schema: "stash.workspace-workflow.v1", workspaceId, statuses: [] },
+  tasks: [{ schema: "stash.task.v1", id: taskId, workspaceId, title: "Prepare interview summary", description: "",
+    revision: 2, status: { id: statusId, name: "Stored status", category: "started", position: 1 }, assigneeIds: [],
+    projectKeys: [], sourceNoteIds: [] }],
+  workflow: { schema: "stash.workspace-workflow.v1", workspaceId,
+    statuses: [{ id: statusId, name: "Ready for review", category: "started", position: 1 }] },
   collections: [{
     schema: "stash.collection.v1",
     id: collectionId,
@@ -40,7 +45,17 @@ const snapshot: MobileWorkspaceSnapshot = {
     ownerNoteId: noteId,
     blockId: "88888888-8888-4888-8888-888888888888",
     title: "Research",
-    definition: { source: { kind: "collection", collectionId }, presentation: "table", filters: [], sorts: [], layout: {} },
+    definition: { source: { kind: "collection", collectionId }, presentation: "table", filters: [], sorts: [],
+      groupBy: statusPropertyId, layout: {} },
+  }, {
+    schema: "stash.view-block.v1",
+    id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    workspaceId,
+    ownerNoteId: noteId,
+    blockId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    title: "Delivery",
+    definition: { source: { kind: "tasks", workspaceId }, presentation: "board", filters: [], sorts: [],
+      groupBy: "task:status", layout: {} },
   }],
   search: [],
 };
@@ -60,7 +75,9 @@ describe("WorkspaceReader", () => {
 
     expect(screen.getByRole("heading", { name: "Research" })).toBeTruthy();
     expect(screen.getByText("Table from Research in Research notes")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "In progress" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Interview synthesis" })).toBeTruthy();
     expect(screen.getByLabelText("Status: In progress")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Ready for review" })).toBeTruthy();
   });
 });

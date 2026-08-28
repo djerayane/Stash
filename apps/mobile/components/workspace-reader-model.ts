@@ -1,7 +1,10 @@
 import type {
   CollectionProperty,
   CollectionRecord,
+  MobileCanonicalTask,
   MobileNoteTreeNode,
+  MobileWorkspaceWorkflow,
+  TaskViewPropertyId,
   ViewFilter,
   ViewPresentation,
   ViewSort,
@@ -53,7 +56,7 @@ export function visibleNoteTree(nodes: readonly MobileNoteTreeNode[], collapsed:
 
 export function groupReadableRecords(records: readonly CollectionRecord[], definition: {
   filters: readonly ViewFilter[]; sorts: readonly ViewSort[]; groupBy?: string; focused?: { readonly recordId: string };
-}) {
+}, properties: readonly CollectionProperty[] = []) {
   const visible = [...records].filter((record) => (!definition.focused || definition.focused.recordId === record.id)
     && definition.filters.every((filter) =>
     matchesReadableFilter(record.values[filter.propertyId], filter.operator, filter.value))).sort((left, right) => {
@@ -64,11 +67,24 @@ export function groupReadableRecords(records: readonly CollectionRecord[], defin
       return left.position - right.position;
     });
   if (!definition.groupBy) return [{ label: undefined, items: visible }];
+  const groupProperty = properties.find(({ id }) => id === definition.groupBy);
   const groups = new Map<string, CollectionRecord[]>();
   for (const record of visible) {
-    const raw = displayReadableValue(record.values[definition.groupBy]);
+    const raw = groupProperty
+      ? displayCollectionPropertyValue(groupProperty, record.values[definition.groupBy])
+      : displayReadableValue(record.values[definition.groupBy]);
     const label = raw ? raw.replaceAll("_", " ").replace(/^./, (letter) => letter.toLocaleUpperCase()) : "No value";
     groups.set(label, [...(groups.get(label) ?? []), record]);
   }
   return [...groups].map(([label, items]) => ({ label, items }));
+}
+
+export function readableTaskGroupLabel(task: MobileCanonicalTask, propertyId: TaskViewPropertyId,
+  statuses: MobileWorkspaceWorkflow["statuses"]): string {
+  if (propertyId === "task:status") return statuses.find(({ id }) => id === task.status.id)?.name ?? task.status.name;
+  if (propertyId === "task:assignee") return task.assigneeIds.length
+    ? `${task.assigneeIds.length} assignee${task.assigneeIds.length === 1 ? "" : "s"}` : "Unassigned";
+  if (propertyId === "task:project") return task.projectKeys.map(({ key }) => key).join(", ") || "No Project";
+  if (propertyId === "task:title") return task.title;
+  return task.description || "No value";
 }

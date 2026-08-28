@@ -1,4 +1,4 @@
-import type { IncomingShareDelivery, MobileCapture, MobileCaptureOptions, MobileCapturePairing, MobileSyncMutation } from "@stash/domain-types";
+import type { IncomingShareDelivery, MobileCapture, MobileCaptureOptions, MobileCapturePairing, MobileSyncMutation, MobileWorkspaceSnapshot } from "@stash/domain-types";
 import type { EncryptedMobileCaptureStore } from "@stash/sync";
 
 export interface MobileCipher { encrypt(plaintext: string): Promise<string>; decrypt(ciphertext: string): Promise<string> }
@@ -6,6 +6,7 @@ export interface CiphertextStateRepository { read(key: string): Promise<string |
 const pairingKey = "pairing"; const outboxKey = "outbox"; const optionsKey = "options";
 const incomingSharesKey = "incoming-shares";
 const mutationOutboxKey = "mutation-outbox";
+const workspaceSnapshotsKey = "workspace-snapshots";
 type IncomingShareState = { pending: IncomingShareDelivery[]; native?: { fingerprint: string; ids: string[] } };
 
 export class EncryptedStateMobileCaptureStore implements EncryptedMobileCaptureStore {
@@ -39,6 +40,17 @@ export class EncryptedStateMobileCaptureStore implements EncryptedMobileCaptureS
     const write = this.#writeBarrier.then(async () => {
       const scoped = await this.#read<Record<string, MobileCaptureOptions>>(optionsKey, {});
       await this.#write(optionsKey, { ...scoped, [scope]: options });
+    });
+    this.#writeBarrier = write.catch(() => undefined); await write;
+  }
+  async loadWorkspaceSnapshot(scope: string) {
+    await this.#writeBarrier;
+    return (await this.#read<Record<string, MobileWorkspaceSnapshot>>(workspaceSnapshotsKey, {}))[scope];
+  }
+  async saveWorkspaceSnapshot(scope: string, snapshot: MobileWorkspaceSnapshot) {
+    const write = this.#writeBarrier.then(async () => {
+      const scoped = await this.#read<Record<string, MobileWorkspaceSnapshot>>(workspaceSnapshotsKey, {});
+      await this.#write(workspaceSnapshotsKey, { ...scoped, [scope]: snapshot });
     });
     this.#writeBarrier = write.catch(() => undefined); await write;
   }

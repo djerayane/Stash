@@ -9,6 +9,7 @@ import {
   groupReadableRecords,
   matchesReadableFilter,
   readablePresentationName,
+  readableTaskGroupLabel,
   visibleNoteTree,
 } from "./workspace-reader-model";
 
@@ -137,7 +138,8 @@ function ReadableViews({ views, snapshot }: { views: ViewBlock[]; snapshot: Mobi
           }
           return left.title.localeCompare(right.title);
         }) : [];
-      const recordGroups = collection ? groupReadableRecords(collection.records, view.definition) : [];
+      const taskGroups = groupTasksForReading(tasks, view.definition.groupBy, snapshot);
+      const recordGroups = collection ? groupReadableRecords(collection.records, view.definition, collection.properties) : [];
       const records = recordGroups.flatMap(({ items }) => items);
       const count = source.kind === "tasks" ? tasks.length : records.length;
       const presentation = readablePresentationName(view.definition.presentation);
@@ -151,12 +153,13 @@ function ReadableViews({ views, snapshot }: { views: ViewBlock[]; snapshot: Mobi
           <Text selectable style={{ color: colors.secondaryLabel }}>{sourceDescription}</Text>
           <Text selectable style={{ color: colors.secondaryLabel }}>{count} {itemName}{count === 1 ? "" : "s"}{view.definition.focused ? " · Focused record" : ""}</Text>
         </View>
-        {tasks.map((task) => <View key={task.id} style={recordStyle}>
-          {view.definition.groupBy ? <Text selectable style={{ color: colors.secondaryLabel, fontWeight: "600" }}>
-            {displayReadableValue(taskValue(task, view.definition.groupBy)) || "No value"}
-          </Text> : null}
-          <Text selectable accessibilityRole="header" style={{ color: colors.label, fontSize: 17, fontWeight: "700" }}>{task.title}</Text>
-          <Text selectable style={{ color: colors.secondaryLabel }}>{task.status.name} · {task.projectKeys.map(({ key }) => key).join(" · ") || "No Project"}</Text>
+        {taskGroups.map((group, index) => <View key={group.label ?? `tasks-${index}`} style={{ gap: stashTheme.spacing.sm }}>
+          {group.label ? <Text selectable accessibilityRole="header"
+            style={{ color: colors.secondaryLabel, fontWeight: "700" }}>{group.label}</Text> : null}
+          {group.items.map((task) => <View key={task.id} style={recordStyle}>
+            <Text selectable accessibilityRole="header" style={{ color: colors.label, fontSize: 17, fontWeight: "700" }}>{task.title}</Text>
+            <Text selectable style={{ color: colors.secondaryLabel }}>{task.status.name} · {task.projectKeys.map(({ key }) => key).join(" · ") || "No Project"}</Text>
+          </View>)}
         </View>)}
         {collection && recordGroups.map((group, index) => <View key={group.label ?? `all-${index}`} accessibilityRole="summary" style={{ gap: stashTheme.spacing.sm }}>
           {group.label ? <Text selectable accessibilityRole="header" style={{ color: colors.secondaryLabel, fontWeight: "700" }}>{group.label}</Text> : null}
@@ -185,6 +188,16 @@ function ReadableViews({ views, snapshot }: { views: ViewBlock[]; snapshot: Mobi
       </View>;
     }) : <Empty text="No desktop-authored views are cached yet." />}
   </View>;
+}
+
+function groupTasksForReading(tasks: MobileCanonicalTask[], groupBy: string | undefined, snapshot: MobileWorkspaceSnapshot) {
+  if (!groupBy || !isTaskViewPropertyId(groupBy)) return [{ label: undefined, items: tasks }];
+  const groups = new Map<string, MobileCanonicalTask[]>();
+  for (const task of tasks) {
+    const label = readableTaskGroupLabel(task, groupBy, snapshot.workflow.statuses);
+    groups.set(label, [...(groups.get(label) ?? []), task]);
+  }
+  return [...groups].map(([label, items]) => ({ label, items }));
 }
 
 function taskValue(task: MobileCanonicalTask, propertyId: string): unknown {

@@ -10,12 +10,12 @@ import type { MobileCaptureOptions } from "@stash/domain-types";
 import { SecureMobileCaptureStore } from "../src/secure-mobile-store";
 import { NativeActionButton } from "@/components/native-controls";
 import { NativeChoice } from "@/components/native-choice";
-import { CaptureComposer } from "@/components/capture-composer";
+import { CaptureScreenComposition } from "@/components/capture-screen";
 import { MediaCaptureControls } from "@/components/media-capture-controls";
-import { MobileStatusNotice, mobileStatusVariantForMessage } from "@/components/mobile-status-notice";
-import { Screen } from "@/components/screen";
 import { stashTheme } from "@/theme/theme";
 import { presentMobileSyncResult } from "@/src/sync-status";
+import { discardQuarantinedIncomingShares } from "@/src/capture-actions";
+import { mobileStatus, type MobileStatusPresentation } from "@/src/mobile-status-presentation";
 import {
   captureOptionsErrorMessage,
   captureOptionsLoadingMessage,
@@ -37,7 +37,8 @@ export default function CaptureScreen() {
   const client = useMemo(() => new MobileCaptureClient(store, fetch), [store]);
   const [content, setContent] = useState("");
   const [checklist, setChecklist] = useState(false);
-  const [status, setStatus] = useState("Saved captures synchronize when your Instance is reachable.");
+  const [status, setStatus] = useState<MobileStatusPresentation>(mobileStatus("waiting",
+    "Saved captures synchronize when your Instance is reachable."));
   const [options, setOptions] = useState<MobileCaptureOptions>({ projects: [], tags: [], reminders: [] });
   const [projectId, setProjectId] = useState<string>();
   const [tag, setTag] = useState<string>();
@@ -67,14 +68,14 @@ export default function CaptureScreen() {
     if (mounted.current) {
       setOptionsLoading(true);
       setOptionsError(false);
-      setStatus(captureOptionsLoadingMessage);
+      setStatus(mobileStatus("waiting", captureOptionsLoadingMessage));
     }
   }, () => {
     optionsReady.current = false;
     if (mounted.current) {
       setOptionsLoading(false);
       setOptionsError(true);
-      setStatus(captureOptionsErrorMessage);
+      setStatus(mobileStatus("error", captureOptionsErrorMessage));
     }
   }), [client, optionsReload]));
   useEffect(() => client.watchConnectivity(
@@ -96,13 +97,15 @@ export default function CaptureScreen() {
       if (!url || !incomingGate.current.accept(url, delivery)) return;
       const incoming = parseIncomingCapture(url);
       if (incoming.kind === "ignored") return;
-      if (incoming.kind === "error") { if (mounted.current) setStatus(incoming.message); return; }
+      if (incoming.kind === "error") { if (mounted.current) setStatus(mobileStatus("error", incoming.message)); return; }
       try {
         await client.captureSharedContent(incoming.capture.content, incoming.capture.source);
-        if (mounted.current) setStatus(incoming.capture.source === "widget" ? "Widget input saved securely on this device." : "Shared content saved securely on this device.");
+        if (mounted.current) setStatus(mobileStatus("saved", incoming.capture.source === "widget"
+          ? "Widget input saved securely on this device." : "Shared content saved securely on this device."));
         const result = await client.sync();
         if (mounted.current) setStatus(await syncStatus(result));
-      } catch (error) { if (mounted.current) setStatus(error instanceof Error ? error.message : "Shared content could not be saved."); }
+      } catch (error) { if (mounted.current) setStatus(mobileStatus("error",
+        error instanceof Error ? error.message : "Shared content could not be saved.")); }
     };
     void Linking.getInitialURL().then((url) => handle(url, "initial"));
     const subscription = Linking.addEventListener("url", ({ url }) => { void handle(url, "event"); });
@@ -123,17 +126,18 @@ export default function CaptureScreen() {
         const result = await client.sync();
         if (mounted.current) {
           setQuarantinedShares(blocked.length);
-          setStatus(blocked.length ? `${blocked.length} shared item needs attention. Other items continue saving.`
+          setStatus(blocked.length ? mobileStatus("attention", `${blocked.length} shared item needs attention. Other items continue saving.`)
             : await syncStatus(result));
         }
-  }, (error) => { if (mounted.current) setStatus(error instanceof Error ? error.message : "Shared content could not be saved."); }), [client, store, syncStatus]);
+  }, (error) => { if (mounted.current) setStatus(mobileStatus("error",
+    error instanceof Error ? error.message : "Shared content could not be saved.")); }), [client, store, syncStatus]);
   useEffect(() => {
-    if (incomingShare.error && mounted.current) setStatus("Shared content could not be read and was not saved.");
+    if (incomingShare.error && mounted.current) setStatus(mobileStatus("error", "Shared content could not be read and was not saved."));
     shareDrain.request();
   }, [incomingShare.error, incomingShare.revision, shareDrain]);
   const discardQuarantinedShares = async () => {
-    for (const item of await store.listIncomingShares()) if (item.status === "quarantined") await store.removeIncomingShare(item.id);
-    setQuarantinedShares(0); setStatus("Blocked shared items discarded.");
+    const presentation = await discardQuarantinedIncomingShares(store);
+    setQuarantinedShares(0); setStatus(presentation);
   };
 
   const save = async () => {
@@ -144,11 +148,12 @@ export default function CaptureScreen() {
         await client.captureChecklist(title, items, structure());
       } else await client.captureText(content, structure());
       if (!mounted.current) return;
-      setContent(""); setStatus("Saved on this device.");
+      setContent(""); setStatus(mobileStatus("saved", "Saved on this device."));
       const result = await client.sync();
       if (!mounted.current) return;
       setStatus(await syncStatus(result));
-    } catch (error) { if (mounted.current) setStatus(error instanceof Error ? error.message : "The capture could not be saved."); }
+    } catch (error) { if (mounted.current) setStatus(mobileStatus("error",
+      error instanceof Error ? error.message : "The capture could not be saved.")); }
   };
   const structure = () => ({
     ...(projectId ? { projectId } : {}), ...(tag ? { tags: [tag] } : {}),
@@ -158,7 +163,7 @@ export default function CaptureScreen() {
     ensureCaptureOptionsReady(optionsReady.current);
     const capture = await client.captureMedia(media, content, structure());
     if (!mounted.current) return capture;
-    setContent(""); setStatus(`${media.filename} saved securely on this device.`);
+    setContent(""); setStatus(mobileStatus("saved", `${media.filename} saved securely on this device.`));
     const result = await client.sync();
     if (mounted.current) setStatus(await syncStatus(result));
     return capture;
@@ -175,19 +180,21 @@ export default function CaptureScreen() {
       ? <Text selectable style={{ color: stashTheme.colors.secondaryInk, lineHeight: 21 }}>No optional structure is available from this Workspace.</Text> : null}
   </>;
 
-  return <Screen bottomAction={<NativeActionButton label={optionsLoading ? "Loading capture options" : "Save capture"}
-    disabled={optionsLoading || optionsError || !content.trim()} onPress={save} />}>
-    <MobileStatusNotice variant={mobileStatusVariantForMessage(status)} message={status} />
-    <View role="navigation" accessibilityLabel="Capture destinations" style={{ flexDirection: "row", gap: stashTheme.spacing.sm }}>
+  const destinations = <View role="navigation" accessibilityLabel="Capture destinations"
+    style={{ flexDirection: "row", gap: stashTheme.spacing.sm }}>
       <DestinationLink href="/workspace" label="Open Workspace" />
       <DestinationLink href="/pairing" label="Pair Instance" />
-    </View>
+    </View>;
+  const recovery = <>
     {optionsError ? <NativeActionButton variant="secondary" label="Retry loading options" onPress={() => setOptionsReload((value) => value + 1)} /> : null}
     {quarantinedShares ? <NativeActionButton variant="secondary" label={`Discard ${quarantinedShares} blocked shared item${quarantinedShares === 1 ? "" : "s"}`}
       onPress={discardQuarantinedShares} /> : null}
-    <CaptureComposer content={content} checklist={checklist} onContentChange={setContent} onChecklistChange={setChecklist}
-      media={<MediaCaptureControls onPicked={saveMedia} onError={setStatus} />} structure={structureControls} />
-  </Screen>;
+  </>;
+  return <CaptureScreenComposition status={status} destinations={destinations} recovery={recovery}
+    content={content} checklist={checklist} onContentChange={setContent} onChecklistChange={setChecklist}
+    media={<MediaCaptureControls onPicked={saveMedia} onError={(message) => setStatus(mobileStatus("error", message))} />}
+    structure={structureControls} saveLabel={optionsLoading ? "Loading capture options" : "Save capture"}
+    saveDisabled={optionsLoading || optionsError || !content.trim()} onSave={save} />;
 }
 
 function DestinationLink({ href, label }: { href: "/workspace" | "/pairing"; label: string }) {
