@@ -253,7 +253,7 @@ test("initial collaboration errors preserve landmarks and recover accessibly @a1
   });
   await page.goto(`/app/notes/${noteId}`);
   await expect(page.getByRole("main")).toBeVisible();
-  const alert = page.getByRole("alert"); await expect(alert).toBeFocused({ timeout: 15_000 });
+  const alert = page.getByRole("alert").filter({ hasText: "The Note editor is unavailable." }); await expect(alert).toBeFocused({ timeout: 15_000 });
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
   await page.keyboard.press("Tab"); const retry = page.getByRole("button", { name: "Try again" }); await expect(retry).toBeFocused();
   unavailable = false; await page.keyboard.press("Enter");

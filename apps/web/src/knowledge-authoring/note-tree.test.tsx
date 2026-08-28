@@ -18,6 +18,17 @@ function wrapper(children: React.ReactNode) {
 
 function LocationProbe() { return <div data-testid="location">{useLocation().pathname}</div>; }
 
+it("names every compact tree action without decorative hierarchy labels", async () => {
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ nodes: [] }));
+  render(wrapper(<NoteTree fetcher={fetcher} token="member" variant="page" workspaceId={workspaceId} />));
+
+  expect(await screen.findByRole("heading", { name: "Note Tree" })).toBeVisible();
+  expect(screen.queryByText("Knowledge")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Create root Note" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Show archived and trashed branches" })).toBeVisible();
+  for (const action of screen.getAllByRole("button")) expect(action).toHaveAccessibleName();
+});
+
 it("creates children and offers keyboard and pointer alternatives for moving Notes", async () => {
   const nodes = [
     { id: roadmapId, workspaceId, title: "Roadmap", position: "1", childCount: 1 },

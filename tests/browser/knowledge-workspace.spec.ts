@@ -76,6 +76,7 @@ test("authors and recovers knowledge through the keyboard-accessible Note worksp
   await page.goto(`/app/notes/${roadmapId}`);
   const tree = page.getByRole("tree", { name: "Note Tree" });
   await expect(tree).toBeVisible();
+  await expect(page.getByRole("complementary", { name: "Note context" })).toHaveCount(0);
   await tree.getByRole("treeitem", { name: "Release collaboration plan" }).focus();
   await page.keyboard.press("ArrowDown");
   await expect(tree.getByRole("treeitem", { name: "Authoritative second Note" })).toBeFocused();
@@ -161,11 +162,12 @@ test("persists a real Note branch lifecycle through the acceptance Instance", as
   await page.getByRole("textbox", { name: "Root Note title" }).fill("Browser field guide");
   await page.getByRole("button", { name: "Create root Note" }).last().click();
   await expect(page).toHaveURL(/\/app\/notes\/[0-9a-f-]+$/);
-  const guide = page.getByRole("treeitem", { name: "Browser field guide" }); await expect(guide).toBeVisible();
+  const sidebarTree = page.getByRole("region", { name: "Note Tree sidebar" });
+  const guide = sidebarTree.getByRole("treeitem", { name: "Browser field guide" }); await expect(guide).toBeVisible();
   await guide.getByRole("button", { name: "Add child to Browser field guide" }).click();
   await page.getByRole("textbox", { name: "Child Note title" }).fill("Browser observations");
   await page.getByRole("button", { name: "Create child Note" }).click();
-  const observations = page.getByRole("treeitem", { name: "Browser observations" }); await expect(observations).toHaveAttribute("aria-level", "2");
+  const observations = sidebarTree.getByRole("treeitem", { name: "Browser observations" }); await expect(observations).toHaveAttribute("aria-level", "2");
   await guide.getByRole("button", { name: /Nest Browser field guide under Release collaboration plan/ }).click();
   await expect(guide).toHaveAttribute("aria-level", "2"); await expect(observations).toHaveAttribute("aria-level", "3");
 
@@ -177,7 +179,7 @@ test("persists a real Note branch lifecycle through the acceptance Instance", as
   await page.getByRole("button", { name: "Create root Note" }).last().click();
   await page.getByRole("textbox", { name: "Root Note title" }).fill("Private linked research");
   await page.getByRole("button", { name: "Create root Note" }).last().click();
-  await expect(page.getByRole("treeitem", { name: "Private linked research" })).toHaveAttribute("aria-current", "page");
+  await expect(sidebarTree.getByRole("treeitem", { name: "Private linked research" })).toHaveAttribute("aria-current", "page");
   await expect(page).not.toHaveURL(new RegExp(`/app/notes/${guideId}$`));
   const privateId = new URL(page.url()).pathname.split("/").at(-1)!;
   await guide.getByText("Browser field guide", { exact: true }).click();

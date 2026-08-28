@@ -1,9 +1,6 @@
 * { box-sizing: border-box; }
-html { font-family: var(--stash-font-sans); background: var(--stash-color-canvas); text-rendering: optimizeLegibility; }
-body { min-width: 20rem; margin: 0; background:
-  radial-gradient(circle at 76% 6%, rgb(255 255 255 / 76%), transparent 36rem),
-  repeating-linear-gradient(96deg, rgb(38 34 28 / .65%) 0 1px, transparent 1px 5px),
-  var(--stash-color-canvas); }
+html { max-width: 100%; overflow-x: clip; font-family: var(--stash-font-sans); background: var(--stash-color-canvas); text-rendering: optimizeLegibility; }
+body { min-width: 20rem; max-width: 100%; margin: 0; overflow-x: clip; background: var(--stash-color-canvas); }
 button, input, select, textarea { font: inherit; }
 button { letter-spacing: -.01em; }
 :where(h1, h2, h3, p) { text-wrap: pretty; }

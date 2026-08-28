@@ -67,8 +67,10 @@ it("loads an authorized collaborative Note and exposes keyboard-operable rich-te
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<QueryClientProvider client={client}><NoteEditor contextVisible={false} noteId="note" memberId="member" fetcher={fetcher} token="member-token" /></QueryClientProvider>);
   expect(await screen.findByRole("heading", { name: "Release plan" })).toBeInTheDocument();
+  expect(screen.queryByText("Workspace Note")).not.toBeInTheDocument();
   await waitFor(() => expect(screen.getByRole("textbox", { name: "Note content" })).toHaveTextContent("Preserve this Block"));
   expect(screen.getByRole("toolbar", { name: "Text formatting" })).toBeInTheDocument();
+  for (const action of screen.getAllByRole("toolbar", { name: "Text formatting" })[0]!.querySelectorAll("button")) expect(action).toHaveAccessibleName();
   expect(screen.getByRole("button", { name: "Insert link" })).toBeEnabled();
   expect(screen.getByRole("button", { name: "Insert callout" })).toBeEnabled();
   expect(screen.getByRole("button", { name: "Insert Workspace Attachment" })).toBeEnabled();

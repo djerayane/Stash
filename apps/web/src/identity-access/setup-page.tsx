@@ -3,6 +3,7 @@ import { gsap } from "gsap";
 import { useGSAP } from "@gsap/react";
 
 import styles from "./setup-page.module.css";
+import { Button, Field, StatusNotice } from "../ui/control";
 
 export type SetupAvailability = "available-local" | "code-required";
 export interface SetupResult { token: string; workspaceId: string; starterNoteId: string }
@@ -82,18 +83,18 @@ export function SetupPage({ state, fetcher = fetch, onComplete = defaultCompleti
           <span className={step === "identity" ? styles.active : styles.complete} /><span className={step === "workspace" ? styles.active : ""} />
         </div>
         {step === "identity" ? <form className={styles.form} onSubmit={(event) => { event.preventDefault(); setStep("workspace"); }}>
-          <div className={styles.reveal}><p className={styles.stepName}>Set up your Workspace</p><h2 id="form-title">Create your Stash Workspace</h2><p>You’ll be the first owner and admin of this Instance.</p></div>
-          <label className={styles.reveal}>Name<input aria-label="Name" autoComplete="name" autoFocus maxLength={200} required value={name} onChange={(event) => setName(event.target.value)} /></label>
-          <label className={styles.reveal}>Email<input aria-label="Email" autoComplete="email" maxLength={320} required type="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label>
-          <button className={`${styles.primary} ${styles.reveal}`} type="submit">Continue</button>
+          <div className={styles.reveal}><h2 id="form-title">Create your Stash Workspace</h2><p>You’ll be the first owner and admin of this Instance.</p></div>
+          <div className={styles.reveal}><Field label="Name"><input aria-label="Name" autoComplete="name" autoFocus maxLength={200} required value={name} onChange={(event) => setName(event.target.value)} /></Field></div>
+          <div className={styles.reveal}><Field label="Email"><input aria-label="Email" autoComplete="email" maxLength={320} required type="email" value={email} onChange={(event) => setEmail(event.target.value)} /></Field></div>
+          <Button className={`${styles.primary} ${styles.reveal}`} type="submit">Continue</Button>
         </form> : <form className={styles.form} onSubmit={(event) => { event.preventDefault(); void createWorkspace(); }}>
-          <div className={styles.reveal}><p className={styles.stepName}>Set up your Workspace</p><h2 id="form-title">Create your Stash Workspace</h2><p>Name your space and secure the first owner account.</p></div>
-          <label className={styles.reveal}>Workspace name<input aria-label="Workspace name" autoComplete="organization" maxLength={200} ref={workspaceNameRef} required value={workspaceName} onChange={(event) => setWorkspaceName(event.target.value)} /></label>
-          <label className={styles.reveal}>Password<input aria-label="Password" autoComplete="new-password" minLength={12} required type="password" value={password} onChange={(event) => setPassword(event.target.value)} /><small>Use at least 12 characters.</small></label>
-          {state === "code-required" ? <label className={styles.reveal}>Setup code<input aria-label="Setup code" autoCapitalize="characters" autoComplete="one-time-code" required value={setupCode} onChange={(event) => setSetupCode(event.target.value)} /><small>Copy the short-lived code from the Instance startup output.</small></label> : null}
-          {error ? <p className={styles.error} role="alert">{error}</p> : <p className={styles.security} role="status">{state === "available-local" ? "This loopback-only connection can claim the Instance directly." : "This networked Instance is protected by an operator code."}</p>}
+          <div className={styles.reveal}><h2 id="form-title">Create your Stash Workspace</h2><p>Name your space and secure the first owner account.</p></div>
+          <div className={styles.reveal}><Field label="Workspace name"><input aria-label="Workspace name" autoComplete="organization" maxLength={200} ref={workspaceNameRef} required value={workspaceName} onChange={(event) => setWorkspaceName(event.target.value)} /></Field></div>
+          <div className={styles.reveal}><Field hint="Use at least 12 characters." label="Password"><input aria-label="Password" autoComplete="new-password" minLength={12} required type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></Field></div>
+          {state === "code-required" ? <div className={styles.reveal}><Field hint="Copy the short-lived code from the Instance startup output. If the setup code is missing or has expired, restart Stash to issue a new code." label="Setup code"><input aria-label="Setup code" autoCapitalize="characters" autoComplete="one-time-code" required value={setupCode} onChange={(event) => setSetupCode(event.target.value)} /></Field></div> : null}
+          {error ? <StatusNotice className={styles.error} tone="error">{error}</StatusNotice> : <StatusNotice className={styles.security} tone={state === "available-local" ? "success" : "attention"}>{state === "available-local" ? "This loopback-only connection can claim the Instance directly." : "This networked Instance is protected by an operator code."}</StatusNotice>}
           <div className={styles.actions}>
-            <button className={styles.secondary} disabled={pending} type="button" onClick={() => setStep("identity")}>Back</button>
+            <Button className={styles.secondary} disabled={pending} type="button" variant="secondary" onClick={() => setStep("identity")}>Back</Button>
             <button className={styles.primary} disabled={pending} ref={submitRef} type="submit">{pending ? "Creating…" : "Create my Workspace"}</button>
           </div>
         </form>}

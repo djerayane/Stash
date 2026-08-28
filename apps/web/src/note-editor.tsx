@@ -18,6 +18,7 @@ import * as Y from "yjs";
 import { markdownToRichText } from "@stash/rich-text";
 import { markdownFromTiptap, toTiptap, type NoteDocument } from "./note-document";
 import styles from "./note-editor.module.css";
+import { Button, Field, IconButton } from "./ui/control";
 
 gsap.registerPlugin(useGSAP);
 
@@ -131,8 +132,6 @@ function NoteEditorDocument({ noteId, memberId, fetcher = globalThis.fetch, toke
   const restoredPendingUpdate = useRef(false);
   const shouldSeedCanonicalDocument = useRef(false);
   const layoutRef = useRef<HTMLElement>(null);
-  const toolbarRef = useRef<HTMLDivElement>(null);
-  const asideRef = useRef<HTMLElement>(null);
   const statusRef = useRef<HTMLParagraphElement>(null);
   const unavailableRef = useRef<HTMLDivElement>(null);
   const markdownPanelRef = useRef<HTMLDivElement>(null);
@@ -171,17 +170,6 @@ function NoteEditorDocument({ noteId, memberId, fetcher = globalThis.fetch, toke
   canEditRef.current = canEdit;
   const selectedBlockKey = () => { if (!editor) return ""; for (let depth = editor.state.selection.$from.depth; depth >= 0; depth -= 1) { const value = editor.state.selection.$from.node(depth).attrs.blockKey; if (typeof value === "string" && value) return value; } return ""; };
   const createTask = useMutation({ mutationFn: async () => { const blockKey = selectedBlockKey(); if (!blockKey) throw new Error("Place the cursor in the Block that should source this Task."); const response = await fetcher(`/api/notes/${encodeURIComponent(noteId)}/blocks/${encodeURIComponent(blockKey)}/tasks`, { method: "POST", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify({ projectId: taskProjectId, title: taskTitle }) }); const body = await response.json().catch(() => ({})) as { message?: string }; if (!response.ok) throw new Error(body.message || "The Task could not be created."); return body; }, onSuccess: async () => { setTaskComposerOpen(false); setTaskTitle(""); await queryClient.invalidateQueries({ queryKey: ["note-linked-tasks", noteId] }); } });
-
-  useGSAP(() => {
-    if (!toolbarRef.current || !asideRef.current || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
-    gsap.fromTo(toolbarRef.current, { y: -10, opacity: 0 }, { y: 0, opacity: 1, duration: .34, ease: "power2.out" });
-    gsap.fromTo(asideRef.current, { x: 14, opacity: 0 }, { x: 0, opacity: 1, duration: .42, ease: "power2.out" });
-  }, { scope: layoutRef });
-
-  useGSAP(() => {
-    if (!statusRef.current || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
-    gsap.fromTo(statusRef.current, { opacity: .35, y: 3 }, { opacity: 1, y: 0, duration: .24, ease: "power1.out" });
-  }, { scope: layoutRef, dependencies: [status], revertOnUpdate: true });
 
   useGSAP(() => {
     if (editorMode !== "markdown" || !markdownPanelRef.current || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
@@ -305,39 +293,39 @@ function NoteEditorDocument({ noteId, memberId, fetcher = globalThis.fetch, toke
     <div ref={unavailableRef} role="alert" tabIndex={-1} className={styles.errorPanel}>
       <h1>The Note editor is unavailable.</h1>
       <p>Check the Instance connection, then try loading the collaborative document again.</p>
-      <button className={styles.retry} type="button" onClick={() => { void note.refetch(); void collaboration.refetch(); }}>Try again</button>
+      <Button className={styles.retry} type="button" variant="secondary" onClick={() => { void note.refetch(); void collaboration.refetch(); }}>Try again</Button>
     </div>
   </main>;
   const taskComposer = taskComposerOpen ? <form onSubmit={(event) => { event.preventDefault(); createTask.mutate(); }}>
-    <label>Project<select required value={taskProjectId} onChange={(event) => setTaskProjectId(event.target.value)}><option value="">Choose a Project</option>{workspaces.data?.workspaces.flatMap((workspace) => workspace.projects).map((project) => <option key={project.id} value={project.id}>{project.name} · {project.key}</option>)}</select></label>
-    <label>Task title<input required value={taskTitle} onChange={(event) => setTaskTitle(event.target.value)} /></label>
-    <button disabled={createTask.isPending} type="submit">Create linked Task</button><button type="button" onClick={() => setTaskComposerOpen(false)}>Cancel</button>
+    <Field label="Project"><select required value={taskProjectId} onChange={(event) => setTaskProjectId(event.target.value)}><option value="">Choose a Project</option>{workspaces.data?.workspaces.flatMap((workspace) => workspace.projects).map((project) => <option key={project.id} value={project.id}>{project.name} · {project.key}</option>)}</select></Field>
+    <Field label="Task title"><input required value={taskTitle} onChange={(event) => setTaskTitle(event.target.value)} /></Field>
+    <Button pending={createTask.isPending} pendingLabel="Creating linked Task" type="submit">Create linked Task</Button><Button type="button" variant="secondary" onClick={() => setTaskComposerOpen(false)}>Cancel</Button>
     {createTask.isError ? <p role="alert">{createTask.error.message}</p> : null}</form> : null;
   return <main id="workspace-content" ref={layoutRef} className={`${styles.layout} ${contextVisible || taskComposerOpen ? "" : styles.contextHidden}`} aria-busy={!editor || !note.data || !collaboration.data}>
     <article className={styles.document}>
-      <header className={styles.header}><p className={styles.kicker}>Workspace Note</p><h1 className={styles.title}>{note.data?.content.split("\n")[0] || "Untitled Note"}</h1></header>
+      <header className={styles.header}><h1 className={styles.title}>{note.data?.content.split("\n")[0] || "Untitled Note"}</h1></header>
       <Tabs.Root className={styles.mode} value={editorMode} activationMode="manual">
         <Tabs.List className={styles.modeList} aria-label="Note editing mode">
           <Tabs.Trigger className={styles.modeTrigger} disabled={!documentReady} value="rich" onClick={() => changeEditorMode("rich")}>Rich text</Tabs.Trigger>
           <Tabs.Trigger className={styles.modeTrigger} disabled={!documentReady} value="markdown" onClick={() => changeEditorMode("markdown")}>Markdown source</Tabs.Trigger>
         </Tabs.List>
-      <Tabs.Content value="rich"><div ref={toolbarRef} className={styles.toolbar} role="toolbar" aria-label="Text formatting">
-        <button disabled={!canEdit} type="button" aria-label="Bold" aria-pressed={editor?.isActive("bold") ?? false} onClick={() => editor?.chain().focus().toggleBold().run()}>B</button>
-        <button disabled={!canEdit} type="button" aria-label="Italic" aria-pressed={editor?.isActive("italic") ?? false} onClick={() => editor?.chain().focus().toggleItalic().run()}>I</button>
-        <button disabled={!canEdit} type="button" aria-label="Heading" aria-pressed={editor?.isActive("heading", { level: 2 }) ?? false} onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()}>H2</button>
-        <button disabled={!canEdit} type="button" aria-label="Bullet list" aria-pressed={editor?.isActive("bulletList") ?? false} onClick={() => editor?.chain().focus().toggleBulletList().run()}>List</button>
-        <button disabled={!canEdit} type="button" aria-label="Checklist" aria-pressed={editor?.isActive("taskList") ?? false} onClick={() => editor?.chain().focus().toggleTaskList().run()}>Check</button>
-        <button disabled={!canEdit} type="button" aria-label="Code block" aria-pressed={editor?.isActive("codeBlock") ?? false} onClick={() => editor?.chain().focus().toggleCodeBlock().run()}>Code</button>
-        <button disabled={!canEdit} type="button" aria-label="Quote" aria-pressed={editor?.isActive("blockquote") ?? false} onClick={() => editor?.chain().focus().toggleBlockquote().run()}>Quote</button>
-        <button disabled={!canEdit} type="button" aria-label="Insert table" onClick={() => editor?.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()}>Table</button>
-        <button disabled={!canEdit} type="button" aria-label="Insert image" onClick={() => { const src = window.prompt("Image URL"); if (src) editor?.chain().focus().setImage({ src }).run(); }}>Image</button>
-        <button disabled={!canEdit} type="button" aria-label="Insert link" aria-pressed={editor?.isActive("link") ?? false} onClick={() => { const href = window.prompt("Link URL"); if (href) editor?.chain().focus().extendMarkRange("link").setLink({ href }).run(); }}>Link</button>
-        <button disabled={!canEdit} type="button" aria-label="Insert callout" onClick={() => editor?.chain().focus().insertContent({ type: "callout", attrs: { blockKey: crypto.randomUUID(), blockId: null, kind: "note" }, content: [{ type: "paragraph", content: [{ type: "text", text: "Callout" }] }] }).run()}>Callout</button>
-        <button disabled={!canEdit} type="button" aria-label="Insert Workspace Attachment" onClick={() => { const href = window.prompt("Workspace Attachment path"); if (!href?.startsWith("./attachments/")) return; const label = window.prompt("Attachment label")?.trim() || "Attachment"; editor?.chain().focus().insertContent({ type: "workspaceAttachment", attrs: { blockKey: crypto.randomUUID(), blockId: null, href, label } }).run(); }}>Attachment</button>
-        <button disabled={!canEdit} type="button" aria-label="Create Task from current Block" onClick={() => setTaskComposerOpen(true)}
-          onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setTaskComposerOpen(true); } }}>Task</button>
-        <button disabled={!canEdit} type="button" aria-label="Undo" onClick={() => editor?.chain().focus().undo().run()}>Undo</button>
-        <button disabled={!canEdit} type="button" aria-label="Redo" onClick={() => editor?.chain().focus().redo().run()}>Redo</button>
+      <Tabs.Content value="rich"><div className={styles.toolbar} role="toolbar" aria-label="Text formatting">
+        <IconButton disabled={!canEdit} label="Bold" aria-pressed={editor?.isActive("bold") ?? false} onClick={() => editor?.chain().focus().toggleBold().run()}>B</IconButton>
+        <IconButton disabled={!canEdit} label="Italic" aria-pressed={editor?.isActive("italic") ?? false} onClick={() => editor?.chain().focus().toggleItalic().run()}>I</IconButton>
+        <IconButton disabled={!canEdit} label="Heading" aria-pressed={editor?.isActive("heading", { level: 2 }) ?? false} onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()}>H2</IconButton>
+        <IconButton disabled={!canEdit} label="Bullet list" aria-pressed={editor?.isActive("bulletList") ?? false} onClick={() => editor?.chain().focus().toggleBulletList().run()}>List</IconButton>
+        <IconButton disabled={!canEdit} label="Checklist" aria-pressed={editor?.isActive("taskList") ?? false} onClick={() => editor?.chain().focus().toggleTaskList().run()}>Check</IconButton>
+        <IconButton disabled={!canEdit} label="Code block" aria-pressed={editor?.isActive("codeBlock") ?? false} onClick={() => editor?.chain().focus().toggleCodeBlock().run()}>Code</IconButton>
+        <IconButton disabled={!canEdit} label="Quote" aria-pressed={editor?.isActive("blockquote") ?? false} onClick={() => editor?.chain().focus().toggleBlockquote().run()}>Quote</IconButton>
+        <IconButton disabled={!canEdit} label="Insert table" onClick={() => editor?.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()}>Table</IconButton>
+        <IconButton disabled={!canEdit} label="Insert image" onClick={() => { const src = window.prompt("Image URL"); if (src) editor?.chain().focus().setImage({ src }).run(); }}>Image</IconButton>
+        <IconButton disabled={!canEdit} label="Insert link" aria-pressed={editor?.isActive("link") ?? false} onClick={() => { const href = window.prompt("Link URL"); if (href) editor?.chain().focus().extendMarkRange("link").setLink({ href }).run(); }}>Link</IconButton>
+        <IconButton disabled={!canEdit} label="Insert callout" onClick={() => editor?.chain().focus().insertContent({ type: "callout", attrs: { blockKey: crypto.randomUUID(), blockId: null, kind: "note" }, content: [{ type: "paragraph", content: [{ type: "text", text: "Callout" }] }] }).run()}>Callout</IconButton>
+        <IconButton disabled={!canEdit} label="Insert Workspace Attachment" onClick={() => { const href = window.prompt("Workspace Attachment path"); if (!href?.startsWith("./attachments/")) return; const label = window.prompt("Attachment label")?.trim() || "Attachment"; editor?.chain().focus().insertContent({ type: "workspaceAttachment", attrs: { blockKey: crypto.randomUUID(), blockId: null, href, label } }).run(); }}>Attachment</IconButton>
+        <IconButton disabled={!canEdit} label="Create Task from current Block" onClick={() => setTaskComposerOpen(true)}
+          onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setTaskComposerOpen(true); } }}>Task</IconButton>
+        <IconButton disabled={!canEdit} label="Undo" onClick={() => editor?.chain().focus().undo().run()}>Undo</IconButton>
+        <IconButton disabled={!canEdit} label="Redo" onClick={() => editor?.chain().focus().redo().run()}>Redo</IconButton>
       </div>
       <div className={styles.editor}><EditorContent editor={editor} /></div></Tabs.Content>
       <Tabs.Content value="markdown"><div ref={markdownPanelRef} className={styles.markdownPanel}>
@@ -352,8 +340,8 @@ function NoteEditorDocument({ noteId, memberId, fetcher = globalThis.fetch, toke
       {linkedTasks.data?.tasks?.length ? <section className={styles.linkedTasks} aria-label="Linked Tasks"><h2>Linked Tasks</h2><ul>{linkedTasks.data.tasks.map((task) => <li key={task.id}>
         <Link to={`/app/projects/${task.projectId}/tasks/${task.key}`}>{task.key} · {task.title}</Link><span>{task.status.name} · {task.relationshipState}</span></li>)}</ul></section> : null}
     </article>
-    {contextVisible ? <aside ref={asideRef} className={styles.aside} aria-label="Note context"><h2>Collaboration</h2><p ref={statusRef} className={styles.status} role="status">{visibleStatus}</p>
-      {error ? <><p className={styles.error} role="alert">{error}</p><button className={styles.retry} type="button" onClick={() => void synchronize()}>Retry saving</button></> : null}
+    {contextVisible ? <aside className={styles.aside} aria-label="Note context"><h2>Collaboration</h2><p ref={statusRef} className={styles.status} role="status">{visibleStatus}</p>
+      {error ? <><p className={styles.error} role="alert">{error}</p><Button className={styles.retry} type="button" variant="secondary" onClick={() => void synchronize()}>Retry saving</Button></> : null}
       <p>Changes merge with contributions from other Members. Offline work remains on this device until the Instance accepts it.</p>
       <h2>Linked Tasks</h2>{linkedTasks.isError ? <p role="alert">{linkedTasks.error.message}</p> : linkedTasks.data?.tasks?.length ? <ul>{linkedTasks.data.tasks.map((task) => <li key={task.id}><Link to={`/app/projects/${task.projectId}/tasks/${task.key}`}>{task.key} · {task.title}</Link><span>{task.status.name} · {task.relationshipState}</span></li>)}</ul> : <p>No Tasks are linked to this Note yet.</p>}
       {taskComposer}

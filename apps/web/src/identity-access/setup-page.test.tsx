@@ -35,6 +35,11 @@ describe("first-run setup", () => {
     fireEvent.submit(screen.getByRole("button", { name: "Continue" }).closest("form")!);
     expect(await screen.findByLabelText("Setup code")).toHaveAttribute("autocomplete", "one-time-code");
     expect(screen.getByText(/startup output/i)).toBeVisible();
+    expect(screen.getByText(/If the setup code is missing or has expired, restart Stash to issue a new code/i)).toBeVisible();
+    expect(screen.queryByText("Set up your Workspace")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
+    expect(screen.getAllByRole("heading", { level: 2 })).toHaveLength(1);
+    expect(screen.queryByRole("heading", { level: 3 })).not.toBeInTheDocument();
   });
 
   it("submits setup, stores the authenticated session, and opens the starter Note", async () => {
