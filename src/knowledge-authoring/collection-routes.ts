@@ -5,18 +5,43 @@ import { InvalidCollectionInput, type CollectionService } from "./collections.js
 const noteCollections = /^\/api\/notes\/([^/]+)\/collections(?:\/(impact|relocate|delete))?$/;
 const collection = /^\/api\/collections\/([^/]+)$/;
 const properties = /^\/api\/collections\/([^/]+)\/properties$/;
+const propertyOrder = /^\/api\/collections\/([^/]+)\/properties\/order$/;
+const property = /^\/api\/collections\/([^/]+)\/properties\/([^/]+)$/;
 const records = /^\/api\/collections\/([^/]+)\/records(?:\/([^/]+)(?:\/(move))?)?$/;
 const noteViews = /^\/api\/notes\/([^/]+)\/view-blocks$/;
 const view = /^\/api\/view-blocks\/([^/]+)$/;
 
 export function collectionRoutes(service: CollectionService, access: MemberAccessResolver): HttpRoute {
   return {
-    matches(_request, url) { return noteCollections.test(url.pathname) || collection.test(url.pathname) || properties.test(url.pathname) || records.test(url.pathname)
+    matches(_request, url) { return noteCollections.test(url.pathname) || collection.test(url.pathname) || properties.test(url.pathname)
+      || propertyOrder.test(url.pathname) || property.test(url.pathname) || records.test(url.pathname)
       || noteViews.test(url.pathname) || view.test(url.pathname); },
     async handle(request, response, url) {
       const member = await access.authenticateBearer(request.headers.authorization);
       if (!member) { json(response, 401, { error: "unauthorized", message: "A valid Member session is required." }); return true; }
       try {
+        const orderMatch = propertyOrder.exec(url.pathname);
+        if (orderMatch) {
+          if (request.method !== "PATCH") return method(response, "PATCH");
+          const result = await service.reorderProperties(member.accountId, decodeURIComponent(orderMatch[1]!), await readJson(request));
+          if (result.status === "updated") json(response, 200, { collection: result.collection });
+          else json(response, 404, { error: result.status, message: "This Collection property is unavailable." });
+          return true;
+        }
+        const itemMatch = property.exec(url.pathname);
+        if (itemMatch) {
+          if (request.method !== "PATCH" && request.method !== "DELETE") return method(response, "PATCH or DELETE");
+          const collectionId = decodeURIComponent(itemMatch[1]!); const propertyId = decodeURIComponent(itemMatch[2]!);
+          const result = request.method === "PATCH"
+            ? await service.updateProperty(member.accountId, collectionId, propertyId, await readJson(request))
+            : await service.deleteProperty(member.accountId, collectionId, propertyId);
+          if (result.status === "updated") json(response, 200, { collection: result.collection,
+            ...("impact" in result ? { impact: result.impact } : {}) });
+          else if (result.status === "primary_property_required") json(response, 409, { error: result.status,
+            message: "Keep one primary text property so every record remains identifiable." });
+          else json(response, 404, { error: result.status, message: "This Collection property is unavailable." });
+          return true;
+        }
         const propertyMatch = properties.exec(url.pathname);
         if (propertyMatch) {
           if (request.method !== "POST") return method(response, "POST");
@@ -39,7 +64,7 @@ export function collectionRoutes(service: CollectionService, access: MemberAcces
           if (result.status === "created") json(response, 201, { collection: result.collection });
           else if (result.status === "found") json(response, 200, "impact" in result ? { impact: result.impact }
             : { workspaceId: result.workspaceId, collections: result.collections,
-              availableCollections: result.availableCollections, views: result.views });
+              availableCollections: result.availableCollections, availableCollectionNotes: result.availableCollectionNotes, views: result.views });
           else if (result.status === "relocated" || result.status === "deleted") json(response, 200, result);
           else if (result.status === "impact_changed" || result.status === "collection_conflict") json(response, 409,
             { error: result.status, message: "The Collection impact changed. Review it again before continuing." });
@@ -69,7 +94,7 @@ export function collectionRoutes(service: CollectionService, access: MemberAcces
             else json(response, 404, { error: result.status, message: "This Collection is unavailable." });
           } else if (request.method === "PATCH") {
             const result = await service.rename(member.accountId, collectionId, await readJson(request));
-            if (result.status === "updated") json(response, 200, result);
+            if (result.status === "updated") json(response, 200, { collection: result.collection });
             else json(response, 404, { error: result.status, message: "This Collection field is unavailable." });
           } else return method(response, "GET or PATCH");
           return true;

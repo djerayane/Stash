@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { Collection, ViewDefinition } from "@stash/domain-types";
-import { evaluateCollectionView, updateBoardGroup } from "./view-model";
+import { evaluateCollectionView, presentationRequirement, repairDefinitionAfterPropertyDeletion, updateBoardGroup } from "./view-model";
 
 const titleId = "11111111-1111-4111-8111-111111111111";
 const statusId = "22222222-2222-4222-8222-222222222222";
@@ -35,5 +35,21 @@ describe("Collection view model", () => {
       .toEqual({ recordId: "77777777-7777-4777-8777-777777777777", values: { [statusId]: "later" } });
     expect(() => updateBoardGroup(collection, { ...definition, groupBy: undefined }, collection.records[0]!.id, "later"))
       .toThrow(/board_group_unavailable/);
+  });
+
+  it("requests presentation prerequisites in context", () => {
+    const textOnly = { ...collection, properties: collection.properties.slice(0, 1) };
+
+    expect(presentationRequirement(textOnly, "calendar")).toEqual({ propertyType: "date_time", actionLabel: "Add date property" });
+    expect(presentationRequirement(textOnly, "board")).toEqual({ propertyType: "single_select", actionLabel: "Add select property" });
+    expect(presentationRequirement(collection, "calendar")).toBeUndefined();
+    expect(presentationRequirement(collection, "board")).toBeUndefined();
+  });
+
+  it("removes deleted property presentation state without touching the canonical source", () => {
+    const { groupBy: _groupBy, ...expected } = definition;
+    expect(repairDefinitionAfterPropertyDeletion({ ...definition, layout: { visiblePropertyIds: [titleId, statusId] } }, statusId)).toEqual({
+      ...expected, filters: [], layout: { visiblePropertyIds: [titleId] },
+    });
   });
 });

@@ -97,7 +97,7 @@ export class PostgresCollectionRepository implements CollectionRepository {
   }
 
   async renameCollection(memberId: string, collectionId: string, title: string): Promise<
-    { status: "updated" } | { status: "collection_not_found" }> {
+    { status: "updated"; collection: CanonicalCollection } | { status: "collection_not_found" }> {
     return this.kernel.transaction(async (client) => {
       await this.prepare(client);
       const updated = await client.query(`UPDATE stash_collections collection SET title=$3 FROM stash_workspaces workspace
@@ -105,12 +105,12 @@ export class PostgresCollectionRepository implements CollectionRepository {
       if (!updated.rowCount) return { status: "collection_not_found" as const };
       const collection = await this.canonicalCollection(client, collectionId);
       await this.projection(client, "Collection", collectionId, collection.schema, collection);
-      return { status: "updated" as const };
+      return { status: "updated" as const, collection };
     });
   }
 
   async renameCollectionProperty(memberId: string, collectionId: string, propertyId: string, name: string): Promise<
-    { status: "updated" } | { status: "collection_not_found" | "property_not_found" }> {
+    { status: "updated"; collection: CanonicalCollection } | { status: "collection_not_found" | "property_not_found" }> {
     return this.kernel.transaction(async (client) => {
       await this.prepare(client);
       const authorized = await client.query(`SELECT collection.id FROM stash_collections collection JOIN stash_workspaces workspace
@@ -121,7 +121,7 @@ export class PostgresCollectionRepository implements CollectionRepository {
       if (!updated.rowCount) return { status: "property_not_found" as const };
       const collection = await this.canonicalCollection(client, collectionId);
       await this.projection(client, "Collection", collectionId, collection.schema, collection);
-      return { status: "updated" as const };
+      return { status: "updated" as const, collection };
     });
   }
 
@@ -142,6 +142,81 @@ export class PostgresCollectionRepository implements CollectionRepository {
       const collection = await this.canonicalCollection(client, collectionId);
       await this.projection(client, "Collection", collectionId, collection.schema, collection);
       return { status: "created" as const, property };
+    });
+  }
+
+  async updateCollectionProperty(memberId: string, collectionId: string, property: CanonicalProperty): Promise<
+    { status: "updated"; collection: CanonicalCollection } | { status: "collection_not_found" | "property_not_found" }> {
+    return this.kernel.transaction(async (client) => {
+      await this.prepare(client);
+      if (!(await client.query(`SELECT collection.id FROM stash_collections collection JOIN stash_workspaces workspace
+        ON workspace.id=collection.workspace_id WHERE collection.id=$1 AND (${member}) FOR UPDATE OF collection`, [collectionId, memberId])).rowCount)
+        return { status: "collection_not_found" as const };
+      const configuration = property.type === "single_select" || property.type === "multi_select" ? { options: property.options }
+        : property.type === "relation" ? { target: property.target } : {};
+      const updated = await client.query(`UPDATE stash_collection_properties SET name=$3,property_type=$4,configuration=$5::jsonb
+        WHERE collection_id=$1 AND id=$2 RETURNING id`, [collectionId, property.id, property.name, property.type, JSON.stringify(configuration)]);
+      if (!updated.rowCount) return { status: "property_not_found" as const };
+      const collection = await this.canonicalCollection(client, collectionId);
+      await this.projection(client, "Collection", collectionId, collection.schema, collection);
+      return { status: "updated" as const, collection };
+    });
+  }
+
+  async reorderCollectionProperties(memberId: string, collectionId: string, properties: readonly CanonicalProperty[]): Promise<
+    { status: "updated"; collection: CanonicalCollection } | { status: "collection_not_found" | "property_not_found" }> {
+    return this.kernel.transaction(async (client) => {
+      await this.prepare(client);
+      if (!(await client.query(`SELECT collection.id FROM stash_collections collection JOIN stash_workspaces workspace
+        ON workspace.id=collection.workspace_id WHERE collection.id=$1 AND (${member}) FOR UPDATE OF collection`, [collectionId, memberId])).rowCount)
+        return { status: "collection_not_found" as const };
+      const locked = await client.query<{ id: string }>("SELECT id FROM stash_collection_properties WHERE collection_id=$1 FOR UPDATE", [collectionId]);
+      if (locked.rows.length !== properties.length || properties.some((property) => !locked.rows.some(({ id }) => id === property.id)))
+        return { status: "property_not_found" as const };
+      await client.query("UPDATE stash_collection_properties SET position=position+1000000 WHERE collection_id=$1", [collectionId]);
+      for (const property of properties) await client.query("UPDATE stash_collection_properties SET position=$3 WHERE collection_id=$1 AND id=$2",
+        [collectionId, property.id, property.position]);
+      const collection = await this.canonicalCollection(client, collectionId);
+      await this.projection(client, "Collection", collectionId, collection.schema, collection);
+      return { status: "updated" as const, collection };
+    });
+  }
+
+  async deleteCollectionProperty(memberId: string, collectionId: string, propertyId: string): Promise<
+    { status: "updated"; collection: CanonicalCollection; impact: { affectedValues: number; affectedRelations: number; affectedViews: number } }
+    | { status: "collection_not_found" | "property_not_found" }> {
+    return this.kernel.transaction(async (client) => {
+      await this.prepare(client);
+      if (!(await client.query(`SELECT collection.id FROM stash_collections collection JOIN stash_workspaces workspace
+        ON workspace.id=collection.workspace_id WHERE collection.id=$1 AND (${member}) FOR UPDATE OF collection`, [collectionId, memberId])).rowCount)
+        return { status: "collection_not_found" as const };
+      const property = await client.query<{ property_type: string }>(`SELECT property_type FROM stash_collection_properties
+        WHERE collection_id=$1 AND id=$2 FOR UPDATE`, [collectionId, propertyId]);
+      if (!property.rows[0]) return { status: "property_not_found" as const };
+      const values = await client.query<{ affected_values: number; affected_relations: number }>(`SELECT count(*)::int affected_values,
+        COALESCE(sum(CASE WHEN jsonb_typeof(value)='array' THEN jsonb_array_length(value) ELSE 0 END),0)::int affected_relations
+        FROM stash_collection_record_values WHERE property_id=$1`, [propertyId]);
+      const viewRows = await client.query<{ id: string }>("SELECT id FROM stash_view_blocks WHERE source_collection_id=$1 FOR UPDATE", [collectionId]);
+      const affectedViews: string[] = [];
+      for (const { id } of viewRows.rows) {
+        const view = await this.canonicalView(client, id); const definition = withoutProperty(view.definition, propertyId);
+        if (JSON.stringify(definition) === JSON.stringify(view.definition)) continue;
+        affectedViews.push(id);
+        await client.query("UPDATE stash_view_blocks SET definition=$2::jsonb WHERE id=$1", [id, JSON.stringify(definition)]);
+        await this.projection(client, "ViewBlock", id, view.schema, { ...view, definition });
+      }
+      await client.query("DELETE FROM stash_collection_properties WHERE collection_id=$1 AND id=$2", [collectionId, propertyId]);
+      const remaining = await client.query<{ id: string }>(`SELECT id FROM stash_collection_properties
+        WHERE collection_id=$1 ORDER BY position,id FOR UPDATE`, [collectionId]);
+      await client.query("UPDATE stash_collection_properties SET position=position+1000000 WHERE collection_id=$1", [collectionId]);
+      for (const [index, row] of remaining.rows.entries()) await client.query("UPDATE stash_collection_properties SET position=$2 WHERE id=$1", [row.id, index + 1]);
+      const collection = await this.canonicalCollection(client, collectionId);
+      await this.projection(client, "Collection", collectionId, collection.schema, collection);
+      return { status: "updated" as const, collection, impact: {
+        affectedValues: Number(values.rows[0]?.affected_values ?? 0),
+        affectedRelations: property.rows[0].property_type === "relation" ? Number(values.rows[0]?.affected_relations ?? 0) : 0,
+        affectedViews: affectedViews.length,
+      } };
     });
   }
 
@@ -289,7 +364,7 @@ export class PostgresCollectionRepository implements CollectionRepository {
 
   async listCollectionsForNote(memberId: string, noteId: string): Promise<
     { status: "found"; workspaceId: string; collections: readonly CanonicalCollection[]; availableCollections: readonly CanonicalCollection[];
-      views: readonly CanonicalViewBlock[] } | { status: "note_not_found" }> {
+      availableCollectionNotes: Readonly<Record<string, string>>; views: readonly CanonicalViewBlock[] } | { status: "note_not_found" }> {
     return this.kernel.withSession(async (client) => {
       await this.prepare(client);
       const note = await client.query<{ workspace_id: string }>(`SELECT note.workspace_id FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id=note.workspace_id
@@ -297,7 +372,7 @@ export class PostgresCollectionRepository implements CollectionRepository {
       [noteId, memberId]);
       if (!note.rows[0]) return { status: "note_not_found" as const };
       const collections = await client.query<{ id: string }>("SELECT id FROM stash_collections WHERE owner_note_id=$1 ORDER BY title,id", [noteId]);
-      const available = await client.query<{ id: string }>(`SELECT collection.id FROM stash_collections collection
+      const available = await client.query<{ id: string; owner_note_title: string }>(`SELECT collection.id,owner_note.title owner_note_title FROM stash_collections collection
         JOIN stash_notes owner_note ON owner_note.id=collection.owner_note_id
         JOIN stash_workspaces workspace ON workspace.id=collection.workspace_id
         WHERE collection.workspace_id=$1 AND ${effectiveNoteReadSql("owner_note", "workspace", "$2")}
@@ -308,6 +383,7 @@ export class PostgresCollectionRepository implements CollectionRepository {
           await this.canonicalCollection(client, id)))),
         availableCollections: await Promise.all(available.rows.map(async ({ id }) => this.permissionFilteredCollection(client, memberId,
           await this.canonicalCollection(client, id)))),
+        availableCollectionNotes: Object.fromEntries(available.rows.map(({ id, owner_note_title }) => [id, owner_note_title])),
         views: await Promise.all(views.rows.map(({ id }) => this.canonicalView(client, id))) };
     });
   }
@@ -350,8 +426,8 @@ export class PostgresCollectionRepository implements CollectionRepository {
       if (owned.rows.length !== uniqueCollectionIds.length || uniqueCollectionIds.length !== collectionIds.length)
         return { status: "collection_not_found" as const };
       const impact = await this.collectionImpact(client, noteId);
-      if (impact.token !== impactToken || collectionIds.length !== impact.collections.length
-        || collectionIds.some((id) => !impact.collections.some((entry) => entry.id === id))) return { status: "impact_changed" as const };
+      if (impact.token !== impactToken || collectionIds.some((id) => !impact.collections.some((entry) => entry.id === id)))
+        return { status: "impact_changed" as const };
 
       const recordIds = (await client.query<{ id: string }>(`SELECT id FROM stash_collection_records
         WHERE collection_id=ANY($1::uuid[]) FOR UPDATE`, [uniqueCollectionIds])).rows.map(({ id }) => id);
@@ -462,25 +538,36 @@ export class PostgresCollectionRepository implements CollectionRepository {
       ON record.collection_id=collection.id WHERE collection.owner_note_id=$1 GROUP BY collection.id ORDER BY collection.title,collection.id`, [noteId]);
     const ids = collections.rows.map(({ id }) => id);
     if (!ids.length) return { noteId, collections: [], relations: [], viewBlocks: [], token: "empty" };
-    const relations = await client.query<{ collection_id: string; record_id: string; property_id: string; reference_count: number }>(`SELECT
-      property.collection_id,value.record_id,value.property_id,
+    const relations = await client.query<{ collection_id: string; record_id: string; property_id: string; target_collection_id: string; reference_count: number }>(`SELECT
+      property.collection_id,value.record_id,value.property_id,property.configuration->'target'->>'collectionId' target_collection_id,
       CASE WHEN jsonb_typeof(value.value)='array' THEN jsonb_array_length(value.value) ELSE 0 END::int reference_count
       FROM stash_collection_record_values value JOIN stash_collection_properties property ON property.id=value.property_id
       WHERE property.property_type='relation' AND property.configuration->'target'->>'kind'='collection_records'
       AND property.configuration->'target'->>'collectionId'=ANY($1::text[])
       AND CASE WHEN jsonb_typeof(value.value)='array' THEN jsonb_array_length(value.value) ELSE 0 END>0
       ORDER BY property.collection_id,value.record_id,value.property_id`, [ids]);
-    const views = await client.query<{ id: string; title: string; owner_note_id: string }>(`SELECT id,title,owner_note_id FROM stash_view_blocks
+    const views = await client.query<{ id: string; title: string; owner_note_id: string; source_collection_id: string }>(`SELECT id,title,owner_note_id,source_collection_id FROM stash_view_blocks
       WHERE source_collection_id=ANY($1::uuid[]) ORDER BY title,id`, [ids]);
     const collectionImpact = collections.rows.map((row) => ({ id: row.id, title: row.title, recordCount: Number(row.record_count) }));
     const relationImpact = relations.rows.map((row) => ({ collectionId: row.collection_id, recordId: row.record_id,
-      propertyId: row.property_id, referenceCount: Number(row.reference_count) }));
-    const viewBlocks = views.rows.map((row) => ({ id: row.id, title: row.title, ownerNoteId: row.owner_note_id }));
+      propertyId: row.property_id, targetCollectionId: row.target_collection_id, referenceCount: Number(row.reference_count) }));
+    const viewBlocks = views.rows.map((row) => ({ id: row.id, title: row.title, ownerNoteId: row.owner_note_id,
+      collectionId: row.source_collection_id }));
     const token = encodeURIComponent(JSON.stringify({ collections: collectionImpact.map(({ id, recordCount }) => [id, recordCount]),
-      relations: relationImpact.map(({ collectionId, recordId, propertyId, referenceCount }) => [collectionId, recordId, propertyId, referenceCount]),
+      relations: relationImpact.map(({ collectionId, recordId, propertyId, targetCollectionId, referenceCount }) =>
+        [collectionId, recordId, propertyId, targetCollectionId, referenceCount]),
       views: viewBlocks.map(({ id }) => id) }));
     return { noteId, collections: collectionImpact, relations: relationImpact, viewBlocks, token };
   }
   private async projection(client:PostgresQueryable,kind:string,id:string,schema:string,payload:object){await client.query(`INSERT INTO stash_portable_projection_outbox(object_kind,object_id,revision,projection_schema,payload)
     SELECT $1,$2,COALESCE(MAX(revision),0)+1,$3,$4::jsonb FROM stash_portable_projection_outbox WHERE object_kind=$1 AND object_id=$2`,[kind,id,schema,JSON.stringify(payload)]);}
+}
+
+function withoutProperty(definition: ViewDefinition, propertyId: string): ViewDefinition {
+  const visible = Array.isArray(definition.layout.visiblePropertyIds)
+    ? definition.layout.visiblePropertyIds.filter((id) => id !== propertyId) : undefined;
+  const { groupBy: _groupBy, ...withoutGroup } = definition; const base = definition.groupBy === propertyId ? withoutGroup : definition;
+  return { ...base, filters: definition.filters.filter((filter) => filter.propertyId !== propertyId),
+    sorts: definition.sorts.filter((sort) => sort.propertyId !== propertyId),
+    layout: visible ? { ...definition.layout, visiblePropertyIds: visible } : definition.layout };
 }

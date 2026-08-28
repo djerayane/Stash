@@ -1,4 +1,4 @@
-import type { Collection, CollectionPropertyValue, CollectionRecord, ViewDefinition } from "@stash/domain-types";
+import type { Collection, CollectionPropertyType, CollectionPropertyValue, CollectionRecord, ViewDefinition, ViewPresentation } from "@stash/domain-types";
 
 export interface EvaluatedCollectionView {
   readonly records: readonly CollectionRecord[];
@@ -53,4 +53,22 @@ export function updateBoardGroup(collection: Collection, definition: ViewDefinit
   if (!collection.records.some(({ id }) => id === recordId) || !collection.properties.some(({ id }) => id === definition.groupBy))
     throw new Error("board_group_unavailable");
   return { recordId, values: { [definition.groupBy]: groupValue } };
+}
+
+export function presentationRequirement(collection: Collection, presentation: ViewPresentation):
+  { propertyType: CollectionPropertyType; actionLabel: string } | undefined {
+  if (presentation === "calendar" && !collection.properties.some(({ type }) => type === "date_time"))
+    return { propertyType: "date_time", actionLabel: "Add date property" };
+  if (presentation === "board" && !collection.properties.some(({ type }) => type === "single_select" || type === "multi_select" || type === "checkbox"))
+    return { propertyType: "single_select", actionLabel: "Add select property" };
+  return undefined;
+}
+
+export function repairDefinitionAfterPropertyDeletion(definition: ViewDefinition, propertyId: string): ViewDefinition {
+  const visible = Array.isArray(definition.layout.visiblePropertyIds)
+    ? definition.layout.visiblePropertyIds.filter((id) => id !== propertyId) : undefined;
+  const { groupBy: _groupBy, ...withoutGroup } = definition; const base = definition.groupBy === propertyId ? withoutGroup : definition;
+  return { ...base, filters: definition.filters.filter((filter) => filter.propertyId !== propertyId),
+    sorts: definition.sorts.filter((sort) => sort.propertyId !== propertyId),
+    layout: visible ? { ...definition.layout, visiblePropertyIds: visible } : definition.layout };
 }

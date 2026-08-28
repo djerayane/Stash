@@ -39,8 +39,9 @@ export interface ViewBlock {
 export interface CollectionImpact {
   readonly noteId: string;
   readonly collections: readonly { readonly id: string; readonly title: string; readonly recordCount: number }[];
-  readonly relations: readonly { readonly collectionId: string; readonly recordId: string; readonly propertyId: string; readonly referenceCount: number }[];
-  readonly viewBlocks: readonly { readonly id: string; readonly title: string; readonly ownerNoteId: string }[];
+  readonly relations: readonly { readonly collectionId: string; readonly recordId: string; readonly propertyId: string;
+    readonly targetCollectionId?: string; readonly referenceCount: number }[];
+  readonly viewBlocks: readonly { readonly id: string; readonly title: string; readonly ownerNoteId: string; readonly collectionId?: string }[];
   readonly token: string;
 }
 

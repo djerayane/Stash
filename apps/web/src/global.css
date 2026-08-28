@@ -1,6 +1,6 @@
 * { box-sizing: border-box; }
 html { max-width: 100%; overflow-x: clip; font-family: var(--stash-font-sans); background: var(--stash-color-canvas); text-rendering: optimizeLegibility; }
-body { min-width: 20rem; max-width: 100%; margin: 0; overflow-x: clip; background: var(--stash-color-canvas); }
+body { min-width: min(20rem, 100%); max-width: 100%; margin: 0; overflow-x: clip; background: var(--stash-color-canvas); }
 button, input, select, textarea { font: inherit; }
 button { letter-spacing: -.01em; }
 :where(h1, h2, h3, p) { text-wrap: pretty; }

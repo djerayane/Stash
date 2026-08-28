@@ -90,6 +90,71 @@ describe("Collection contracts", () => {
     assert.deepEqual(await service.read("member", collection.id), { status: "collection_not_found" });
   });
 
+  test("creates an immediately useful Collection when no properties were supplied", async () => {
+    let created: ReturnType<typeof normalizeCollection> | undefined;
+    const repository = {
+      async create(_memberId: string, collection: ReturnType<typeof normalizeCollection>) {
+        created = collection;
+        return { status: "created" as const, collection };
+      },
+    } as unknown as CollectionRepository;
+    const service = new CollectionService(repository);
+
+    const result = await service.create("member", "55555555-5555-4555-8555-555555555555", {
+      schema: "stash.collection.v1", id: "33333333-3333-4333-8333-333333333333",
+      workspaceId: "44444444-4444-4444-8444-444444444444", ownerNoteId: "55555555-5555-4555-8555-555555555555",
+      title: "Untitled collection", properties: [], records: [],
+    });
+
+    assert.equal(result.status, "created");
+    assert.equal(created?.properties.length, 1);
+    assert.deepEqual(created?.properties[0] && { name: created.properties[0].name, type: created.properties[0].type,
+      position: created.properties[0].position }, { name: "Name", type: "text", position: 1 });
+    assert.match(created?.properties[0]?.id ?? "", /^[0-9a-f-]{36}$/i);
+  });
+
+  test("updates, reorders, and deletes properties atomically while reporting the affected canonical data", async () => {
+    const store = await EmbeddedInstanceStore.open(await temporaryTestDirectory("stash-collection-properties-"),
+      createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
+    try {
+      const ownerId = "18181818-1818-4818-8818-181818181818";
+      await store.database.createFirstOrganizationOwner({ organizationId: "19191919-1919-4919-8919-191919191919",
+        organizationName: "Studio", ownerId, ownerName: "Ada", ownerEmail: "properties@example.test", passwordHash: "test-only", role: "Owner" });
+      const workspace = await new WorkspaceProjectService(store.database.identityAccessRepositories()).createWorkspace(ownerId,
+        { name: "Notebook", owner: { type: "personal" } });
+      assert.equal(workspace.status, "created"); if (workspace.status !== "created") return;
+      const note = await new NoteTreeService(store.database.noteTreeRepository(), new EmptyCollectionImpactInspector())
+        .create(ownerId, workspace.workspace.id, { title: "Research" });
+      assert.equal(note.status, "created"); if (note.status !== "created") return;
+      const nameId = "20202020-2020-4020-8020-202020202020"; const statusId = "21212121-2121-4121-8121-212121212121";
+      const collection = normalizeCollection({ schema: "stash.collection.v1", id: "22222222-2222-4222-8222-222222222222",
+        workspaceId: workspace.workspace.id, ownerNoteId: note.node.id, title: "Research", properties: [
+          { id: nameId, name: "Name", type: "text", position: 1 },
+          { id: statusId, name: "Stage", type: "single_select", position: 2, options: [{ id: "open", name: "Open" }] },
+        ], records: [{ id: "23232323-2323-4323-8323-232323232323", position: 1,
+          values: { [nameId]: "Map constraints", [statusId]: "open" } }] });
+      const service = new CollectionService(store.database.collectionRepository());
+      assert.equal((await service.create(ownerId, note.node.id, collection)).status, "created");
+
+      const renamed = await service.updateProperty(ownerId, collection.id, statusId, { name: "Status" });
+      assert.equal(renamed.status, "updated");
+      if (renamed.status === "updated") assert.equal(renamed.collection.properties[1]?.name, "Status");
+      const reordered = await service.reorderProperties(ownerId, collection.id, { propertyIds: [statusId, nameId] });
+      assert.equal(reordered.status, "updated");
+      if (reordered.status === "updated") assert.deepEqual(reordered.collection.properties.map(({ id, position }) => [id, position]),
+        [[statusId, 1], [nameId, 2]]);
+
+      assert.deepEqual(await service.deleteProperty(ownerId, collection.id, nameId), { status: "primary_property_required" });
+      const deleted = await service.deleteProperty(ownerId, collection.id, statusId);
+      assert.equal(deleted.status, "updated");
+      if (deleted.status === "updated") {
+        assert.deepEqual(deleted.collection.properties.map(({ id, position }) => [id, position]), [[nameId, 1]]);
+        assert.equal(Object.hasOwn(deleted.collection.records[0]!.values, statusId), false);
+        assert.deepEqual(deleted.impact, { affectedValues: 1, affectedRelations: 0, affectedViews: 0 });
+      }
+    } finally { await store.close(); }
+  });
+
   test("persists canonical Collections through the focused PGLite adapter and filters unauthorized reads before metadata", async () => {
     const store = await EmbeddedInstanceStore.open(await temporaryTestDirectory("stash-collections-"),
       createAuthenticationSecretCodec(randomBytes(32).toString("base64")));

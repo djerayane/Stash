@@ -11,7 +11,7 @@ export function CalendarView({ title, collection, records, definition, onFocus }
     groups.set(key, [...(groups.get(key) ?? []), record]); }
   return <section aria-label={`${title} calendar`} className="collection-calendar">{property ? groups.size
     ? [...groups].sort(([a], [b]) => a.localeCompare(b)).map(([date, entries]) =>
-      <section key={date}><h4>{date}</h4><ul>{entries.map((record) => <li key={record.id}><button type="button"
+      <section key={date}><h4>{date === "No date" ? date : <time dateTime={date}>{date}</time>}</h4><ul>{entries.map((record) => <li key={record.id}><button type="button"
         onClick={() => onFocus(record.id)}>{recordTitle(collection, record)}</button></li>)}</ul></section>)
     : <p role="note">No dated records yet.</p>
     : <p role="note">Add a date/time property to place records on this calendar.</p>}</section>;
