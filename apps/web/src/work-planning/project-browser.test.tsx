@@ -97,3 +97,27 @@ test("keeps focus trapped while Project creation is pending and actions are disa
   expect(key).toHaveFocus();
   finish(Response.json({ id: "new-project" }, { status: 201 }));
 });
+
+test("uses one destination heading and shared actions without decorative kickers", async () => {
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ workspaces: [{
+    id: "personal", name: "Personal", projectCreation: { allowed: true }, projects: [],
+  }] }));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const { container } = render(<QueryClientProvider client={client}><MemoryRouter>
+    <ProjectBrowser fetcher={fetcher} onOpenProject={vi.fn()} token="member-token" />
+  </MemoryRouter></QueryClientProvider>);
+
+  await screen.findByRole("heading", { name: "Projects" });
+  expect(container.querySelectorAll("h1")).toHaveLength(1);
+  expect(screen.queryByText("Work planning")).not.toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "Create a Project in Personal" })).toHaveAttribute("data-variant", "secondary");
+});
+
+test("keeps a failed Project listing recoverable and says that nothing changed", async () => {
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ message: "Projects are temporarily unavailable." }), { status: 503 }));
+  renderBrowser(fetcher);
+
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("No Projects or drafts were changed");
+  expect(within(alert).getByRole("button", { name: "Try again" })).toHaveAttribute("data-variant", "secondary");
+});

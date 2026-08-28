@@ -93,7 +93,7 @@ test("reveals Organization administration only from server-provided scope", () =
 
 test("marks only the nested administration destination as current", async () => {
   renderShell("/app/settings/organization", { ...member, organizationAdministrations: [{ organizationId: "org-1", organizationName: "Acme", members: [] }] });
-  expect(await screen.findByRole("heading", { name: "Authority should be explicit." })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "Organization settings" })).toBeInTheDocument();
   const navigation = screen.getByRole("navigation", { name: "Workspace" });
   const current = within(navigation).getAllByRole("link").filter((link) => link.getAttribute("aria-current") === "page");
   expect(current).toHaveLength(1);

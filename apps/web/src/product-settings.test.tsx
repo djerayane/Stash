@@ -20,6 +20,11 @@ describe("remaining product settings", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save regional settings" }));
     await waitFor(() => expect(requests.some(({ path, init }) => path === "/api/member/localization" && init?.method === "PUT" && String(init.body).includes('"locale":"fr-FR"'))).toBe(true));
     expect(gsap.from).not.toHaveBeenCalled();
+    expect(screen.getByRole("heading", { name: "Personal settings" })).toBeInTheDocument();
+    expect(screen.queryByText("Personal settings", { selector: "p" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save regional settings" })).toHaveAttribute("data-variant", "secondary");
+    expect(within(locale.closest("label")!).getByText("Locale", { selector: "span" })).toBeVisible();
+    for (const button of screen.getAllByRole("button")) expect(button, button.textContent || "unnamed button").toHaveAttribute("data-variant");
   });
 
   it("keeps import input intact after a recoverable server failure", async () => {
@@ -28,6 +33,7 @@ describe("remaining product settings", () => {
     const file = new File(["archive"], "workspace.zip", { type: "application/zip" }); const archive = screen.getByLabelText("ZIP archive"); fireEvent.change(archive, { target: { files: [file] } }); await waitFor(() => expect((archive as HTMLInputElement).files?.[0]).toBe(file));
     fireEvent.submit(screen.getByRole("button", { name: "Validate and import" }).closest("form")!);
     expect(await screen.findByRole("alert")).toHaveTextContent("Nothing was imported");
+    expect(screen.getByRole("alert")).toHaveTextContent("Your selected archive and import settings are preserved");
   });
 
   it("submits an Obsidian vault through the dedicated client boundary and presents its report",async()=>{
@@ -58,6 +64,8 @@ describe("remaining product settings", () => {
       if (path.includes("/roles")) return Response.json({ updated: true });
       return Response.json({ repositoryConnections: [{ id: "connection-1", repositoryUrl: "https://github.com/acme/stash", projectIds: [], ownership: "organization", state: "active" }] }); }));
     view(<OrganizationSettingsPage token="admin-token" activeOrganizationId="org-1" administrations={[{ organizationId: "org-1", organizationName: "Acme", members: [{ id: "member-1", name: "Ada", email: "ada@example.com", role: "Owner" }] }]} />);
+    expect(screen.getByRole("heading", { name: "Organization settings" })).toBeVisible();
+    expect(screen.queryByText("Organization administration", { selector: "p" })).not.toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "Roles and Members" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "Custom Roles" })).toBeVisible();
     fireEvent.change(screen.getAllByRole("textbox", { name: "Role name" })[0]!, { target: { value: "Delivery lead" } });
@@ -79,5 +87,6 @@ describe("remaining product settings", () => {
     fireEvent.change(await screen.findByRole("combobox", { name: "Project for https://github.com/acme/stash" }), { target: { value: "project-1" } });
     fireEvent.click(screen.getByRole("button", { name: "Attach" }));
     await waitFor(() => expect(requests.some(({ path, init }) => path.endsWith("/repository-connections/connection-1/projects/project-1") && init?.method === "POST")).toBe(true));
+    for (const button of screen.getAllByRole("button")) expect(button, button.textContent || "unnamed button").toHaveAttribute("data-variant");
   });
 });

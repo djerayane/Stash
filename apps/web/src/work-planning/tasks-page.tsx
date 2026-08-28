@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import styles from "./tasks-page.module.css";
 import { TaskView } from "../shared/task-view";
+import { Button, Field, StatusNotice } from "../ui/control";
 
 type Task = { id: string; title: string; status: { id: string; name: string; category: string }; assigneeIds: string[];
   projectKeys: Array<{ projectId: string; key: string }>; projectAssociations: string[]; parentTaskId?: string };
@@ -29,17 +30,18 @@ export function TasksPage({ workspaceId, memberId, token, fetcher = globalThis.f
     filters: mine ? [{propertyId:"task:assignee",operator:"equals" as const,value:memberId}] : [],sorts:[],layout:{},
     ...(view === "board" ? {groupBy:"task:status"} : {}) }),[memberId,mine,view,workspaceId]);
   useEffect(()=>{storage?.setItem(`stash.tasks.definition.${workspaceId}.${memberId}`,JSON.stringify(definition));},[definition,memberId,storage,workspaceId]);
-  return <div className={styles.page}><header><div><p className={styles.eyebrow}>Workspace work</p><h1>Tasks</h1>
+  return <div className={styles.page}><header><div><h1>Tasks</h1>
     <p>One truthful list of action, whether work belongs to no Project, one Project, or several.</p></div>
-    <form onSubmit={(event) => { event.preventDefault(); if (title.trim()) create.mutate(); }}><label htmlFor="new-task">New Task</label>
-      <div><input id="new-task" maxLength={500} onChange={(event) => setTitle(event.target.value)} placeholder="What needs doing?" required value={title} />
-      <button disabled={create.isPending}>{create.isPending ? "Creating…" : "Create Task"}</button></div></form></header>
-    <nav aria-label="Task view"><button aria-pressed={mine} onClick={() => setMine((value) => !value)} type="button">{mine ? "My Tasks" : "All Tasks"}</button><span>View</span>{(["list", "board", "table", "calendar"] as const).map((item) => <button
-      aria-pressed={view === item} key={item} onClick={() => setView(item)} type="button">{item[0]!.toUpperCase() + item.slice(1)}</button>)}</nav>
-    {query.isPending ? <p role="status">Loading Tasks…</p> : query.isError ? <p role="alert">{query.error.message}</p>
+    <form onSubmit={(event) => { event.preventDefault(); if (title.trim()) create.mutate(); }}><Field label="New Task">
+      <input id="new-task" maxLength={500} onChange={(event) => setTitle(event.target.value)} placeholder="What needs doing?" required value={title} />
+      </Field><Button pending={create.isPending} pendingLabel="Creating Task">Create Task</Button></form></header>
+    <nav aria-label="Task controls"><div aria-label="Filters" className={styles.filters} role="group"><Button aria-pressed={mine} onClick={() => setMine((value) => !value)} type="button" variant="secondary">{mine ? "My Tasks" : "All Tasks"}</Button></div>
+      <div aria-label="View" className={styles.viewControls} role="group"><span>View</span>{(["list", "board", "table", "calendar"] as const).map((item) => <Button
+      aria-pressed={view === item} key={item} onClick={() => setView(item)} type="button" variant="secondary">{item[0]!.toUpperCase() + item.slice(1)}</Button>)}</div></nav>
+    {query.isPending ? <StatusNotice>Loading Tasks…</StatusNotice> : query.isError ? <StatusNotice tone="error"><strong>Tasks are unavailable.</strong><p>{query.error.message}</p><p>Your Task view and draft are preserved. Try loading the same view again.</p><Button type="button" variant="secondary" onClick={() => void query.refetch()}>Try again</Button></StatusNotice>
       : <section aria-label={`${view} Task view`} className={styles.tasks} data-view={view}><TaskView tasks={query.data.tasks} definition={definition}
         statuses={query.data.workflow.statuses} onStatusChange={(task,statusId)=>move.mutate({id:task.id,statusId})}
         empty={<div className={styles.empty}><h2>A quiet place for action.</h2><p>Create a Projectless Task now; add execution contexts only when they help.</p></div>}/></section>}
     <p className={styles.srOnly} role="status">{move.isSuccess ? "Task status updated everywhere." : create.isSuccess ? "Task created." : ""}</p>
-    {create.isError || move.isError ? <p role="alert">{(create.error || move.error)?.message}</p> : null}</div>;
+    {create.isError || move.isError ? <StatusNotice tone="error"><strong>{(create.error || move.error)?.message}</strong><p>Your Task view and draft are preserved. Try the action again.</p></StatusNotice> : null}</div>;
 }

@@ -4,24 +4,20 @@
   padding: clamp(3.75rem, 7vw, 6.2rem) clamp(1.5rem, 4vw, 4.5rem);
   font-family: var(--stash-font-sans);
 }
-.page header { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; padding-bottom: clamp(2.5rem, 4vw, 3.6rem); border-bottom: 1px solid var(--stash-border-subtle); }
-.eyebrow { margin: 0 0 1.4rem; color: var(--stash-color-accent); font-size: .74rem; font-weight: 740; letter-spacing: .11em; text-transform: uppercase; }
-.page h1 { max-width: 52rem; margin: 0; font-family: var(--stash-font-display); font-size: clamp(4rem, 6vw, 5.35rem); font-weight: 450; letter-spacing: -.058em; line-height: .94; }
-.page header p:not(.eyebrow) { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-.page form { margin-top: clamp(4rem, 6vw, 5.2rem); padding: 1.25rem; background: color-mix(in srgb, var(--stash-color-surface) 76%, transparent); border: 1px solid var(--stash-border-subtle); border-radius: var(--stash-radius-md); box-shadow: var(--stash-shadow-paper); }
-.page form label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-.page form > div { display: flex; gap: .8rem; }
+.page header { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(18rem, .8fr); align-items: end; gap: clamp(2rem, 6vw, 6rem); padding-bottom: clamp(2rem, 4vw, 3.5rem); border-bottom: 1px solid var(--stash-border-subtle); }
+.page h1 { max-width: 52rem; margin: 0; font-family: var(--stash-font-display); font-size: clamp(3rem, 5vw, 4.25rem); font-weight: 460; letter-spacing: -.052em; line-height: .98; }
+.page header p { max-width: 38rem; margin: 1rem 0 0; color: var(--stash-color-muted); line-height: 1.6; }
+.page form { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: .8rem; }
 .page input, .page select { min-height: 3.55rem; padding: .75rem 1rem; color: var(--stash-color-ink); background: color-mix(in srgb, var(--stash-color-surface) 86%, transparent); border: 1px solid var(--stash-border-subtle); border-radius: .55rem; font: inherit; }
-.page input { min-width: 0; flex: 1; box-shadow: inset 0 1px 3px rgb(38 35 29 / 3%); }
+.page input { min-width: 0; box-shadow: inset 0 1px 3px rgb(38 35 29 / 3%); }
 .page input::placeholder { color: #5f625c; opacity: 1; }
-.page button { min-height: 2.75rem; padding: .65rem .9rem; color: var(--stash-color-ink); background: transparent; border: 0; border-radius: 0; font: 620 .86rem/1 var(--stash-font-sans); cursor: pointer; }
 .page button:focus-visible, .page input:focus-visible, .page select:focus-visible { outline: 3px solid var(--stash-color-focus); outline-offset: 3px; }
-.page form button { min-width: 9rem; color: var(--stash-color-accent-contrast); background: var(--stash-color-accent); border: 1px solid var(--stash-color-accent); border-radius: .55rem; box-shadow: 0 .35rem 1rem rgb(218 61 34 / 13%); }
-.page nav { display: flex; align-items: center; gap: clamp(1rem, 3vw, 2.65rem); min-height: 6.2rem; margin: 0; overflow-x: auto; }
-.page nav span { color: var(--stash-color-muted); font-size: .86rem; font-weight: 520; }
-.page nav button { position: relative; flex: 0 0 auto; padding-inline: 0; color: var(--stash-color-muted); }
-.page nav button[aria-pressed="true"] { color: var(--stash-color-accent); }
-.page nav button[aria-pressed="true"]::after { content: ""; position: absolute; right: 0; bottom: .25rem; left: 0; height: 2px; border-radius: 999px; background: var(--stash-color-accent); }
+.page form button { min-width: 9rem; box-shadow: 0 .35rem 1rem rgb(218 61 34 / 13%); }
+.page nav { display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-height: 5.5rem; margin: 0; overflow-x: auto; }
+.filters, .viewControls { display: flex; align-items: center; gap: .5rem; }
+.page nav span { margin-right: .35rem; color: var(--stash-color-muted); font-size: .78rem; font-weight: 650; }
+.page nav button { flex: 0 0 auto; }
+.page nav button[aria-pressed="true"] { color: var(--stash-color-ink); border-color: var(--stash-color-accent); background: var(--stash-color-accent-soft); }
 .tasks { position: relative; overflow: hidden; display: block; border: 1px solid var(--stash-border-subtle); border-radius: var(--stash-radius-md); background: color-mix(in srgb, var(--stash-color-surface) 76%, transparent); box-shadow: var(--stash-shadow-paper); }
 .tasks[data-view="list"]::before { content: "Task"; display: block; padding: 1rem 1.5rem; color: var(--stash-color-muted); background: color-mix(in srgb, var(--stash-color-canvas-deep) 42%, transparent); border-bottom: 1px solid var(--stash-border-subtle); font-size: .66rem; font-weight: 720; letter-spacing: .08em; text-transform: uppercase; }
 .tasks[data-view="list"]::after { content: "Status"; position: absolute; top: 1rem; right: 5.5rem; color: var(--stash-color-muted); font-size: .66rem; font-weight: 720; letter-spacing: .08em; text-transform: uppercase; }
@@ -47,12 +43,12 @@
 .srOnly { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 @media (max-width: 760px) {
   .page { padding: 2.8rem 1.15rem 3rem; }
-  .page h1 { font-size: clamp(3.25rem, 17vw, 4.4rem); }
-  .page header p:not(.eyebrow) { position: static; width: auto; height: auto; margin: 1rem 0 0; overflow: visible; clip-path: none; white-space: normal; color: var(--stash-color-muted); line-height: 1.55; }
-  .page form { margin-top: 2.5rem; padding: .85rem; }
-  .page form > div { align-items: stretch; flex-direction: column; }
+  .page header { grid-template-columns: 1fr; }
+  .page h1 { font-size: clamp(2.8rem, 15vw, 3.8rem); }
+  .page form { grid-template-columns: 1fr; }
   .page form button { min-width: 0; min-height: 3.25rem; }
-  .page nav { gap: 1.5rem; min-height: 5.2rem; }
+  .page nav { align-items: flex-start; flex-direction: column; padding-block: 1rem; }
+  .viewControls { max-width: 100%; overflow-x: auto; }
   .tasks[data-view="list"]::before, .tasks[data-view="list"]::after { display: none; }
   .tasks[data-view="list"] [data-task-row] { grid-template-columns: 1.7rem minmax(0, 1fr); gap: .85rem; min-height: 8.5rem; padding: 1.2rem; }
   .tasks [data-status-control] { grid-column: 2; justify-self: start; }

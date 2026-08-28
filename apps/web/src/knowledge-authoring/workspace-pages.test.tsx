@@ -33,6 +33,17 @@ describe("core React workflows", () => {
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Object type" })).toHaveValue(""));
   });
 
+  it("uses the common disclosed filter language and one Search heading", () => {
+    const fetcher = vi.fn(async () => Response.json({ results: [], total: 0, facets: { kinds: [], projects: [], statuses: [] } }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { container } = render(<QueryClientProvider client={client}><MemoryRouter initialEntries={["/app/search"]}><SearchPage workspaceId="workspace-1" token="member" fetcher={fetcher as typeof fetch} /></MemoryRouter></QueryClientProvider>);
+
+    expect(screen.getByRole("heading", { name: "Search" })).toBeInTheDocument();
+    expect(container.querySelectorAll("h1")).toHaveLength(1);
+    expect(screen.getByRole("group", { name: "Filters" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Clear filters" })).toHaveAttribute("data-variant", "secondary");
+  });
+
   it("does not animate search results when reduced motion is requested", async () => {
     const motion = vi.spyOn(gsap, "from");
     vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true, addEventListener() {}, removeEventListener() {} })));
@@ -53,6 +64,7 @@ describe("core React workflows", () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<QueryClientProvider client={client}><MemoryRouter initialEntries={["/app/search?q=release&status=Ready"]}><SearchPage workspaceId="workspace-1" token="member" fetcher={fetcher as typeof fetch} /></MemoryRouter></QueryClientProvider>);
     const alert = await screen.findByRole("alert"); await waitFor(() => expect(alert).toHaveFocus());
+    expect(alert).toHaveTextContent("Your search and filters are preserved");
     expect(screen.getByRole("textbox", { name: "Status" })).toHaveValue("Ready");
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(await screen.findByText("No permitted matches")).toBeVisible();

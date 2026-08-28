@@ -16,17 +16,19 @@ test("@a11y saves Member localization and recovers from a failed update", async 
     if (route.request().method() === "PUT" && attempts++ === 0) return route.fulfill({ status: 503, json: { message: "Preferences are temporarily unavailable. No changes were saved." } });
     return route.fulfill({ json: { locale: attempts ? "fr-FR" : "en", timeZone: "UTC", dateFormat: "medium", weekStartsOn: "monday" } });
   });
-  await page.emulateMedia({ reducedMotion: "reduce" }); await page.goto("/app/settings");
-  const locale = page.getByRole("textbox", { name: "Locale" }); await locale.fill("fr-FR"); await page.getByRole("button", { name: "Save regional settings" }).click();
+  await page.setViewportSize({ width: 320, height: 760 }); await page.emulateMedia({ reducedMotion: "reduce" }); await page.goto("/app/settings");
+  await expect(page.getByRole("heading", { name: "Personal settings" })).toBeVisible(); await expect(page.getByRole("heading", { level: 1 })).toHaveCount(1);
+  const locale = page.getByRole("textbox", { name: "Locale" }); await locale.fill("fr-FR"); const save = page.getByRole("button", { name: "Save regional settings" }); await save.focus(); await page.keyboard.press("Enter");
   await expect(page.getByRole("alert")).toContainText("No changes were saved"); await expect(locale).toHaveValue("fr-FR");
-  await page.getByRole("button", { name: "Save regional settings" }).click(); await expect(page.getByRole("status")).toContainText("Saved successfully");
+  await save.focus(); await page.keyboard.press("Enter"); await expect(page.getByRole("status")).toContainText("Saved successfully");
+  expect(await page.locator("body").evaluate((body) => body.scrollWidth <= body.clientWidth)).toBe(true);
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 });
 
 test("ordinary Members cannot discover or deep-link Organization administration", async ({ page }) => {
   await authenticate(page, "browser-acceptance-second-member-token"); await page.goto("/app/settings");
   await expect(page.getByRole("link", { name: "Organization" })).toHaveCount(0); await expect(page.getByRole("link", { name: "Imported identities" })).toHaveCount(0);
-  await page.goto("/app/settings/organization"); await expect(page).toHaveURL(/\/app\/settings$/); await expect(page.getByRole("heading", { name: "Make Stash work in your language and time." })).toBeVisible();
+  await page.goto("/app/settings/organization"); await expect(page).toHaveURL(/\/app\/settings$/); await expect(page.getByRole("heading", { name: "Personal settings" })).toBeVisible();
 });
 
 test("@a11y imports an Obsidian vault by keyboard and exposes every conversion outcome",async({page})=>{

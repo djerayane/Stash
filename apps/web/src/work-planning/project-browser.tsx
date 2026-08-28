@@ -2,6 +2,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 
 import styles from "./project-browser.module.css";
+import { Button, Field, StatusNotice } from "../ui/control";
 
 interface ProjectSummary { readonly id: string; readonly name: string; readonly key: string }
 interface ProjectCreationAllowed { readonly allowed: true }
@@ -28,7 +29,6 @@ export function ProjectBrowser({ token, workspaceId, fetcher = fetch, onOpenProj
   const [creatingIn, setCreatingIn] = useState<WorkspaceSummary>();
   const [name, setName] = useState("");
   const [key, setKey] = useState("");
-  const submitRef = useRef<HTMLButtonElement>(null);
   const nameRef = useRef<HTMLInputElement>(null);
   const dialogRef = useRef<HTMLElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -51,7 +51,7 @@ export function ProjectBrowser({ token, workspaceId, fetcher = fetch, onOpenProj
     const body = await responseBody(response) as { id?: string; message?: string };
     if (!response.ok || !body.id) throw new Error(body.message || "The Project could not be created.");
     return body.id;
-  }, onSuccess: (projectId) => onOpenProject(projectId), onError: () => requestAnimationFrame(() => submitRef.current?.focus()) });
+  }, onSuccess: (projectId) => onOpenProject(projectId), onError: () => requestAnimationFrame(() => dialogRef.current?.querySelector<HTMLButtonElement>('button[type="submit"]')?.focus()) });
 
   useEffect(() => { if (creatingIn) requestAnimationFrame(() => nameRef.current?.focus()); }, [creatingIn]);
   const close = () => {
@@ -74,36 +74,36 @@ export function ProjectBrowser({ token, workspaceId, fetcher = fetch, onOpenProj
 
   return <section className={styles.page} aria-labelledby="projects-title">
     <header className={styles.header}>
-      <div><p>Work planning</p><h1 id="projects-title">Projects</h1></div>
+      <div><h1 id="projects-title">Projects</h1></div>
       <p>Add a Project when related Tasks need an optional execution context and shared Workflow.</p>
     </header>
-    {workspaces.isPending ? <p className={styles.state} aria-live="polite">Loading Projects…</p>
-      : workspaces.isError ? <div className={styles.state} role="alert"><strong>Projects are unavailable.</strong><p>{workspaces.error.message}</p><button type="button" onClick={() => void workspaces.refetch()}>Try again</button></div>
+    {workspaces.isPending ? <StatusNotice className={styles.state}>Loading Projects…</StatusNotice>
+      : workspaces.isError ? <StatusNotice className={styles.state} tone="error"><strong>Projects are unavailable.</strong><p>{workspaces.error.message}</p><p>No Projects or drafts were changed. Try loading the list again.</p><Button type="button" variant="secondary" onClick={() => void workspaces.refetch()}>Try again</Button></StatusNotice>
       : visibleWorkspaces?.length ? <div className={styles.workspaceGrid}>{visibleWorkspaces.map((workspace) => {
         const reasonId = `project-creation-${workspace.id}`;
         return <article className={styles.workspace} key={workspace.id}>
-          <div className={styles.workspaceHeading}><div><span>Workspace</span><h2>{workspace.name}</h2></div>
-            <button aria-describedby={workspace.projectCreation.allowed ? undefined : reasonId}
-              disabled={!workspace.projectCreation.allowed} type="button"
+          <div className={styles.workspaceHeading}><div><h2>{workspace.name}</h2></div>
+            <Button aria-describedby={workspace.projectCreation.allowed ? undefined : reasonId}
+              disabled={!workspace.projectCreation.allowed} type="button" variant="secondary"
               onClick={(event) => { triggerRef.current = event.currentTarget; setCreatingIn(workspace); create.reset(); }}>
               Create a Project in {workspace.name}
-            </button></div>
-          {!workspace.projectCreation.allowed ? <p className={styles.denial} id={reasonId}>{workspace.projectCreation.reason}</p> : null}
+            </Button></div>
+          {!workspace.projectCreation.allowed ? <StatusNotice className={styles.denial} id={reasonId} tone="attention">{workspace.projectCreation.reason}</StatusNotice> : null}
           {workspace.projects.length ? <ul className={styles.projects}>{workspace.projects.map((project) => <li key={project.id}>
-            <button type="button" onClick={() => onOpenProject(project.id)}><strong>{project.name}</strong><span>{project.key}</span><span aria-hidden="true">Open →</span></button>
+            <Button type="button" variant="secondary" onClick={() => onOpenProject(project.id)}><strong>{project.name}</strong><span>{project.key}</span><span aria-hidden="true">Open →</span></Button>
           </li>)}</ul> : <p className={styles.empty}>No Projects yet. {workspace.projectCreation.allowed ? "Create one when a body of work needs its own Workflow." : "Projects shared with you will appear here."}</p>}
         </article>;
       })}</div> : <p className={styles.state}>No accessible Workspaces.</p>}
     {creatingIn ? <div className={styles.backdrop} onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}>
       <section aria-describedby="create-project-description" aria-labelledby="create-project-title" aria-modal="true" className={styles.dialog}
         onKeyDown={keepDialogFocus} ref={dialogRef} role="dialog" tabIndex={-1}>
-        <p className={styles.eyebrow}>{creatingIn.name}</p><h2 id="create-project-title">Create a Project</h2>
-        <p id="create-project-description">Name the work and choose a short key for Tasks, such as STASH-12.</p>
+        <h2 id="create-project-title">Create a Project</h2>
+        <p id="create-project-description">Create it in {creatingIn.name}. Name the work and choose a short key for Tasks, such as STASH-12.</p>
         <form onSubmit={(event) => { event.preventDefault(); create.mutate(); }}>
-          <label>Project name<input maxLength={200} ref={nameRef} required value={name} onChange={(event) => setName(event.target.value)} /></label>
-          <label>Project key<input autoCapitalize="characters" maxLength={20} minLength={2} pattern="[A-Za-z][A-Za-z0-9]*" required value={key} onChange={(event) => setKey(event.target.value.toUpperCase())} /></label>
-          {create.isError ? <p className={styles.error} role="alert">{create.error.message}</p> : null}
-          <div className={styles.actions}><button disabled={create.isPending} type="button" onClick={close}>Cancel</button><button className={styles.primary} disabled={create.isPending} ref={submitRef} type="submit">{create.isPending ? "Creating…" : "Create Project"}</button></div>
+          <Field label="Project name"><input maxLength={200} ref={nameRef} required value={name} onChange={(event) => setName(event.target.value)} /></Field>
+          <Field label="Project key"><input autoCapitalize="characters" maxLength={20} minLength={2} pattern="[A-Za-z][A-Za-z0-9]*" required value={key} onChange={(event) => setKey(event.target.value.toUpperCase())} /></Field>
+          {create.isError ? <StatusNotice tone="error"><strong>{create.error.message}</strong><p>Your Project name and key are preserved. Review the message and try again.</p></StatusNotice> : null}
+          <div className={styles.actions}><Button disabled={create.isPending} type="button" variant="secondary" onClick={close}>Cancel</Button><Button pending={create.isPending} pendingLabel="Creating…" type="submit">Create Project</Button></div>
         </form>
       </section>
     </div> : null}

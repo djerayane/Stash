@@ -4,6 +4,7 @@ import gsap from "gsap";
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
 import styles from "./member-administration.module.css";
+import { Button, StatusNotice } from "./ui/control";
 
 export interface OrganizationAdministration {
   readonly organizationId: string;
@@ -45,11 +46,11 @@ export function MemberAdministrationPage({ administrations, activeOrganizationId
   }, { dependencies: [candidate?.id] });
   useEffect(() => { if (candidate) confirmationRef.current?.focus(); }, [candidate]);
 
-  if (!administration || !token) return <div className={styles.page}><p className={styles.error} role="alert">Organization Member administration is unavailable for this account.</p></div>;
+  if (!administration || !token) return <div className={styles.page}><StatusNotice tone="error">Organization Member administration is unavailable for this account. No access was changed.</StatusNotice></div>;
   const eligibleMembers = administration.members.filter(({ id }) => id !== currentMemberId && id !== departed?.id);
   return <article className={styles.page} aria-labelledby="members-title">
-    <header className={styles.header}><p className={styles.kicker}>{administration.organizationName}</p><h1 id="members-title">Member access</h1>
-      <p>End Organization access without erasing the work and decisions a person contributed.</p></header>
+    <header className={styles.header}><h1 id="members-title">Member access</h1>
+      <p>Review access to {administration.organizationName} without erasing the work and decisions a person contributed.</p></header>
     {availableAdministrations.length > 1 ? <label className={styles.organizationPicker}>Organization
       <select value={administration.organizationId} onChange={(event) => {
         removal.reset(); setCandidate(undefined); setDeparted(undefined); setSelectedOrganizationId(event.target.value);
@@ -61,14 +62,14 @@ export function MemberAdministrationPage({ administrations, activeOrganizationId
     </section> : null}
     <section className={styles.roster} aria-labelledby="active-members"><div><h2 id="active-members">Active Members</h2><p>Only current, server-verified Organization Members are eligible.</p></div>
       <ul>{eligibleMembers.map((member) => <li key={member.id}><span><strong>{member.name}</strong><small>{member.email} · {member.role}</small></span>
-        <button type="button" onClick={() => { removal.reset(); setCandidate(member); }}>Review departure</button></li>)}</ul>
+        <Button type="button" variant="secondary" onClick={() => { removal.reset(); setCandidate(member); }}>Review departure</Button></li>)}</ul>
     </section>
     {candidate ? <div className={styles.confirmation} ref={confirmationRef} role="region" aria-labelledby="confirm-departure" tabIndex={-1}>
-      <p className={styles.kicker}>Confirm authority change</p><h2 id="confirm-departure">Remove {candidate.name} from {administration.organizationName}?</h2>
+      <h2 id="confirm-departure">Remove {candidate.name} from {administration.organizationName}?</h2>
       <p>Their active authority will be revoked immediately. Authorship stays preserved, and Tasks remain visibly marked until someone takes responsibility.</p>
-      <div className={styles.actions}><button type="button" onClick={() => setCandidate(undefined)}>Keep Member</button>
-        <button className={styles.danger} type="button" disabled={removal.isPending} onClick={() => removal.mutate(candidate)}>{removal.isPending ? "Removing…" : "Remove Member"}</button></div>
-      {removal.isError ? <p className={styles.error} role="alert">{removal.error.message}</p> : null}
+      <div className={styles.actions}><Button type="button" variant="secondary" onClick={() => setCandidate(undefined)}>Keep Member</Button>
+        <Button type="button" variant="danger" pending={removal.isPending} pendingLabel="Removing…" onClick={() => removal.mutate(candidate)}>Remove Member</Button></div>
+      {removal.isError ? <StatusNotice tone="error">{removal.error.message} The Member still has their previous access.</StatusNotice> : null}
     </div> : null}
   </article>;
 }
