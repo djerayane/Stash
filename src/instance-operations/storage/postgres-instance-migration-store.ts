@@ -9,8 +9,7 @@ import type { PostgresPortableProjectionContributor } from "./portable-projectio
 import { PostgresKernel, type PostgresQueryable } from "./postgres-kernel.js";
 
 const authenticationKeyCheckLockId = 795_541_992;
-const portableProjectionObjectKinds = ["Workspace", "Project", "Workflow", "WorkspaceWorkflow", "Collection", "ViewBlock", "Board", "Note", "NoteLocation", "NoteLink", "Task", "GuestProjectAccess", "RepositoryConnection", "Attachment", "Discussion", "DiscussionWorkLink", "Activity"] as const;
-const portableProjectionObjectKindSql = portableProjectionObjectKinds.map((kind) => `'${kind}'`).join(", ");
+const corePortableProjectionObjectKinds = ["Workspace", "Project", "Workflow", "WorkspaceWorkflow", "Collection", "ViewBlock", "Board", "Note", "NoteLocation", "NoteLink", "Task", "GuestProjectAccess", "RepositoryConnection", "Attachment", "Discussion", "DiscussionWorkLink", "Activity"] as const;
 
 export interface PostgresInstanceMigrationHooks {
   prepareRegistration(client: PostgresQueryable): Promise<void>;
@@ -423,6 +422,11 @@ export class PostgresInstanceMigrationStore {
 
   async ensurePortableProjectionSchema(client: PostgresQueryable): Promise<void> {
     await this.kernel.advisoryTransactionLock(client, 1_094_218_495);
+    const portableProjectionObjectKinds = [...new Set([
+      ...corePortableProjectionObjectKinds,
+      ...this.hooks.portableProjectionContributors.flatMap(({ portableObjectKinds }) => portableObjectKinds),
+    ])];
+    const portableProjectionObjectKindSql = portableProjectionObjectKinds.map((kind) => `'${kind}'`).join(", ");
     await client.query(`
         CREATE TABLE IF NOT EXISTS stash_portable_projection_outbox (
           object_kind TEXT NOT NULL CONSTRAINT stash_portable_projection_outbox_object_kind_check CHECK (object_kind IN (${portableProjectionObjectKindSql})),

@@ -123,6 +123,9 @@ describe("embedded-to-PostgreSQL migration key preflight", () => {
     assert.ok(statements.some((sql) => sql.includes("pg_class")));
     assert.ok(statements.some((sql) => sql.includes("pg_proc")));
     assert.ok(statements.some((sql) => sql.includes("pg_type")));
+    const portableSchema = statements.find((sql) => sql.includes("CREATE TABLE IF NOT EXISTS stash_portable_projection_outbox"));
+    assert.match(portableSchema ?? "", /'VisualizationBlock'/,
+      "the portable projection constraint must include capability-contributed object kinds");
     assert.ok(statements.some((sql) => /'f'.*'c'.*'i'.*'I'/.test(sql)), "foreign tables, composite types, and indexes must be rejected");
     for (const catalog of ["pg_collation", "pg_operator", "pg_opfamily", "pg_opclass", "pg_conversion", "pg_ts_config", "pg_ts_dict",
       "pg_ts_parser", "pg_ts_template", "pg_statistic_ext", "pg_extension", "pg_constraint", "pg_default_acl"]) {

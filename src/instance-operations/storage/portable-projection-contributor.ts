@@ -3,6 +3,7 @@ import type { PostgresQueryable } from "./postgres-kernel.js";
 
 /** Capability-owned durable projections, without teaching the database kernel capability tables or schemas. */
 export interface PostgresPortableProjectionContributor {
+  readonly portableObjectKinds: readonly string[];
   preparePortableObjects(client: PostgresQueryable): Promise<void>;
   importPortableObjects(client: PostgresQueryable, objects: readonly PortableDurableObject[], workspaceId: string): Promise<void>;
   readPortableObjects(client: PostgresQueryable, input: {
