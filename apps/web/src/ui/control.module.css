@@ -1,0 +1,17 @@
+.button, .iconButton { min-height: var(--stash-control-height); border: 1px solid transparent; border-radius: var(--stash-radius-control); font-weight: 680; cursor: pointer; transition: color var(--stash-duration-fast) var(--stash-ease-standard), background var(--stash-duration-fast) var(--stash-ease-standard), border-color var(--stash-duration-fast) var(--stash-ease-standard), transform var(--stash-duration-fast) var(--stash-ease-standard); }
+.button { display: inline-flex; align-items: center; justify-content: center; padding: .65rem 1rem; }
+.button:hover:not(:disabled), .iconButton:hover:not(:disabled) { transform: translateY(-1px); }
+.button:disabled, .iconButton:disabled { cursor: not-allowed; opacity: .55; }
+.primary { color: var(--stash-color-accent-contrast); background: var(--stash-color-accent); border-color: var(--stash-color-accent); }
+.primary:hover:not(:disabled) { background: var(--stash-color-accent-hover); }
+.secondary { color: var(--stash-color-ink); background: var(--stash-color-surface); border-color: var(--stash-border-subtle); }
+.danger { color: var(--stash-color-accent-contrast); background: var(--stash-color-error); border-color: var(--stash-color-error); }
+.iconButton { width: var(--stash-control-height); display: inline-grid; place-items: center; padding: 0; color: var(--stash-color-ink); background: var(--stash-color-surface); border-color: var(--stash-border-subtle); }
+.field { display: grid; gap: .35rem; color: var(--stash-color-muted); font-size: .78rem; font-weight: 650; }
+.field :where(input, select, textarea) { min-height: var(--stash-control-height); padding: .65rem .75rem; color: var(--stash-color-ink); background: var(--stash-color-surface); border: 1px solid var(--stash-border-subtle); border-radius: var(--stash-radius-control); }
+.field small { color: var(--stash-color-faint); font-weight: 450; line-height: 1.45; }
+.notice { padding: .8rem 1rem; color: var(--stash-color-muted); border-left: 2px solid var(--stash-border-strong); background: color-mix(in srgb, var(--stash-color-surface) 74%, transparent); line-height: 1.5; }
+.success { color: var(--stash-color-sage-deep); border-left-color: var(--stash-color-success); background: var(--stash-color-success-surface); }
+.attention { color: var(--stash-color-ink); border-left-color: var(--stash-color-accent); }
+.error { color: var(--stash-color-error); border-left-color: var(--stash-color-error); }
+@media (prefers-reduced-motion: reduce) { .button, .iconButton { transition: none; } }

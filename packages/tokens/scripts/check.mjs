@@ -1,2 +1,10 @@
-import { access } from "node:fs/promises";
-await access(new URL("../src/tokens.css", import.meta.url));
+import { readFile } from "node:fs/promises";
+
+const tokens = await readFile(new URL("../src/tokens.css", import.meta.url), "utf8");
+for (const name of [
+  "--stash-color-canvas", "--stash-color-surface", "--stash-color-ink", "--stash-color-accent",
+  "--stash-color-success", "--stash-border-subtle", "--stash-color-focus", "--stash-control-height",
+  "--stash-radius-control", "--stash-duration-fast", "--stash-ease-standard",
+]) {
+  if (!tokens.includes(`${name}:`)) throw new Error(`Missing required design token ${name}`);
+}

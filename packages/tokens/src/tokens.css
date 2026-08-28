@@ -24,6 +24,8 @@
   --stash-color-sage: #929b88;
   --stash-color-sage-deep: #26382e;
   --stash-color-sage-soft: #d9ddd4;
+  --stash-color-success: #67745f;
+  --stash-color-success-surface: #e1e5dc;
   --stash-shadow-paper: 0 1.1rem 3.6rem rgb(54 49 41 / 7%), 0 .15rem .5rem rgb(54 49 41 / 5%);
   --stash-space-1: 0.25rem;
   --stash-space-2: 0.5rem;
@@ -33,6 +35,13 @@
   --stash-space-8: 2rem;
   --stash-radius-sm: 0.5rem;
   --stash-radius-md: 0.875rem;
+  --stash-radius-control: 0.55rem;
+  --stash-radius-surface: 0.9rem;
+  --stash-control-height: 2.75rem;
+  --stash-control-height-compact: 2.25rem;
+  --stash-duration-fast: 140ms;
+  --stash-duration-standard: 220ms;
+  --stash-ease-standard: cubic-bezier(.2, .8, .2, 1);
   --stash-font-sans: Geist, ui-sans-serif, system-ui, sans-serif;
   --stash-font-display: Geist, ui-sans-serif, system-ui, sans-serif;
 }

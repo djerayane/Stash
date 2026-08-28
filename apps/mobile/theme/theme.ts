@@ -1,0 +1,22 @@
+export const stashTheme = Object.freeze({
+  colors: Object.freeze({
+    canvas: "#f4f1e9",
+    canvasDeep: "#e9e5dc",
+    surface: "#fffdf8",
+    ink: "#181a18",
+    secondaryInk: "#62645f",
+    accent: "#bf381f",
+    accentPressed: "#aa2e19",
+    accentContrast: "#ffffff",
+    success: "#67745f",
+    successSurface: "#e1e5dc",
+    rule: "#d8d3c9",
+    error: "#9b271d",
+  }),
+  spacing: Object.freeze({ xs: 4, sm: 8, md: 12, lg: 20, xl: 32 }),
+  radius: Object.freeze({ control: 10, surface: 18 }),
+  type: Object.freeze({ caption: 13, body: 16, title: 32 }),
+  shadow: Object.freeze({ color: "#363129", opacity: 0.08, radius: 20, offsetY: 8 }),
+  motion: Object.freeze({ fast: 140, standard: 220 }),
+  controlHeight: 44,
+});
