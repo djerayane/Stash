@@ -14,6 +14,8 @@ const taskId = "99999999-9999-4999-8999-999999999999";
 const statusId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const adaId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const graceId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+const ordinalNameId = "abababab-abab-4bab-8bab-abababababab";
+const prefixedNameId = "bcbcbcbc-bcbc-4cbc-8cbc-bcbcbcbcbcbc";
 
 afterEach(cleanup);
 
@@ -119,10 +121,46 @@ describe("WorkspaceReader", () => {
     render(<WorkspaceReader snapshot={assignedSnapshot} pendingTaskIds={new Set()} onUpdateTaskStatus={vi.fn()} />);
     fireEvent.click(screen.getByRole("tab", { name: "Views" }));
 
-    expect(screen.getByRole("heading", { name: "Alex Smith · 1 of 2" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "Alex Smith · 2 of 2" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Group 1 of 2 · Alex Smith" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Group 2 of 2 · Alex Smith" })).toBeTruthy();
     expect(screen.queryByText(new RegExp(adaId))).toBeNull();
     expect(screen.queryByText(new RegExp(graceId))).toBeNull();
+  });
+
+  it("keeps assignee group labels unique when a Member name matches a generated ordinal label", () => {
+    const assignedSnapshot = {
+      ...snapshot,
+      members: [
+        { id: adaId, name: "Alex Smith" },
+        { id: graceId, name: "Alex Smith" },
+        { id: ordinalNameId, name: "Alex Smith · 1 of 2" },
+        { id: prefixedNameId, name: "Group 1 of 4 · Alex Smith" },
+      ],
+      tasks: [
+        { ...snapshot.tasks[0]!, assigneeIds: [adaId] },
+        { ...snapshot.tasks[0]!, id: "ffffffff-ffff-4fff-8fff-ffffffffffff", title: "Validate compiler", assigneeIds: [graceId] },
+        { ...snapshot.tasks[0]!, id: "acacacac-acac-4cac-8cac-acacacacacac", title: "Review generated labels", assigneeIds: [ordinalNameId] },
+        { ...snapshot.tasks[0]!, id: "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd", title: "Review prefixed labels", assigneeIds: [prefixedNameId] },
+      ],
+      viewBlocks: [{ ...snapshot.viewBlocks[1]!, definition: {
+        ...snapshot.viewBlocks[1]!.definition, groupBy: "task:assignee" as const,
+      } }],
+    };
+    render(<WorkspaceReader snapshot={assignedSnapshot} pendingTaskIds={new Set()} onUpdateTaskStatus={vi.fn()} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Views" }));
+
+    const labels = screen.getAllByRole("heading", { name: /Alex Smith/ }).map(({ textContent }) => textContent);
+    expect(labels).toEqual([
+      "Group 1 of 4 · Alex Smith",
+      "Group 2 of 4 · Alex Smith · 1 of 2",
+      "Group 3 of 4 · Group 1 of 4 · Alex Smith",
+      "Group 4 of 4 · Alex Smith",
+    ]);
+    expect(new Set(labels).size).toBe(4);
+    expect(screen.queryByText(new RegExp(adaId))).toBeNull();
+    expect(screen.queryByText(new RegExp(graceId))).toBeNull();
+    expect(screen.queryByText(new RegExp(ordinalNameId))).toBeNull();
+    expect(screen.queryByText(new RegExp(prefixedNameId))).toBeNull();
   });
 
   it("disambiguates repeated unknown assignee groups without exposing their IDs", () => {
@@ -139,8 +177,8 @@ describe("WorkspaceReader", () => {
     render(<WorkspaceReader snapshot={assignedSnapshot} pendingTaskIds={new Set()} onUpdateTaskStatus={vi.fn()} />);
     fireEvent.click(screen.getByRole("tab", { name: "Views" }));
 
-    expect(screen.getByRole("heading", { name: "Unknown Member · 1 of 2" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "Unknown Member · 2 of 2" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Group 1 of 2 · Unknown Member" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Group 2 of 2 · Unknown Member" })).toBeTruthy();
     expect(screen.queryByText(new RegExp(adaId))).toBeNull();
     expect(screen.queryByText(new RegExp(graceId))).toBeNull();
   });

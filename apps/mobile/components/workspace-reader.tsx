@@ -202,14 +202,12 @@ function groupTasksForReading(tasks: MobileCanonicalTask[], groupBy: string | un
   if (groupBy !== "task:assignee") return grouped;
   const totals = new Map<string, number>();
   for (const group of grouped) totals.set(group.label, (totals.get(group.label) ?? 0) + 1);
-  const occurrences = new Map<string, number>();
-  return grouped.map((group) => {
-    const total = totals.get(group.label) ?? 1;
-    if (total === 1) return group;
-    const occurrence = (occurrences.get(group.label) ?? 0) + 1;
-    occurrences.set(group.label, occurrence);
-    return { ...group, label: `${group.label} · ${occurrence} of ${total}` };
-  });
+  const hasDuplicateLabels = grouped.some(({ label }) => (totals.get(label) ?? 1) > 1);
+  if (!hasDuplicateLabels) return grouped;
+  return grouped.map((group, index) => ({
+    ...group,
+    label: `Group ${index + 1} of ${grouped.length} · ${group.label}`,
+  }));
 }
 
 function taskValue(task: MobileCanonicalTask, propertyId: string): unknown {
