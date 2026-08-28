@@ -1,6 +1,7 @@
 import type { PostgresKernel, PostgresQueryable } from "../instance-operations/storage/postgres-kernel.js";
 import { effectiveNoteReadSql } from "./postgres-note-access.js";
-import type { Collection as CanonicalCollection, CollectionImpact, CollectionRecord as CanonicalRecord, ViewBlock as CanonicalViewBlock, ViewDefinition } from "@stash/domain-types";
+import { normalizeCollection, type Collection as CanonicalCollection, type CollectionImpact, type CollectionPropertyImpact,
+  type CollectionPropertyValue, type CollectionRecord as CanonicalRecord, type ViewBlock as CanonicalViewBlock, type ViewDefinition } from "@stash/domain-types";
 import type { CollectionProperty as CanonicalProperty } from "@stash/domain-types";
 import type { CollectionRepository, CollectionViewResult } from "./collections.js";
 
@@ -145,17 +146,34 @@ export class PostgresCollectionRepository implements CollectionRepository {
     });
   }
 
-  async updateCollectionProperty(memberId: string, collectionId: string, property: CanonicalProperty): Promise<
-    { status: "updated"; collection: CanonicalCollection } | { status: "collection_not_found" | "property_not_found" }> {
+  async updateCollectionProperty(memberId: string, collectionId: string, propertyId: string, input: Readonly<Record<string, unknown>>): Promise<
+    { status: "updated"; collection: CanonicalCollection }
+    | { status: "collection_not_found" | "property_not_found" | "primary_property_required" | "invalid_property" }> {
     return this.kernel.transaction(async (client) => {
       await this.prepare(client);
       if (!(await client.query(`SELECT collection.id FROM stash_collections collection JOIN stash_workspaces workspace
         ON workspace.id=collection.workspace_id WHERE collection.id=$1 AND (${member}) FOR UPDATE OF collection`, [collectionId, memberId])).rowCount)
         return { status: "collection_not_found" as const };
-      const configuration = property.type === "single_select" || property.type === "multi_select" ? { options: property.options }
-        : property.type === "relation" ? { target: property.target } : {};
+      const current = await this.canonicalCollection(client, collectionId);
+      const property = current.properties.find(({ id }) => id === propertyId);
+      if (!property) return { status: "property_not_found" as const };
+      if (property.type === "text" && input.type !== undefined && input.type !== "text"
+        && current.properties.filter(({ type }) => type === "text").length === 1)
+        return { status: "primary_property_required" as const };
+      const candidate: Record<string, unknown> = { ...property, ...input, id: property.id, position: property.position };
+      if (input.type !== "single_select" && input.type !== "multi_select" && input.type !== undefined) delete candidate.options;
+      if (input.type !== "relation" && input.type !== undefined) delete candidate.target;
+      let normalized: CanonicalCollection;
+      try { normalized = normalizeCollection({ ...current,
+        properties: current.properties.map((entry) => entry.id === propertyId ? candidate : entry) }); }
+      catch { return { status: "invalid_property" as const }; }
+      if (current.properties.some(({ type }) => type === "text") && !normalized.properties.some(({ type }) => type === "text"))
+        return { status: "primary_property_required" as const };
+      const next = normalized.properties.find(({ id }) => id === propertyId)!;
+      const configuration = next.type === "single_select" || next.type === "multi_select" ? { options: next.options }
+        : next.type === "relation" ? { target: next.target } : {};
       const updated = await client.query(`UPDATE stash_collection_properties SET name=$3,property_type=$4,configuration=$5::jsonb
-        WHERE collection_id=$1 AND id=$2 RETURNING id`, [collectionId, property.id, property.name, property.type, JSON.stringify(configuration)]);
+        WHERE collection_id=$1 AND id=$2 RETURNING id`, [collectionId, next.id, next.name, next.type, JSON.stringify(configuration)]);
       if (!updated.rowCount) return { status: "property_not_found" as const };
       const collection = await this.canonicalCollection(client, collectionId);
       await this.projection(client, "Collection", collectionId, collection.schema, collection);
@@ -182,26 +200,41 @@ export class PostgresCollectionRepository implements CollectionRepository {
     });
   }
 
-  async deleteCollectionProperty(memberId: string, collectionId: string, propertyId: string): Promise<
-    { status: "updated"; collection: CanonicalCollection; impact: { affectedValues: number; affectedRelations: number; affectedViews: number } }
-    | { status: "collection_not_found" | "property_not_found" }> {
+  async previewCollectionPropertyRemoval(memberId: string, collectionId: string, propertyId: string): Promise<
+    { status: "found"; impact: CollectionPropertyImpact }
+    | { status: "collection_not_found" | "property_not_found" | "primary_property_required" }> {
+    return this.kernel.withSession(async (client) => {
+      await this.prepare(client);
+      if (!(await client.query(`SELECT collection.id FROM stash_collections collection JOIN stash_workspaces workspace
+        ON workspace.id=collection.workspace_id WHERE collection.id=$1 AND (${member})`, [collectionId, memberId])).rowCount)
+        return { status: "collection_not_found" as const };
+      const collection = await this.canonicalCollection(client, collectionId);
+      const property = collection.properties.find(({ id }) => id === propertyId);
+      if (!property) return { status: "property_not_found" as const };
+      if (property.type === "text" && collection.properties.filter(({ type }) => type === "text").length === 1)
+        return { status: "primary_property_required" as const };
+      return { status: "found" as const, impact: (await this.propertyRemovalImpact(client, collectionId, propertyId, property.type, false)).impact };
+    });
+  }
+
+  async deleteCollectionProperty(memberId: string, collectionId: string, propertyId: string, impactToken: string): Promise<
+    { status: "updated"; collection: CanonicalCollection; impact: CollectionPropertyImpact }
+    | { status: "impact_changed"; impact: CollectionPropertyImpact }
+    | { status: "collection_not_found" | "property_not_found" | "primary_property_required" }> {
     return this.kernel.transaction(async (client) => {
       await this.prepare(client);
       if (!(await client.query(`SELECT collection.id FROM stash_collections collection JOIN stash_workspaces workspace
         ON workspace.id=collection.workspace_id WHERE collection.id=$1 AND (${member}) FOR UPDATE OF collection`, [collectionId, memberId])).rowCount)
         return { status: "collection_not_found" as const };
-      const property = await client.query<{ property_type: string }>(`SELECT property_type FROM stash_collection_properties
-        WHERE collection_id=$1 AND id=$2 FOR UPDATE`, [collectionId, propertyId]);
-      if (!property.rows[0]) return { status: "property_not_found" as const };
-      const values = await client.query<{ affected_values: number; affected_relations: number }>(`SELECT count(*)::int affected_values,
-        COALESCE(sum(CASE WHEN jsonb_typeof(value)='array' THEN jsonb_array_length(value) ELSE 0 END),0)::int affected_relations
-        FROM stash_collection_record_values WHERE property_id=$1`, [propertyId]);
-      const viewRows = await client.query<{ id: string }>("SELECT id FROM stash_view_blocks WHERE source_collection_id=$1 FOR UPDATE", [collectionId]);
-      const affectedViews: string[] = [];
-      for (const { id } of viewRows.rows) {
+      const current = await this.canonicalCollection(client, collectionId);
+      const property = current.properties.find(({ id }) => id === propertyId);
+      if (!property) return { status: "property_not_found" as const };
+      if (property.type === "text" && current.properties.filter(({ type }) => type === "text").length === 1)
+        return { status: "primary_property_required" as const };
+      const exact = await this.propertyRemovalImpact(client, collectionId, propertyId, property.type, true);
+      if (exact.impact.token !== impactToken) return { status: "impact_changed" as const, impact: exact.impact };
+      for (const id of exact.affectedViewIds) {
         const view = await this.canonicalView(client, id); const definition = withoutProperty(view.definition, propertyId);
-        if (JSON.stringify(definition) === JSON.stringify(view.definition)) continue;
-        affectedViews.push(id);
         await client.query("UPDATE stash_view_blocks SET definition=$2::jsonb WHERE id=$1", [id, JSON.stringify(definition)]);
         await this.projection(client, "ViewBlock", id, view.schema, { ...view, definition });
       }
@@ -212,11 +245,7 @@ export class PostgresCollectionRepository implements CollectionRepository {
       for (const [index, row] of remaining.rows.entries()) await client.query("UPDATE stash_collection_properties SET position=$2 WHERE id=$1", [row.id, index + 1]);
       const collection = await this.canonicalCollection(client, collectionId);
       await this.projection(client, "Collection", collectionId, collection.schema, collection);
-      return { status: "updated" as const, collection, impact: {
-        affectedValues: Number(values.rows[0]?.affected_values ?? 0),
-        affectedRelations: property.rows[0].property_type === "relation" ? Number(values.rows[0]?.affected_relations ?? 0) : 0,
-        affectedViews: affectedViews.length,
-      } };
+      return { status: "updated" as const, collection, impact: exact.impact };
     });
   }
 
@@ -262,18 +291,26 @@ export class PostgresCollectionRepository implements CollectionRepository {
     });
   }
 
-  async updateCollectionRecord(memberId: string, collectionId: string, record: CanonicalRecord): Promise<
-    { status: "updated"; record: CanonicalRecord } | { status: "collection_not_found" | "record_not_found" }> {
+  async updateCollectionRecordValues(memberId: string, collectionId: string, recordId: string,
+    values: Readonly<Record<string, CollectionPropertyValue>>): Promise<
+    { status: "updated"; record: CanonicalRecord }
+    | { status: "collection_not_found" | "record_not_found" | "invalid_record" }> {
     return this.kernel.transaction(async (client) => {
       await this.prepare(client);
       if (!(await client.query(`SELECT collection.id FROM stash_collections collection JOIN stash_workspaces workspace
         ON workspace.id=collection.workspace_id WHERE collection.id=$1 AND (${member}) FOR UPDATE OF collection`, [collectionId, memberId])).rowCount)
         return { status: "collection_not_found" as const };
-      if (!(await client.query("SELECT 1 FROM stash_collection_records WHERE id=$1 AND collection_id=$2 FOR UPDATE", [record.id, collectionId])).rowCount)
+      if (!(await client.query("SELECT 1 FROM stash_collection_records WHERE id=$1 AND collection_id=$2 FOR UPDATE", [recordId, collectionId])).rowCount)
         return { status: "record_not_found" as const };
-      await client.query("DELETE FROM stash_collection_record_values WHERE record_id=$1", [record.id]);
-      for (const [propertyId, value] of Object.entries(record.values)) await client.query(`INSERT INTO stash_collection_record_values
-        (record_id,property_id,value) VALUES($1,$2,$3::jsonb)`, [record.id, propertyId, JSON.stringify(value)]);
+      const current = await this.canonicalCollection(client, collectionId); const found = current.records.find(({ id }) => id === recordId)!;
+      let normalized: CanonicalCollection;
+      try { normalized = normalizeCollection({ ...current, records: current.records.map((record) => record.id === recordId
+        ? { ...record, values: { ...record.values, ...values } } : record) }); }
+      catch { return { status: "invalid_record" as const }; }
+      const record = normalized.records.find(({ id }) => id === recordId)!;
+      for (const [propertyId, value] of Object.entries(values)) await client.query(`INSERT INTO stash_collection_record_values
+        (record_id,property_id,value) VALUES($1,$2,$3::jsonb)
+        ON CONFLICT(record_id,property_id) DO UPDATE SET value=EXCLUDED.value`, [recordId, propertyId, JSON.stringify(value)]);
       const collection = await this.canonicalCollection(client, collectionId); await this.projection(client, "Collection", collectionId, collection.schema, collection);
       return { status: "updated" as const, record };
     });
@@ -291,9 +328,11 @@ export class PostgresCollectionRepository implements CollectionRepository {
       if (view.definition.source.kind === "collection") {
         const source = await client.query(`SELECT 1 FROM stash_collections collection JOIN stash_notes note ON note.id=collection.owner_note_id
           JOIN stash_workspaces workspace ON workspace.id=collection.workspace_id WHERE collection.id=$1 AND collection.workspace_id=$2
-          AND ${effectiveNoteReadSql("note", "workspace", "$3")}`,
+          AND ${effectiveNoteReadSql("note", "workspace", "$3")} FOR UPDATE OF collection`,
         [view.definition.source.collectionId, view.workspaceId, memberId]);
         if (!source.rowCount) return { status: "source_unavailable" as const };
+        if (!definitionFitsCollection(view.definition, await this.canonicalCollection(client, view.definition.source.collectionId)))
+          return { status: "source_unavailable" as const };
       } else if (view.definition.source.workspaceId !== view.workspaceId) return { status: "workspace_mismatch" as const };
       try {
         await client.query(`INSERT INTO stash_view_blocks(id,workspace_id,owner_note_id,block_id,title,source_kind,source_workspace_id,
@@ -342,15 +381,19 @@ export class PostgresCollectionRepository implements CollectionRepository {
     return this.kernel.transaction(async (client) => {
       await this.prepare(client);
       const found = await client.query<{ workspace_id: string }>(`SELECT view.workspace_id FROM stash_view_blocks view
-        JOIN stash_workspaces workspace ON workspace.id=view.workspace_id WHERE view.id=$1 AND (${member}) FOR UPDATE OF view`, [viewId, memberId]);
+        JOIN stash_workspaces workspace ON workspace.id=view.workspace_id WHERE view.id=$1 AND (${member})`, [viewId, memberId]);
       if (!found.rows[0]) return { status: "view_not_found" as const };
       const workspaceId = found.rows[0].workspace_id;
       if (definition.source.kind === "collection") {
         if (!(await client.query(`SELECT 1 FROM stash_collections collection JOIN stash_notes note ON note.id=collection.owner_note_id
           JOIN stash_workspaces workspace ON workspace.id=collection.workspace_id WHERE collection.id=$1 AND collection.workspace_id=$2
-          AND ${effectiveNoteReadSql("note", "workspace", "$3")}`, [definition.source.collectionId, workspaceId, memberId])).rowCount)
+          AND ${effectiveNoteReadSql("note", "workspace", "$3")} FOR UPDATE OF collection`, [definition.source.collectionId, workspaceId, memberId])).rowCount)
+          return { status: "source_unavailable" as const };
+        if (!definitionFitsCollection(definition, await this.canonicalCollection(client, definition.source.collectionId)))
           return { status: "source_unavailable" as const };
       } else if (definition.source.workspaceId !== workspaceId) return { status: "source_unavailable" as const };
+      if (!(await client.query(`SELECT view.id FROM stash_view_blocks view JOIN stash_workspaces workspace ON workspace.id=view.workspace_id
+        WHERE view.id=$1 AND (${member}) FOR UPDATE OF view`, [viewId, memberId])).rowCount) return { status: "view_not_found" as const };
       await client.query(`UPDATE stash_view_blocks SET source_kind=$2,source_workspace_id=$3,source_collection_id=$4,
         source_project_scope=$5,layout=$6,definition=$7::jsonb WHERE id=$1`, [viewId, definition.source.kind,
         definition.source.kind === "tasks" ? definition.source.workspaceId : null,
@@ -364,7 +407,8 @@ export class PostgresCollectionRepository implements CollectionRepository {
 
   async listCollectionsForNote(memberId: string, noteId: string): Promise<
     { status: "found"; workspaceId: string; collections: readonly CanonicalCollection[]; availableCollections: readonly CanonicalCollection[];
-      availableCollectionNotes: Readonly<Record<string, string>>; views: readonly CanonicalViewBlock[] } | { status: "note_not_found" }> {
+      availableCollectionNotes: Readonly<Record<string, string>>; availableNotes: readonly { readonly id: string; readonly title: string }[];
+      views: readonly CanonicalViewBlock[] } | { status: "note_not_found" }> {
     return this.kernel.withSession(async (client) => {
       await this.prepare(client);
       const note = await client.query<{ workspace_id: string }>(`SELECT note.workspace_id FROM stash_notes note JOIN stash_workspaces workspace ON workspace.id=note.workspace_id
@@ -377,6 +421,10 @@ export class PostgresCollectionRepository implements CollectionRepository {
         JOIN stash_workspaces workspace ON workspace.id=collection.workspace_id
         WHERE collection.workspace_id=$1 AND ${effectiveNoteReadSql("owner_note", "workspace", "$2")}
         ORDER BY collection.title,collection.id`, [note.rows[0].workspace_id, memberId]);
+      const availableNotes = await client.query<{ id: string; title: string }>(`SELECT candidate.id,candidate.title FROM stash_notes candidate
+        JOIN stash_workspaces workspace ON workspace.id=candidate.workspace_id WHERE candidate.workspace_id=$1
+        AND candidate.archived_at IS NULL AND candidate.trashed_at IS NULL AND ${effectiveNoteReadSql("candidate", "workspace", "$2")}
+        ORDER BY candidate.title,candidate.id`, [note.rows[0].workspace_id, memberId]);
       const views = await client.query<{ id: string }>("SELECT id FROM stash_view_blocks WHERE owner_note_id=$1 ORDER BY title,id", [noteId]);
       return { status: "found" as const, workspaceId: note.rows[0].workspace_id,
         collections: await Promise.all(collections.rows.map(async ({ id }) => this.permissionFilteredCollection(client, memberId,
@@ -384,6 +432,7 @@ export class PostgresCollectionRepository implements CollectionRepository {
         availableCollections: await Promise.all(available.rows.map(async ({ id }) => this.permissionFilteredCollection(client, memberId,
           await this.canonicalCollection(client, id)))),
         availableCollectionNotes: Object.fromEntries(available.rows.map(({ id, owner_note_title }) => [id, owner_note_title])),
+        availableNotes: availableNotes.rows,
         views: await Promise.all(views.rows.map(({ id }) => this.canonicalView(client, id))) };
     });
   }
@@ -466,6 +515,27 @@ export class PostgresCollectionRepository implements CollectionRepository {
       }
       return { status: "deleted" as const, collectionIds: [...collectionIds] };
     });
+  }
+
+  private async propertyRemovalImpact(client: PostgresQueryable, collectionId: string, propertyId: string, propertyType: string, lock: boolean): Promise<{
+    impact: CollectionPropertyImpact; affectedViewIds: string[];
+  }> {
+    const values = await client.query<{ record_id: string; value: unknown }>(`SELECT record_id,value FROM stash_collection_record_values
+      WHERE property_id=$1 ORDER BY record_id${lock ? " FOR UPDATE" : ""}`, [propertyId]);
+    const viewRows = await client.query<{ id: string }>(`SELECT id FROM stash_view_blocks WHERE source_collection_id=$1
+      ORDER BY id${lock ? " FOR UPDATE" : ""}`, [collectionId]);
+    const affectedViews: Array<{ id: string; definition: ViewDefinition }> = [];
+    for (const { id } of viewRows.rows) {
+      const view = await this.canonicalView(client, id); const repaired = withoutProperty(view.definition, propertyId);
+      if (JSON.stringify(repaired) !== JSON.stringify(view.definition)) affectedViews.push({ id, definition: view.definition });
+    }
+    const affectedRelations = propertyType === "relation" ? values.rows.reduce((count, row) =>
+      count + (Array.isArray(row.value) ? row.value.length : 0), 0) : 0;
+    const token = encodeURIComponent(JSON.stringify({ collectionId, propertyId, propertyType,
+      values: values.rows.map(({ record_id, value }) => [record_id, value]),
+      views: affectedViews.map(({ id, definition }) => [id, definition]) }));
+    return { impact: { collectionId, propertyId, affectedValues: values.rows.length, affectedRelations,
+      affectedViews: affectedViews.length, token }, affectedViewIds: affectedViews.map(({ id }) => id) };
   }
 
   private async canonicalCollection(client: PostgresQueryable, id: string): Promise<CanonicalCollection> {
@@ -570,4 +640,12 @@ function withoutProperty(definition: ViewDefinition, propertyId: string): ViewDe
   return { ...base, filters: definition.filters.filter((filter) => filter.propertyId !== propertyId),
     sorts: definition.sorts.filter((sort) => sort.propertyId !== propertyId),
     layout: visible ? { ...definition.layout, visiblePropertyIds: visible } : definition.layout };
+}
+
+function definitionFitsCollection(definition: ViewDefinition, collection: CanonicalCollection) {
+  const available = new Set(collection.properties.map(({ id }) => id));
+  const referenced = [...definition.filters.map(({ propertyId }) => propertyId), ...definition.sorts.map(({ propertyId }) => propertyId),
+    ...(definition.groupBy ? [definition.groupBy] : []), ...(Array.isArray(definition.layout.visiblePropertyIds)
+      ? definition.layout.visiblePropertyIds.filter((id): id is string => typeof id === "string") : [])];
+  return referenced.every((propertyId) => available.has(propertyId));
 }

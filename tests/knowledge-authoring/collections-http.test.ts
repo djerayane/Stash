@@ -46,7 +46,8 @@ describe("Collection HTTP capability", () => {
     assert.equal((await fetch(`${instance.url}/api/notes/${noteId}/collections`)).status, 401);
     const empty = await call(`/api/notes/${noteId}/collections`);
     assert.equal(empty.status, 200);
-    assert.deepEqual(await empty.json(), { workspaceId, collections: [], availableCollections: [], availableCollectionNotes: {}, views: [] });
+    assert.deepEqual(await empty.json(), { workspaceId, collections: [], availableCollections: [], availableCollectionNotes: {},
+      availableNotes: [{ id: dashboardId, title: "Dashboard" }, { id: noteId, title: "Research" }], views: [] });
     const propertyId = "20212223-2425-4627-8829-303132333435"; const collectionId = "30313233-3435-4637-8839-404142434445";
     const created = await call(`/api/notes/${noteId}/collections`, { method: "POST", body: JSON.stringify({ schema: "stash.collection.v1",
       id: collectionId, workspaceId, ownerNoteId: noteId, title: "Research", properties: [{ id: propertyId, name: "Idea", type: "text", position: 1 }], records: [] }) });
@@ -64,13 +65,20 @@ describe("Collection HTTP capability", () => {
     assert.equal(reordered.status, 200);
     assert.deepEqual((await reordered.json() as any).collection.properties.map(({ id, position }: any) => [id, position]),
       [[numberPropertyId, 1], [propertyId, 2]]);
-    const protectedProperty = await call(`/api/collections/${collectionId}/properties/${propertyId}`, { method: "DELETE" });
+    const protectedProperty = await call(`/api/collections/${collectionId}/properties/${propertyId}/impact`);
     assert.equal(protectedProperty.status, 409);
     assert.equal((await protectedProperty.json() as any).error, "primary_property_required");
-    const deletedProperty = await call(`/api/collections/${collectionId}/properties/${numberPropertyId}`, { method: "DELETE" });
+    const propertyImpact = await call(`/api/collections/${collectionId}/properties/${numberPropertyId}/impact`);
+    assert.equal(propertyImpact.status, 200); const propertyPreview = (await propertyImpact.json() as any).impact;
+    assert.deepEqual({ affectedValues: propertyPreview.affectedValues, affectedRelations: propertyPreview.affectedRelations,
+      affectedViews: propertyPreview.affectedViews }, { affectedValues: 0, affectedRelations: 0, affectedViews: 0 });
+    assert.equal((await call(`/api/collections/${collectionId}/properties/${numberPropertyId}`, { method: "DELETE",
+      body: JSON.stringify({ impactToken: `${propertyPreview.token}-stale` }) })).status, 409);
+    const deletedProperty = await call(`/api/collections/${collectionId}/properties/${numberPropertyId}`, { method: "DELETE",
+      body: JSON.stringify({ impactToken: propertyPreview.token }) });
     assert.equal(deletedProperty.status, 200);
-    assert.deepEqual((await deletedProperty.json() as any).impact,
-      { affectedValues: 0, affectedRelations: 0, affectedViews: 0 });
+    assert.deepEqual({ ...(await deletedProperty.json() as any).impact, token: undefined },
+      { collectionId, propertyId: numberPropertyId, affectedValues: 0, affectedRelations: 0, affectedViews: 0, token: undefined });
     assert.equal((await call(`/api/notes/${noteId}/collections`, { method: "POST", body: JSON.stringify({ schema: "stash.collection.v1",
       id: "40414243-4445-4647-8849-505152535455", workspaceId, ownerNoteId: noteId, title: "Invalid",
       properties: [{ id: "50515253-5455-4657-8859-606162636465", name: "Formula", type: "formula", position: 1 }], records: [] }) })).status, 422);

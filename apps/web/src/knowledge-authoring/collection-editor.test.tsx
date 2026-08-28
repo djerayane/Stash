@@ -16,9 +16,9 @@ const view: ViewBlock = { schema: "stash.view-block.v1", id: "77777777-7777-4777
   ownerNoteId: collection.ownerNoteId, blockId: "88888888-8888-4888-8888-888888888888", title: "Research lens",
   definition: { source: { kind: "collection", collectionId: collection.id }, presentation: "table", filters: [], sorts: [], groupBy: statusId, layout: {} } };
 
-function renderWorkspace(fetcher: typeof fetch, noteId = collection.ownerNoteId) {
+function renderWorkspace(fetcher: typeof fetch, noteId = collection.ownerNoteId, editable = true) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(<QueryClientProvider client={client}><CollectionWorkspace noteId={noteId} token="member" fetcher={fetcher} /></QueryClientProvider>);
+  return render(<QueryClientProvider client={client}><CollectionWorkspace noteId={noteId} token="member" editable={editable} fetcher={fetcher} /></QueryClientProvider>);
 }
 
 describe("Collection workspace", () => {
@@ -92,8 +92,10 @@ describe("Collection workspace", () => {
   });
 
   it("keeps property changes in the header and reports property deletion impact before confirmation", async () => {
-    const requests: Array<{ path: string; init?: RequestInit }> = []; let current = collection;
+    const requests: Array<{ path: string; init?: RequestInit }> = []; let current = collection; let staleDelete = true;
     const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => { const path = String(input); requests.push({ path, init });
+      if (path.endsWith(`/properties/${statusId}/impact`)) return Response.json({ impact: { collectionId: collection.id, propertyId: statusId,
+        affectedValues: 1, affectedRelations: 0, affectedViews: 1, token: "preview-token" } });
       if (!init?.method) return Response.json({ workspaceId: collection.workspaceId, collections: [current], availableCollections: [current], views: [view] });
       const body = init.body ? JSON.parse(String(init.body)) : undefined;
       if (path.endsWith(`/properties/${statusId}`) && init.method === "PATCH") {
@@ -105,6 +107,9 @@ describe("Collection workspace", () => {
         return Response.json({ property: body }, { status: 201 });
       }
       if (path.endsWith(`/properties/${statusId}`) && init.method === "DELETE") {
+        if (staleDelete) { staleDelete = false; return Response.json({ message: "Property impact changed. Review the updated impact before deleting.", impact: {
+          collectionId: collection.id, propertyId: statusId, affectedValues: 2, affectedRelations: 0, affectedViews: 2, token: "fresh-token",
+        } }, { status: 409 }); }
         current = { ...current, properties: current.properties.filter(({ id }) => id !== statusId),
           records: current.records.map((record) => ({ ...record, values: { [titleId]: record.values[titleId]! } })) };
         return Response.json({ collection: current, impact: { affectedValues: 1, affectedRelations: 0, affectedViews: 1 } });
@@ -116,11 +121,17 @@ describe("Collection workspace", () => {
 
     fireEvent.click(within(region).getByRole("button", { name: "Edit Status property" }));
     fireEvent.change(screen.getByRole("textbox", { name: "Property name" }), { target: { value: "Stage" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Option 1" }), { target: { value: "In progress" } });
+    fireEvent.click(screen.getByRole("button", { name: "Move option 1 down" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add option" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Option 3" }), { target: { value: "Blocked" } });
     fireEvent.click(screen.getByRole("button", { name: "Save property" }));
     expect(await within(region).findByRole("columnheader", { name: "Stage" })).toBeVisible();
     const renamedPayload = JSON.parse(String(requests.find(({ path, init }) => path.endsWith(`/properties/${statusId}`)
       && init?.method === "PATCH")?.init?.body));
-    expect(renamedPayload.options.map(({ id }: { id: string }) => id)).toEqual(["ready", "later"]);
+    expect(renamedPayload.options.slice(0, 2)).toEqual([{ id: "later", name: "Later" }, { id: "ready", name: "In progress" }]);
+    expect(renamedPayload.options[2]).toEqual(expect.objectContaining({ name: "Blocked" }));
+    expect(renamedPayload.options[2].id).not.toMatch(/^option-/);
 
     fireEvent.click(within(region).getByRole("button", { name: "Edit Stage property" }));
     fireEvent.click(screen.getByRole("button", { name: "Duplicate property" }));
@@ -132,7 +143,13 @@ describe("Collection workspace", () => {
     expect(within(dialog).getByText("1 saved value will be removed.")).toBeVisible();
     expect(within(dialog).getByText("1 view will be updated.")).toBeVisible();
     fireEvent.click(within(dialog).getByRole("button", { name: "Delete property" }));
-    await waitFor(() => expect(requests.some(({ path, init }) => path.endsWith(`/properties/${statusId}`) && init?.method === "DELETE")).toBe(true));
+    expect(await within(dialog).findByText("2 saved values will be removed.")).toBeVisible();
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("Review the updated impact");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete property" }));
+    await waitFor(() => expect(requests.filter(({ path, init }) => path.endsWith(`/properties/${statusId}`) && init?.method === "DELETE")).toHaveLength(2));
+    const deletions = requests.filter(({ path, init }) => path.endsWith(`/properties/${statusId}`) && init?.method === "DELETE");
+    expect(JSON.parse(String(deletions[0]?.init?.body))).toEqual({ impactToken: "preview-token" });
+    expect(JSON.parse(String(deletions[1]?.init?.body))).toEqual({ impactToken: "fresh-token" });
   });
 
   it("requests required properties in context and keeps advanced settings behind View", async () => {
@@ -169,7 +186,9 @@ describe("Collection workspace", () => {
       if (path.endsWith("/impact")) return Response.json({ impact });
       if (init?.method === "POST") return Response.json({ view }, { status: 201 });
       return Response.json({ workspaceId: collection.workspaceId, collections: [collection], availableCollections: [collection, other],
-        availableCollectionNotes: { [collection.id]: "Research note", [other.id]: "Field notes" }, views: [] });
+        availableCollectionNotes: { [collection.id]: "Research note", [other.id]: "Field notes" }, availableNotes: [
+          { id: collection.ownerNoteId, title: "Research note" }, { id: other.ownerNoteId, title: "Field notes" },
+        ], views: [] });
     }) as typeof fetch;
     renderWorkspace(fetcher);
 
@@ -182,6 +201,7 @@ describe("Collection workspace", () => {
     expect(within(moveDialog).getByText("1 record will move with this Collection.")).toBeVisible();
     expect(within(moveDialog).getByText("2 relation references will keep pointing to it.")).toBeVisible();
     expect(within(moveDialog).getByText("1 inserted view will keep showing it.")).toBeVisible();
+    expect(within(moveDialog).getByRole("option", { name: "Field notes" })).toBeVisible();
     fireEvent.click(within(moveDialog).getByRole("button", { name: "Cancel move" }));
     await waitFor(() => expect(more).toHaveFocus());
 
@@ -209,5 +229,65 @@ describe("Collection workspace", () => {
     expect(duplicate.records).toEqual([]);
     expect(duplicate.properties).toHaveLength(collection.properties.length);
     expect(duplicate.properties.map(({ id }) => id)).not.toEqual(collection.properties.map(({ id }) => id));
+  });
+
+  it("renders every saved Collection View independently with source ownership and safe canonical actions", async () => {
+    const second: ViewBlock = { ...view, id: "77777777-7777-4777-8777-777777777778", blockId: "88888888-8888-4888-8888-888888888889",
+      title: "Later ideas", definition: { ...view.definition, presentation: "list", filters: [{ propertyId: statusId, operator: "equals", value: "later" }] } };
+    const fetcher = vi.fn(async () => Response.json({ workspaceId: collection.workspaceId, collections: [collection], availableCollections: [collection],
+      availableCollectionNotes: { [collection.id]: "Research note" }, availableNotes: [{ id: collection.ownerNoteId, title: "Research note" }], views: [view, second] })) as typeof fetch;
+    renderWorkspace(fetcher);
+
+    expect(await screen.findByRole("region", { name: "Research" })).toBeVisible();
+    const firstView = screen.getByRole("region", { name: "Research lens" });
+    const secondView = screen.getByRole("region", { name: "Later ideas" });
+    expect(within(firstView).getByText("View of Research · From Research note")).toBeVisible();
+    expect(within(firstView).getByRole("textbox", { name: "Idea, Map constraints" })).toHaveValue("Map constraints");
+    expect(within(secondView).queryByText("Map constraints")).not.toBeInTheDocument();
+    expect(within(firstView).queryByRole("button", { name: "Collection actions" })).not.toBeInTheDocument();
+    expect(within(firstView).queryByRole("button", { name: "Edit Status property" })).not.toBeInTheDocument();
+  });
+
+  it("prevents every persisted View mutation when the workspace is read-only", async () => {
+    const readOnlyView = { ...view, definition: { ...view.definition, presentation: "list" as const } };
+    const fetcher = vi.fn(async () => Response.json({ workspaceId: collection.workspaceId, collections: [collection], availableCollections: [collection],
+      availableCollectionNotes: { [collection.id]: "Research note" }, views: [readOnlyView] })) as typeof fetch;
+    renderWorkspace(fetcher, collection.ownerNoteId, false);
+    const savedView = await screen.findByRole("region", { name: "Research lens" });
+
+    expect(within(savedView).getByRole("button", { name: "Board" })).toBeDisabled();
+    fireEvent.click(within(savedView).getByRole("button", { name: /Map constraints/ }));
+    fireEvent.click(within(savedView).getByRole("button", { name: /View/ }));
+    expect(fetcher).not.toHaveBeenCalledWith(expect.stringContaining("/api/view-blocks/"), expect.objectContaining({ method: "PATCH" }));
+  });
+
+  it("keeps failed required-property and Board actions adjacent and retryable", async () => {
+    let propertyAttempts = 0; let moveAttempts = 0; const requests: Array<{ path: string; init?: RequestInit }> = [];
+    let current: Collection = { ...collection, properties: [collection.properties[0]!] };
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => { const path = String(input); requests.push({ path, init });
+      if (path.endsWith("/properties") && init?.method === "POST") { propertyAttempts += 1;
+        if (propertyAttempts === 1) return Response.json({ message: "Connection lost while adding Status." }, { status: 503 });
+        const property = JSON.parse(String(init.body)); current = { ...current, properties: [...current.properties, property], records: current.records.map((record) => ({
+          ...record, values: { ...record.values, [property.id]: "not-started" },
+        })) };
+        return Response.json({ property }, { status: 201 }); }
+      if (path.endsWith(`/records/${recordId}`) && init?.method === "PATCH") { moveAttempts += 1;
+        if (moveAttempts === 1) return Response.json({ message: "Move could not be saved." }, { status: 503 });
+        return Response.json({ status: "updated" }); }
+      return Response.json({ workspaceId: collection.workspaceId, collections: [current], availableCollections: [current], views: [] });
+    }) as typeof fetch;
+    renderWorkspace(fetcher);
+    const region = await screen.findByRole("region", { name: "Research" });
+
+    fireEvent.click(within(region).getByRole("button", { name: "Board" }));
+    fireEvent.click(within(region).getByRole("button", { name: "Add select property" }));
+    expect(await within(region).findByRole("alert")).toHaveTextContent("Connection lost while adding Status");
+    fireEvent.click(within(region).getByRole("button", { name: "Try again" }));
+    expect(await within(region).findByRole("region", { name: "Research board" })).toBeVisible();
+
+    fireEvent.click(within(region).getByRole("button", { name: "Move Map constraints to Done" }));
+    expect(await within(region).findByRole("alert")).toHaveTextContent("Move not saved");
+    fireEvent.click(within(region).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(moveAttempts).toBe(2));
   });
 });

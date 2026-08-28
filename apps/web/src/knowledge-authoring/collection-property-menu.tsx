@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { Collection, CollectionProperty, CollectionPropertyType, ViewBlock } from "@stash/domain-types";
+import type { Collection, CollectionProperty, CollectionPropertyImpact, CollectionPropertyType } from "@stash/domain-types";
 
 import { Button, Field } from "../ui/control";
 import { CollectionImpactDialog } from "./collection-impact-dialog";
@@ -14,29 +14,26 @@ const propertyTypes: Array<{ value: CollectionPropertyType; label: string }> = [
 
 function auth(token: string) { return { authorization: `Bearer ${token}`, "content-type": "application/json" }; }
 
-export function CollectionPropertyMenu({ collection, property, views, token, fetcher, onChanged, onClose, returnFocusRef }: {
-  collection: Collection; property?: CollectionProperty; views: readonly ViewBlock[]; token: string; fetcher: typeof fetch;
+export function CollectionPropertyMenu({ collection, property, token, fetcher, onChanged, onClose, returnFocusRef }: {
+  collection: Collection; property?: CollectionProperty; token: string; fetcher: typeof fetch;
   onChanged(): Promise<void>; onClose(): void; returnFocusRef: React.RefObject<HTMLButtonElement | null>;
 }) {
   const inputRef = useRef<HTMLInputElement>(null); const [name, setName] = useState(property?.name ?? "");
   const [type, setType] = useState<CollectionPropertyType>(property?.type ?? "text");
-  const [options, setOptions] = useState(property && (property.type === "single_select" || property.type === "multi_select")
-    ? property.options.map(({ name }) => name).join(", ") : "");
+  const [options, setOptions] = useState<Array<{ id: string; name: string }>>(property && (property.type === "single_select" || property.type === "multi_select")
+    ? property.options.map((option) => ({ ...option })) : []);
   const [targetKind, setTargetKind] = useState<"collection_records" | "notes" | "tasks" | "projects">(
     property?.type === "relation" ? property.target.kind : "notes");
   const [targetCollectionId, setTargetCollectionId] = useState(property?.type === "relation" && property.target.kind === "collection_records"
     ? property.target.collectionId : "");
   const [pending, setPending] = useState(false); const [error, setError] = useState(""); const [deleteOpen, setDeleteOpen] = useState(false);
+  const [impact, setImpact] = useState<CollectionPropertyImpact>();
   useEffect(() => { inputRef.current?.focus(); }, []);
   const submit = async () => {
     setPending(true); setError("");
     const base = { name: name.trim(), type };
     const body = type === "single_select" || type === "multi_select" ? { ...base,
-      options: options.split(",").map((entry, index) => ({
-        id: property && (property.type === "single_select" || property.type === "multi_select")
-          ? property.options[index]?.id ?? `option-${index + 1}` : `option-${index + 1}`,
-        name: entry.trim(),
-      })).filter(({ name }) => name) }
+      options: options.map((option) => ({ ...option, name: option.name.trim() })).filter(({ name }) => name) }
       : type === "relation" ? { ...base, target: targetKind === "collection_records"
         ? { kind: targetKind, collectionId: targetCollectionId } : { kind: targetKind } } : base;
     const path = property ? `/api/collections/${encodeURIComponent(collection.id)}/properties/${encodeURIComponent(property.id)}`
@@ -69,27 +66,42 @@ export function CollectionPropertyMenu({ collection, property, views, token, fet
       await onChanged(); onClose();
     } catch (reason) { setError(reason instanceof Error ? reason.message : "The property could not be duplicated."); } finally { setPending(false); }
   };
-  const valueCount = property ? collection.records.filter((record) => Object.hasOwn(record.values, property.id)).length : 0;
-  const relationCount = property?.type === "relation" ? collection.records.reduce((sum, record) => {
-    const value = record.values[property.id]; return sum + (Array.isArray(value) ? value.length : 0);
-  }, 0) : 0;
-  const viewCount = property ? views.filter((view) => view.definition.filters.some((filter) => filter.propertyId === property.id)
-    || view.definition.sorts.some((sort) => sort.propertyId === property.id) || view.definition.groupBy === property.id
-    || Array.isArray(view.definition.layout.visiblePropertyIds) && view.definition.layout.visiblePropertyIds.includes(property.id)).length : 0;
-  const remove = async () => { if (!property) return; setPending(true); setError("");
+  const previewRemoval = async () => { if (!property) return; setPending(true); setError("");
+    try { const response = await fetcher(`/api/collections/${encodeURIComponent(collection.id)}/properties/${encodeURIComponent(property.id)}/impact`,
+      { headers: { authorization: `Bearer ${token}` } });
+      const result = await response.json() as { impact?: CollectionPropertyImpact; message?: string };
+      if (!response.ok || !result.impact) throw new Error(result.message || "Property impact is unavailable.");
+      setImpact(result.impact); setDeleteOpen(true);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Property impact is unavailable."); }
+    finally { setPending(false); } };
+  const remove = async () => { if (!property || !impact) return; setPending(true); setError("");
     try { const response = await fetcher(`/api/collections/${encodeURIComponent(collection.id)}/properties/${encodeURIComponent(property.id)}`,
-      { method: "DELETE", headers: { authorization: `Bearer ${token}` } });
-      const result = await response.json() as { message?: string }; if (!response.ok) throw new Error(result.message || "The property could not be deleted.");
+      { method: "DELETE", headers: auth(token), body: JSON.stringify({ impactToken: impact.token }) });
+      const result = await response.json() as { impact?: CollectionPropertyImpact; message?: string };
+      if (response.status === 409 && result.impact) { setImpact(result.impact);
+        throw new Error(result.message || "Property impact changed. Review the updated impact before deleting."); }
+      if (!response.ok) throw new Error(result.message || "The property could not be deleted.");
       setDeleteOpen(false); await onChanged(); onClose();
     } catch (reason) { setError(reason instanceof Error ? reason.message : "The property could not be deleted."); } finally { setPending(false); }
   };
   return <><form className={styles.propertyMenu} aria-label={property ? `Edit ${property.name} property` : "Add property"}
     onSubmit={(event) => { event.preventDefault(); void submit(); }}>
     <Field label="Property name"><input ref={inputRef} required value={name} onChange={(event) => setName(event.target.value)} /></Field>
-    <Field label="Property type"><select value={type} onChange={(event) => setType(event.target.value as CollectionPropertyType)}>
+    <Field label="Property type"><select disabled={property?.type === "text" && collection.properties.filter(({ type }) => type === "text").length === 1}
+      value={type} onChange={(event) => setType(event.target.value as CollectionPropertyType)}>
       {propertyTypes.map((entry) => <option key={entry.value} value={entry.value}>{entry.label}</option>)}</select></Field>
-    {type === "single_select" || type === "multi_select" ? <Field label="Options"><input required value={options}
-      onChange={(event) => setOptions(event.target.value)} /></Field> : null}
+    {property?.type === "text" && collection.properties.filter(({ type }) => type === "text").length === 1
+      ? <p className={styles.primaryNote} role="note">Keep one text property as the primary record name.</p> : null}
+    {type === "single_select" || type === "multi_select" ? <fieldset className={styles.optionEditor}><legend>Options</legend>
+      {options.map((option, index) => <div key={option.id}><input required aria-label={`Option ${index + 1}`} value={option.name}
+        onChange={(event) => setOptions((current) => current.map((entry) => entry.id === option.id ? { ...entry, name: event.target.value } : entry))} />
+        <button type="button" aria-label={`Move option ${index + 1} up`} disabled={index === 0} onClick={() => setOptions((current) => {
+          const next = [...current]; const [moving] = next.splice(index, 1); next.splice(index - 1, 0, moving!); return next; })}>↑</button>
+        <button type="button" aria-label={`Move option ${index + 1} down`} disabled={index === options.length - 1} onClick={() => setOptions((current) => {
+          const next = [...current]; const [moving] = next.splice(index, 1); next.splice(index + 1, 0, moving!); return next; })}>↓</button>
+        <button type="button" aria-label={`Remove option ${index + 1}`} onClick={() => setOptions((current) => current.filter(({ id }) => id !== option.id))}>Remove</button></div>)}
+      <button type="button" onClick={() => setOptions((current) => [...current, { id: crypto.randomUUID(), name: "" }])}>Add option</button>
+    </fieldset> : null}
     {type === "relation" ? <><Field label="Relation target"><select value={targetKind}
       onChange={(event) => setTargetKind(event.target.value as typeof targetKind)}><option value="notes">Notes</option><option value="tasks">Tasks</option>
       <option value="projects">Projects</option><option value="collection_records">Collection records</option></select></Field>
@@ -100,13 +112,13 @@ export function CollectionPropertyMenu({ collection, property, views, token, fet
       {property ? <><Button type="button" variant="secondary" disabled={pending || property.position === 1} onClick={() => void move(-1)}>Move left</Button>
         <Button type="button" variant="secondary" disabled={pending || property.position === collection.properties.length} onClick={() => void move(1)}>Move right</Button>
         <Button type="button" variant="secondary" disabled={pending} onClick={() => void duplicate()}>Duplicate property</Button>
-        <Button type="button" variant="danger" onClick={() => setDeleteOpen(true)}>Delete property</Button></> : null}
+        <Button type="button" variant="danger" pending={pending} onClick={() => void previewRemoval()}>Delete property</Button></> : null}
     </div></form>
     {property ? <CollectionImpactDialog open={deleteOpen} onOpenChange={setDeleteOpen} title={`Delete ${property.name} property?`}
       description="This removes the property from this canonical Collection everywhere it appears." confirmLabel="Delete property"
       cancelLabel="Keep property" pending={pending} error={error} returnFocusRef={returnFocusRef} onConfirm={() => void remove()}>
-      <p>{valueCount} saved value{valueCount === 1 ? "" : "s"} will be removed.</p>
-      <p>{relationCount} relation reference{relationCount === 1 ? "" : "s"} will be removed.</p>
-      <p>{viewCount} view{viewCount === 1 ? "" : "s"} will be updated.</p>
+      <p>{impact?.affectedValues ?? 0} saved value{impact?.affectedValues === 1 ? "" : "s"} will be removed.</p>
+      <p>{impact?.affectedRelations ?? 0} relation reference{impact?.affectedRelations === 1 ? "" : "s"} will be removed.</p>
+      <p>{impact?.affectedViews ?? 0} view{impact?.affectedViews === 1 ? "" : "s"} will be updated.</p>
     </CollectionImpactDialog> : null}</>;
 }

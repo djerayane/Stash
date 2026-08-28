@@ -123,9 +123,11 @@ describe("Collection contracts", () => {
       const workspace = await new WorkspaceProjectService(store.database.identityAccessRepositories()).createWorkspace(ownerId,
         { name: "Notebook", owner: { type: "personal" } });
       assert.equal(workspace.status, "created"); if (workspace.status !== "created") return;
-      const note = await new NoteTreeService(store.database.noteTreeRepository(), new EmptyCollectionImpactInspector())
-        .create(ownerId, workspace.workspace.id, { title: "Research" });
+      const notes = new NoteTreeService(store.database.noteTreeRepository(), new EmptyCollectionImpactInspector());
+      const note = await notes.create(ownerId, workspace.workspace.id, { title: "Research" });
       assert.equal(note.status, "created"); if (note.status !== "created") return;
+      const dashboard = await notes.create(ownerId, workspace.workspace.id, { title: "Dashboard" });
+      assert.equal(dashboard.status, "created"); if (dashboard.status !== "created") return;
       const nameId = "20202020-2020-4020-8020-202020202020"; const statusId = "21212121-2121-4121-8121-212121212121";
       const collection = normalizeCollection({ schema: "stash.collection.v1", id: "22222222-2222-4222-8222-222222222222",
         workspaceId: workspace.workspace.id, ownerNoteId: note.node.id, title: "Research", properties: [
@@ -139,19 +141,89 @@ describe("Collection contracts", () => {
       const renamed = await service.updateProperty(ownerId, collection.id, statusId, { name: "Status" });
       assert.equal(renamed.status, "updated");
       if (renamed.status === "updated") assert.equal(renamed.collection.properties[1]?.name, "Status");
+      assert.deepEqual(await service.updateProperty(ownerId, collection.id, nameId, { type: "number" }),
+        { status: "primary_property_required" });
       const reordered = await service.reorderProperties(ownerId, collection.id, { propertyIds: [statusId, nameId] });
       assert.equal(reordered.status, "updated");
       if (reordered.status === "updated") assert.deepEqual(reordered.collection.properties.map(({ id, position }) => [id, position]),
         [[statusId, 1], [nameId, 2]]);
 
-      assert.deepEqual(await service.deleteProperty(ownerId, collection.id, nameId), { status: "primary_property_required" });
-      const deleted = await service.deleteProperty(ownerId, collection.id, statusId);
+      const view = normalizeViewBlock({ schema: "stash.view-block.v1", id: "24242424-2424-4424-8424-242424242424",
+        workspaceId: workspace.workspace.id, ownerNoteId: dashboard.node.id, blockId: "25252525-2525-4525-8525-252525252525",
+        title: "Status elsewhere", definition: { source: { kind: "collection", collectionId: collection.id }, presentation: "table",
+          filters: [{ propertyId: statusId, operator: "equals", value: "open" }], sorts: [], groupBy: statusId,
+          layout: { visiblePropertyIds: [nameId, statusId] } } });
+      assert.equal((await service.createView(ownerId, dashboard.node.id, view)).status, "created");
+
+      const protectedPreview = await service.previewPropertyRemoval(ownerId, collection.id, nameId);
+      assert.deepEqual(protectedPreview, { status: "primary_property_required" });
+      const preview = await service.previewPropertyRemoval(ownerId, collection.id, statusId);
+      assert.equal(preview.status, "found"); if (preview.status !== "found") return;
+      assert.deepEqual({ affectedValues: preview.impact.affectedValues, affectedRelations: preview.impact.affectedRelations,
+        affectedViews: preview.impact.affectedViews }, { affectedValues: 1, affectedRelations: 0, affectedViews: 1 });
+      assert.ok(preview.impact.token.length > 10);
+      const stale = await service.deleteProperty(ownerId, collection.id, statusId, { impactToken: `${preview.impact.token}-stale` });
+      assert.equal(stale.status, "impact_changed");
+      const deleted = await service.deleteProperty(ownerId, collection.id, statusId, { impactToken: preview.impact.token });
       assert.equal(deleted.status, "updated");
       if (deleted.status === "updated") {
         assert.deepEqual(deleted.collection.properties.map(({ id, position }) => [id, position]), [[nameId, 1]]);
         assert.equal(Object.hasOwn(deleted.collection.records[0]!.values, statusId), false);
-        assert.deepEqual(deleted.impact, { affectedValues: 1, affectedRelations: 0, affectedViews: 0 });
+        assert.deepEqual({ affectedValues: deleted.impact.affectedValues, affectedRelations: deleted.impact.affectedRelations,
+          affectedViews: deleted.impact.affectedViews }, { affectedValues: 1, affectedRelations: 0, affectedViews: 1 });
       }
+
+      const scoreId = "26262626-2626-4626-8626-262626262626";
+      assert.equal((await service.createProperty(ownerId, collection.id,
+        { id: scoreId, name: "Score", type: "number", position: 2 })).status, "created");
+      const [renamedCell, scoredCell] = await Promise.all([
+        service.updateRecord(ownerId, collection.id, collection.records[0]!.id, { values: { [nameId]: "Mapped concurrently" } }),
+        service.updateRecord(ownerId, collection.id, collection.records[0]!.id, { values: { [scoreId]: 7 } }),
+      ]);
+      assert.equal(renamedCell.status, "updated"); assert.equal(scoredCell.status, "updated");
+      const afterCells = await service.read(ownerId, collection.id); assert.equal(afterCells.status, "found");
+      if (afterCells.status === "found") assert.deepEqual(afterCells.collection.records[0]?.values,
+        { [nameId]: "Mapped concurrently", [scoreId]: 7 });
+
+      const stageId = "27272727-2727-4727-8727-272727272727";
+      assert.equal((await service.createProperty(ownerId, collection.id, { id: stageId, name: "Stage", type: "single_select", position: 3,
+        options: [{ id: "open", name: "Open" }, { id: "later", name: "Later" }] })).status, "created");
+      assert.equal((await service.updateRecord(ownerId, collection.id, collection.records[0]!.id,
+        { values: { [stageId]: "open" } })).status, "updated");
+      const raced = await Promise.all([
+        service.updateProperty(ownerId, collection.id, stageId,
+          { options: [{ id: "open", name: "Open" }] }),
+        service.updateRecord(ownerId, collection.id, collection.records[0]!.id, { values: { [stageId]: "later" } }),
+      ]);
+      assert.equal(raced.filter(({ status }) => status === "updated").length, 1);
+      assert.equal(raced.some(({ status }) => status === "invalid_property" || status === "invalid_record"), true);
+      const afterRace = await service.read(ownerId, collection.id); assert.equal(afterRace.status, "found");
+      if (afterRace.status === "found") assert.doesNotThrow(() => normalizeCollection(afterRace.collection));
+      const raceView = normalizeViewBlock({ ...view, id: "29292929-2929-4929-8929-292929292929",
+        blockId: "30303030-3030-4030-8030-303030303030", title: "Current stage",
+        definition: { ...view.definition, filters: [{ propertyId: stageId, operator: "equals", value: "open" }],
+          groupBy: stageId, layout: { visiblePropertyIds: [nameId, stageId] } } });
+      assert.equal((await service.createView(ownerId, dashboard.node.id, raceView)).status, "created");
+      const stagePreview = await service.previewPropertyRemoval(ownerId, collection.id, stageId);
+      assert.equal(stagePreview.status, "found"); if (stagePreview.status !== "found") return;
+      assert.equal((await service.deleteProperty(ownerId, collection.id, stageId, { impactToken: stagePreview.impact.token })).status, "updated");
+      assert.deepEqual(await service.updateView(ownerId, raceView.id, raceView.definition), { status: "source_unavailable" });
+
+      const detailId = "28282828-2828-4828-8828-282828282828";
+      assert.equal((await service.createProperty(ownerId, collection.id,
+        { id: detailId, name: "Detail", type: "text", position: 4 })).status, "created");
+      const namePreview = await service.previewPropertyRemoval(ownerId, collection.id, nameId);
+      const detailPreview = await service.previewPropertyRemoval(ownerId, collection.id, detailId);
+      assert.equal(namePreview.status, "found"); assert.equal(detailPreview.status, "found");
+      if (namePreview.status !== "found" || detailPreview.status !== "found") return;
+      const concurrentDeletes = await Promise.all([
+        service.deleteProperty(ownerId, collection.id, nameId, { impactToken: namePreview.impact.token }),
+        service.deleteProperty(ownerId, collection.id, detailId, { impactToken: detailPreview.impact.token }),
+      ]);
+      assert.equal(concurrentDeletes.filter(({ status }) => status === "updated").length, 1);
+      assert.equal(concurrentDeletes.some(({ status }) => status === "primary_property_required"), true);
+      const afterDeletes = await service.read(ownerId, collection.id); assert.equal(afterDeletes.status, "found");
+      if (afterDeletes.status === "found") assert.equal(afterDeletes.collection.properties.filter(({ type }) => type === "text").length, 1);
     } finally { await store.close(); }
   });
 

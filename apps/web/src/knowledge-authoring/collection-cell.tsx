@@ -3,13 +3,45 @@ import type { CollectionProperty, CollectionPropertyValue } from "@stash/domain-
 
 import styles from "./collection-editor.module.css";
 
-export type CollectionCellDraft = string | boolean | string[];
+export interface CollectionDateDraft {
+  kind: "date_time";
+  value: string;
+  includeTime: boolean;
+}
+
+export type CollectionCellDraft = string | boolean | string[] | CollectionDateDraft;
+
+function localOffsetMinutes(at: Date) {
+  return -at.getTimezoneOffset();
+}
+
+export function dateValueDraft(value?: CollectionPropertyValue, timezoneOffsetMinutes?: number): CollectionDateDraft {
+  if (!value || typeof value !== "object" || Array.isArray(value) || !("start" in value))
+    return { kind: "date_time", value: "", includeTime: false };
+  if (!value.includeTime || value.start.length === 10)
+    return { kind: "date_time", value: value.start.slice(0, 10), includeTime: false };
+  const instant = new Date(value.start);
+  const offset = timezoneOffsetMinutes ?? localOffsetMinutes(instant);
+  return { kind: "date_time", value: new Date(instant.getTime() + offset * 60_000).toISOString().slice(0, 16), includeTime: true };
+}
+
+export function dateDraftValue(draft: CollectionDateDraft, timezoneOffsetMinutes?: number): CollectionPropertyValue {
+  if (!draft.value) return null;
+  if (!draft.includeTime) return { start: draft.value.slice(0, 10), includeTime: false };
+  const parts = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(draft.value);
+  if (!parts) return null;
+  const [, year, month, day, hour, minute] = parts;
+  const wallClockUtc = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute));
+  const offset = timezoneOffsetMinutes ?? localOffsetMinutes(new Date(
+    Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute),
+  ));
+  return { start: new Date(wallClockUtc - offset * 60_000).toISOString(), includeTime: true };
+}
 
 export function collectionValueDraft(property: CollectionProperty, value?: CollectionPropertyValue): CollectionCellDraft {
   if (property.type === "checkbox") return value === true;
   if (property.type === "multi_select") return Array.isArray(value) ? value.map(String) : [];
-  if (property.type === "date_time" && value && typeof value === "object" && !Array.isArray(value) && "start" in value)
-    return value.start.length > 10 ? value.start.slice(0, 16) : value.start;
+  if (property.type === "date_time") return dateValueDraft(value);
   if (property.type === "relation" && Array.isArray(value)) return value.map((entry) => typeof entry === "string"
     ? entry : `${entry.id} | ${entry.fallback}`).join(", ");
   if ((property.type === "person" || property.type === "attachment") && Array.isArray(value)) return value.join(", ");
@@ -19,9 +51,9 @@ export function collectionValueDraft(property: CollectionProperty, value?: Colle
 export function collectionDraftValue(property: CollectionProperty, raw: CollectionCellDraft): CollectionPropertyValue {
   if (property.type === "checkbox") return raw === true;
   if (property.type === "multi_select") return Array.isArray(raw) ? raw : [];
+  if (property.type === "date_time") return dateDraftValue(raw as CollectionDateDraft);
   const value = String(raw).trim();
   if (property.type === "number") return value ? Number(value) : null;
-  if (property.type === "date_time") return value ? { start: new Date(value).toISOString(), includeTime: value.includes("T") } : null;
   if (property.type === "single_select" || property.type === "url") return value || null;
   if (property.type === "person" || property.type === "attachment") return value ? value.split(",").map((entry) => entry.trim()).filter(Boolean) : [];
   if (property.type === "relation") return value ? value.split(",").map((entry) => { const [identity, ...fallback] = entry.split("|");
@@ -29,24 +61,36 @@ export function collectionDraftValue(property: CollectionProperty, raw: Collecti
   return value;
 }
 
+function draftText(property: CollectionProperty, draft: CollectionCellDraft) {
+  if (property.type === "date_time") return (draft as CollectionDateDraft).value || "—";
+  if (property.type === "checkbox") return draft === true ? "Checked" : "Not checked";
+  if (property.type === "single_select") return property.options.find(({ id }) => id === draft)?.name ?? "—";
+  if (property.type === "multi_select" && Array.isArray(draft)) return draft.map((id) => property.options.find((option) => option.id === id)?.name ?? id).join(", ") || "—";
+  if (Array.isArray(draft)) return draft.join(", ") || "—";
+  return String(draft) || "—";
+}
+
 interface DraftControlProps {
   property: CollectionProperty;
   value: CollectionCellDraft;
   label: string;
   autoFocus?: boolean;
+  disabled?: boolean;
   onChange(value: CollectionCellDraft): void;
   onConfirm?(): void;
   onCancel?(): void;
   onNavigate?(direction: "left" | "right" | "up" | "down"): void;
 }
 
-export function CollectionDraftControl({ property, value, label, autoFocus, onChange, onConfirm, onCancel, onNavigate }: DraftControlProps) {
+export function CollectionDraftControl({ property, value, label, autoFocus, disabled, onChange, onConfirm, onCancel, onNavigate }: DraftControlProps) {
   const controlRef = useRef<HTMLInputElement | HTMLSelectElement>(null);
   useEffect(() => { if (autoFocus) controlRef.current?.focus(); }, [autoFocus]);
   const keyDown = (event: KeyboardEvent<HTMLInputElement | HTMLSelectElement>) => {
     if (event.key === "Escape" && onCancel) { event.preventDefault(); onCancel(); return; }
     if (event.key === "Enter" && onConfirm && property.type !== "multi_select") { event.preventDefault(); onConfirm(); return; }
     if (!onNavigate || !event.key.startsWith("Arrow")) return;
+    if (event.currentTarget instanceof HTMLSelectElement) return;
+    if (event.currentTarget instanceof HTMLInputElement && ["date", "datetime-local", "time", "month", "week"].includes(event.currentTarget.type)) return;
     const direction = event.key.slice(5).toLowerCase() as "left" | "right" | "up" | "down";
     if (event.currentTarget instanceof HTMLInputElement && (direction === "left" || direction === "right")) {
       const atStart = event.currentTarget.selectionStart === 0; const atEnd = event.currentTarget.selectionEnd === event.currentTarget.value.length;
@@ -56,15 +100,27 @@ export function CollectionDraftControl({ property, value, label, autoFocus, onCh
     event.preventDefault(); onNavigate(direction);
   };
   if (property.type === "checkbox") return <input ref={controlRef as React.RefObject<HTMLInputElement>} aria-label={label} checked={value === true}
-    type="checkbox" onChange={(event) => onChange(event.target.checked)} onKeyDown={keyDown} />;
+    type="checkbox" disabled={disabled} onChange={(event) => onChange(event.target.checked)} onKeyDown={keyDown} />;
   if (property.type === "single_select") return <select ref={controlRef as React.RefObject<HTMLSelectElement>} aria-label={label} value={String(value)}
-    onChange={(event) => onChange(event.target.value)} onKeyDown={keyDown}><option value="">No value</option>
+    disabled={disabled} onChange={(event) => onChange(event.target.value)} onKeyDown={keyDown}><option value="">No value</option>
     {property.options.map((option) => <option key={option.id} value={option.id}>{option.name}</option>)}</select>;
   if (property.type === "multi_select") return <select ref={controlRef as React.RefObject<HTMLSelectElement>} aria-label={label} multiple
-    value={Array.isArray(value) ? value : []} onChange={(event) => onChange(Array.from(event.target.selectedOptions).map(({ value }) => value))}
+    disabled={disabled} value={Array.isArray(value) ? value : []} onChange={(event) => onChange(Array.from(event.target.selectedOptions).map(({ value }) => value))}
     onKeyDown={keyDown}>{property.options.map((option) => <option key={option.id} value={option.id}>{option.name}</option>)}</select>;
-  const type = property.type === "number" ? "number" : property.type === "date_time" ? "datetime-local" : property.type === "url" ? "url" : "text";
-  return <input ref={controlRef as React.RefObject<HTMLInputElement>} aria-label={label} type={type} value={String(value)}
+  if (property.type === "date_time") {
+    const date = value as CollectionDateDraft;
+    return <span className={styles.dateControl}>
+      <input ref={controlRef as React.RefObject<HTMLInputElement>} aria-label={label} disabled={disabled}
+        type={date.includeTime ? "datetime-local" : "date"} value={date.value}
+        onChange={(event) => onChange({ ...date, value: event.target.value })} onKeyDown={keyDown} />
+      <label><input type="checkbox" checked={date.includeTime} disabled={disabled} onChange={(event) => {
+        const includeTime = event.target.checked;
+        onChange({ ...date, includeTime, value: includeTime ? `${date.value.slice(0, 10)}T00:00` : date.value.slice(0, 10) });
+      }} />Include time for {label}</label>
+    </span>;
+  }
+  const type = property.type === "number" ? "number" : property.type === "url" ? "url" : "text";
+  return <input ref={controlRef as React.RefObject<HTMLInputElement>} aria-label={label} disabled={disabled} type={type} value={String(value)}
     placeholder={property.type === "relation" ? "Identity | readable name" : undefined}
     onChange={(event) => onChange(event.target.value)} onKeyDown={keyDown} />;
 }
@@ -78,14 +134,14 @@ export function CollectionCell({ property, value, recordLabel, editable, onSave,
   const [saving, setSaving] = useState(false); const [failed, setFailed] = useState(false);
   useEffect(() => { if (!failed) setDraft(saved); }, [failed, property.id, value]);
   const changed = JSON.stringify(draft) !== JSON.stringify(saved);
-  const save = async () => { if (!changed || saving) return; setSaving(true); setFailed(false);
-    try { await onSave(collectionDraftValue(property, draft)); } catch { setFailed(true); } finally { setSaving(false); } };
+  const save = async () => { if (!changed || saving) return; setSaving(true);
+    try { await onSave(collectionDraftValue(property, draft)); setFailed(false); } catch { setFailed(true); } finally { setSaving(false); } };
   const restore = () => { setDraft(saved); setFailed(false); };
-  if (!editable) return <span>{String(saved) || "—"}</span>;
+  if (!editable) return <span>{draftText(property, saved)}</span>;
   return <div className={styles.cellEditor} data-saving={saving || undefined} onBlur={(event) => {
     if (!event.currentTarget.contains(event.relatedTarget)) void save();
   }}>
-    <CollectionDraftControl property={property} value={draft} label={`${property.name}, ${recordLabel}`} onChange={setDraft}
+    <CollectionDraftControl property={property} value={draft} label={`${property.name}, ${recordLabel}`} disabled={saving} onChange={setDraft}
       onCancel={restore} onConfirm={() => void save()} onNavigate={onNavigate} />
     {failed ? <span className={styles.cellError} role="alert">Value not saved. <button type="button" aria-label={`Retry ${property.name}`}
       onClick={() => void save()}>Try again</button></span> : null}

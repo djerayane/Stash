@@ -15,6 +15,7 @@ interface CollectionWorkspaceData {
   collections: Collection[];
   availableCollections: Collection[];
   availableCollectionNotes: Record<string, string>;
+  availableNotes: Array<{ id: string; title: string }>;
   views: ViewBlock[];
 }
 
@@ -28,7 +29,7 @@ export function CollectionWorkspace({ noteId, token, editable = true, fetcher = 
     const body = await response.json() as Partial<CollectionWorkspaceData> & { message?: string };
     if (!response.ok || !body.workspaceId || !body.collections || !body.views) throw new Error(body.message || "Collections are unavailable.");
     return { workspaceId: body.workspaceId, collections: body.collections, availableCollections: body.availableCollections ?? body.collections,
-      availableCollectionNotes: body.availableCollectionNotes ?? {}, views: body.views };
+      availableCollectionNotes: body.availableCollectionNotes ?? {}, availableNotes: body.availableNotes ?? [], views: body.views };
   } });
   useEffect(() => { if (!focusCollectionId || !query.data?.collections.some(({ id: collectionId }) => collectionId === focusCollectionId)) return;
     const frame = requestAnimationFrame(() => { const title = document.querySelector<HTMLInputElement>(
@@ -54,9 +55,8 @@ export function CollectionWorkspace({ noteId, token, editable = true, fetcher = 
   }, onSuccess: async () => { setInsertOpen(false); setSourceId(""); await changed(); } });
   if (query.isPending) return <StatusNotice>Opening Collections…</StatusNotice>;
   if (query.isError) return <StatusNotice tone="error">{query.error.message}</StatusNotice>;
-  const ownedIds = new Set(query.data.collections.map(({ id }) => id));
   const reusable = query.data.availableCollections.filter(({ ownerNoteId }) => ownerNoteId !== noteId);
-  const reusedViews = query.data.views.filter((view) => view.definition.source.kind === "collection" && !ownedIds.has(view.definition.source.collectionId));
+  const collectionViews = query.data.views.filter((view) => view.definition.source.kind === "collection");
   const taskViews = query.data.views.filter((view) => view.definition.source.kind === "tasks");
   return <section className={styles.workspace} aria-labelledby="collections-heading"><header className={styles.workspaceHeader}>
     <div><h2 id="collections-heading">Collections</h2><p>Shape recurring knowledge directly where you use it.</p></div>
@@ -67,9 +67,16 @@ export function CollectionWorkspace({ noteId, token, editable = true, fetcher = 
     <div className={styles.menuActions}><Button disabled={!sourceId} pending={insert.isPending}>Insert view</Button>
       <Button type="button" variant="secondary" onClick={() => { setInsertOpen(false); setSourceId(""); }}>Cancel insert view</Button></div>
     {insert.isError ? <p role="alert">{insert.error.message}</p> : null}</form> : null}
-    <div className={styles.collections}>{query.data.collections.map((collection) => <CollectionTable key={collection.id} collection={collection}
-      views={query.data.views} editable={editable} token={token} fetcher={fetcher} onChanged={changed} />)}
-      {reusedViews.map((view) => <ReusedCollectionView key={view.id} view={view} editable={editable} token={token} fetcher={fetcher} onChanged={changed} />)}</div>
+    <div className={styles.collections}>{query.data.collections.map((collection) => <CollectionTable key={`collection-${collection.id}`} collection={collection}
+      availableNotes={query.data.availableNotes} editable={editable} token={token} fetcher={fetcher} onChanged={changed} />)}
+      {collectionViews.map((view) => { const sourceId = view.definition.source.kind === "collection" ? view.definition.source.collectionId : "";
+        const source = query.data.availableCollections.find(({ id }) => id === sourceId);
+        return source ? <CollectionTable key={`view-${view.id}`} collection={source} view={view} canonicalActions={false}
+          sourceNoteTitle={query.data.availableCollectionNotes[source.id] ?? "Another Note"} availableNotes={query.data.availableNotes}
+          editable={editable} token={token} fetcher={fetcher} onChanged={changed} />
+          : <section key={`view-${view.id}`} className={styles.collection} aria-label={view.title}><StatusNotice tone="error">
+            {view.title} cannot open because its source Collection is unavailable. <button type="button" onClick={() => void changed()}>Try again</button>
+          </StatusNotice></section>; })}</div>
     {taskViews.map((view) => <SavedTaskView key={view.id} view={view} editable={editable} token={token} fetcher={fetcher} />)}
     {editable ? <div className={styles.newCollection}><Button type="button" pending={create.isPending} onClick={() => create.mutate()}>New collection</Button>
       {create.isError ? <p role="alert">{create.error.message}</p> : null}</div> : null}
@@ -107,17 +114,4 @@ function SavedTaskView({ view, editable, token, fetcher }: { view: ViewBlock; ed
     <TaskView tasks={query.data.source.records} definition={definition} statuses={editable ? query.data.source.statuses : undefined}
       onStatusChange={editable ? (task, statusId) => move.mutate({ id: task.id, statusId }) : undefined} empty={<p role="note">No Tasks in this view.</p>} />
     {create.isError || save.isError || move.isError ? <p role="alert">{(create.error || save.error || move.error)?.message}</p> : null}</section>;
-}
-
-function ReusedCollectionView({ view, editable, token, fetcher, onChanged }: { view: ViewBlock; editable: boolean; token: string;
-  fetcher: typeof fetch; onChanged(): Promise<void> }) {
-  const query = useQuery({ queryKey: ["collection-view", view.id], retry: false, queryFn: async () => {
-    const response = await fetcher(`/api/view-blocks/${encodeURIComponent(view.id)}`, { headers: auth(token, false) });
-    const body = await response.json() as { view?: ViewBlock; source?: { kind: "collection"; collection: Collection }; message?: string };
-    if (!response.ok || !body.view || body.source?.kind !== "collection") throw new Error(body.message || "This Collection view is unavailable.");
-    return { view: body.view, collection: body.source.collection };
-  } });
-  if (query.isPending) return <StatusNotice>Opening {view.title}…</StatusNotice>;
-  if (query.isError) return <StatusNotice tone="error">{query.error.message}</StatusNotice>;
-  return <CollectionTable collection={query.data.collection} views={[query.data.view]} editable={editable} token={token} fetcher={fetcher} onChanged={onChanged} />;
 }

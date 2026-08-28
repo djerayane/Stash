@@ -3,18 +3,12 @@ import { randomUUID } from "node:crypto";
 import { normalizeCollection, normalizeViewBlock, normalizeViewDefinition, type Collection as CanonicalCollection,
   type CollectionProperty as CanonicalProperty, type CollectionRecord as CanonicalRecord, type CollectionPropertyValue,
   type ViewBlock as CanonicalViewBlock, type ViewDefinition } from "@stash/domain-types";
-import type { CollectionImpact } from "@stash/domain-types";
+import type { CollectionImpact, CollectionPropertyImpact } from "@stash/domain-types";
 
 export type CollectionViewResult =
   | { status: "found"; view: CanonicalViewBlock; source: { kind: "collection"; collection: CanonicalCollection } }
   | { status: "found"; view: CanonicalViewBlock; source: { kind: "tasks"; records: readonly unknown[]; statuses: readonly unknown[] } }
   | { status: "view_not_found" | "source_unavailable" };
-
-export interface CollectionPropertyImpact {
-  readonly affectedValues: number;
-  readonly affectedRelations: number;
-  readonly affectedViews: number;
-}
 
 export interface CollectionRepository {
   create(memberId: string, collection: CanonicalCollection): Promise<
@@ -28,19 +22,26 @@ export interface CollectionRepository {
     { status: "updated"; collection: CanonicalCollection } | { status: "collection_not_found" | "property_not_found" }>;
   createCollectionProperty(memberId: string, collectionId: string, property: CanonicalProperty): Promise<
     { status: "created"; property: CanonicalProperty } | { status: "collection_not_found" | "property_conflict" }>;
-  updateCollectionProperty(memberId: string, collectionId: string, property: CanonicalProperty): Promise<
-    { status: "updated"; collection: CanonicalCollection } | { status: "collection_not_found" | "property_not_found" }>;
+  updateCollectionProperty(memberId: string, collectionId: string, propertyId: string, input: Readonly<Record<string, unknown>>): Promise<
+    { status: "updated"; collection: CanonicalCollection }
+    | { status: "collection_not_found" | "property_not_found" | "primary_property_required" | "invalid_property" }>;
   reorderCollectionProperties(memberId: string, collectionId: string, properties: readonly CanonicalProperty[]): Promise<
     { status: "updated"; collection: CanonicalCollection } | { status: "collection_not_found" | "property_not_found" }>;
-  deleteCollectionProperty(memberId: string, collectionId: string, propertyId: string): Promise<
+  previewCollectionPropertyRemoval(memberId: string, collectionId: string, propertyId: string): Promise<
+    { status: "found"; impact: CollectionPropertyImpact }
+    | { status: "collection_not_found" | "property_not_found" | "primary_property_required" }>;
+  deleteCollectionProperty(memberId: string, collectionId: string, propertyId: string, impactToken: string): Promise<
     { status: "updated"; collection: CanonicalCollection; impact: CollectionPropertyImpact }
-    | { status: "collection_not_found" | "property_not_found" }>;
+    | { status: "impact_changed"; impact: CollectionPropertyImpact }
+    | { status: "collection_not_found" | "property_not_found" | "primary_property_required" }>;
   moveCollectionRecord(memberId: string, collectionId: string, recordId: string, beforeId?: string): Promise<
     { status: "moved" } | { status: "collection_not_found" | "record_not_found" | "before_not_found" }>;
   createCollectionRecord(memberId: string, collectionId: string, record: CanonicalRecord): Promise<
     { status: "created"; record: CanonicalRecord } | { status: "collection_not_found" | "record_conflict" }>;
-  updateCollectionRecord(memberId: string, collectionId: string, record: CanonicalRecord): Promise<
-    { status: "updated"; record: CanonicalRecord } | { status: "collection_not_found" | "record_not_found" }>;
+  updateCollectionRecordValues(memberId: string, collectionId: string, recordId: string,
+    values: Readonly<Record<string, CollectionPropertyValue>>): Promise<
+    { status: "updated"; record: CanonicalRecord }
+    | { status: "collection_not_found" | "record_not_found" | "invalid_record" }>;
   createCanonicalViewBlock(memberId: string, view: CanonicalViewBlock): Promise<
     { status: "created"; view: CanonicalViewBlock } | { status: "note_not_found" | "workspace_mismatch" | "source_unavailable" | "view_conflict" }>;
   readCanonicalViewBlock(memberId: string, viewId: string): Promise<CollectionViewResult>;
@@ -48,7 +49,8 @@ export interface CollectionRepository {
     { status: "updated" } | { status: "view_not_found" | "source_unavailable" }>;
   listCollectionsForNote(memberId: string, noteId: string): Promise<
     { status: "found"; workspaceId: string; collections: readonly CanonicalCollection[]; availableCollections: readonly CanonicalCollection[];
-      availableCollectionNotes: Readonly<Record<string, string>>; views: readonly CanonicalViewBlock[] } | { status: "note_not_found" }>;
+      availableCollectionNotes: Readonly<Record<string, string>>; availableNotes: readonly { readonly id: string; readonly title: string }[];
+      views: readonly CanonicalViewBlock[] } | { status: "note_not_found" }>;
   previewCollectionRemoval(memberId: string, noteId: string): Promise<{ status: "found"; impact: CollectionImpact } | { status: "note_not_found" }>;
   relocateCollections(memberId: string, noteId: string, destinationNoteId: string, collectionIds: readonly string[]): Promise<
     { status: "relocated"; collectionIds: readonly string[] } | { status: "note_not_found" | "destination_not_found" | "collection_not_found" }>;
@@ -100,19 +102,7 @@ export class CollectionService {
       throw new InvalidCollectionInput();
     const input = value as Record<string, unknown>; const keys = Object.keys(input);
     if (!keys.length || keys.some((key) => !["name", "type", "options", "target"].includes(key))) throw new InvalidCollectionInput();
-    const current = await this.repository.readCollection(memberId, collectionId);
-    if (current.status !== "found") return current;
-    const property = current.collection.properties.find(({ id }) => id === propertyId);
-    if (!property) return { status: "property_not_found" as const };
-    const candidate: Record<string, unknown> = { ...property, ...input, id: property.id, position: property.position };
-    if (input.type !== "single_select" && input.type !== "multi_select" && input.type !== undefined) delete candidate.options;
-    if (input.type !== "relation" && input.type !== undefined) delete candidate.target;
-    let normalized: CanonicalCollection;
-    try { normalized = normalizeCollection({ ...current.collection,
-      properties: current.collection.properties.map((entry) => entry.id === propertyId ? candidate : entry) }); }
-    catch { throw new InvalidCollectionInput(); }
-    return this.repository.updateCollectionProperty(memberId, collectionId,
-      normalized.properties.find(({ id }) => id === propertyId)!);
+    return this.repository.updateCollectionProperty(memberId, collectionId, propertyId, input);
   }
 
   async reorderProperties(memberId: string, collectionId: string, value: unknown) {
@@ -128,17 +118,18 @@ export class CollectionService {
     return this.repository.reorderCollectionProperties(memberId, collectionId, properties);
   }
 
-  async deleteProperty(memberId: string, collectionId: string, propertyId: string) {
+  previewPropertyRemoval(memberId: string, collectionId: string, propertyId: string) {
     if (!uuid.test(collectionId) || !uuid.test(propertyId)) throw new InvalidCollectionInput();
-    const current = await this.repository.readCollection(memberId, collectionId);
-    if (current.status !== "found") return current;
-    const property = current.collection.properties.find(({ id }) => id === propertyId);
-    if (!property) return { status: "property_not_found" as const };
-    const primaryText = [...current.collection.properties].sort((left, right) => left.position - right.position)
-      .find(({ type }) => type === "text");
-    if (primaryText?.id === propertyId && current.collection.properties.filter(({ type }) => type === "text").length === 1)
-      return { status: "primary_property_required" as const };
-    return this.repository.deleteCollectionProperty(memberId, collectionId, propertyId);
+    return this.repository.previewCollectionPropertyRemoval(memberId, collectionId, propertyId);
+  }
+
+  deleteProperty(memberId: string, collectionId: string, propertyId: string, value: unknown) {
+    if (!uuid.test(collectionId) || !uuid.test(propertyId) || !value || typeof value !== "object" || Array.isArray(value))
+      throw new InvalidCollectionInput();
+    const input = value as Record<string, unknown>;
+    if (Object.keys(input).length !== 1 || typeof input.impactToken !== "string" || !input.impactToken)
+      throw new InvalidCollectionInput();
+    return this.repository.deleteCollectionProperty(memberId, collectionId, propertyId, input.impactToken);
   }
 
   moveRecord(memberId: string, collectionId: string, recordId: string, value: unknown) {
@@ -164,15 +155,8 @@ export class CollectionService {
       || Object.keys(value).length !== 1 || !Object.hasOwn(value, "values") || !(value as Record<string, unknown>).values
       || typeof (value as Record<string, unknown>).values !== "object" || Array.isArray((value as Record<string, unknown>).values))
       throw new InvalidCollectionInput();
-    const current = await this.repository.readCollection(memberId, collectionId);
-    if (current.status !== "found") return current;
-    const found = current.collection.records.find(({ id }) => id === recordId);
-    if (!found) return { status: "record_not_found" as const };
-    let normalized: CanonicalCollection;
-    try { normalized = normalizeCollection({ ...current.collection, records: current.collection.records.map((record) => record.id === recordId
-      ? { ...record, values: { ...record.values, ...(value as { values: Record<string, CollectionPropertyValue> }).values } } : record) }); }
-    catch { throw new InvalidCollectionInput(); }
-    return this.repository.updateCollectionRecord(memberId, collectionId, normalized.records.find(({ id }) => id === recordId)!);
+    return this.repository.updateCollectionRecordValues(memberId, collectionId, recordId,
+      (value as { values: Record<string, CollectionPropertyValue> }).values);
   }
 
   createView(memberId: string, ownerNoteId: string, value: unknown) {

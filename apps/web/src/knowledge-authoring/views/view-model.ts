@@ -50,9 +50,12 @@ export function evaluateCollectionView(collection: Collection, definition: ViewD
 
 export function updateBoardGroup(collection: Collection, definition: ViewDefinition, recordId: string, groupValue: CollectionPropertyValue) {
   if (!definition.groupBy) throw new Error("board_group_unavailable");
-  if (!collection.records.some(({ id }) => id === recordId) || !collection.properties.some(({ id }) => id === definition.groupBy))
+  const property = collection.properties.find(({ id }) => id === definition.groupBy);
+  if (!collection.records.some(({ id }) => id === recordId) || !property)
     throw new Error("board_group_unavailable");
-  return { recordId, values: { [definition.groupBy]: groupValue } };
+  const value = property.type === "multi_select" ? [String(groupValue)]
+    : property.type === "checkbox" ? groupValue === true || groupValue === "true" : groupValue;
+  return { recordId, values: { [definition.groupBy]: value } };
 }
 
 export function presentationRequirement(collection: Collection, presentation: ViewPresentation):
@@ -62,13 +65,4 @@ export function presentationRequirement(collection: Collection, presentation: Vi
   if (presentation === "board" && !collection.properties.some(({ type }) => type === "single_select" || type === "multi_select" || type === "checkbox"))
     return { propertyType: "single_select", actionLabel: "Add select property" };
   return undefined;
-}
-
-export function repairDefinitionAfterPropertyDeletion(definition: ViewDefinition, propertyId: string): ViewDefinition {
-  const visible = Array.isArray(definition.layout.visiblePropertyIds)
-    ? definition.layout.visiblePropertyIds.filter((id) => id !== propertyId) : undefined;
-  const { groupBy: _groupBy, ...withoutGroup } = definition; const base = definition.groupBy === propertyId ? withoutGroup : definition;
-  return { ...base, filters: definition.filters.filter((filter) => filter.propertyId !== propertyId),
-    sorts: definition.sorts.filter((sort) => sort.propertyId !== propertyId),
-    layout: visible ? { ...definition.layout, visiblePropertyIds: visible } : definition.layout };
 }

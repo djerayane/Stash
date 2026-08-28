@@ -30,7 +30,10 @@ test("creates and edits a Collection without leaving its table", async ({ page }
   await collection.getByRole("button", { name: "Add property" }).press("Enter");
   await page.getByRole("textbox", { name: "Property name" }).fill("Status");
   await page.getByRole("combobox", { name: "Property type" }).selectOption("single_select");
-  await page.getByRole("textbox", { name: "Options" }).fill("Research, Ready");
+  await page.getByRole("button", { name: "Add option" }).press("Enter");
+  await page.getByRole("textbox", { name: "Option 1" }).fill("Research");
+  await page.getByRole("button", { name: "Add option" }).press("Enter");
+  await page.getByRole("textbox", { name: "Option 2" }).fill("Ready");
   await page.getByRole("button", { name: "Add property" }).press("Enter");
   await expect(collection.getByRole("columnheader", { name: "Status" })).toBeVisible();
 
@@ -82,6 +85,8 @@ test("inserts a canonical view from another Note and reviews deletion impact", a
   await page.getByRole("button", { name: "Insert view", exact: true }).press("Enter");
   const reused = page.getByRole("region", { name: "Cross-note source" });
   await expect(reused).toBeVisible();
+  await expect(reused.getByText(/View of Cross-note source · From /)).toBeVisible();
+  await expect(reused.getByRole("button", { name: "Collection actions" })).toHaveCount(0);
   const canonicalCell = reused.getByRole("textbox", { name: "Name, Portable record" });
   const canonicalSave = page.waitForResponse((response) => response.url().endsWith(`/api/collections/${collectionId}/records/${recordId}`)
     && response.request().method() === "PATCH");

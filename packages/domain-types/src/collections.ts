@@ -45,6 +45,15 @@ export interface CollectionImpact {
   readonly token: string;
 }
 
+export interface CollectionPropertyImpact {
+  readonly collectionId: string;
+  readonly propertyId: string;
+  readonly affectedValues: number;
+  readonly affectedRelations: number;
+  readonly affectedViews: number;
+  readonly token: string;
+}
+
 export const taskViewPropertyIds = ["task:title", "task:description", "task:status", "task:assignee", "task:project"] as const;
 export type TaskViewPropertyId = (typeof taskViewPropertyIds)[number];
 export function isTaskViewPropertyId(value: string): value is TaskViewPropertyId {
