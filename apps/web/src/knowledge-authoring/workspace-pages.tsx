@@ -8,7 +8,7 @@ import type { ActivityCause, ActivityRecord, NotificationDelivery } from "@stash
 
 import { DiscussionPanel } from "./discussion-panel";
 import styles from "../core-workflows.module.css";
-import { Button, StatusNotice } from "../ui/control";
+import { Button, Field, StatusNotice } from "../ui/control";
 
 type Fetcher = typeof fetch;
 interface CoreProps { readonly workspaceId: string; readonly token: string; readonly fetcher?: Fetcher }
@@ -27,10 +27,10 @@ function request(fetcher: Fetcher, token: string, path: string, init?: RequestIn
 }
 
 function Loading() { return <StatusNotice className={styles.loading}>Loading Workspace data…</StatusNotice>; }
-function Failure({ error, retry, recovery }: { readonly error: Error; readonly retry: () => void; readonly recovery?: string }) {
+function Failure({ error, retry, recovery }: { readonly error: Error; readonly retry: () => void; readonly recovery: string }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => { ref.current?.querySelector<HTMLElement>('[role="alert"]')?.focus(); }, []);
-  return <div ref={ref}><StatusNotice className={styles.failure} tone="error" tabIndex={-1}><strong>That view could not be loaded</strong><p>{error.message}</p>{recovery ? <p>{recovery}</p> : null}<Button type="button" variant="secondary" onClick={retry}>Try again</Button></StatusNotice></div>;
+  return <div ref={ref}><StatusNotice className={styles.failure} tone="error" tabIndex={-1}><strong>That view could not be loaded</strong><p>{error.message}</p><p>{recovery}</p><Button type="button" variant="secondary" onClick={retry}>Try again</Button></StatusNotice></div>;
 }
 function Header({ title, lede, action }: { readonly title: string; readonly lede: string; readonly action?: ReactNode }) {
   return <header className={styles.header}><div><h1>{title}</h1><p>{lede}</p></div>{action}</header>;
@@ -50,7 +50,7 @@ export function InboxPage({ workspaceId, token, fetcher = globalThis.fetch }: Co
   const triage = useMutation({ mutationFn: ({ note, action }: { note: Note; action: "archive" | "organize" }) => request(fetcher, token, `/api/workspaces/${encodeURIComponent(workspaceId)}/inbox/${encodeURIComponent(note.id)}/triage`, { method: "POST", body: JSON.stringify(action === "archive" ? { action } : { action, projectId }) }), onSuccess: async () => { setSelected(undefined); setProjectId(""); await client.invalidateQueries({ queryKey: key }); } });
   return <div className={styles.page}><Header title="Inbox" lede="Capture first. Add shape only when the thought earns it." action={<Dialog.Root open={captureOpen} onOpenChange={setCaptureOpen}><Dialog.Trigger asChild><Button type="button">Capture Note</Button></Dialog.Trigger><Dialog.Portal><Dialog.Overlay className={styles.overlay} /><Dialog.Content className={styles.dialog}><Dialog.Title>Capture a Note</Dialog.Title><Dialog.Description>Write the thought as it arrived. You can organize it from the Inbox.</Dialog.Description><textarea autoFocus value={content} onChange={(event) => setContent(event.target.value)} aria-label="Note content" /><div className={styles.actions}><Dialog.Close asChild><Button type="button" variant="secondary">Cancel</Button></Dialog.Close><Button disabled={!content.trim()} onClick={() => capture.mutate()} pending={capture.isPending} pendingLabel="Capturing…" type="button">Capture</Button></div>{capture.isError ? <StatusNotice tone="error">{capture.error.message} Your draft is preserved.</StatusNotice> : null}</Dialog.Content></Dialog.Portal></Dialog.Root>} />
     {inbox.isPending ? <Loading /> : inbox.isError ? <Failure error={inbox.error} retry={() => void inbox.refetch()} recovery="Your Inbox state is preserved. Try loading it again." /> : inbox.data.length === 0 ? <Empty title="Your Inbox is clear" body="New Notes will wait here until you organize or archive them." /> : <section className={styles.list} aria-label="Inbox Notes">{inbox.data.map((note) => <article key={note.id}><div><h2>{note.content.split("\n")[0] || "Untitled Note"}</h2><p>{note.content}</p></div><Button type="button" variant="secondary" onClick={() => setSelected(note)}>Triage</Button></article>)}</section>}
-    <Dialog.Root open={Boolean(selected)} onOpenChange={(open) => !open && setSelected(undefined)}><Dialog.Portal><Dialog.Overlay className={styles.overlay} /><Dialog.Content className={styles.dialog}><Dialog.Title>Organize this Note</Dialog.Title><Dialog.Description>Assign it to a Project, or archive it from active views.</Dialog.Description><label>Project ID<input value={projectId} onChange={(event) => setProjectId(event.target.value)} /></label><div className={styles.actions}><Button type="button" variant="secondary" onClick={() => selected && triage.mutate({ note: selected, action: "archive" })}>Archive</Button><Button disabled={!projectId.trim()} type="button" onClick={() => selected && triage.mutate({ note: selected, action: "organize" })}>Organize</Button></div>{triage.isError ? <StatusNotice tone="error">{triage.error.message} Your triage choice is preserved.</StatusNotice> : null}</Dialog.Content></Dialog.Portal></Dialog.Root>
+    <Dialog.Root open={Boolean(selected)} onOpenChange={(open) => !open && setSelected(undefined)}><Dialog.Portal><Dialog.Overlay className={styles.overlay} /><Dialog.Content className={styles.dialog}><Dialog.Title>Organize this Note</Dialog.Title><Dialog.Description>Assign it to a Project, or archive it from active views.</Dialog.Description><Field label="Project ID"><input value={projectId} onChange={(event) => setProjectId(event.target.value)} /></Field><div className={styles.actions}><Button type="button" variant="secondary" onClick={() => selected && triage.mutate({ note: selected, action: "archive" })}>Archive</Button><Button disabled={!projectId.trim()} type="button" onClick={() => selected && triage.mutate({ note: selected, action: "organize" })}>Organize</Button></div>{triage.isError ? <StatusNotice tone="error">{triage.error.message} Your triage choice is preserved.</StatusNotice> : null}</Dialog.Content></Dialog.Portal></Dialog.Root>
   </div>;
 }
 
@@ -68,7 +68,7 @@ export function DiscussionsPage({ token, targetKind, fetcher = globalThis.fetch 
     access: "edit" | "read"; discussions: unknown[];
   }> });
   return <div className={styles.page}><Header title="Discussions" lede="Keep conversation portable and distinct from authored knowledge." />
-    {access.isPending ? <Loading /> : access.isError ? <Failure error={access.error} retry={() => void access.refetch()} /> : <DiscussionPanel canWrite={access.data.access === "edit"}
+    {access.isPending ? <Loading /> : access.isError ? <Failure error={access.error} retry={() => void access.refetch()} recovery="No Discussion state changed. Try loading this view again." /> : <DiscussionPanel canWrite={access.data.access === "edit"}
       classes={{ actions: styles.actions, empty: styles.empty, failure: styles.failure, list: styles.list,
       loading: styles.loading, primary: styles.primary, reply: styles.reply }} fetcher={fetcher} showWorkActions target={target} token={token} />
     }
@@ -77,7 +77,7 @@ export function DiscussionsPage({ token, targetKind, fetcher = globalThis.fetch 
 
 export function ActivityPage({ workspaceId, token, fetcher = globalThis.fetch }: CoreProps) {
   const query = useQuery({ queryKey: ["activity", workspaceId], retry: false, queryFn: () => request(fetcher, token, `/api/workspaces/${encodeURIComponent(workspaceId)}/activity`) as Promise<{ activities: ActivityRecord[] }> });
-  return <div className={styles.page}><Header title="Activity" lede="Meaningful changes with enough history to understand who changed what." />{query.isPending ? <Loading /> : query.isError ? <Failure error={query.error} retry={() => void query.refetch()} /> : query.data.activities.length ? <ol className={styles.timeline}>{query.data.activities.map((item) => <li key={item.id}><span aria-hidden="true" /><div><strong>{words(item.action)}</strong><p>{item.actor.displayName} · {new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(item.occurredAt))}</p><p>Cause: {causeLabel(item.cause)}</p><p><b>Before:</b> {facts(item.before)} <b>After:</b> {facts(item.after)}</p></div></li>)}</ol> : <Empty title="No Activity yet" body="Changes to Notes, Tasks, and Automations will be explained here." />}</div>;
+  return <div className={styles.page}><Header title="Activity" lede="Meaningful changes with enough history to understand who changed what." />{query.isPending ? <Loading /> : query.isError ? <Failure error={query.error} retry={() => void query.refetch()} recovery="No Activity state changed. Try loading this view again." /> : query.data.activities.length ? <ol className={styles.timeline}>{query.data.activities.map((item) => <li key={item.id}><span aria-hidden="true" /><div><strong>{words(item.action)}</strong><p>{item.actor.displayName} · {new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(item.occurredAt))}</p><p>Cause: {causeLabel(item.cause)}</p><p><b>Before:</b> {facts(item.before)} <b>After:</b> {facts(item.after)}</p></div></li>)}</ol> : <Empty title="No Activity yet" body="Changes to Notes, Tasks, and Automations will be explained here." />}</div>;
 }
 
 export function NotificationsPage({ token, fetcher = globalThis.fetch }: Omit<CoreProps, "workspaceId">) {

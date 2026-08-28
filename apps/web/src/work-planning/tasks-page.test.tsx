@@ -42,7 +42,13 @@ test("uses the shared page, primary-action, and filter language", async () => {
   expect(container.querySelectorAll("h1")).toHaveLength(1);
   expect(screen.queryByText("Workspace work")).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Create Task" })).toHaveAttribute("data-variant", "primary");
-  expect(screen.getByRole("group", { name: "Filters" })).toBeInTheDocument();
+  const filters = screen.getByText("Filters", { selector: "summary" });
+  const disclosure = filters.closest("details");
+  expect(disclosure).toHaveAttribute("open");
+  fireEvent.click(filters);
+  expect(disclosure).not.toHaveAttribute("open");
+  fireEvent.click(filters);
+  expect(disclosure).toHaveAttribute("open");
   expect(screen.getByRole("group", { name: "View" })).toBeInTheDocument();
 });
 

@@ -62,7 +62,8 @@ test("@a11y downloads a safe Workspace archive by keyboard and recovers without 
   await page.keyboard.press("Enter");
   const alert = page.getByRole("alert");
   await expect(alert).toBeFocused();
-  await expect(alert).toHaveText("The Workspace export could not be completed. No partial export was produced.");
+  await expect(alert).toContainText("The Workspace export could not be completed. No partial export was produced.");
+  await expect(alert).toContainText("Your Workspace and import selections are unchanged. Try the download again.");
   await expect(markdown).toBeChecked();
   await expect.poll(() => archiveInput.evaluate((input: HTMLInputElement) => ({ length: input.files?.length, name: input.files?.[0]?.name })))
     .toEqual({ length: 1, name: "preserved-vault.zip" });
@@ -105,6 +106,25 @@ test("@a11y administrators discover every Organization control surface", async (
   await page.emulateMedia({ reducedMotion: "reduce" }); await page.goto("/app/settings/organization");
   for (const heading of ["Roles and Members", "Invite access", "GitHub Repository Connections", "OpenID Connect"]) await expect(page.getByRole("heading", { name: heading })).toBeVisible();
   await expect(page.getByRole("link", { name: "Review Member departure" })).toHaveAttribute("href", "/app/settings/members");
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+});
+
+test("@a11y keeps degraded Repository Connection actions inside a 320px Organization viewport", async ({ page }) => {
+  await authenticate(page);
+  await page.route("**/api/organizations/*/roles", (route) => route.fulfill({ json: { roles: builtInRoles } }));
+  await page.route("**/api/agent-grant-options", (route) => route.fulfill({ json: { organizations: [{ organizationId: "11111111-1111-4111-8111-111111111111", organizationName: "Acceptance Organization", projects: [{ id: "22222222-2222-4222-8222-222222222222", name: "A deliberately long Project name for narrow viewport coverage" }] }] } }));
+  await page.route("**/api/organizations/*/repository-connections", (route) => route.fulfill({ json: { repositoryConnections: [{ id: "33333333-3333-4333-8333-333333333333", repositoryUrl: "https://github.com/an-extraordinarily-long-organization-name/an-extraordinarily-long-repository-name", ownership: "organization", state: "degraded", projectIds: [] }] } }));
+  await page.setViewportSize({ width: 320, height: 760 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("/app/settings/organization");
+
+  const connection = page.getByText("an-extraordinarily-long-organization-name/an-extraordinarily-long-repository-name").locator("xpath=ancestor::li");
+  await expect(connection.getByRole("combobox", { name: /Project for/ })).toBeVisible();
+  await expect(connection.getByRole("button", { name: "Attach" })).toBeVisible();
+  await expect(connection.getByRole("button", { name: "Verify" })).toBeVisible();
+  await expect(connection.getByRole("button", { name: "Repair" })).toBeVisible();
+  expect(await page.locator("body").evaluate((body) => body.scrollWidth <= body.clientWidth)).toBe(true);
+  expect(await connection.evaluate((row) => row.scrollWidth <= row.clientWidth)).toBe(true);
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 });
 

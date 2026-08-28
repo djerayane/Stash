@@ -4,7 +4,7 @@ import gsap from "gsap";
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
 import styles from "./member-administration.module.css";
-import { Button, StatusNotice } from "./ui/control";
+import { Button, Field, StatusNotice } from "./ui/control";
 
 export interface OrganizationAdministration {
   readonly organizationId: string;
@@ -23,6 +23,8 @@ export function MemberAdministrationPage({ administrations, activeOrganizationId
   const [candidate, setCandidate] = useState<OrganizationAdministration["members"][number]>();
   const [departed, setDeparted] = useState<OrganizationAdministration["members"][number]>();
   const confirmationRef = useRef<HTMLDivElement>(null);
+  const completionRef = useRef<HTMLElement>(null);
+  const departureTriggerRef = useRef<HTMLButtonElement>(null);
   const queryClient = useQueryClient();
   const removal = useMutation({
     mutationFn: async (member: OrganizationAdministration["members"][number]) => {
@@ -45,29 +47,36 @@ export function MemberAdministrationPage({ administrations, activeOrganizationId
     gsap.from(confirmationRef.current, { opacity: 0, y: 8, duration: .3, ease: "power2.out", clearProps: "all" });
   }, { dependencies: [candidate?.id] });
   useEffect(() => { if (candidate) confirmationRef.current?.focus(); }, [candidate]);
+  useEffect(() => { if (departed) completionRef.current?.focus(); }, [departed]);
 
-  if (!administration || !token) return <div className={styles.page}><StatusNotice tone="error">Organization Member administration is unavailable for this account. No access was changed.</StatusNotice></div>;
+  const pageHeader = <header className={styles.header}><h1 id="members-title">Member access</h1>
+    <p>{administration ? `Review access to ${administration.organizationName}` : "Review Organization access"} without erasing the work and decisions a person contributed.</p></header>;
+  const cancelDeparture = () => {
+    setCandidate(undefined);
+    requestAnimationFrame(() => departureTriggerRef.current?.focus());
+  };
+
+  if (!administration || !token) return <article className={styles.page} aria-labelledby="members-title">{pageHeader}<StatusNotice tone="error">Organization Member administration is unavailable for this account. No access was changed.</StatusNotice></article>;
   const eligibleMembers = administration.members.filter(({ id }) => id !== currentMemberId && id !== departed?.id);
   return <article className={styles.page} aria-labelledby="members-title">
-    <header className={styles.header}><h1 id="members-title">Member access</h1>
-      <p>Review access to {administration.organizationName} without erasing the work and decisions a person contributed.</p></header>
-    {availableAdministrations.length > 1 ? <label className={styles.organizationPicker}>Organization
+    {pageHeader}
+    {availableAdministrations.length > 1 ? <Field className={styles.organizationPicker} label="Organization">
       <select value={administration.organizationId} onChange={(event) => {
-        removal.reset(); setCandidate(undefined); setDeparted(undefined); setSelectedOrganizationId(event.target.value);
+        removal.reset(); setCandidate(undefined); setDeparted(undefined); departureTriggerRef.current = null; setSelectedOrganizationId(event.target.value);
       }}>{availableAdministrations.map((organization) => <option key={organization.organizationId} value={organization.organizationId}>{organization.organizationName}</option>)}</select>
-    </label> : null}
-    {departed ? <section className={styles.completion} aria-live="polite" aria-labelledby="departure-complete">
+    </Field> : null}
+    {departed ? <section className={styles.completion} aria-live="polite" aria-labelledby="departure-complete" ref={completionRef} tabIndex={-1}>
       <div><h2 id="departure-complete">{departed.name} no longer has access</h2><p>Sessions, personal credentials, Agent Grants, and personal Repository Connections were revoked. Historical attribution remains intact.</p></div>
       <Link className={styles.taskLink} to="/app/tasks">Review Tasks</Link>
     </section> : null}
     <section className={styles.roster} aria-labelledby="active-members"><div><h2 id="active-members">Active Members</h2><p>Only current, server-verified Organization Members are eligible.</p></div>
       <ul>{eligibleMembers.map((member) => <li key={member.id}><span><strong>{member.name}</strong><small>{member.email} · {member.role}</small></span>
-        <Button type="button" variant="secondary" onClick={() => { removal.reset(); setCandidate(member); }}>Review departure</Button></li>)}</ul>
+        <Button type="button" variant="secondary" onClick={(event) => { removal.reset(); departureTriggerRef.current = event.currentTarget; setCandidate(member); }}>Review departure</Button></li>)}</ul>
     </section>
     {candidate ? <div className={styles.confirmation} ref={confirmationRef} role="region" aria-labelledby="confirm-departure" tabIndex={-1}>
       <h2 id="confirm-departure">Remove {candidate.name} from {administration.organizationName}?</h2>
       <p>Their active authority will be revoked immediately. Authorship stays preserved, and Tasks remain visibly marked until someone takes responsibility.</p>
-      <div className={styles.actions}><Button type="button" variant="secondary" onClick={() => setCandidate(undefined)}>Keep Member</Button>
+      <div className={styles.actions}><Button type="button" variant="secondary" onClick={cancelDeparture}>Keep Member</Button>
         <Button type="button" variant="danger" pending={removal.isPending} pendingLabel="Removing…" onClick={() => removal.mutate(candidate)}>Remove Member</Button></div>
       {removal.isError ? <StatusNotice tone="error">{removal.error.message} The Member still has their previous access.</StatusNotice> : null}
     </div> : null}

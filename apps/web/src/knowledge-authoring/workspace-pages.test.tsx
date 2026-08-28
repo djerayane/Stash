@@ -83,6 +83,9 @@ describe("core React workflows", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Capture$/ }));
     expect(await screen.findByRole("heading", { name: "Plan the release" })).toBeVisible();
     expect(fetcher).toHaveBeenCalledWith("/api/workspaces/workspace-1/notes", expect.objectContaining({ method: "POST" }));
+    fireEvent.click(screen.getByRole("button", { name: "Triage" }));
+    const project = screen.getByRole("textbox", { name: "Project ID" });
+    expect(project.closest("label")?.querySelector("span")).toHaveTextContent("Project ID");
   });
 
   it("replies, resolves, and creates work from selected Discussion messages", async () => {
@@ -141,6 +144,20 @@ describe("core React workflows", () => {
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(await screen.findByText("You are caught up")).toBeVisible();
     expect(attempts).toBe(2);
+  });
+
+  it("explains preservation and retry for every retriable Discussion and Activity read", async () => {
+    const failing = vi.fn(async () => new Response(JSON.stringify({ message: "Temporarily unavailable" }), { status: 503 }));
+    const discussion = renderWorkflow(<DiscussionsPage targetKind="note" fetcher={failing as typeof fetch} token="member" />);
+    const discussionAlert = await screen.findByRole("alert");
+    expect(discussionAlert).toHaveTextContent("No Discussion state changed. Try loading this view again.");
+    expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
+    discussion.unmount();
+
+    renderWorkflow(<ActivityPage fetcher={failing as typeof fetch} token="member" workspaceId="workspace" />);
+    const activityAlert = await screen.findByRole("alert");
+    expect(activityAlert).toHaveTextContent("No Activity state changed. Try loading this view again.");
+    expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
   });
 
   it("renders canonical Activity and Notification meaning instead of invented DTO fields", async () => {
