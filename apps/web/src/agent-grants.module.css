@@ -1,6 +1,6 @@
 .page { max-width: 72rem; margin: 0 auto; padding: clamp(2rem, 6vw, 5rem); color: var(--stash-color-ink); }
 .header { max-width: 58rem; padding: 2rem 0 4rem; border-bottom: 1px solid var(--stash-border-subtle); }
-.header h1 { max-width: 18ch; margin: .3rem 0 1rem; font: 600 clamp(2.5rem, 6vw, 5.4rem)/.98 var(--stash-font-display); letter-spacing: -.055em; }
+.header h1 { max-width: 18ch; margin: .3rem 0 1rem; font: 600 clamp(2.5rem, 6vw, 5.4rem)/.98 var(--stash-font-sans); letter-spacing: -.055em; }
 .header p:last-child { max-width: 43rem; color: var(--stash-color-muted); font-size: 1.1rem; line-height: 1.65; }
 .kicker { color: var(--stash-color-accent); font-size: .76rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
 .composer,.list,.credential { display: grid; grid-template-columns: minmax(14rem, .7fr) minmax(18rem, 1.3fr); gap: clamp(2rem, 6vw, 7rem); padding: 4rem 0; border-bottom: 1px solid var(--stash-border-subtle); }

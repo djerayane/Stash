@@ -13,6 +13,12 @@ export type TaskViewSource = (memberId: string, workspaceId: string) => Promise<
 const member = `(workspace.owner_type='personal' AND workspace.personal_owner_id=$2) OR
   (workspace.owner_type='organization' AND EXISTS (SELECT 1 FROM stash_organization_memberships membership
     WHERE membership.organization_id=workspace.organization_owner_id AND membership.account_id=$2))`;
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`).join(",")}}`;
+  return JSON.stringify(value);
+}
 
 /** Focused canonical Collection and View Block persistence over the shared Postgres kernel. */
 export class PostgresCollectionRepository implements CollectionRepository {
@@ -34,7 +40,13 @@ export class PostgresCollectionRepository implements CollectionRepository {
       );
       CREATE TABLE IF NOT EXISTS stash_collection_records (
         id UUID PRIMARY KEY, collection_id UUID NOT NULL REFERENCES stash_collections(id) ON DELETE CASCADE,
-        position INTEGER NOT NULL CHECK(position>0), UNIQUE(collection_id,position)
+        position INTEGER NOT NULL CHECK(position>0), revision INTEGER NOT NULL DEFAULT 1 CHECK(revision>0), UNIQUE(collection_id,position)
+      );
+      ALTER TABLE stash_collection_records ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 1 CHECK(revision>0);
+      CREATE TABLE IF NOT EXISTS stash_collection_record_operations (
+        record_id UUID NOT NULL REFERENCES stash_collection_records(id) ON DELETE CASCADE,
+        operation_id UUID NOT NULL, digest TEXT NOT NULL, outcome JSONB NOT NULL,
+        PRIMARY KEY(record_id,operation_id)
       );
       CREATE TABLE IF NOT EXISTS stash_collection_record_values (
         record_id UUID NOT NULL REFERENCES stash_collection_records(id) ON DELETE CASCADE,
@@ -72,7 +84,8 @@ export class PostgresCollectionRepository implements CollectionRepository {
             VALUES($1,$2,$3,$4,$5::jsonb,$6)`, [property.id, collection.id, property.name, property.type, JSON.stringify(configuration), property.position]);
         }
         for (const record of collection.records) {
-          await client.query("INSERT INTO stash_collection_records(id,collection_id,position) VALUES($1,$2,$3)", [record.id, collection.id, record.position]);
+          await client.query("INSERT INTO stash_collection_records(id,collection_id,position,revision) VALUES($1,$2,$3,$4)",
+            [record.id, collection.id, record.position, record.revision ?? 1]);
           for (const [propertyId, value] of Object.entries(record.values)) await client.query(`INSERT INTO stash_collection_record_values
             (record_id,property_id,value) VALUES($1,$2,$3::jsonb)`, [record.id, propertyId, JSON.stringify(value)]);
         }
@@ -279,9 +292,11 @@ export class PostgresCollectionRepository implements CollectionRepository {
     { status: "created"; record: CanonicalRecord } | { status: "collection_not_found" | "record_conflict" | "invalid_record" }> {
     return this.kernel.transaction(async (client) => {
       await this.prepare(client);
-      if (!(await client.query(`SELECT collection.id FROM stash_collections collection JOIN stash_workspaces workspace
-        ON workspace.id=collection.workspace_id WHERE collection.id=$1 AND (${member}) FOR UPDATE OF collection`, [collectionId, memberId])).rowCount)
+      const workspaceId = await this.editableCollectionWorkspace(client, memberId, collectionId);
+      if (!workspaceId)
         return { status: "collection_not_found" as const };
+      const lockedCollections = await this.lockWorkspaceCollections(client, workspaceId);
+      if (!lockedCollections.has(collectionId)) return { status: "collection_not_found" as const };
       const current = await this.canonicalCollection(client, collectionId); const candidate = input as Partial<CanonicalRecord>;
       if (current.records.some(({ id }) => id === candidate.id))
         return { status: "record_conflict" as const };
@@ -292,9 +307,10 @@ export class PostgresCollectionRepository implements CollectionRepository {
         { ...(input as Record<string, unknown>), position: nextPosition }] }); }
       catch { return { status: "invalid_record" as const }; }
       const record = normalized.records.at(-1)!;
-      if (!await this.relationTargetsExist(client, current, record.values)) return { status: "invalid_record" as const };
+      if (!await this.relationTargetsExist(client, current, record.values, lockedCollections)) return { status: "invalid_record" as const };
       try {
-        await client.query("INSERT INTO stash_collection_records(id,collection_id,position) VALUES($1,$2,$3)", [record.id, collectionId, record.position]);
+        await client.query("INSERT INTO stash_collection_records(id,collection_id,position,revision) VALUES($1,$2,$3,1)",
+          [record.id, collectionId, record.position]);
         for (const [propertyId, value] of Object.entries(record.values)) await client.query(`INSERT INTO stash_collection_record_values
           (record_id,property_id,value) VALUES($1,$2,$3::jsonb)`, [record.id, propertyId, JSON.stringify(value)]);
       } catch (error) {
@@ -302,33 +318,56 @@ export class PostgresCollectionRepository implements CollectionRepository {
         throw error;
       }
       const collection = await this.canonicalCollection(client, collectionId); await this.projection(client, "Collection", collectionId, collection.schema, collection);
-      return { status: "created" as const, record };
+      return { status: "created" as const, record: { ...record, revision: 1 } };
     });
   }
 
   async updateCollectionRecordValues(memberId: string, collectionId: string, recordId: string,
-    values: Readonly<Record<string, CollectionPropertyValue>>): Promise<
+    values: Readonly<Record<string, CollectionPropertyValue>>,
+    operation?: { readonly id: string; readonly baseRevision: number }): Promise<
     { status: "updated"; record: CanonicalRecord }
+    | { status: "revision_conflict"; record: CanonicalRecord }
     | { status: "collection_not_found" | "record_not_found" | "invalid_record" }> {
     return this.kernel.transaction(async (client) => {
       await this.prepare(client);
-      if (!(await client.query(`SELECT collection.id FROM stash_collections collection JOIN stash_workspaces workspace
-        ON workspace.id=collection.workspace_id WHERE collection.id=$1 AND (${member}) FOR UPDATE OF collection`, [collectionId, memberId])).rowCount)
+      const workspaceId = await this.editableCollectionWorkspace(client, memberId, collectionId);
+      if (!workspaceId)
         return { status: "collection_not_found" as const };
+      const lockedCollections = await this.lockWorkspaceCollections(client, workspaceId);
+      if (!lockedCollections.has(collectionId)) return { status: "collection_not_found" as const };
       if (!(await client.query("SELECT 1 FROM stash_collection_records WHERE id=$1 AND collection_id=$2 FOR UPDATE", [recordId, collectionId])).rowCount)
         return { status: "record_not_found" as const };
       const current = await this.canonicalCollection(client, collectionId); const found = current.records.find(({ id }) => id === recordId)!;
+      const digest = operation ? createHash("sha256").update(stableJson({ baseRevision: operation.baseRevision, values })).digest("base64url") : undefined;
+      if (operation) {
+        const receipt = await client.query<{ digest: string; outcome: { status: "updated" | "revision_conflict"; record: CanonicalRecord } }>(
+          "SELECT digest,outcome FROM stash_collection_record_operations WHERE record_id=$1 AND operation_id=$2", [recordId, operation.id]);
+        if (receipt.rows[0]) return receipt.rows[0].digest === digest ? receipt.rows[0].outcome
+          : { status: "revision_conflict" as const, record: found };
+        if (found.revision !== operation.baseRevision) {
+          const outcome = { status: "revision_conflict" as const, record: found };
+          await client.query(`INSERT INTO stash_collection_record_operations(record_id,operation_id,digest,outcome)
+            VALUES($1,$2,$3,$4::jsonb)`, [recordId, operation.id, digest, JSON.stringify(outcome)]);
+          return outcome;
+        }
+      }
       let normalized: CanonicalCollection;
       try { normalized = normalizeCollection({ ...current, records: current.records.map((record) => record.id === recordId
         ? { ...record, values: { ...record.values, ...values } } : record) }); }
       catch { return { status: "invalid_record" as const }; }
       const record = normalized.records.find(({ id }) => id === recordId)!;
-      if (!await this.relationTargetsExist(client, current, values)) return { status: "invalid_record" as const };
+      if (!await this.relationTargetsExist(client, current, values, lockedCollections)) return { status: "invalid_record" as const };
       for (const [propertyId, value] of Object.entries(values)) await client.query(`INSERT INTO stash_collection_record_values
         (record_id,property_id,value) VALUES($1,$2,$3::jsonb)
         ON CONFLICT(record_id,property_id) DO UPDATE SET value=EXCLUDED.value`, [recordId, propertyId, JSON.stringify(value)]);
+      const revision = Number((await client.query<{ revision: number }>(`UPDATE stash_collection_records SET revision=revision+1
+        WHERE id=$1 RETURNING revision`, [recordId])).rows[0]!.revision);
+      const revisedRecord = { ...record, revision };
+      if (operation) await client.query(`INSERT INTO stash_collection_record_operations(record_id,operation_id,digest,outcome)
+        VALUES($1,$2,$3,$4::jsonb)`, [recordId, operation.id, digest,
+        JSON.stringify({ status: "updated", record: revisedRecord })]);
       const collection = await this.canonicalCollection(client, collectionId); await this.projection(client, "Collection", collectionId, collection.schema, collection);
-      return { status: "updated" as const, record };
+      return { status: "updated" as const, record: revisedRecord };
     });
   }
 
@@ -424,6 +463,7 @@ export class PostgresCollectionRepository implements CollectionRepository {
   async listCollectionsForNote(memberId: string, noteId: string): Promise<
     { status: "found"; workspaceId: string; collections: readonly CanonicalCollection[]; availableCollections: readonly CanonicalCollection[];
       availableCollectionNotes: Readonly<Record<string, string>>; availableNotes: readonly { readonly id: string; readonly title: string }[];
+      access: { readonly read: true; readonly edit: boolean };
       selectionOptions: CollectionSelectionOptions; views: readonly CanonicalViewBlock[] } | { status: "note_not_found" }> {
     return this.kernel.withSession(async (client) => {
       await this.prepare(client);
@@ -462,6 +502,7 @@ export class PostgresCollectionRepository implements CollectionRepository {
         : { rows: [] as { id: string; label: string }[] };
       const views = await client.query<{ id: string }>("SELECT id FROM stash_view_blocks WHERE owner_note_id=$1 ORDER BY title,id", [noteId]);
       return { status: "found" as const, workspaceId: note.rows[0].workspace_id,
+        access: { read: true as const, edit: fullAccess },
         collections: await Promise.all(collections.rows.map(async ({ id }) => this.permissionFilteredCollection(client, memberId,
           await this.canonicalCollection(client, id)))),
         availableCollections: await Promise.all(available.rows.map(async ({ id }) => this.permissionFilteredCollection(client, memberId,
@@ -584,15 +625,16 @@ export class PostgresCollectionRepository implements CollectionRepository {
       WHERE collection_id=$1 ORDER BY position,id`, [id])).rows.map((row: any) => ({ id: row.id, name: row.name, type: row.property_type,
       position: row.position, ...(row.property_type === "single_select" || row.property_type === "multi_select"
         ? { options: row.configuration.options ?? [] } : row.property_type === "relation" ? { target: row.configuration.target } : {}) }));
-    const records = (await client.query<any>(`SELECT record.id,record.position,
+    const records = (await client.query<any>(`SELECT record.id,record.position,record.revision,
       COALESCE(jsonb_object_agg(value.property_id,value.value) FILTER(WHERE value.property_id IS NOT NULL),'{}'::jsonb) values
       FROM stash_collection_records record LEFT JOIN stash_collection_record_values value ON value.record_id=record.id
       WHERE record.collection_id=$1 GROUP BY record.id ORDER BY record.position,record.id`, [id])).rows;
     return { schema: "stash.collection.v1", id: base.id, workspaceId: base.workspace_id, ownerNoteId: base.owner_note_id,
-      title: base.title, properties, records: records.map((row: any) => ({ id: row.id, position: row.position, values: row.values })) };
+      title: base.title, properties, records: records.map((row: any) => ({ id: row.id, position: row.position,
+        revision: Number(row.revision), values: row.values })) };
   }
   private async relationTargetsExist(client: PostgresQueryable, collection: CanonicalCollection,
-    values: Readonly<Record<string, CollectionPropertyValue>>): Promise<boolean> {
+    values: Readonly<Record<string, CollectionPropertyValue>>, lockedCollections: ReadonlySet<string>): Promise<boolean> {
     const targets = new Map<string, Set<string>>();
     for (const [propertyId, value] of Object.entries(values)) {
       const property = collection.properties.find(({ id }) => id === propertyId);
@@ -603,9 +645,7 @@ export class PostgresCollectionRepository implements CollectionRepository {
     }
     const collectionIds = [...targets.keys()].sort();
     if (!collectionIds.length) return true;
-    const locked = await client.query<{ id: string }>(`SELECT id FROM stash_collections WHERE id=ANY($1::uuid[])
-      ORDER BY id FOR UPDATE`, [collectionIds]);
-    if (locked.rows.length !== collectionIds.length) return false;
+    if (collectionIds.some((id) => !lockedCollections.has(id))) return false;
     for (const collectionId of collectionIds) {
       const recordIds = [...targets.get(collectionId)!].sort();
       if (!recordIds.length) continue;
@@ -614,6 +654,15 @@ export class PostgresCollectionRepository implements CollectionRepository {
       if (existing.rows.length !== recordIds.length) return false;
     }
     return true;
+  }
+  private async editableCollectionWorkspace(client: PostgresQueryable, memberId: string, collectionId: string): Promise<string | undefined> {
+    return (await client.query<{ workspace_id: string }>(`SELECT collection.workspace_id FROM stash_collections collection
+      JOIN stash_workspaces workspace ON workspace.id=collection.workspace_id WHERE collection.id=$1 AND (${member})`,
+    [collectionId, memberId])).rows[0]?.workspace_id;
+  }
+  private async lockWorkspaceCollections(client: PostgresQueryable, workspaceId: string): Promise<Set<string>> {
+    const rows = await client.query<{ id: string }>(`SELECT id FROM stash_collections WHERE workspace_id=$1 ORDER BY id FOR UPDATE`, [workspaceId]);
+    return new Set(rows.rows.map(({ id }) => id));
   }
   private async canonicalView(client: PostgresQueryable, id: string): Promise<CanonicalViewBlock> {
     const row = (await client.query<any>("SELECT * FROM stash_view_blocks WHERE id=$1", [id])).rows[0];
@@ -633,6 +682,7 @@ export class PostgresCollectionRepository implements CollectionRepository {
     const allowed = new Map<string, Set<string>>();
     for (const property of collection.properties) {
       if (property.type === "person") { allowed.set(property.id, new Set([memberId])); continue; }
+      if (property.type === "attachment") { allowed.set(property.id, new Set()); continue; }
       if (property.type !== "relation") continue;
       const ids = [...new Set(collection.records.flatMap((record) => {
         const value = record.values[property.id]; return Array.isArray(value) ? (value as readonly { id?: string }[]).map(({ id }) => id).filter(Boolean) as string[] : [];

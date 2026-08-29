@@ -49,7 +49,7 @@ describe("mobile workspace synchronization", () => {
 
   it("reconciles pairing-scoped pending canonical Task changes over the offline snapshot after restart", async () => {
     const base = { schema: "stash.mobile-workspace.v1" as const, workspaceId, refreshedAt: "2026-08-27T10:00:00.000Z",
-      noteTree: [], notes: [], members: [], collections: [], viewBlocks: [], search: [], workflow: { schema: "stash.workspace-workflow.v1" as const,
+      noteTree: [], notes: [], members: [], collections: [], collectionAccess: {}, collectionDisplay: {}, viewBlocks: [], search: [], workflow: { schema: "stash.workspace-workflow.v1" as const,
         workspaceId, statuses: [{ id: memberId, name: "Todo", category: "unstarted", position: 1 }] },
       tasks: [{ schema: "stash.task.v1" as const, id: taskId, workspaceId, title: "Review", description: "", revision: 2,
         status: { id: memberId, name: "Todo", category: "unstarted", position: 1 }, assigneeIds: [], projectKeys: [], sourceNoteIds: [] }] };
@@ -153,8 +153,115 @@ describe("mobile workspace synchronization", () => {
     }] }] });
     await expect(client.sync()).resolves.toEqual({ status: "synced", count: 1 });
     expect(request).toHaveBeenCalledWith(`https://stash.example/api/collections/${collectionId}/records/${recordId}`,
-      expect.objectContaining({ method: "PATCH", body: JSON.stringify({ values: { [propertyId]: "Edited offline" } }) }));
+      expect.objectContaining({ method: "PATCH", body: JSON.stringify({ operationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        baseRevision: 1, values: { [propertyId]: "Edited offline" } }) }));
     expect(state.snapshot?.collections[0]?.records[0]?.values[propertyId]).toBe("Edited offline");
+    expect(state.mutations).toEqual([]);
+  });
+
+  it("upgrades a queued pre-revision Collection edit from the cached canonical record", async () => {
+    const legacy = { id: "abababab-abab-4bab-8bab-abababababab", kind: "collection_record_edit",
+      collectionId, recordId, values: { [propertyId]: "Queued before revisions" }, attempts: 0,
+      origin: { instanceUrl: "https://stash.example", workspaceId, memberId } } as unknown as MobileSyncMutation;
+    const state: { snapshot?: MobileWorkspaceSnapshot; mutations: MobileSyncMutation[] } = {
+      snapshot: mobileSnapshot(), mutations: [legacy],
+    };
+    const request = vi.fn<typeof globalThis.fetch>(async () => Response.json({ status: "updated", record: {
+      id: recordId, position: 1, revision: 2, values: { [propertyId]: "Queued before revisions" },
+    } }));
+    const client = new MobileCaptureClient(store(state), request);
+
+    await expect(client.sync()).resolves.toEqual({ status: "synced", count: 1 });
+    expect(JSON.parse(String(request.mock.calls[0]?.[1]?.body))).toEqual({
+      operationId: legacy.id, baseRevision: 1, values: { [propertyId]: "Queued before revisions" },
+    });
+  });
+
+  it("refuses to enqueue a Collection edit without cached edit access", async () => {
+    const readonly = mobileSnapshot(); readonly.collectionAccess[collectionId] = { read: true, edit: false };
+    const state: { snapshot?: MobileWorkspaceSnapshot; mutations: MobileSyncMutation[] } = { snapshot: readonly, mutations: [] };
+    const client = new MobileCaptureClient(store(state), async () => Response.json({ status: "updated" }));
+
+    await expect(client.queueCollectionRecordEdit(collectionId, recordId, { [propertyId]: "Forbidden" }))
+      .rejects.toThrow("read-only");
+    expect(state.mutations).toEqual([]);
+  });
+
+  it("preserves a conflicted Collection edit for explicit reconcile or discard", async () => {
+    const state: { snapshot?: MobileWorkspaceSnapshot; mutations: MobileSyncMutation[] } = { snapshot: mobileSnapshot(), mutations: [] };
+    const serverRecord = { id: recordId, position: 1, revision: 2, values: { [propertyId]: "Server edit" } };
+    const client = new MobileCaptureClient(store(state), async () => Response.json({ error: "revision_conflict",
+      message: "The record changed.", record: serverRecord }, { status: 409 }));
+    await client.queueCollectionRecordEdit(collectionId, recordId, { [propertyId]: "Offline edit" },
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+
+    await expect(client.sync()).resolves.toEqual({ status: "attention_required", count: 0, error: "revision_conflict" });
+    await expect(client.pendingMutations()).resolves.toMatchObject([{ kind: "collection_record_edit", baseRevision: 1, conflict: true }]);
+    await expect(client.cachedWorkspace()).resolves.toMatchObject({ collections: [{ records: [{ values: { [propertyId]: "Offline edit" } }] }] });
+    await expect(client.discardCollectionRecordEdit(collectionId, recordId)).resolves.toBe(1);
+    await expect(client.cachedWorkspace()).resolves.toMatchObject({ collections: [{ records: [{ revision: 2, values: { [propertyId]: "Server edit" } }] }] });
+  });
+
+  it("reconciles a conflicted Collection edit against the latest cached revision with a new operation", async () => {
+    const state: { snapshot?: MobileWorkspaceSnapshot; mutations: MobileSyncMutation[] } = { snapshot: mobileSnapshot(), mutations: [] };
+    let attempt = 0;
+    const request = vi.fn<typeof globalThis.fetch>(async (_input, init) => {
+      attempt += 1;
+      if (attempt === 1) return Response.json({ error: "revision_conflict", message: "The record changed.",
+        record: { id: recordId, position: 1, revision: 2, values: { [propertyId]: "Server edit" } } }, { status: 409 });
+      return Response.json({ status: "updated", record: { id: recordId, position: 1, revision: 3,
+        values: { [propertyId]: "Offline edit" } } });
+    });
+    const client = new MobileCaptureClient(store(state), request);
+    await client.queueCollectionRecordEdit(collectionId, recordId, { [propertyId]: "Offline edit" },
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    await client.sync();
+    await client.reconcileCollectionRecordEdit(collectionId, recordId, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    await client.sync();
+
+    expect(JSON.parse(String(request.mock.calls[1]?.[1]?.body))).toEqual({ operationId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      baseRevision: 2, values: { [propertyId]: "Offline edit" } });
+    expect(state.mutations).toEqual([]);
+    expect(state.snapshot?.collections[0]?.records[0]).toMatchObject({ revision: 3, values: { [propertyId]: "Offline edit" } });
+  });
+
+  it("marks a permanently rejected Collection edit as discardable without retrying forever", async () => {
+    const state: { snapshot?: MobileWorkspaceSnapshot; mutations: MobileSyncMutation[] } = { snapshot: mobileSnapshot(), mutations: [] };
+    const client = new MobileCaptureClient(store(state), async () => Response.json({ error: "collection_not_found",
+      message: "This record is unavailable." }, { status: 404 }));
+    await client.queueCollectionRecordEdit(collectionId, recordId, { [propertyId]: "Rejected" });
+
+    await expect(client.sync()).resolves.toMatchObject({ status: "attention_required", error: "collection_not_found" });
+    await expect(client.pendingMutations()).resolves.toMatchObject([{ kind: "collection_record_edit", permanentFailure: true }]);
+    await client.discardCollectionRecordEdit(collectionId, recordId);
+    await expect(client.cachedWorkspace()).resolves.toMatchObject({ collections: [{ records: [{ values: { [propertyId]: "Draft" } }] }] });
+  });
+
+  it("coordinates separate live clients so a slower failure cannot resurrect an applied operation", async () => {
+    const state: { snapshot?: MobileWorkspaceSnapshot; mutations: MobileSyncMutation[] } = {
+      snapshot: mobileSnapshot(),
+      mutations: [{ id: "55555555-5555-4555-8555-555555555555", kind: "canonical_task_edit", taskId,
+        baseRevision: 2, changes: { title: "Applied once" }, attempts: 0,
+        origin: { instanceUrl: "https://stash.example", workspaceId, memberId } }],
+    };
+    let releaseSuccess!: (response: Response) => void;
+    const firstResponse = new Promise<Response>((resolve) => { releaseSuccess = resolve; });
+    let requestCount = 0;
+    const request = vi.fn<typeof globalThis.fetch>(async () => (++requestCount === 1)
+      ? firstResponse : Response.json({ message: "Temporarily unavailable." }, { status: 503 }));
+    const captureClient = new MobileCaptureClient(store(state), request);
+    const workspaceClient = new MobileCaptureClient(store(state), request);
+
+    const captureSync = captureClient.sync();
+    const workspaceSync = workspaceClient.sync();
+    await vi.waitFor(() => expect(request).toHaveBeenCalled());
+    await Promise.resolve();
+    releaseSuccess(Response.json({ status: "updated", task: { ...mobileSnapshot().tasks[0], title: "Applied once", revision: 3 } }));
+
+    await expect(Promise.all([captureSync, workspaceSync])).resolves.toEqual([
+      { status: "synced", count: 1 }, { status: "synced", count: 0 },
+    ]);
+    expect(request).toHaveBeenCalledTimes(1);
     expect(state.mutations).toEqual([]);
   });
 
@@ -195,7 +302,7 @@ describe("mobile workspace synchronization", () => {
 
   it("demonstrates offline capture, local canonical update, synchronization, and stable identity reconciliation", async () => {
     const snapshot: MobileWorkspaceSnapshot = { schema: "stash.mobile-workspace.v1", workspaceId,
-      refreshedAt: "2026-08-27T10:00:00.000Z", noteTree: [], notes: [], members: [], collections: [], viewBlocks: [], search: [],
+      refreshedAt: "2026-08-27T10:00:00.000Z", noteTree: [], notes: [], members: [], collections: [], collectionAccess: {}, collectionDisplay: {}, viewBlocks: [], search: [],
       workflow: { schema: "stash.workspace-workflow.v1", workspaceId, statuses: [
         { id: memberId, name: "Todo", category: "unstarted", position: 1 },
         { id: statusId, name: "Done", category: "completed", position: 2 },
@@ -235,5 +342,7 @@ function mobileSnapshot(): MobileWorkspaceSnapshot {
     collections: [{ schema: "stash.collection.v1", id: collectionId, workspaceId, ownerNoteId: noteId, title: "Research",
       properties: [{ id: propertyId, name: "Name", position: 1, type: "text" }],
       records: [{ id: recordId, position: 1, values: { [propertyId]: "Draft" } }] }],
+    collectionAccess: { [collectionId]: { read: true, edit: true } },
+    collectionDisplay: { [collectionId]: { members: [], attachments: [] } },
   };
 }

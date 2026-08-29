@@ -141,6 +141,9 @@ test("preserves a record draft through save, access, and synchronization failure
   await value.fill("Work that must survive"); await value.press("Enter");
   await expect(collection.getByRole("alert")).toContainText("Value not saved");
   await expect(value).toHaveValue("Work that must survive");
+  const inlineRetryBox = await collection.getByRole("button", { name: "Retry Name" }).boundingBox();
+  expect(inlineRetryBox?.width).toBeGreaterThanOrEqual(44);
+  expect(inlineRetryBox?.height).toBeGreaterThanOrEqual(44);
 
   for (const expectedAttempt of [2, 3]) {
     await collection.getByRole("button", { name: "Retry Name" }).press("Enter");
@@ -218,9 +221,29 @@ test("keeps keyboard focus and multi-select Board moves within one saved View", 
 
   const viewSave = page.waitForResponse((response) => response.url().endsWith(`/api/view-blocks/${viewId}`) && response.request().method() === "PATCH");
   await savedView.getByRole("button", { name: "Board" }).press("Enter"); expect((await viewSave).status()).toBe(200);
-  const recordSave = page.waitForResponse((response) => response.url().endsWith(`/api/collections/${collectionId}/records/${recordId}`)
-    && response.request().method() === "PATCH");
+  for (const target of [savedView.getByRole("button", { name: "Scoped record" }).first(),
+    savedView.getByRole("region", { name: "Open" }).getByRole("button", { name: "Move Scoped record to Done" })]) {
+    const box = await target.boundingBox();
+    expect(box?.width).toBeGreaterThanOrEqual(44);
+    expect(box?.height).toBeGreaterThanOrEqual(44);
+  }
+  let boardAttempt = 0;
+  await page.route(`**/api/collections/${collectionId}/records/${recordId}`, async (route) => {
+    if (route.request().method() !== "PATCH") { await route.continue(); return; }
+    boardAttempt += 1;
+    if (boardAttempt === 1) { await route.fulfill({ status: 503, contentType: "application/json",
+      body: JSON.stringify({ message: "Synchronization temporarily unavailable." }) }); return; }
+    await route.continue();
+  });
   await savedView.getByRole("region", { name: "Open" }).getByRole("button", { name: "Move Scoped record to Done" }).press("Enter");
+  const boardRetry = savedView.getByRole("region", { name: "Open" }).getByRole("button", { name: "Try again" });
+  await expect(boardRetry).toBeVisible();
+  const boardRetryBox = await boardRetry.boundingBox();
+  expect(boardRetryBox?.width).toBeGreaterThanOrEqual(44);
+  expect(boardRetryBox?.height).toBeGreaterThanOrEqual(44);
+  const recordSave = page.waitForResponse((response) => response.url().endsWith(`/api/collections/${collectionId}/records/${recordId}`)
+    && response.request().method() === "PATCH" && response.status() === 200);
+  await boardRetry.press("Enter");
   const saved = await recordSave; expect(saved.status()).toBe(200);
   expect(saved.request().postDataJSON()).toEqual({ values: { [statusId]: ["blocked", "done"] } });
 });

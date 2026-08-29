@@ -43,7 +43,7 @@
 .content:focus-visible { box-shadow: inset 3px 0 var(--stash-color-focus); }
 .page { width: min(100%, 82rem); margin: 0 auto; padding: clamp(3rem, 6vw, 5.5rem) clamp(1.5rem, 4vw, 4.5rem); }
 .pageHeader { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--stash-space-8); }
-.pageHeader h1, .stateScreen h1, .signInPanel h1 { max-width: 72rem; margin: 0; font-family: var(--stash-font-display); font-size: clamp(2.4rem, 5vw, 5.2rem); font-weight: 480; letter-spacing: -.055em; line-height: .98; text-wrap: balance; }
+.pageHeader h1, .stateScreen h1, .signInPanel h1 { max-width: 72rem; margin: 0; font-family: var(--stash-font-sans); font-size: clamp(2.4rem, 5vw, 5.2rem); font-weight: 480; letter-spacing: -.055em; line-height: .98; text-wrap: balance; }
 .lede { max-width: 40rem; margin: var(--stash-space-4) 0 0; color: var(--stash-color-muted); font-size: clamp(1rem, 2vw, 1.2rem); line-height: 1.55; }
 .emptyState { display: grid; grid-template-columns: minmax(14rem, .8fr) minmax(16rem, 1fr); align-items: center; gap: clamp(2rem, 7vw, 7rem); margin-top: clamp(4rem, 10vw, 9rem); padding: clamp(2rem, 5vw, 5rem); background: var(--stash-color-surface); border: 1px solid var(--stash-border-subtle); }
 .emptyGraphic { aspect-ratio: 4 / 3; position: relative; overflow: hidden; background: var(--stash-color-canvas-deep); }
@@ -51,7 +51,7 @@
 .emptyGraphic span { position: absolute; width: 54%; height: 1px; left: 13%; top: 34%; background: var(--stash-color-accent); transform-origin: left; }
 .emptyGraphic span:nth-child(2) { width: 68%; top: 51%; opacity: .55; }
 .emptyGraphic span:nth-child(3) { width: 40%; top: 68%; opacity: .25; }
-.emptyState h2, .placeholder h2 { max-width: 20ch; margin: 0; font-family: var(--stash-font-display); font-size: clamp(1.8rem, 3vw, 3rem); font-weight: 500; letter-spacing: -.04em; line-height: 1.04; }
+.emptyState h2, .placeholder h2 { max-width: 20ch; margin: 0; font-family: var(--stash-font-sans); font-size: clamp(1.8rem, 3vw, 3rem); font-weight: 500; letter-spacing: -.04em; line-height: 1.04; }
 .emptyState p, .placeholder p { max-width: 34rem; margin: var(--stash-space-4) 0; color: var(--stash-color-muted); line-height: 1.65; }
 .textLink { color: var(--stash-color-accent); font-size: .84rem; font-weight: 700; text-decoration-thickness: 1px; text-underline-offset: .3em; }
 .quietNote { max-width: 28rem; margin: clamp(3rem, 8vw, 7rem) 0 0; padding-top: var(--stash-space-6); color: var(--stash-color-muted); border-top: 1px solid var(--stash-border-subtle); font-size: .85rem; line-height: 1.6; }

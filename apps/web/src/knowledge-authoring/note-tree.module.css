@@ -123,7 +123,7 @@
 .discussionLoading { color: var(--stash-color-muted); font-size: .75rem; }
 .discussionEmpty { min-height: 10rem; display: grid; align-content: center; padding: 1.2rem; background: var(--stash-color-canvas); border-left: 2px solid var(--stash-color-accent); }
 .discussionEmpty span { width: 2rem; height: 2px; background: var(--stash-color-accent); }
-.discussionEmpty h2 { margin: .8rem 0 .25rem; font: 560 1.25rem/1.05 var(--stash-font-display); letter-spacing: -.035em; }
+.discussionEmpty h2 { margin: .8rem 0 .25rem; font: 560 1.25rem/1.05 var(--stash-font-sans); letter-spacing: -.035em; }
 .discussionEmpty p { margin: 0; }
 .discussionFailure { padding: 1rem; color: var(--stash-color-error); background: var(--stash-color-canvas); border-left: 2px solid var(--stash-color-error); }
 .discussionList { display: grid; gap: 1rem; }

@@ -9,6 +9,9 @@ const noteId = "22222222-2222-4222-8222-222222222222";
 const collectionId = "33333333-3333-4333-8333-333333333333";
 const namePropertyId = "44444444-4444-4444-8444-444444444444";
 const statusPropertyId = "55555555-5555-4555-8555-555555555555";
+const ownerPropertyId = "10101010-1010-4010-8010-101010101010";
+const filePropertyId = "20202020-2020-4020-8020-202020202020";
+const attachmentId = "30303030-3030-4030-8030-303030303030";
 const researchRecordId = "66666666-6666-4666-8666-666666666666";
 const taskId = "99999999-9999-4999-8999-999999999999";
 const statusId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -40,9 +43,15 @@ const snapshot: MobileWorkspaceSnapshot = {
     properties: [
       { id: namePropertyId, name: "Name", position: 1, type: "text" },
       { id: statusPropertyId, name: "Status", position: 2, type: "single_select", options: [{ id: "doing", name: "In progress" }] },
+      { id: ownerPropertyId, name: "Owner", position: 3, type: "person" },
+      { id: filePropertyId, name: "Files", position: 4, type: "attachment" },
     ],
-    records: [{ id: researchRecordId, position: 1, values: { [namePropertyId]: "Interview synthesis", [statusPropertyId]: "doing" } }],
+    records: [{ id: researchRecordId, position: 1, values: { [namePropertyId]: "Interview synthesis", [statusPropertyId]: "doing",
+      [ownerPropertyId]: [adaId], [filePropertyId]: [attachmentId] } }],
   }],
+  collectionAccess: { [collectionId]: { read: true, edit: true } },
+  collectionDisplay: { [collectionId]: { members: [{ id: adaId, label: "Ada Lovelace" }],
+    attachments: [{ id: attachmentId, label: "interview-brief.pdf" }] } },
   viewBlocks: [{
     schema: "stash.view-block.v1",
     id: "77777777-7777-4777-8777-777777777777",
@@ -102,6 +111,44 @@ describe("WorkspaceReader", () => {
     expect(updateRecord).toHaveBeenCalledWith(collectionId, researchRecordId, {
       [namePropertyId]: "Interview findings",
     });
+    expect(screen.getByLabelText("Owner: Ada Lovelace")).toBeTruthy();
+    expect(screen.getByLabelText("Files: interview-brief.pdf")).toBeTruthy();
+    expect(screen.queryByText(adaId)).toBeNull();
+    expect(screen.queryByText(attachmentId)).toBeNull();
+  });
+
+  it("keeps a readable Guest Collection inspectable without offering an edit", () => {
+    render(<WorkspaceReader snapshot={{ ...snapshot,
+      collectionAccess: { [collectionId]: { read: true, edit: false } }, viewBlocks: [] }} pendingTaskIds={new Set()}
+      pendingCollectionRecordIds={new Set()} onUpdateTaskStatus={vi.fn()} onUpdateCollectionRecord={vi.fn()} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Views" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open Collection Research" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open record Interview synthesis" }));
+
+    expect(screen.getByText("You have read-only access to this Collection.")).toBeTruthy();
+    expect(screen.queryByLabelText("Edit Name for Interview synthesis")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Save Interview synthesis" })).toBeNull();
+  });
+
+  it("shows the server Collection value after an optimistic edit is explicitly discarded", () => {
+    const updateRecord = vi.fn(async () => undefined);
+    const { rerender } = render(<WorkspaceReader snapshot={{ ...snapshot, viewBlocks: [] }} pendingTaskIds={new Set()}
+      pendingCollectionRecordIds={new Set()} onUpdateTaskStatus={vi.fn()} onUpdateCollectionRecord={updateRecord} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Views" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open Collection Research" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open record Interview synthesis" }));
+    const editor = screen.getByLabelText("Edit Name for Interview synthesis");
+    fireEvent.change(editor, { target: { value: "Offline edit" } });
+
+    const withPrimary = (value: string): MobileWorkspaceSnapshot => ({ ...snapshot, viewBlocks: [],
+      collections: [{ ...snapshot.collections[0]!, records: [{ ...snapshot.collections[0]!.records[0]!,
+        values: { ...snapshot.collections[0]!.records[0]!.values, [namePropertyId]: value } }] }] });
+    rerender(<WorkspaceReader snapshot={withPrimary("Offline edit")} pendingTaskIds={new Set()}
+      pendingCollectionRecordIds={new Set([researchRecordId])} onUpdateTaskStatus={vi.fn()} onUpdateCollectionRecord={updateRecord} />);
+    rerender(<WorkspaceReader snapshot={withPrimary("Server edit")} pendingTaskIds={new Set()}
+      pendingCollectionRecordIds={new Set()} onUpdateTaskStatus={vi.fn()} onUpdateCollectionRecord={updateRecord} />);
+
+    expect((screen.getByLabelText("Edit Name for Server edit") as HTMLInputElement).value).toBe("Server edit");
   });
 
   it("counts a multi-grouped Collection record once and uses its primary text label", () => {

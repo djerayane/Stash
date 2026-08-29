@@ -1,6 +1,6 @@
 .workspace { width: calc(100% - 3rem); max-width: 76rem; min-width: 0; display: grid; gap: var(--stash-space-6); margin: 0 auto 2.5rem; color: var(--stash-color-ink); }
 .workspaceHeader { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: var(--stash-space-4); }
-.workspaceHeader h2 { margin: 0; font-family: var(--stash-font-display); font-size: clamp(1.8rem, 4vw, 2.8rem); font-weight: 520; letter-spacing: -.035em; }
+.workspaceHeader h2 { margin: 0; font-family: var(--stash-font-sans); font-size: clamp(1.8rem, 4vw, 2.8rem); font-weight: 520; letter-spacing: -.035em; }
 .workspaceHeader p { max-width: 42rem; margin: .35rem 0 0; color: var(--stash-color-muted); }
 .collections { display: grid; gap: 1.75rem; }
 .collection { position: relative; min-width: 0; overflow: visible; display: grid; border: 1px solid var(--stash-border-subtle); border-radius: var(--stash-radius-surface); background: var(--stash-color-surface); box-shadow: var(--stash-shadow-paper); }
@@ -48,7 +48,7 @@
 .disclosureEdit { width: 100%; min-height: 3.1rem; padding: .65rem .75rem; border: 0; color: var(--stash-color-ink); background: transparent; text-align: left; }
 .disclosureEdit:hover { background: var(--stash-color-canvas); }
 .cellError { display: flex; align-items: center; justify-content: space-between; gap: .4rem; padding: .35rem .5rem; color: var(--stash-color-error); border-top: 1px solid var(--stash-color-error); font-size: .68rem; }
-.cellError button { border: 0; color: currentColor; background: transparent; text-decoration: underline; }
+.cellError button { min-width: var(--stash-control-height); min-height: var(--stash-control-height); padding: .45rem .65rem; border: 0; color: currentColor; background: transparent; text-decoration: underline; }
 .newRecord td :where(input, select) { width: 100%; min-height: 3rem; padding: .6rem .7rem; border: 2px solid var(--stash-color-focus); background: var(--stash-color-surface); }
 .newRecord td .checkboxControl input { width: 1.2rem; min-height: 1.2rem; padding: 0; border: revert; }
 .newRecordAction button { width: 100%; min-height: 3rem; padding: .65rem .75rem; border: 0; color: var(--stash-color-muted); background: var(--stash-color-surface); text-align: left; font-weight: 680; }
@@ -73,7 +73,7 @@
 .dialogOverlay { position: fixed; z-index: 50; inset: 0; background: color-mix(in srgb, var(--stash-color-ink) 62%, transparent); }
 .dialog { position: fixed; z-index: 51; top: 50%; left: 50%; width: min(34rem, calc(100vw - 2rem)); max-height: calc(100vh - 2rem); overflow-y: auto; translate: -50% -50%; display: grid; gap: var(--stash-space-4); padding: clamp(1.2rem, 4vw, 2rem); border: 1px solid var(--stash-border-strong); border-radius: var(--stash-radius-surface); color: var(--stash-color-ink); background: var(--stash-color-surface); box-shadow: var(--stash-elevation-surface); }
 .dialog h2, .dialog p { margin: 0; }
-.dialog h2 { font-family: var(--stash-font-display); font-size: 1.7rem; letter-spacing: -.03em; }
+.dialog h2 { font-family: var(--stash-font-sans); font-size: 1.7rem; letter-spacing: -.03em; }
 .dialog > p { color: var(--stash-color-muted); line-height: 1.55; }
 .impactSummary { display: grid; gap: .45rem; padding: var(--stash-space-3); border-left: 2px solid var(--stash-color-accent); background: var(--stash-color-canvas-deep); }
 .impactSummary p { margin: 0; }
@@ -88,8 +88,9 @@
 :global(.collection-board) { overflow-x: auto; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(15rem, 1fr); gap: 1px; padding: 1px; background: var(--stash-border-subtle); }
 :global(.collection-board > section) { padding: .8rem; background: var(--stash-color-canvas-deep); }
 :global(.collection-board h4), :global(.collection-calendar h4) { margin: 0 0 .7rem; font-size: .78rem; }
-:global(.collection-board li) { display: grid; gap: .4rem; padding: .55rem; background: var(--stash-color-surface); }
+:global(.collection-board li) { min-height: var(--stash-control-height); display: grid; gap: .4rem; padding: .55rem; background: var(--stash-color-surface); }
 :global(.collection-board li div) { display: flex; flex-wrap: wrap; gap: .3rem; }
+:global(.collection-card), :global(.collection-board li div button), :global(.collection-board li p button) { min-width: var(--stash-control-height); min-height: var(--stash-control-height); padding: .55rem .7rem; }
 :global(.collection-card) { width: 100%; text-align: left; }
 :global(.collection-calendar) { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 1px; background: var(--stash-border-subtle); }
 :global(.collection-calendar > section) { min-height: 8rem; padding: .8rem; background: var(--stash-color-surface); }

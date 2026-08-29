@@ -19,7 +19,7 @@ describe("mobile domain contracts", () => {
   it("keeps offline workspace reads portable and keyed by canonical identities", () => {
     const snapshot: MobileWorkspaceSnapshot = {
       schema: "stash.mobile-workspace.v1", workspaceId: "11111111-1111-4111-8111-111111111111",
-      refreshedAt: "2026-08-27T10:00:00.000Z", noteTree: [], notes: [], members: [], collections: [], viewBlocks: [], search: [],
+      refreshedAt: "2026-08-27T10:00:00.000Z", noteTree: [], notes: [], members: [], collections: [], collectionAccess: {}, collectionDisplay: {}, viewBlocks: [], search: [],
       workflow: { schema: "stash.workspace-workflow.v1", workspaceId: "11111111-1111-4111-8111-111111111111", statuses: [] },
       tasks: [{ schema: "stash.task.v1", id: "22222222-2222-4222-8222-222222222222",
         workspaceId: "11111111-1111-4111-8111-111111111111", title: "Review", description: "", assigneeIds: [],
@@ -47,6 +47,7 @@ describe("mobile domain contracts", () => {
       collections: [], viewBlocks: [], search: [] };
 
     expect(normalizeMobileWorkspaceSnapshot(legacy).members).toEqual([]);
+    expect(normalizeMobileWorkspaceSnapshot(legacy)).toMatchObject({ collectionAccess: {}, collectionDisplay: {} });
     expect(normalizeMobileWorkspaceSnapshot({ ...legacy,
       members: [{ id: "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA", name: "Ada Lovelace" }] }).members)
       .toEqual([{ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", name: "Ada Lovelace" }]);

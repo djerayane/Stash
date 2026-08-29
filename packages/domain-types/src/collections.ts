@@ -16,7 +16,8 @@ export interface CollectionDateTimeValue { readonly start: string; readonly end?
 export interface CollectionRelationValue { readonly id: string; readonly fallback: string }
 export type CollectionPropertyValue = string | number | boolean | null | readonly string[] | CollectionDateTimeValue
   | readonly CollectionRelationValue[];
-export interface CollectionRecord { readonly id: string; readonly position: number; readonly values: Readonly<Record<string, CollectionPropertyValue>> }
+export interface CollectionRecord { readonly id: string; readonly position: number; readonly revision?: number;
+  readonly values: Readonly<Record<string, CollectionPropertyValue>> }
 export interface Collection {
   readonly schema: "stash.collection.v1"; readonly id: string; readonly workspaceId: string; readonly ownerNoteId: string;
   readonly title: string; readonly properties: readonly CollectionProperty[]; readonly records: readonly CollectionRecord[];
@@ -159,14 +160,15 @@ export function normalizeCollection(value: unknown): Collection {
     invalidCollection();
   const byId = new Map(properties.map((property) => [property.id, property])); const recordIds = new Set<string>(); const positions = new Set<number>();
   const records = value.records.map((record): CollectionRecord => {
-    if (!plain(record) || !exact(record, ["id", "position", "values"]) || !uuid.test(String(record.id)) || recordIds.has(String(record.id))
-      || !Number.isInteger(record.position) || Number(record.position) < 1 || positions.has(Number(record.position)) || !plain(record.values)) invalidCollection();
+    if (!plain(record) || !exact(record, ["id", "position", "values"], ["revision"]) || !uuid.test(String(record.id)) || recordIds.has(String(record.id))
+      || !Number.isInteger(record.position) || Number(record.position) < 1 || positions.has(Number(record.position)) || !plain(record.values)
+      || record.revision !== undefined && (!Number.isSafeInteger(record.revision) || Number(record.revision) < 1)) invalidCollection();
     recordIds.add(String(record.id)); positions.add(Number(record.position));
     const values: Record<string, CollectionPropertyValue> = {};
     for (const [propertyId, entry] of Object.entries(record.values)) {
       const property = byId.get(propertyId); if (!property) invalidCollection(); values[propertyId] = normalizePropertyValue(property, entry);
     }
-    return { id: String(record.id), position: Number(record.position), values };
+    return { id: String(record.id), position: Number(record.position), revision: Number(record.revision ?? 1), values };
   });
   return { schema: "stash.collection.v1", id: String(value.id), workspaceId: String(value.workspaceId), ownerNoteId: String(value.ownerNoteId),
     title: String(value.title).trim(), properties, records };

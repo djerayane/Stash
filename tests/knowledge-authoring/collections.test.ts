@@ -431,6 +431,12 @@ describe("Collection contracts", () => {
       ]);
       assert.deepEqual(propertyResults.map(({ status }) => status), ["created", "created"]);
 
+      assert.equal((await service.createProperty(ownerId, collectionId,
+        { id: "49494949-4949-4949-8949-494949494949", name: "Committed first", type: "text", position: 4 })).status, "created");
+      assert.equal((await service.createProperty(ownerId, collectionId,
+        { id: "50505050-5050-4050-8050-505050505050", name: "Stale client", type: "text", position: 4 })).status, "created",
+      "a stale property position must reach the locked server allocator after an earlier append commits");
+
       const recordResults = await Promise.all([
         service.createRecord(ownerId, collectionId, { id: "47474747-4747-4747-8747-474747474747", position: 1,
           values: { [nameId]: "First" } }),
@@ -440,9 +446,48 @@ describe("Collection contracts", () => {
       assert.deepEqual(recordResults.map(({ status }) => status), ["created", "created"]);
       const current = await service.read(ownerId, collectionId); assert.equal(current.status, "found");
       if (current.status === "found") {
-        assert.deepEqual(current.collection.properties.map(({ position }) => position), [1, 2, 3]);
+        assert.deepEqual(current.collection.properties.map(({ position }) => position), [1, 2, 3, 4, 5]);
         assert.deepEqual(current.collection.records.map(({ position }) => position), [1, 2]);
       }
+    } finally { await store.close(); }
+  });
+
+  test("serializes reciprocal Collection relation writes without losing either edit", async () => {
+    const store = await EmbeddedInstanceStore.open(await temporaryTestDirectory("stash-reciprocal-relations-"),
+      createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
+    try {
+      const ownerId = "51515151-5151-4151-8151-515151515151";
+      await store.database.createFirstOrganizationOwner({ organizationId: "52525252-5252-4252-8252-525252525252",
+        organizationName: "Studio", ownerId, ownerName: "Ada", ownerEmail: "reciprocal@example.test", passwordHash: "test-only", role: "Owner" });
+      const workspace = await new WorkspaceProjectService(store.database.identityAccessRepositories()).createWorkspace(ownerId,
+        { name: "Notebook", owner: { type: "personal" } });
+      assert.equal(workspace.status, "created"); if (workspace.status !== "created") return;
+      const note = await new NoteTreeService(store.database.noteTreeRepository(), new EmptyCollectionImpactInspector())
+        .create(ownerId, workspace.workspace.id, { title: "Relations" });
+      assert.equal(note.status, "created"); if (note.status !== "created") return;
+      const service = new CollectionService(store.database.collectionRepository());
+      const firstCollectionId = "53535353-5353-4353-8353-535353535353";
+      const secondCollectionId = "54545454-5454-4454-8454-545454545454";
+      const firstPropertyId = "55555555-5555-4555-8555-555555555555";
+      const secondPropertyId = "56565656-5656-4656-8656-565656565656";
+      const firstRecordId = "57575757-5757-4757-8757-575757575757";
+      const secondRecordId = "58585858-5858-4858-8858-585858585858";
+      assert.equal((await service.create(ownerId, note.node.id, { schema: "stash.collection.v1", id: firstCollectionId,
+        workspaceId: workspace.workspace.id, ownerNoteId: note.node.id, title: "First", properties: [{ id: firstPropertyId,
+          name: "Second", type: "relation", position: 1, target: { kind: "collection_records", collectionId: secondCollectionId } }],
+        records: [{ id: firstRecordId, position: 1, values: {} }] })).status, "created");
+      assert.equal((await service.create(ownerId, note.node.id, { schema: "stash.collection.v1", id: secondCollectionId,
+        workspaceId: workspace.workspace.id, ownerNoteId: note.node.id, title: "Second", properties: [{ id: secondPropertyId,
+          name: "First", type: "relation", position: 1, target: { kind: "collection_records", collectionId: firstCollectionId } }],
+        records: [{ id: secondRecordId, position: 1, values: {} }] })).status, "created");
+
+      const results = await Promise.all([
+        service.updateRecord(ownerId, firstCollectionId, firstRecordId,
+          { values: { [firstPropertyId]: [{ id: secondRecordId, fallback: "Second" }] } }),
+        service.updateRecord(ownerId, secondCollectionId, secondRecordId,
+          { values: { [secondPropertyId]: [{ id: firstRecordId, fallback: "First" }] } }),
+      ]);
+      assert.deepEqual(results.map(({ status }) => status), ["updated", "updated"]);
     } finally { await store.close(); }
   });
 
@@ -468,16 +513,28 @@ describe("Collection contracts", () => {
         { action: "organize", projectId: project.project.id })).status, "updated");
       await store.upgradeDatabase.query("INSERT INTO stash_project_guests(project_id,account_id) VALUES($1,$2)", [project.project.id, guestId]);
       const relationPropertyId = "15151515-1515-4515-8515-151515151515"; const collectionId = "16161616-1616-4616-8616-161616161616";
+      const personPropertyId = "18181818-1818-4818-8818-181818181818";
+      const attachmentPropertyId = "19191919-1919-4919-8919-191919191919";
+      const attachmentId = "20202020-2020-4020-8020-202020202020";
       const collection = normalizeCollection({ schema: "stash.collection.v1", id: collectionId, workspaceId: workspace.workspace.id,
-        ownerNoteId: visible.node.id, title: "Shared lens", properties: [{ id: relationPropertyId, name: "Notes", type: "relation", position: 1,
-          target: { kind: "notes" } }], records: [{ id: "17171717-1717-4717-8717-171717171717", position: 1,
-            values: { [relationPropertyId]: [{ id: visible.node.id, fallback: "Visible" }, { id: hidden.node.id, fallback: "Private roadmap" }] } }] });
+        ownerNoteId: visible.node.id, title: "Shared lens", properties: [
+          { id: relationPropertyId, name: "Notes", type: "relation", position: 1, target: { kind: "notes" } },
+          { id: personPropertyId, name: "Owner", type: "person", position: 2 },
+          { id: attachmentPropertyId, name: "Files", type: "attachment", position: 3 },
+        ], records: [{ id: "17171717-1717-4717-8717-171717171717", position: 1,
+          values: { [relationPropertyId]: [{ id: visible.node.id, fallback: "Visible" }, { id: hidden.node.id, fallback: "Private roadmap" }],
+            [personPropertyId]: [ownerId], [attachmentPropertyId]: [attachmentId] } }] });
       const service = new CollectionService(store.database.collectionRepository()); assert.equal((await service.create(ownerId, visible.node.id, collection)).status, "created");
       const guest = await service.read(guestId, collectionId); assert.equal(guest.status, "found");
-      if (guest.status === "found") assert.deepEqual(guest.collection.records[0]?.values[relationPropertyId], [{ id: visible.node.id, fallback: "Visible" }]);
+      if (guest.status === "found") {
+        assert.deepEqual(guest.collection.records[0]?.values[relationPropertyId], [{ id: visible.node.id, fallback: "Visible" }]);
+        assert.deepEqual(guest.collection.records[0]?.values[personPropertyId], []);
+        assert.deepEqual(guest.collection.records[0]?.values[attachmentPropertyId], []);
+      }
       assert.doesNotMatch(JSON.stringify(guest), new RegExp(`Private roadmap|${hidden.node.id}`));
       const guestWorkspace = await service.listForNote(guestId, visible.node.id); assert.equal(guestWorkspace.status, "found");
       if (guestWorkspace.status === "found") {
+        assert.deepEqual(guestWorkspace.access, { read: true, edit: false });
         assert.deepEqual(guestWorkspace.selectionOptions.members, [{ id: guestId, label: "Guest" }]);
         assert.deepEqual(guestWorkspace.selectionOptions.notes, [{ id: visible.node.id, label: "Visible" }]);
         assert.deepEqual(guestWorkspace.selectionOptions.projects, [{ id: project.project.id, label: "Shared" }]);

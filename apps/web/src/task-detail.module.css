@@ -1,10 +1,10 @@
 .taskPage { width: min(100%, 76rem); margin: 0 auto; padding: clamp(2.5rem, 7vw, 6rem) clamp(1.25rem, 4vw, 4rem); }
 .taskHeader { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: var(--stash-space-8); padding-bottom: clamp(2rem, 5vw, 4rem); border-bottom: 1px solid var(--stash-border-subtle); }
 .taskKey { margin: 0 0 var(--stash-space-3); color: var(--stash-color-accent); font-size: .72rem; font-weight: 750; letter-spacing: .1em; text-transform: uppercase; }
-.taskHeader h1 { max-width: 72rem; margin: 0; font-family: var(--stash-font-display); font-size: clamp(2.4rem, 5vw, 5.2rem); font-weight: 480; letter-spacing: -.055em; line-height: .98; text-wrap: balance; }
+.taskHeader h1 { max-width: 72rem; margin: 0; font-family: var(--stash-font-sans); font-size: clamp(2.4rem, 5vw, 5.2rem); font-weight: 480; letter-spacing: -.055em; line-height: .98; text-wrap: balance; }
 .status { align-self: start; padding: .55rem .75rem; color: var(--stash-color-muted); background: var(--stash-color-surface); border: 1px solid var(--stash-border-subtle); border-radius: var(--stash-radius-sm); font-size: .78rem; font-weight: 650; }
 .assignmentPanel { display: grid; grid-template-columns: minmax(12rem, .65fr) minmax(16rem, 1.35fr); gap: clamp(2rem, 7vw, 7rem); margin-top: clamp(3rem, 8vw, 7rem); padding: clamp(1.5rem, 4vw, 3rem); background: var(--stash-color-surface); border: 1px solid var(--stash-border-subtle); }
-.assignmentPanel h2 { margin: 0; font-family: var(--stash-font-display); font-size: clamp(1.6rem, 3vw, 2.5rem); font-weight: 500; letter-spacing: -.04em; }
+.assignmentPanel h2 { margin: 0; font-family: var(--stash-font-sans); font-size: clamp(1.6rem, 3vw, 2.5rem); font-weight: 500; letter-spacing: -.04em; }
 .assignmentPanel p { margin: var(--stash-space-3) 0 0; color: var(--stash-color-muted); line-height: 1.6; }
 .assigneeList { display: grid; align-content: start; gap: var(--stash-space-3); margin: 0; padding: 0; list-style: none; }
 .departedMarker { display: flex; align-items: center; justify-content: space-between; gap: var(--stash-space-4); padding: var(--stash-space-4); color: var(--stash-color-ink); background: var(--stash-color-error-soft); border-left: 3px solid var(--stash-color-accent); }

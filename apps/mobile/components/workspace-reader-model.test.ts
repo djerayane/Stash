@@ -91,4 +91,20 @@ describe("mobile Workspace reader model", () => {
       options: [{ id: "doing", name: "In progress" }],
     }, "doing")).toBe("In progress");
   });
+
+  it("uses permission-filtered Member and file labels without exposing stored identities", () => {
+    const memberId = "11111111-1111-4111-8111-111111111111";
+    const fileId = "22222222-2222-4222-8222-222222222222";
+    const hiddenId = "33333333-3333-4333-8333-333333333333";
+    const display = { members: [{ id: memberId, label: "Ada Lovelace" }], attachments: [{ id: fileId, label: "brief.pdf" }] };
+
+    expect(displayCollectionPropertyValue({ id: memberId, name: "Owner", position: 1, type: "person" }, [memberId, hiddenId], display))
+      .toBe("Ada Lovelace, Unavailable Member");
+    expect(displayCollectionPropertyValue({ id: fileId, name: "Files", position: 2, type: "attachment" }, [fileId, hiddenId], display))
+      .toBe("brief.pdf, Unavailable file");
+    expect(JSON.stringify([
+      displayCollectionPropertyValue({ id: memberId, name: "Owner", position: 1, type: "person" }, [memberId, hiddenId], display),
+      displayCollectionPropertyValue({ id: fileId, name: "Files", position: 2, type: "attachment" }, [fileId, hiddenId], display),
+    ])).not.toContain(hiddenId);
+  });
 });

@@ -81,7 +81,7 @@ export function collectionRoutes(service: CollectionService, access: MemberAcces
           else if (result.status === "found") json(response, 200, "impact" in result ? { impact: result.impact }
             : { workspaceId: result.workspaceId, collections: result.collections,
               availableCollections: result.availableCollections, availableCollectionNotes: result.availableCollectionNotes,
-              availableNotes: result.availableNotes, selectionOptions: result.selectionOptions, views: result.views });
+              availableNotes: result.availableNotes, access: result.access, selectionOptions: result.selectionOptions, views: result.views });
           else if (result.status === "relocated" || result.status === "deleted") json(response, 200, result);
           else if (result.status === "impact_changed" || result.status === "collection_conflict") json(response, 409,
             { error: result.status, ...(result.status === "impact_changed" ? { impact: result.impact } : {}),
@@ -99,6 +99,8 @@ export function collectionRoutes(service: CollectionService, access: MemberAcces
               : await service.updateRecord(member.accountId, collectionId, recordId, await readJson(request));
           if (result.status === "created") json(response, 201, { record: result.record });
           else if (result.status === "updated" || result.status === "moved") json(response, 200, result);
+          else if (result.status === "revision_conflict") json(response, 409, { error: result.status, record: result.record,
+            message: "This Collection record changed while the offline edit was pending." });
           else if (result.status === "record_conflict") json(response, 409, { error: result.status, message: "That record identity or position is already in use." });
           else if (result.status === "invalid_record") json(response, 422, { error: result.status,
             message: "The saved value no longer matches this Collection property." });

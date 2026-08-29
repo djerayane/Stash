@@ -4,6 +4,7 @@ import type {
   MobileCanonicalTask,
   MobileNoteTreeNode,
   MobileWorkspaceMember,
+  MobileCollectionDisplayMetadata,
   MobileWorkspaceWorkflow,
   TaskViewPropertyId,
   ViewFilter,
@@ -21,10 +22,17 @@ export function displayReadableValue(value: unknown): string {
   return "";
 }
 
-export function displayCollectionPropertyValue(property: CollectionProperty, value: unknown): string {
+export function displayCollectionPropertyValue(property: CollectionProperty, value: unknown,
+  display: MobileCollectionDisplayMetadata = { members: [], attachments: [] }): string {
   if (property.type === "single_select" || property.type === "multi_select") {
     const values = Array.isArray(value) ? value : value === undefined || value === null ? [] : [value];
     return values.map((entry) => property.options.find(({ id }) => id === entry)?.name ?? displayReadableValue(entry)).join(", ");
+  }
+  if (property.type === "person" || property.type === "attachment") {
+    const options = property.type === "person" ? display.members : display.attachments;
+    const unavailable = property.type === "person" ? "Unavailable Member" : "Unavailable file";
+    return (Array.isArray(value) ? value : []).map((entry) =>
+      options.find(({ id }) => id === entry)?.label ?? unavailable).join(", ");
   }
   return displayReadableValue(value);
 }
@@ -58,7 +66,7 @@ export function visibleNoteTree(nodes: readonly MobileNoteTreeNode[], collapsed:
 
 export function groupReadableRecords(records: readonly CollectionRecord[], definition: {
   filters: readonly ViewFilter[]; sorts: readonly ViewSort[]; groupBy?: string; focused?: { readonly recordId: string };
-}, properties: readonly CollectionProperty[] = []) {
+}, properties: readonly CollectionProperty[] = [], display?: MobileCollectionDisplayMetadata) {
   const visible = [...records].filter((record) => (!definition.focused || definition.focused.recordId === record.id)
     && definition.filters.every((filter) =>
     matchesReadableFilter(record.values[filter.propertyId], filter.operator, filter.value))).sort((left, right) => {
@@ -76,7 +84,7 @@ export function groupReadableRecords(records: readonly CollectionRecord[], defin
     const values = Array.isArray(stored) ? stored.length ? stored : [undefined] : [stored];
     for (const value of values) {
       const raw = groupProperty
-        ? displayCollectionPropertyValue(groupProperty, value)
+        ? displayCollectionPropertyValue(groupProperty, value, display)
         : displayReadableValue(value);
       const label = raw ? raw.replaceAll("_", " ").replace(/^./, (letter) => letter.toLocaleUpperCase()) : "No value";
       const key = value === undefined || value === null || value === ""

@@ -1,6 +1,6 @@
 import type { PostgresQueryable } from "../instance-operations/storage/postgres-kernel.js";
 import { randomUUID } from "node:crypto";
-import { normalizeCollection, normalizeViewBlock, normalizeViewDefinition, type Collection as CanonicalCollection,
+import { normalizeCollection, normalizeCollectionProperty, normalizeViewBlock, normalizeViewDefinition, type Collection as CanonicalCollection,
   type CollectionProperty as CanonicalProperty, type CollectionRecord as CanonicalRecord, type CollectionPropertyValue,
   type ViewBlock as CanonicalViewBlock, type ViewDefinition } from "@stash/domain-types";
 import type { CollectionImpact, CollectionPropertyImpact } from "@stash/domain-types";
@@ -47,8 +47,10 @@ export interface CollectionRepository {
   createCollectionRecord(memberId: string, collectionId: string, record: unknown): Promise<
     { status: "created"; record: CanonicalRecord } | { status: "collection_not_found" | "record_conflict" | "invalid_record" }>;
   updateCollectionRecordValues(memberId: string, collectionId: string, recordId: string,
-    values: Readonly<Record<string, CollectionPropertyValue>>): Promise<
+    values: Readonly<Record<string, CollectionPropertyValue>>,
+    operation?: { readonly id: string; readonly baseRevision: number }): Promise<
     { status: "updated"; record: CanonicalRecord }
+    | { status: "revision_conflict"; record: CanonicalRecord }
     | { status: "collection_not_found" | "record_not_found" | "invalid_record" }>;
   createCanonicalViewBlock(memberId: string, view: CanonicalViewBlock): Promise<
     { status: "created"; view: CanonicalViewBlock } | { status: "note_not_found" | "workspace_mismatch" | "source_unavailable" | "view_conflict" }>;
@@ -58,6 +60,7 @@ export interface CollectionRepository {
   listCollectionsForNote(memberId: string, noteId: string): Promise<
     { status: "found"; workspaceId: string; collections: readonly CanonicalCollection[]; availableCollections: readonly CanonicalCollection[];
       availableCollectionNotes: Readonly<Record<string, string>>; availableNotes: readonly { readonly id: string; readonly title: string }[];
+      access: { readonly read: true; readonly edit: boolean };
       selectionOptions: CollectionSelectionOptions; views: readonly CanonicalViewBlock[] } | { status: "note_not_found" }>;
   previewCollectionRemoval(memberId: string, noteId: string): Promise<{ status: "found"; impact: CollectionImpact } | { status: "note_not_found" }>;
   relocateCollections(memberId: string, noteId: string, destinationNoteId: string, collectionIds: readonly string[]): Promise<
@@ -97,14 +100,12 @@ export class CollectionService {
     throw new InvalidCollectionInput();
   }
 
-  async createProperty(memberId: string, collectionId: string, value: unknown) {
+  createProperty(memberId: string, collectionId: string, value: unknown) {
     if (!uuid.test(collectionId)) throw new InvalidCollectionInput();
-    const current = await this.repository.readCollection(memberId, collectionId);
-    if (current.status !== "found") return current;
-    let normalized: CanonicalCollection;
-    try { normalized = normalizeCollection({ ...current.collection, properties: [...current.collection.properties, value] }); }
+    let property: CanonicalProperty;
+    try { property = normalizeCollectionProperty(value); }
     catch { throw new InvalidCollectionInput(); }
-    return this.repository.createCollectionProperty(memberId, collectionId, normalized.properties.at(-1)!);
+    return this.repository.createCollectionProperty(memberId, collectionId, property);
   }
 
   async updateProperty(memberId: string, collectionId: string, propertyId: string, value: unknown) {
@@ -157,12 +158,17 @@ export class CollectionService {
   }
 
   async updateRecord(memberId: string, collectionId: string, recordId: string, value: unknown) {
-    if (!uuid.test(collectionId) || !uuid.test(recordId) || !value || typeof value !== "object" || Array.isArray(value)
-      || Object.keys(value).length !== 1 || !Object.hasOwn(value, "values") || !(value as Record<string, unknown>).values
-      || typeof (value as Record<string, unknown>).values !== "object" || Array.isArray((value as Record<string, unknown>).values))
+    if (!uuid.test(collectionId) || !uuid.test(recordId) || !value || typeof value !== "object" || Array.isArray(value))
+      throw new InvalidCollectionInput();
+    const input = value as Record<string, unknown>; const keys = Object.keys(input);
+    const legacy = keys.length === 1 && keys[0] === "values";
+    const offline = keys.length === 3 && keys.includes("operationId") && keys.includes("baseRevision") && keys.includes("values")
+      && uuid.test(String(input.operationId)) && Number.isSafeInteger(input.baseRevision) && Number(input.baseRevision) >= 1;
+    if (!legacy && !offline || !input.values || typeof input.values !== "object" || Array.isArray(input.values))
       throw new InvalidCollectionInput();
     return this.repository.updateCollectionRecordValues(memberId, collectionId, recordId,
-      (value as { values: Record<string, CollectionPropertyValue> }).values);
+      input.values as Record<string, CollectionPropertyValue>, offline
+        ? { id: String(input.operationId), baseRevision: Number(input.baseRevision) } : undefined);
   }
 
   createView(memberId: string, ownerNoteId: string, value: unknown) {

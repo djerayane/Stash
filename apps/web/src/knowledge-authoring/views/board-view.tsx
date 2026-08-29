@@ -4,11 +4,12 @@ import { recordTitle } from "./table-view";
 
 export function BoardView({ title, collection, records, definition, editable, onMove, onFocus }: { title: string; collection: Collection;
   records: readonly CollectionRecord[]; definition: ViewDefinition;
-  editable: boolean; onMove: (recordId: string, source: CollectionPropertyValue, destination: CollectionPropertyValue) => Promise<void>;
+  editable: boolean; onMove: (recordId: string, source: CollectionPropertyValue, destination: CollectionPropertyValue,
+    trigger: HTMLButtonElement) => Promise<boolean>;
   onFocus: (recordId: string) => void }) {
   const [failedMove, setFailedMove] = useState<{ recordId: string; source: CollectionPropertyValue; destination: CollectionPropertyValue }>();
-  const move = async (recordId: string, source: CollectionPropertyValue, destination: CollectionPropertyValue) => {
-    try { await onMove(recordId, source, destination); setFailedMove(undefined); }
+  const move = async (recordId: string, source: CollectionPropertyValue, destination: CollectionPropertyValue, trigger: HTMLButtonElement) => {
+    try { if (await onMove(recordId, source, destination, trigger)) setFailedMove(undefined); }
     catch { setFailedMove({ recordId, source, destination }); }
   };
   const property = collection.properties.find(({ id }) => id === definition.groupBy);
@@ -22,10 +23,10 @@ export function BoardView({ title, collection, records, definition, editable, on
     return <section key={groupId} aria-labelledby={`collection-group-${property!.id}-${groupId}`}><h4 id={`collection-group-${property!.id}-${groupId}`}>{option.name}</h4>
       {groupRecords.length ? <ul>{groupRecords.map((record) => <li key={record.id}><button type="button" disabled={!editable} className="collection-card" onClick={() => onFocus(record.id)}>{recordTitle(collection, record)}</button>
         {editable ? <div aria-label={`Move ${recordTitle(collection, record)}`}>{options.filter(({ id }) => id !== option.id).map((destination) => <button key={destination.id ?? "no-value"}
-          type="button" onClick={() => void move(record.id, option.id, destination.id)}
+          type="button" onClick={(event) => void move(record.id, option.id, destination.id, event.currentTarget)}
           aria-label={`Move ${recordTitle(collection, record)} to ${destination.name}`}>Move to {destination.name}</button>)}</div> : null}
-        {failedMove?.recordId === record.id ? <p role="alert">Move not saved. <button type="button"
-          onClick={() => void move(record.id, failedMove.source, failedMove.destination)}>Try again</button></p> : null}</li>)}</ul>
+        {failedMove?.recordId === record.id && failedMove.source === option.id ? <p role="alert">Move not saved. <button type="button"
+          onClick={(event) => void move(record.id, failedMove.source, failedMove.destination, event.currentTarget)}>Try again</button></p> : null}</li>)}</ul>
         : <p role="note">No records in this group.</p>}</section>;
   }) : <p role="note">Choose a checkbox or select property under Group by to arrange this board.</p>}</section>;
 }

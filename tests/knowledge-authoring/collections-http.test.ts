@@ -47,7 +47,7 @@ describe("Collection HTTP capability", () => {
     assert.equal((await fetch(`${instance.url}/api/notes/${noteId}/collections`)).status, 401);
     const empty = await call(`/api/notes/${noteId}/collections`);
     assert.equal(empty.status, 200);
-    assert.deepEqual(await empty.json(), { workspaceId, collections: [], availableCollections: [], availableCollectionNotes: {},
+    assert.deepEqual(await empty.json(), { workspaceId, collections: [], availableCollections: [], availableCollectionNotes: {}, access: { read: true, edit: true },
       availableNotes: [{ id: dashboardId, title: "Dashboard" }, { id: noteId, title: "Research" }], selectionOptions: {
         members: [{ id: ownerId, label: "Ada" }], attachments: [],
         notes: [{ id: dashboardId, label: "Dashboard" }, { id: noteId, label: "Research" }], tasks: [], projects: [],
@@ -87,8 +87,28 @@ describe("Collection HTTP capability", () => {
       id: "40414243-4445-4647-8849-505152535455", workspaceId, ownerNoteId: noteId, title: "Invalid",
       properties: [{ id: "50515253-5455-4657-8859-606162636465", name: "Formula", type: "formula", position: 1 }], records: [] }) })).status, 422);
     const recordId = "60616263-6465-4667-8869-707172737475";
-    assert.equal((await call(`/api/collections/${collectionId}/records`, { method: "POST", body: JSON.stringify({ id: recordId, position: 1,
-      values: { [propertyId]: "Map constraints" } }) })).status, 201);
+    const createdRecord = await call(`/api/collections/${collectionId}/records`, { method: "POST", body: JSON.stringify({ id: recordId, position: 1,
+      values: { [propertyId]: "Map constraints" } }) });
+    assert.equal(createdRecord.status, 201); assert.equal((await createdRecord.json() as any).record.revision, 1);
+    const operationId = "61616161-6161-4161-8161-616161616161";
+    const applied = await call(`/api/collections/${collectionId}/records/${recordId}`, { method: "PATCH",
+      body: JSON.stringify({ operationId, baseRevision: 1, values: { [propertyId]: "Map stable constraints" } }) });
+    assert.equal(applied.status, 200); assert.equal((await applied.json() as any).record.revision, 2);
+    const intervening = await call(`/api/collections/${collectionId}/records/${recordId}`, { method: "PATCH",
+      body: JSON.stringify({ values: { [propertyId]: "Intervening edit" } }) });
+    assert.equal(intervening.status, 200); assert.equal((await intervening.json() as any).record.revision, 3);
+    const replay = await call(`/api/collections/${collectionId}/records/${recordId}`, { method: "PATCH",
+      body: JSON.stringify({ operationId, baseRevision: 1, values: { [propertyId]: "Map stable constraints" } }) });
+    assert.equal(replay.status, 200); assert.deepEqual((await replay.json() as any).record,
+      { id: recordId, position: 1, revision: 2, values: { [propertyId]: "Map stable constraints" } });
+    const afterReplay = await call(`/api/collections/${collectionId}`);
+    assert.equal((await afterReplay.json() as any).collection.records[0].values[propertyId], "Intervening edit",
+      "a replayed operation receipt must not overwrite a later canonical edit");
+    const stale = await call(`/api/collections/${collectionId}/records/${recordId}`, { method: "PATCH",
+      body: JSON.stringify({ operationId: "62626262-6262-4262-8262-626262626262", baseRevision: 2,
+        values: { [propertyId]: "Stale offline edit" } }) });
+    assert.equal(stale.status, 409); assert.deepEqual((await stale.json() as any).record,
+      { id: recordId, position: 1, revision: 3, values: { [propertyId]: "Intervening edit" } });
     assert.equal((await call(`/api/collections/${collectionId}/records/${recordId}`, { method: "PATCH",
       body: JSON.stringify({ values: { [propertyId]: "Map stable constraints" } }) })).status, 200);
     const dashboardSources = await call(`/api/notes/${dashboardId}/collections`); assert.equal(dashboardSources.status, 200);

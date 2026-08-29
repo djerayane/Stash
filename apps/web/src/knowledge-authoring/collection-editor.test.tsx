@@ -253,6 +253,33 @@ describe("Collection workspace", () => {
     expect(screen.queryByRole("dialog", { name: "Edit this canonical record?" })).not.toBeInTheDocument();
   });
 
+  it("gates a cross-Note Board move before mutating its canonical record and restores focus on cancel", async () => {
+    const crossNoteBoard = { ...view, ownerNoteId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      definition: { ...view.definition, presentation: "board" as const, groupBy: statusId } };
+    const requests: Array<{ path: string; init?: RequestInit }> = [];
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({ path: String(input), init });
+      if (init?.method === "PATCH") return Response.json({ status: "updated" });
+      return Response.json({ workspaceId: collection.workspaceId, collections: [], availableCollections: [collection],
+        availableCollectionNotes: { [collection.id]: "Research note" }, availableNotes: [], views: [crossNoteBoard] });
+    }) as typeof fetch;
+    renderWorkspace(fetcher, crossNoteBoard.ownerNoteId);
+    const region = await screen.findByRole("region", { name: "Research lens" });
+    const move = within(region).getByRole("button", { name: "Move Map constraints to Later" });
+
+    fireEvent.click(move);
+    let dialog = await screen.findByRole("dialog", { name: "Edit this canonical record?" });
+    expect(requests.filter(({ init }) => init?.method === "PATCH")).toHaveLength(0);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(move).toHaveFocus());
+
+    fireEvent.click(move);
+    dialog = await screen.findByRole("dialog", { name: "Edit this canonical record?" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Continue editing" }));
+    await waitFor(() => expect(requests.filter(({ path, init }) => path.endsWith(`/records/${recordId}`)
+      && init?.method === "PATCH")).toHaveLength(1));
+  });
+
   it("refreshes Collection deletion impact after a stale confirmation", async () => {
     const initial = { noteId: collection.ownerNoteId, collections: [{ id: collection.id, title: collection.title, recordCount: 1 }],
       relations: [], viewBlocks: [], token: "old-impact" };
