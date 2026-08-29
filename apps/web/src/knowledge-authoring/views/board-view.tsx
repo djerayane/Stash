@@ -12,14 +12,16 @@ export function BoardView({ title, collection, records, definition, editable, on
     catch { setFailedMove({ recordId, source, destination }); }
   };
   const property = collection.properties.find(({ id }) => id === definition.groupBy);
-  const options = property?.type === "single_select" || property?.type === "multi_select" ? property.options
+  const options: ReadonlyArray<{ id: string | null; name: string }> = property?.type === "single_select" || property?.type === "multi_select" ? [...property.options, { id: null, name: "No value" }]
     : property?.type === "checkbox" ? [{ id: "false", name: "Not checked" }, { id: "true", name: "Checked" }] : [];
   return <section aria-label={`${title} board`} className="collection-board">{options.length ? options.map((option) => {
-    const groupRecords = records.filter((record) => property?.type === "multi_select" ? (record.values[property.id] as readonly string[] | undefined)?.includes(option.id)
-      : String(record.values[property!.id] ?? "false") === option.id);
-    return <section key={option.id} aria-labelledby={`collection-group-${property!.id}-${option.id}`}><h4 id={`collection-group-${property!.id}-${option.id}`}>{option.name}</h4>
+    const groupRecords = records.filter((record) => { const value = record.values[property!.id];
+      if (option.id === null) return value === undefined || value === null || value === "" || Array.isArray(value) && value.length === 0;
+      return property?.type === "multi_select" ? Array.isArray(value) && value.map(String).includes(option.id) : String(value ?? "false") === option.id; });
+    const groupId = option.id ?? "no-value";
+    return <section key={groupId} aria-labelledby={`collection-group-${property!.id}-${groupId}`}><h4 id={`collection-group-${property!.id}-${groupId}`}>{option.name}</h4>
       {groupRecords.length ? <ul>{groupRecords.map((record) => <li key={record.id}><button type="button" disabled={!editable} className="collection-card" onClick={() => onFocus(record.id)}>{recordTitle(collection, record)}</button>
-        {editable ? <div aria-label={`Move ${recordTitle(collection, record)}`}>{options.filter(({ id }) => id !== option.id).map((destination) => <button key={destination.id}
+        {editable ? <div aria-label={`Move ${recordTitle(collection, record)}`}>{options.filter(({ id }) => id !== option.id).map((destination) => <button key={destination.id ?? "no-value"}
           type="button" onClick={() => void move(record.id, option.id, destination.id)}
           aria-label={`Move ${recordTitle(collection, record)} to ${destination.name}`}>Move to {destination.name}</button>)}</div> : null}
         {failedMove?.recordId === record.id ? <p role="alert">Move not saved. <button type="button"

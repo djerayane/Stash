@@ -5,6 +5,7 @@ import { Button } from "../ui/control";
 import { CollectionCell, CollectionDraftControl, collectionDraftValue, collectionValueDraft, type CollectionCellDraft } from "./collection-cell";
 import { CollectionImpactDialog } from "./collection-impact-dialog";
 import { CollectionPropertyMenu } from "./collection-property-menu";
+import { emptyCollectionSelectionOptions, selectionOptionsForProperty, type CollectionSelectionOptions } from "./collection-selection-options";
 import { CollectionViewControls } from "./collection-view-controls";
 import { BoardView } from "./views/board-view";
 import { CalendarView } from "./views/calendar-view";
@@ -18,6 +19,9 @@ export interface CollectionTableProps {
   view?: ViewBlock;
   sourceNoteTitle?: string;
   availableNotes?: readonly { id: string; title: string }[];
+  availableCollections?: readonly Collection[];
+  availableCollectionNotes?: Readonly<Record<string, string>>;
+  selectionOptions?: CollectionSelectionOptions;
   canonicalActions?: boolean;
   editable: boolean;
   token: string;
@@ -29,16 +33,19 @@ function auth(token: string, json = true) { return { authorization: `Bearer ${to
 function defaultDefinition(collection: Collection): ViewDefinition { return { source: { kind: "collection", collectionId: collection.id },
   presentation: "table", filters: [], sorts: [], layout: {} }; }
 
-export function CollectionTable({ collection, view: persistedView, sourceNoteTitle, availableNotes = [], canonicalActions = true,
+export function CollectionTable({ collection, view: persistedView, sourceNoteTitle, availableNotes = [], availableCollections = [],
+  availableCollectionNotes = {}, selectionOptions = emptyCollectionSelectionOptions, canonicalActions = true,
   editable, token, fetcher, onChanged }: CollectionTableProps) {
   const canManageCollection = editable && canonicalActions;
   const [definition, setDefinition] = useState<ViewDefinition>(persistedView?.definition ?? defaultDefinition(collection));
   const [title, setTitle] = useState(collection.title); const [propertyMenu, setPropertyMenu] = useState<CollectionProperty | "new">();
   const collectionRoot = useRef<HTMLElement>(null); const propertyTrigger = useRef<HTMLButtonElement>(null);
-  const moreTrigger = useRef<HTMLButtonElement>(null); const saveQueue = useRef(Promise.resolve());
+  const moreTrigger = useRef<HTMLButtonElement>(null); const crossNoteTrigger = useRef<HTMLButtonElement>(null); const saveQueue = useRef(Promise.resolve());
   const [newRecord, setNewRecord] = useState(false); const [newValues, setNewValues] = useState<Record<string, CollectionCellDraft>>({});
   const [actionsOpen, setActionsOpen] = useState(false); const [moveOpen, setMoveOpen] = useState(false); const [destination, setDestination] = useState("");
   const [impact, setImpact] = useState<CollectionImpact>(); const [deleteOpen, setDeleteOpen] = useState(false); const [pending, setPending] = useState(false);
+  const [crossNoteDisclosureOpen, setCrossNoteDisclosureOpen] = useState(false); const [crossNoteEditAcknowledged, setCrossNoteEditAcknowledged] = useState(false);
+  const [requestedEditCell, setRequestedEditCell] = useState<string>();
   const [error, setError] = useState("");
   useEffect(() => { setTitle(collection.title); }, [collection.title]);
   useEffect(() => { if (persistedView) setDefinition(persistedView.definition); }, [persistedView?.id, persistedView?.definition]);
@@ -46,6 +53,9 @@ export function CollectionTable({ collection, view: persistedView, sourceNoteTit
   const focused = definition.focused ? collection.records.find(({ id }) => id === definition.focused?.recordId) : undefined;
   const visibleIds = Array.isArray(definition.layout.visiblePropertyIds) ? definition.layout.visiblePropertyIds as string[] : undefined;
   const visibleProperties = collection.properties.filter(({ id }) => !visibleIds || visibleIds.includes(id));
+  const primaryProperty = [...collection.properties].sort((left, right) => left.position - right.position).find(({ type }) => type === "text");
+  const tableProperties = newRecord && primaryProperty && !visibleProperties.some(({ id }) => id === primaryProperty.id)
+    ? [primaryProperty, ...visibleProperties] : visibleProperties;
   const saveDefinition = (next: ViewDefinition) => { if (!editable) return; setDefinition(next); if (!persistedView) return;
     saveQueue.current = saveQueue.current.catch(() => undefined).then(async () => {
       const response = await fetcher(`/api/view-blocks/${encodeURIComponent(persistedView.id)}`, { method: "PATCH",
@@ -67,12 +77,14 @@ export function CollectionTable({ collection, view: persistedView, sourceNoteTit
     await onChanged();
   };
   const focusCell = (row: number, column: number, direction: "left" | "right" | "up" | "down") => {
-    const nextRow = Math.max(0, Math.min(collection.records.length - 1, row + (direction === "up" ? -1 : direction === "down" ? 1 : 0)));
-    const nextColumn = Math.max(0, Math.min(visibleProperties.length - 1, column + (direction === "left" ? -1 : direction === "right" ? 1 : 0)));
+    if (!evaluated.records.length || !tableProperties.length) return;
+    const nextRow = Math.max(0, Math.min(evaluated.records.length - 1, row + (direction === "up" ? -1 : direction === "down" ? 1 : 0)));
+    const nextColumn = Math.max(0, Math.min(tableProperties.length - 1, column + (direction === "left" ? -1 : direction === "right" ? 1 : 0)));
     collectionRoot.current?.querySelector<HTMLElement>(`[data-collection-cell="${collection.id}-${nextRow}-${nextColumn}"] input, [data-collection-cell="${collection.id}-${nextRow}-${nextColumn}"] select`)?.focus();
   };
   const createRecord = async () => { setPending(true); setError(""); const values = Object.fromEntries(collection.properties.map((property) =>
-    [property.id, collectionDraftValue(property, newValues[property.id] ?? collectionValueDraft(property))]));
+    [property.id, collectionDraftValue(property, newValues[property.id] ?? collectionValueDraft(property),
+      selectionOptionsForProperty(property, selectionOptions, availableCollections))]));
     const record = { id: crypto.randomUUID(), position: Math.max(0, ...collection.records.map(({ position }) => position)) + 1, values };
     try { const response = await fetcher(`/api/collections/${encodeURIComponent(collection.id)}/records`, { method: "POST", headers: auth(token), body: JSON.stringify(record) });
       if (!response.ok) throw new Error(((await response.json()) as { message?: string }).message || "The record could not be created.");
@@ -104,7 +116,10 @@ export function CollectionTable({ collection, view: persistedView, sourceNoteTit
   const deleteCollection = async () => { if (!impact) return; setPending(true); setError("");
     try { const response = await fetcher(`/api/notes/${encodeURIComponent(collection.ownerNoteId)}/collections/delete`, { method: "POST", headers: auth(token),
       body: JSON.stringify({ confirmed: true, impactToken: impact.token, collectionIds: [collection.id] }) });
-      if (!response.ok) throw new Error(((await response.json()) as { message?: string }).message || "The Collection could not be deleted.");
+      const result = await response.json() as { impact?: CollectionImpact; message?: string };
+      if (response.status === 409 && result.impact) { setImpact(result.impact);
+        throw new Error(result.message || "Collection impact changed. Review the updated impact before deleting."); }
+      if (!response.ok) throw new Error(result.message || "The Collection could not be deleted.");
       setDeleteOpen(false); await onChanged();
     } catch (reason) { setError(reason instanceof Error ? reason.message : "The Collection could not be deleted."); } finally { setPending(false); } };
   const moveCollection = async () => { setPending(true); setError("");
@@ -124,7 +139,8 @@ export function CollectionTable({ collection, view: persistedView, sourceNoteTit
       <p>View of {collection.title} · From {sourceNoteTitle ?? "Another Note"}</p></div> : <input className={styles.collectionTitle} aria-label="Collection title" value={title}
       disabled={!canManageCollection || pending} onChange={(event) => setTitle(event.target.value)} onBlur={() => void saveTitle()}
       onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void saveTitle(); } if (event.key === "Escape") setTitle(collection.title); }} />}
-      <CollectionViewControls collection={collection} definition={definition} editable={editable} onChange={saveDefinition} onAddRequiredProperty={addRequired} />
+      <CollectionViewControls collection={collection} availableCollections={availableCollections} selectionOptions={selectionOptions}
+        definition={definition} editable={editable} onChange={saveDefinition} onAddRequiredProperty={addRequired} />
       {canManageCollection ? <div className={styles.actions}><button ref={moreTrigger} className={styles.moreButton} type="button" aria-label="Collection actions"
         aria-expanded={actionsOpen} onClick={() => setActionsOpen((open) => !open)}>•••</button>{actionsOpen ? <div className={styles.actionMenu}>
           <button type="button" onClick={() => void previewImpact("move")}>Move to another Note</button><button type="button" onClick={() => void duplicateCollection()}>Duplicate</button>
@@ -132,25 +148,35 @@ export function CollectionTable({ collection, view: persistedView, sourceNoteTit
         </div> : null}</div> : null}
     </header>{error && !deleteOpen && !moveOpen ? <p className={styles.inlineError} role="alert">{error}</p> : null}
     {definition.presentation === "table" ? <div className={styles.tableScroll}><table aria-label={`${collection.title} records`}><thead><tr>
-      {visibleProperties.map((property) => <th aria-label={property.name} key={property.id} scope="col">{canManageCollection ? <button
+      {tableProperties.map((property) => <th aria-label={property.name} key={property.id} scope="col">{canManageCollection ? <button
         type="button" aria-label={`Edit ${property.name} property`} data-property-trigger={property.id}
         onClick={(event) => { propertyTrigger.current = event.currentTarget; setPropertyMenu(property); }}>{property.name}</button> : <span className={styles.propertyLabel}>{property.name}</span>}
         {propertyMenu !== "new" && propertyMenu?.id === property.id ? <CollectionPropertyMenu collection={collection} property={propertyMenu}
+          availableCollections={availableCollections} availableCollectionNotes={availableCollectionNotes}
           token={token} fetcher={fetcher} onChanged={onChanged} onClose={() => { setPropertyMenu(undefined); requestAnimationFrame(() => propertyTrigger.current?.focus()); }} returnFocusRef={propertyTrigger} /> : null}</th>)}
       {canManageCollection ? <th className={styles.addPropertyHeader} scope="col"><button type="button"
         aria-label={propertyMenu === "new" ? "Close property menu" : "Add property"}
         onClick={(event) => { propertyTrigger.current = event.currentTarget; setPropertyMenu("new"); }}>Add property</button>
-        {propertyMenu === "new" ? <CollectionPropertyMenu collection={collection} token={token} fetcher={fetcher} onChanged={onChanged}
+        {propertyMenu === "new" ? <CollectionPropertyMenu collection={collection} availableCollections={availableCollections}
+          availableCollectionNotes={availableCollectionNotes} token={token} fetcher={fetcher} onChanged={onChanged}
           onClose={() => { setPropertyMenu(undefined); requestAnimationFrame(() => propertyTrigger.current?.focus()); }} returnFocusRef={propertyTrigger} /> : null}</th> : null}
     </tr></thead><tbody>{evaluated.records.map((record, row) => { const label = recordTitle(collection, record); return <tr key={record.id}>
-      {visibleProperties.map((property, column) => <td key={property.id} data-collection-cell={`${collection.id}-${row}-${column}`}><CollectionCell property={property}
-        value={record.values[property.id]} recordLabel={label} editable={editable} onSave={(value) => saveCell(record.id, property.id, value)}
-        onNavigate={(direction) => focusCell(row, column, direction)} /></td>)}{editable ? <td aria-hidden="true" /> : null}</tr>; })}
-      {editable ? newRecord ? <tr className={styles.newRecord}>{visibleProperties.map((property, index) => <td key={property.id}>
-        <CollectionDraftControl property={property} label={`${property.name}, new record`} autoFocus={index === 0} value={newValues[property.id] ?? collectionValueDraft(property)}
+      {tableProperties.map((property, column) => <td key={property.id} data-collection-cell={`${collection.id}-${row}-${column}`}>{persistedView
+        && persistedView.ownerNoteId !== collection.ownerNoteId && !crossNoteEditAcknowledged && editable ? <button type="button" className={styles.disclosureEdit}
+          ref={(node) => { if (requestedEditCell === `${row}-${column}`) crossNoteTrigger.current = node; }} aria-label={`Edit ${property.name}, ${label}`}
+          onClick={(event) => { crossNoteTrigger.current = event.currentTarget; setRequestedEditCell(`${row}-${column}`); setCrossNoteDisclosureOpen(true); }}>
+          <CollectionCell property={property} value={record.values[property.id]} options={selectionOptionsForProperty(property, selectionOptions, availableCollections)}
+            recordLabel={label} editable={false} onSave={async () => undefined}
+            onNavigate={() => undefined} /></button> : <CollectionCell property={property}
+          value={record.values[property.id]} options={selectionOptionsForProperty(property, selectionOptions, availableCollections)}
+          recordLabel={label} editable={editable} onSave={(value) => saveCell(record.id, property.id, value)}
+          onNavigate={(direction) => focusCell(row, column, direction)} />}</td>)}{editable ? <td aria-hidden="true" /> : null}</tr>; })}
+      {editable ? newRecord ? <tr className={styles.newRecord}>{tableProperties.map((property) => <td key={property.id}>
+        <CollectionDraftControl property={property} options={selectionOptionsForProperty(property, selectionOptions, availableCollections)}
+          label={`${property.name}, new record`} autoFocus={property.id === primaryProperty?.id} value={newValues[property.id] ?? collectionValueDraft(property)}
           onChange={(value) => setNewValues((current) => ({ ...current, [property.id]: value }))} onConfirm={() => void createRecord()}
           onCancel={() => { setNewRecord(false); setNewValues({}); }} /></td>)}<td><Button type="button" pending={pending} onClick={() => void createRecord()}>Save record</Button></td></tr>
-        : <tr className={styles.newRecordAction}><td colSpan={visibleProperties.length + 1}><button type="button" onClick={() => setNewRecord(true)}>New record</button></td></tr> : null}
+        : <tr className={styles.newRecordAction}><td colSpan={tableProperties.length + 1}><button type="button" onClick={() => setNewRecord(true)}>New record</button></td></tr> : null}
     </tbody></table></div>
       : definition.presentation === "board" ? <BoardView title={sectionTitle} collection={collection} records={evaluated.records} definition={definition}
         editable={editable} onFocus={focusRecord} onMove={async (recordId, source, destination) => {
@@ -159,6 +185,14 @@ export function CollectionTable({ collection, view: persistedView, sourceNoteTit
         : definition.presentation === "list" ? <ListView title={sectionTitle} collection={collection} records={evaluated.records} editable={editable} onFocus={focusRecord} />
           : <CalendarView title={sectionTitle} collection={collection} records={evaluated.records} definition={definition} editable={editable} onFocus={focusRecord} />}
     {focused ? <p className={styles.focusedRecord} role="status">Focused record: {recordTitle(collection, focused)}</p> : null}
+    <CollectionImpactDialog open={crossNoteDisclosureOpen} onOpenChange={(open) => { setCrossNoteDisclosureOpen(open); if (!open && !crossNoteEditAcknowledged) crossNoteTrigger.current?.focus(); }}
+      title="Edit this canonical record?" description="This View points to one canonical Collection. Your changes will appear everywhere this Collection is used."
+      confirmLabel="Continue editing" cancelLabel="Cancel" confirmVariant="primary" pending={false} error="" returnFocusRef={crossNoteTrigger}
+      onConfirm={() => { const cell = requestedEditCell; setCrossNoteEditAcknowledged(true); setCrossNoteDisclosureOpen(false); requestAnimationFrame(() => {
+        if (!cell) return; const [row, column] = cell.split("-"); collectionRoot.current?.querySelector<HTMLElement>(
+          `[data-collection-cell="${collection.id}-${row}-${column}"] input, [data-collection-cell="${collection.id}-${row}-${column}"] select`)?.focus(); }); }}>
+      <p>The record remains one shared source of truth; this is not a private copy.</p>
+    </CollectionImpactDialog>
     <CollectionImpactDialog open={moveOpen} onOpenChange={(open) => { setMoveOpen(open); if (!open) { setDestination(""); moreTrigger.current?.focus(); } }}
       title={`Move ${collection.title} collection?`} description="The Collection remains canonical; its records, relations, and inserted views stay connected."
       confirmLabel="Move collection" cancelLabel="Cancel move" confirmVariant="primary" confirmDisabled={!destination.trim()}

@@ -33,6 +33,47 @@ describe("mobile Workspace reader model", () => {
     ]);
   });
 
+  it("places a multi-value Collection record in every matching readable group", () => {
+    const records = [
+      { id: "both", position: 1, values: { tags: ["research", "writing"] } },
+      { id: "empty", position: 2, values: { tags: [] } },
+    ];
+    const groups = groupReadableRecords(records, { filters: [], sorts: [], groupBy: "tags" }, [{
+      id: "tags", name: "Tags", position: 1, type: "multi_select",
+      options: [{ id: "research", name: "Research" }, { id: "writing", name: "Writing" }],
+    }]);
+
+    expect(groups.map(({ label, items }) => [label, items.map(({ id }) => id)])).toEqual([
+      ["Research", ["both"]],
+      ["Writing", ["both"]],
+      ["No value", ["empty"]],
+    ]);
+  });
+
+  it("uses each relation fallback as a readable group without exposing relation IDs", () => {
+    const groups = groupReadableRecords([{ id: "related", position: 1, values: { related: [
+      { id: "11111111-1111-4111-8111-111111111111", fallback: "Design brief" },
+      { id: "22222222-2222-4222-8222-222222222222", fallback: "Research notes" },
+    ] } }], { filters: [], sorts: [], groupBy: "related" }, [{
+      id: "related", name: "Related", position: 1, type: "relation", target: { kind: "notes" },
+    }]);
+
+    expect(groups.map(({ label }) => label)).toEqual(["Design brief", "Research notes"]);
+  });
+
+  it("matches web grouping when different relation identities share one fallback", () => {
+    const groups = groupReadableRecords([
+      { id: "first", position: 1, values: { related: [{ id: "11111111-1111-4111-8111-111111111111", fallback: "Unavailable note" }] } },
+      { id: "second", position: 2, values: { related: [{ id: "22222222-2222-4222-8222-222222222222", fallback: "Unavailable note" }] } },
+    ], { filters: [], sorts: [], groupBy: "related" }, [{
+      id: "related", name: "Related", position: 1, type: "relation", target: { kind: "notes" },
+    }]);
+
+    expect(groups.map(({ label, items }) => [label, items.map(({ id }) => id)])).toEqual([
+      ["Unavailable note", ["first", "second"]],
+    ]);
+  });
+
   it("limits a focused Collection view to its canonical record", () => {
     const records = [
       { id: "first", position: 1, values: { title: "Alpha" } },

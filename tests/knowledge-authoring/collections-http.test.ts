@@ -18,7 +18,7 @@ import { WorkspaceProjectService, type MemberAccessResolver } from "../../src/wo
 
 describe("Collection HTTP capability", () => {
   const ownerId = "18181818-1818-4818-8818-181818181818"; let store: EmbeddedInstanceStore; let instance: RunningInstance;
-  let workspaceId: string; let noteId: string; let dashboardId: string;
+  let workspaceId: string; let noteId: string; let dashboardId: string; let collectionService: CollectionService;
   before(async () => {
     store = await EmbeddedInstanceStore.open(await temporaryTestDirectory("stash-collections-http-"),
       createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
@@ -34,9 +34,10 @@ describe("Collection HTTP capability", () => {
     assert.equal(dashboard.status, "created"); if (dashboard.status !== "created") throw new Error("dashboard setup failed"); dashboardId = dashboard.node.id;
     const access: MemberAccessResolver = { async authenticateBearer(header) { return header === "Bearer owner"
       ? { accountId: ownerId, sessionId: "session" } : undefined; } };
+    collectionService = new CollectionService(store.database.collectionRepository());
     instance = await startInstance({ database: store.database, host: "127.0.0.1", port: 0, instanceAdminToken: "admin",
       memberAccess: access, capabilities: createCapabilityRegistry([{ name: "knowledge-authoring", routes: () => [collectionRoutes(
-        new CollectionService(store.database.collectionRepository()), access)] }]) });
+        collectionService, access)] }]) });
   });
   after(async () => { await instance.close(); await store.close(); });
   const call = (path: string, init: RequestInit = {}) => fetch(`${instance.url}${path}`, { ...init,
@@ -47,7 +48,10 @@ describe("Collection HTTP capability", () => {
     const empty = await call(`/api/notes/${noteId}/collections`);
     assert.equal(empty.status, 200);
     assert.deepEqual(await empty.json(), { workspaceId, collections: [], availableCollections: [], availableCollectionNotes: {},
-      availableNotes: [{ id: dashboardId, title: "Dashboard" }, { id: noteId, title: "Research" }], views: [] });
+      availableNotes: [{ id: dashboardId, title: "Dashboard" }, { id: noteId, title: "Research" }], selectionOptions: {
+        members: [{ id: ownerId, label: "Ada" }], attachments: [],
+        notes: [{ id: dashboardId, label: "Dashboard" }, { id: noteId, label: "Research" }], tasks: [], projects: [],
+      }, views: [] });
     const propertyId = "20212223-2425-4627-8829-303132333435"; const collectionId = "30313233-3435-4637-8839-404142434445";
     const created = await call(`/api/notes/${noteId}/collections`, { method: "POST", body: JSON.stringify({ schema: "stash.collection.v1",
       id: collectionId, workspaceId, ownerNoteId: noteId, title: "Research", properties: [{ id: propertyId, name: "Idea", type: "text", position: 1 }], records: [] }) });
@@ -97,6 +101,33 @@ describe("Collection HTTP capability", () => {
     const opened = await call(`/api/view-blocks/${viewId}`); assert.equal(opened.status, 200);
     assert.equal((await opened.json() as any).source.collection.records[0].id, recordId);
     const impact = await call(`/api/notes/${noteId}/collections/impact`); assert.equal(impact.status, 200);
-    assert.equal((await impact.json() as any).impact.viewBlocks.length, 1);
+    const collectionImpact = (await impact.json() as any).impact;
+    assert.equal(collectionImpact.viewBlocks.length, 1);
+    const staleDelete = await call(`/api/notes/${noteId}/collections/delete`, { method: "POST", body: JSON.stringify({
+      confirmed: true, impactToken: `${collectionImpact.token}-stale`, collectionIds: [collectionId],
+    }) });
+    assert.equal(staleDelete.status, 409);
+    assert.equal((await staleDelete.json() as any).impact.token, collectionImpact.token);
+
+    const relationPropertyId = "91919191-9191-4191-8191-919191919191";
+    const referrerId = "92929292-9292-4292-8292-929292929292";
+    const relationRecords = Array.from({ length: 420 }, (_, index) => ({
+      id: `93939393-9393-4393-8393-${String(index + 1).padStart(12, "0")}`,
+      position: index + 1,
+      values: { [relationPropertyId]: [{ id: recordId, fallback: "Map stable constraints" }] },
+    }));
+    assert.equal((await collectionService.create(ownerId, dashboardId, { schema: "stash.collection.v1", id: referrerId,
+      workspaceId, ownerNoteId: dashboardId, title: "Large relation map", properties: [{ id: relationPropertyId,
+        name: "Research", type: "relation", position: 1, target: { kind: "collection_records", collectionId } }],
+      records: relationRecords })).status, "created");
+    const largeImpactResponse = await call(`/api/notes/${noteId}/collections/impact`);
+    assert.equal(largeImpactResponse.status, 200);
+    const largeImpact = (await largeImpactResponse.json() as any).impact;
+    assert.equal(largeImpact.relations.length, 420);
+    assert.ok(Buffer.byteLength(largeImpact.token, "utf8") <= 100);
+    const largeDelete = await call(`/api/notes/${noteId}/collections/delete`, { method: "POST", body: JSON.stringify({
+      confirmed: true, impactToken: largeImpact.token, collectionIds: [collectionId],
+    }) });
+    assert.equal(largeDelete.status, 200, "a valid large-impact confirmation must stay below the HTTP request limit");
   });
 });

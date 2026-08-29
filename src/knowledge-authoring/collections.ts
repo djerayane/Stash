@@ -10,6 +10,14 @@ export type CollectionViewResult =
   | { status: "found"; view: CanonicalViewBlock; source: { kind: "tasks"; records: readonly unknown[]; statuses: readonly unknown[] } }
   | { status: "view_not_found" | "source_unavailable" };
 
+export interface CollectionSelectionOptions {
+  readonly members: readonly { readonly id: string; readonly label: string }[];
+  readonly attachments: readonly { readonly id: string; readonly label: string }[];
+  readonly notes: readonly { readonly id: string; readonly label: string }[];
+  readonly tasks: readonly { readonly id: string; readonly label: string }[];
+  readonly projects: readonly { readonly id: string; readonly label: string }[];
+}
+
 export interface CollectionRepository {
   create(memberId: string, collection: CanonicalCollection): Promise<
     { status: "created"; collection: CanonicalCollection }
@@ -50,12 +58,14 @@ export interface CollectionRepository {
   listCollectionsForNote(memberId: string, noteId: string): Promise<
     { status: "found"; workspaceId: string; collections: readonly CanonicalCollection[]; availableCollections: readonly CanonicalCollection[];
       availableCollectionNotes: Readonly<Record<string, string>>; availableNotes: readonly { readonly id: string; readonly title: string }[];
-      views: readonly CanonicalViewBlock[] } | { status: "note_not_found" }>;
+      selectionOptions: CollectionSelectionOptions; views: readonly CanonicalViewBlock[] } | { status: "note_not_found" }>;
   previewCollectionRemoval(memberId: string, noteId: string): Promise<{ status: "found"; impact: CollectionImpact } | { status: "note_not_found" }>;
   relocateCollections(memberId: string, noteId: string, destinationNoteId: string, collectionIds: readonly string[]): Promise<
     { status: "relocated"; collectionIds: readonly string[] } | { status: "note_not_found" | "destination_not_found" | "collection_not_found" }>;
   deleteCollections(memberId: string, noteId: string, collectionIds: readonly string[], impactToken: string): Promise<
-    { status: "deleted"; collectionIds: readonly string[] } | { status: "note_not_found" | "collection_not_found" | "impact_changed" }>;
+    { status: "deleted"; collectionIds: readonly string[] }
+    | { status: "impact_changed"; impact: CollectionImpact }
+    | { status: "note_not_found" | "collection_not_found" }>;
 }
 
 export class InvalidCollectionInput extends Error {}

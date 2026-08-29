@@ -78,12 +78,67 @@ describe("WorkspaceReader", () => {
     render(<WorkspaceReader snapshot={snapshot} pendingTaskIds={new Set()} onUpdateTaskStatus={vi.fn()} />);
     fireEvent.click(screen.getByRole("tab", { name: "Views" }));
 
-    expect(screen.getByRole("heading", { name: "Research" })).toBeTruthy();
+    expect(screen.getAllByRole("heading", { name: "Research" }).length).toBeGreaterThan(0);
     expect(screen.getByText("Table from Research in Research notes")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "In progress" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Interview synthesis" })).toBeTruthy();
     expect(screen.getByLabelText("Status: In progress")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Ready for review" })).toBeTruthy();
+  });
+
+  it("opens a direct cached Collection without requiring a saved View and queues a record edit", async () => {
+    const updateRecord = vi.fn(async () => undefined);
+    render(<WorkspaceReader snapshot={{ ...snapshot, viewBlocks: [] }} pendingTaskIds={new Set()}
+      pendingCollectionRecordIds={new Set()} onUpdateTaskStatus={vi.fn()} onUpdateCollectionRecord={updateRecord} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Views" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Open Collection Research" }));
+    expect(screen.getByText("Owned by Research notes")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Open record Interview synthesis" }));
+    const editor = screen.getByLabelText("Edit Name for Interview synthesis");
+    fireEvent.change(editor, { target: { value: "Interview findings" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save Interview synthesis" }));
+
+    expect(updateRecord).toHaveBeenCalledWith(collectionId, researchRecordId, {
+      [namePropertyId]: "Interview findings",
+    });
+  });
+
+  it("counts a multi-grouped Collection record once and uses its primary text label", () => {
+    const tagsId = "13131313-1313-4313-8313-131313131313";
+    const groupedSnapshot: MobileWorkspaceSnapshot = {
+      ...snapshot,
+      collections: [{ ...snapshot.collections[0]!, properties: [
+        { id: statusPropertyId, name: "Status", position: 1, type: "single_select", options: [{ id: "doing", name: "In progress" }] },
+        { id: namePropertyId, name: "Name", position: 2, type: "text" },
+        { id: tagsId, name: "Tags", position: 3, type: "multi_select", options: [
+          { id: "research", name: "Research" }, { id: "writing", name: "Writing" },
+        ] },
+      ], records: [{ ...snapshot.collections[0]!.records[0]!, values: {
+        ...snapshot.collections[0]!.records[0]!.values, [tagsId]: ["research", "writing"],
+      } }] }],
+      viewBlocks: [{ ...snapshot.viewBlocks[0]!, definition: {
+        ...snapshot.viewBlocks[0]!.definition, groupBy: tagsId,
+      } }],
+    };
+    render(<WorkspaceReader snapshot={groupedSnapshot} pendingTaskIds={new Set()} onUpdateTaskStatus={vi.fn()} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Views" }));
+
+    expect(screen.queryByText("2 records")).toBeNull();
+    expect(screen.getAllByText("1 record").length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("heading", { name: "Interview synthesis" })).toHaveLength(2);
+    expect(screen.getAllByRole("heading", { name: "Research" }).length).toBeGreaterThan(0);
+    expect(screen.getByRole("heading", { name: "Writing" })).toBeTruthy();
+  });
+
+  it("disables every Task status action while that Task has a pending contribution", () => {
+    const nextStatus = { id: "12121212-1212-4212-8212-121212121212", name: "Done", category: "completed", position: 2 };
+    render(<WorkspaceReader snapshot={{ ...snapshot, workflow: { ...snapshot.workflow,
+      statuses: [...snapshot.workflow.statuses, nextStatus] } }} pendingTaskIds={new Set([taskId])} onUpdateTaskStatus={vi.fn()} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Tasks" }));
+
+    expect(screen.getByRole("button", { name: "Set Prepare interview summary status to Ready for review" })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: "Set Prepare interview summary status to Done" })).toHaveProperty("disabled", true);
   });
 
   it("keeps different single-assignee Task groups distinct and names their Members", () => {

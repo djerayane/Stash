@@ -14,8 +14,10 @@ const propertyTypes: Array<{ value: CollectionPropertyType; label: string }> = [
 
 function auth(token: string) { return { authorization: `Bearer ${token}`, "content-type": "application/json" }; }
 
-export function CollectionPropertyMenu({ collection, property, token, fetcher, onChanged, onClose, returnFocusRef }: {
+export function CollectionPropertyMenu({ collection, property, availableCollections = [], availableCollectionNotes = {}, token, fetcher,
+  onChanged, onClose, returnFocusRef }: {
   collection: Collection; property?: CollectionProperty; token: string; fetcher: typeof fetch;
+  availableCollections?: readonly Collection[]; availableCollectionNotes?: Readonly<Record<string, string>>;
   onChanged(): Promise<void>; onClose(): void; returnFocusRef: React.RefObject<HTMLButtonElement | null>;
 }) {
   const inputRef = useRef<HTMLInputElement>(null); const [name, setName] = useState(property?.name ?? "");
@@ -105,8 +107,9 @@ export function CollectionPropertyMenu({ collection, property, token, fetcher, o
     {type === "relation" ? <><Field label="Relation target"><select value={targetKind}
       onChange={(event) => setTargetKind(event.target.value as typeof targetKind)}><option value="notes">Notes</option><option value="tasks">Tasks</option>
       <option value="projects">Projects</option><option value="collection_records">Collection records</option></select></Field>
-    {targetKind === "collection_records" ? <Field label="Related Collection identity"><input required value={targetCollectionId}
-      onChange={(event) => setTargetCollectionId(event.target.value)} /></Field> : null}</> : null}
+    {targetKind === "collection_records" ? <Field label="Related Collection"><select required aria-label="Related Collection" value={targetCollectionId}
+      onChange={(event) => setTargetCollectionId(event.target.value)}><option value="">Choose a Collection</option>
+      {availableCollections.map((entry) => <option key={entry.id} value={entry.id}>{entry.title} — {availableCollectionNotes[entry.id] ?? "Current Note"}</option>)}</select></Field> : null}</> : null}
     {error ? <p role="alert">{error}</p> : null}<div className={styles.menuActions}>
       <Button type="button" variant="secondary" onClick={onClose}>Cancel</Button><Button pending={pending}>{property ? "Save property" : "Add property"}</Button>
       {property ? <><Button type="button" variant="secondary" disabled={pending || property.position === 1} onClick={() => void move(-1)}>Move left</Button>

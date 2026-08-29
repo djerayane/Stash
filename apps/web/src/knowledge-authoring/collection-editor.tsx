@@ -5,6 +5,7 @@ import type { Collection, ViewBlock, ViewDefinition, ViewPresentation } from "@s
 import { Button, Field, StatusNotice } from "../ui/control";
 import { TaskView, type TaskViewRecord } from "../shared/task-view";
 import { CollectionTable } from "./collection-table";
+import { emptyCollectionSelectionOptions, type CollectionSelectionOptions } from "./collection-selection-options";
 import styles from "./collection-editor.module.css";
 
 function id() { return globalThis.crypto.randomUUID(); }
@@ -16,6 +17,7 @@ interface CollectionWorkspaceData {
   availableCollections: Collection[];
   availableCollectionNotes: Record<string, string>;
   availableNotes: Array<{ id: string; title: string }>;
+  selectionOptions: CollectionSelectionOptions;
   views: ViewBlock[];
 }
 
@@ -28,8 +30,11 @@ export function CollectionWorkspace({ noteId, token, editable = true, fetcher = 
     const response = await fetcher(`/api/notes/${encodeURIComponent(noteId)}/collections`, { headers: auth(token, false) });
     const body = await response.json() as Partial<CollectionWorkspaceData> & { message?: string };
     if (!response.ok || !body.workspaceId || !body.collections || !body.views) throw new Error(body.message || "Collections are unavailable.");
+    const availableNotes = body.availableNotes ?? [];
     return { workspaceId: body.workspaceId, collections: body.collections, availableCollections: body.availableCollections ?? body.collections,
-      availableCollectionNotes: body.availableCollectionNotes ?? {}, availableNotes: body.availableNotes ?? [], views: body.views };
+      availableCollectionNotes: body.availableCollectionNotes ?? {}, availableNotes, views: body.views,
+      selectionOptions: { ...emptyCollectionSelectionOptions, ...body.selectionOptions,
+        notes: body.selectionOptions?.notes ?? availableNotes.map(({ id, title }) => ({ id, label: title })) } };
   } });
   useEffect(() => { if (!focusCollectionId || !query.data?.collections.some(({ id: collectionId }) => collectionId === focusCollectionId)) return;
     const frame = requestAnimationFrame(() => { const title = document.querySelector<HTMLInputElement>(
@@ -68,18 +73,22 @@ export function CollectionWorkspace({ noteId, token, editable = true, fetcher = 
       <Button type="button" variant="secondary" onClick={() => { setInsertOpen(false); setSourceId(""); }}>Cancel insert view</Button></div>
     {insert.isError ? <p role="alert">{insert.error.message}</p> : null}</form> : null}
     <div className={styles.collections}>{query.data.collections.map((collection) => <CollectionTable key={`collection-${collection.id}`} collection={collection}
-      availableNotes={query.data.availableNotes} editable={editable} token={token} fetcher={fetcher} onChanged={changed} />)}
+      availableNotes={query.data.availableNotes} availableCollections={query.data.availableCollections}
+      availableCollectionNotes={query.data.availableCollectionNotes} selectionOptions={query.data.selectionOptions}
+      editable={editable} token={token} fetcher={fetcher} onChanged={changed} />)}
+      {editable ? <div className={styles.newCollection}><Button type="button" pending={create.isPending} onClick={() => create.mutate()}>New collection</Button>
+        {create.isError ? <p role="alert">{create.error.message}</p> : null}</div> : null}
       {collectionViews.map((view) => { const sourceId = view.definition.source.kind === "collection" ? view.definition.source.collectionId : "";
         const source = query.data.availableCollections.find(({ id }) => id === sourceId);
         return source ? <CollectionTable key={`view-${view.id}`} collection={source} view={view} canonicalActions={false}
           sourceNoteTitle={query.data.availableCollectionNotes[source.id] ?? "Another Note"} availableNotes={query.data.availableNotes}
+          availableCollections={query.data.availableCollections} availableCollectionNotes={query.data.availableCollectionNotes}
+          selectionOptions={query.data.selectionOptions}
           editable={editable} token={token} fetcher={fetcher} onChanged={changed} />
           : <section key={`view-${view.id}`} className={styles.collection} aria-label={view.title}><StatusNotice tone="error">
             {view.title} cannot open because its source Collection is unavailable. <button type="button" onClick={() => void changed()}>Try again</button>
           </StatusNotice></section>; })}</div>
     {taskViews.map((view) => <SavedTaskView key={view.id} view={view} editable={editable} token={token} fetcher={fetcher} />)}
-    {editable ? <div className={styles.newCollection}><Button type="button" pending={create.isPending} onClick={() => create.mutate()}>New collection</Button>
-      {create.isError ? <p role="alert">{create.error.message}</p> : null}</div> : null}
   </section>;
 }
 

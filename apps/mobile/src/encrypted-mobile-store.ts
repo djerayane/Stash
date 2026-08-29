@@ -8,16 +8,16 @@ const incomingSharesKey = "incoming-shares";
 const mutationOutboxKey = "mutation-outbox";
 const workspaceSnapshotsKey = "workspace-snapshots";
 type IncomingShareState = { pending: IncomingShareDelivery[]; native?: { fingerprint: string; ids: string[] } };
+let processWriteBarrier: Promise<void> = Promise.resolve();
 
 export class EncryptedStateMobileCaptureStore implements EncryptedMobileCaptureStore {
-  #writeBarrier: Promise<void> = Promise.resolve();
   constructor(readonly repository: CiphertextStateRepository, readonly cipher: MobileCipher) {}
-  loadPairing() { return this.#read<MobileCapturePairing | undefined>(pairingKey, undefined); }
-  savePairing(pairing: MobileCapturePairing) { return this.#write(pairingKey, pairing); }
-  async listCaptures() { await this.#writeBarrier; return this.#read<MobileCapture[]>(outboxKey, []); }
+  async loadPairing() { await processWriteBarrier; return this.#read<MobileCapturePairing | undefined>(pairingKey, undefined); }
+  savePairing(pairing: MobileCapturePairing) { return this.#enqueueWrite(() => this.#write(pairingKey, pairing)); }
+  async listCaptures() { await processWriteBarrier; return this.#read<MobileCapture[]>(outboxKey, []); }
   async saveCapture(capture: MobileCapture) { await this.#mutate((items) => [...items.filter(({ id }) => id !== capture.id), capture]); }
   async removeCapture(id: string) { await this.#mutate((items) => items.filter((capture) => capture.id !== id)); }
-  async listMutations() { await this.#writeBarrier; return this.#read<MobileSyncMutation[]>(mutationOutboxKey, []); }
+  async listMutations() { await processWriteBarrier; return this.#read<MobileSyncMutation[]>(mutationOutboxKey, []); }
   async saveMutation(mutation: MobileSyncMutation) {
     await this.#mutateMutations((items) => {
       const key = mutationKey(mutation);
@@ -28,31 +28,35 @@ export class EncryptedStateMobileCaptureStore implements EncryptedMobileCaptureS
       return [...items.filter((item) => mutationKey(item) !== key), mutation];
     });
   }
+  async replaceMutation(previous: Pick<MobileSyncMutation, "id" | "origin">, mutation: MobileSyncMutation) {
+    await this.#mutateMutations((items) => [
+      ...items.filter((item) => mutationKey(item) !== mutationKey(previous) && mutationKey(item) !== mutationKey(mutation)),
+      mutation,
+    ]);
+  }
   async removeMutation(mutation: Pick<MobileSyncMutation, "id" | "origin">) {
     await this.#mutateMutations((items) => items.filter((item) => mutationKey(item) !== mutationKey(mutation)));
   }
   async loadOptions(scope: string) {
-    await this.#writeBarrier;
+    await processWriteBarrier;
     return (await this.#read<Record<string, MobileCaptureOptions>>(optionsKey, {}))[scope]
       ?? { projects: [], tags: [], reminders: [] };
   }
   async saveOptions(scope: string, options: MobileCaptureOptions) {
-    const write = this.#writeBarrier.then(async () => {
+    await this.#enqueueWrite(async () => {
       const scoped = await this.#read<Record<string, MobileCaptureOptions>>(optionsKey, {});
       await this.#write(optionsKey, { ...scoped, [scope]: options });
     });
-    this.#writeBarrier = write.catch(() => undefined); await write;
   }
   async loadWorkspaceSnapshot(scope: string) {
-    await this.#writeBarrier;
+    await processWriteBarrier;
     return (await this.#read<Record<string, MobileWorkspaceSnapshot>>(workspaceSnapshotsKey, {}))[scope];
   }
   async saveWorkspaceSnapshot(scope: string, snapshot: MobileWorkspaceSnapshot) {
-    const write = this.#writeBarrier.then(async () => {
+    await this.#enqueueWrite(async () => {
       const scoped = await this.#read<Record<string, MobileWorkspaceSnapshot>>(workspaceSnapshotsKey, {});
       await this.#write(workspaceSnapshotsKey, { ...scoped, [scope]: snapshot });
     });
-    this.#writeBarrier = write.catch(() => undefined); await write;
   }
   async stageIncomingShares(fingerprint: string, deliveries: IncomingShareDelivery[]) {
     return this.#mutateIncoming((state) => {
@@ -64,7 +68,7 @@ export class EncryptedStateMobileCaptureStore implements EncryptedMobileCaptureS
   async acknowledgeNativeShares(fingerprint?: string) {
     await this.#mutateIncoming((state) => !fingerprint || state.native?.fingerprint === fingerprint ? { pending: state.pending } : state);
   }
-  async listIncomingShares() { await this.#writeBarrier; return (await this.#read<IncomingShareState>(incomingSharesKey, { pending: [] })).pending; }
+  async listIncomingShares() { await processWriteBarrier; return (await this.#read<IncomingShareState>(incomingSharesKey, { pending: [] })).pending; }
   async removeIncomingShare(id: string) { await this.#mutateIncoming((state) => ({ ...state, pending: state.pending.filter((item) => item.id !== id) })); }
   async saveIncomingShare(delivery: IncomingShareDelivery) {
     await this.#mutateIncoming((state) => ({ ...state,
@@ -76,20 +80,23 @@ export class EncryptedStateMobileCaptureStore implements EncryptedMobileCaptureS
   }
   async #write(key: string, value: unknown) { await this.repository.write(key, await this.cipher.encrypt(JSON.stringify(value))); }
   async #mutate(change: (captures: MobileCapture[]) => MobileCapture[]) {
-    const write = this.#writeBarrier.then(async () => this.#write(outboxKey, change(await this.#read(outboxKey, []))));
-    this.#writeBarrier = write.catch(() => undefined); await write;
+    await this.#enqueueWrite(async () => this.#write(outboxKey, change(await this.#read(outboxKey, []))));
   }
   async #mutateMutations(change: (mutations: MobileSyncMutation[]) => MobileSyncMutation[]) {
-    const write = this.#writeBarrier.then(async () => this.#write(mutationOutboxKey, change(await this.#read(mutationOutboxKey, []))));
-    this.#writeBarrier = write.catch(() => undefined); await write;
+    await this.#enqueueWrite(async () => this.#write(mutationOutboxKey, change(await this.#read(mutationOutboxKey, []))));
   }
   async #mutateIncoming(change: (state: IncomingShareState) => IncomingShareState) {
     let result: IncomingShareState = { pending: [] };
-    const write = this.#writeBarrier.then(async () => {
+    await this.#enqueueWrite(async () => {
       result = change(await this.#read(incomingSharesKey, { pending: [] }));
       await this.#write(incomingSharesKey, result);
     });
-    this.#writeBarrier = write.catch(() => undefined); await write; return result;
+    return result;
+  }
+  async #enqueueWrite(write: () => Promise<void>) {
+    const pending = processWriteBarrier.then(write);
+    processWriteBarrier = pending.catch(() => undefined);
+    await pending;
   }
 }
 
@@ -98,7 +105,7 @@ function mutationKey(mutation: Pick<MobileSyncMutation, "id" | "origin">) {
 }
 
 function mutationContribution(mutation: MobileSyncMutation) {
-  const { attempts: _, nextRetryAt: __, lastError: ___, ...contribution } = mutation;
+  const { attempts: _, nextRetryAt: __, lastError: ___, conflict: ____, ...contribution } = mutation;
   const canonical = contribution.kind === "note_edit" ? { ...contribution, id: canonicalUuid(contribution.id),
     noteId: canonicalUuid(contribution.noteId), operations: contribution.operations.map((operation) => {
       const normalized = { ...operation, id: canonicalUuid(operation.id), blockKey: canonicalUuid(operation.blockKey) };
@@ -111,8 +118,11 @@ function mutationContribution(mutation: MobileSyncMutation) {
     : contribution.kind === "canonical_task_edit"
       ? { ...contribution, id: canonicalUuid(contribution.id), taskId: canonicalUuid(contribution.taskId),
         changes: canonicalTaskChanges(contribution.changes) }
-      : { ...contribution, id: canonicalUuid(contribution.id), projectId: canonicalUuid(contribution.projectId),
-        changes: canonicalTaskChanges(contribution.changes) };
+      : contribution.kind === "collection_record_edit"
+        ? { ...contribution, id: canonicalUuid(contribution.id), collectionId: canonicalUuid(contribution.collectionId),
+          recordId: canonicalUuid(contribution.recordId) }
+        : { ...contribution, id: canonicalUuid(contribution.id), projectId: canonicalUuid(contribution.projectId),
+          changes: canonicalTaskChanges(contribution.changes) };
   return JSON.stringify(canonicalJson({ ...canonical, origin: { ...canonical.origin,
     instanceUrl: new URL(canonical.origin.instanceUrl).origin, workspaceId: canonicalUuid(canonical.origin.workspaceId),
     memberId: canonicalUuid(canonical.origin.memberId) } }));

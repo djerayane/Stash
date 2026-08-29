@@ -22,6 +22,20 @@ function renderWorkspace(fetcher: typeof fetch, noteId = collection.ownerNoteId,
 }
 
 describe("Collection workspace", () => {
+  it("places primary Collection creation directly after the Note-owned Collections", async () => {
+    const reused = { ...view, id: "77777777-7777-4777-8777-777777777779", ownerNoteId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      blockId: "88888888-8888-4888-8888-888888888880", title: "Reused research" };
+    const fetcher = vi.fn(async () => Response.json({ workspaceId: collection.workspaceId, collections: [collection], availableCollections: [collection],
+      availableCollectionNotes: { [collection.id]: "Research note" }, availableNotes: [], views: [reused] })) as typeof fetch;
+    renderWorkspace(fetcher);
+
+    const owned = await screen.findByRole("region", { name: "Research" });
+    const create = screen.getByRole("button", { name: "New collection" });
+    const reusedRegion = screen.getByRole("region", { name: "Reused research" });
+    expect(owned.compareDocumentPosition(create) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(create.compareDocumentPosition(reusedRegion) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it("creates an immediately useful table with a Name property", async () => {
     const requests: Array<{ path: string; init?: RequestInit }> = []; let collections: Collection[] = [];
     const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -168,13 +182,126 @@ describe("Collection workspace", () => {
     expect(within(region).getByText("Calendar needs a date property.")).toBeVisible();
     fireEvent.click(within(region).getByRole("button", { name: "Add date property" }));
     expect(await within(region).findByRole("region", { name: "Research calendar" })).toBeVisible();
-    fireEvent.click(within(region).getByRole("button", { name: "View" }));
+    fireEvent.click(within(region).getByRole("button", { name: "View settings" }));
     const filterBy = within(region).getByRole("combobox", { name: "Filter by" });
     expect(filterBy).toBeVisible();
     expect(within(region).getByRole("combobox", { name: "Density" })).toBeVisible();
     fireEvent.change(filterBy, { target: { value: titleId } });
     fireEvent.change(within(region).getByRole("textbox", { name: "Filter value" }), { target: { value: "No matching idea" } });
     expect(within(region).queryByText("Map constraints")).not.toBeInTheDocument();
+    expect(within(region).getByRole("button", { name: /View.*Filtered/ })).toHaveAccessibleName(/Filtered/);
+  });
+
+  it("uses option-aware filters and Collection labels for typed relation setup", async () => {
+    const other = { ...collection, id: "99999999-9999-4999-8999-999999999998", ownerNoteId: "99999999-9999-4999-8999-999999999997", title: "People" };
+    const fetcher = vi.fn(async () => Response.json({ workspaceId: collection.workspaceId, collections: [collection], availableCollections: [collection, other],
+      availableCollectionNotes: { [other.id]: "Directory" }, availableNotes: [], views: [], selectionOptions: {
+        members: [{ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", label: "Ada Lovelace" }], attachments: [], notes: [], tasks: [], projects: [],
+      } })) as typeof fetch;
+    renderWorkspace(fetcher);
+    const region = await screen.findByRole("region", { name: "Research" });
+
+    fireEvent.click(within(region).getByRole("button", { name: "View settings" }));
+    fireEvent.change(within(region).getByRole("combobox", { name: "Filter by" }), { target: { value: statusId } });
+    const filterValue = within(region).getByRole("combobox", { name: "Filter value" });
+    expect(filterValue).toHaveDisplayValue("No value");
+    expect(within(filterValue).getByRole("option", { name: "Ready" })).toBeVisible();
+
+    fireEvent.click(within(region).getByRole("button", { name: "Add property" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Property name" }), { target: { value: "Person link" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Property type" }), { target: { value: "relation" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Relation target" }), { target: { value: "collection_records" } });
+    const target = screen.getByRole("combobox", { name: "Related Collection" });
+    expect(within(target).getByRole("option", { name: "People — Directory" })).toHaveValue(other.id);
+    expect(screen.queryByRole("textbox", { name: /Collection identity/i })).not.toBeInTheDocument();
+  });
+
+  it("keeps the primary text field available and focused when a View hides it", async () => {
+    const hiddenPrimary = { ...view, definition: { ...view.definition, layout: { visiblePropertyIds: [statusId] } } };
+    const fetcher = vi.fn(async () => Response.json({ workspaceId: collection.workspaceId, collections: [], availableCollections: [collection],
+      availableCollectionNotes: { [collection.id]: "Research note" }, availableNotes: [], views: [hiddenPrimary] })) as typeof fetch;
+    renderWorkspace(fetcher);
+    const region = await screen.findByRole("region", { name: "Research lens" });
+
+    expect(within(region).queryByRole("columnheader", { name: "Idea" })).not.toBeInTheDocument();
+    fireEvent.click(within(region).getByRole("button", { name: "New record" }));
+    const primary = within(region).getByRole("textbox", { name: "Idea, new record" });
+    expect(primary).toBeVisible();
+    await waitFor(() => expect(primary).toHaveFocus());
+  });
+
+  it("discloses canonical impact once before editing through a cross-Note View", async () => {
+    const crossNote = { ...view, ownerNoteId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" };
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "PATCH") return Response.json({ status: "updated" });
+      return Response.json({ workspaceId: collection.workspaceId, collections: [], availableCollections: [collection],
+        availableCollectionNotes: { [collection.id]: "Research note" }, availableNotes: [], views: [crossNote] });
+    }) as typeof fetch;
+    renderWorkspace(fetcher, crossNote.ownerNoteId);
+    const region = await screen.findByRole("region", { name: "Research lens" });
+
+    fireEvent.click(within(region).getByRole("button", { name: "Edit Idea, Map constraints" }));
+    const dialog = await screen.findByRole("dialog", { name: "Edit this canonical record?" });
+    expect(within(dialog).getByText(/changes will appear everywhere/i)).toBeVisible();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Continue editing" }));
+    const editor = within(region).getByRole("textbox", { name: "Idea, Map constraints" });
+    await waitFor(() => expect(editor).toHaveFocus());
+
+    fireEvent.change(editor, { target: { value: "Updated everywhere" } });
+    fireEvent.blur(editor);
+    await waitFor(() => expect(fetcher).toHaveBeenCalledWith(expect.stringContaining(`/records/${recordId}`), expect.objectContaining({ method: "PATCH" })));
+    expect(screen.queryByRole("dialog", { name: "Edit this canonical record?" })).not.toBeInTheDocument();
+  });
+
+  it("refreshes Collection deletion impact after a stale confirmation", async () => {
+    const initial = { noteId: collection.ownerNoteId, collections: [{ id: collection.id, title: collection.title, recordCount: 1 }],
+      relations: [], viewBlocks: [], token: "old-impact" };
+    const refreshed = { ...initial, collections: [{ id: collection.id, title: collection.title, recordCount: 3 }],
+      relations: [{ collectionId: collection.id, recordId, propertyId: statusId, referenceCount: 4 }], token: "new-impact" };
+    const deletionBodies: unknown[] = []; let stale = true;
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => { const path = String(input);
+      if (path.endsWith("/impact")) return Response.json({ impact: initial });
+      if (path.endsWith("/delete") && init?.method === "POST") { deletionBodies.push(JSON.parse(String(init.body)));
+        if (stale) { stale = false; return Response.json({ message: "Collection impact changed. Review the updated impact before deleting.", impact: refreshed }, { status: 409 }); }
+        return Response.json({ status: "deleted", impact: refreshed }); }
+      return Response.json({ workspaceId: collection.workspaceId, collections: [collection], availableCollections: [collection], availableNotes: [], views: [] });
+    }) as typeof fetch;
+    renderWorkspace(fetcher);
+    const region = await screen.findByRole("region", { name: "Research" });
+
+    fireEvent.click(within(region).getByRole("button", { name: "Collection actions" }));
+    fireEvent.click(within(region).getByRole("button", { name: "Delete collection" }));
+    const dialog = await screen.findByRole("dialog", { name: "Delete Research collection?" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete collection" }));
+    expect(await within(dialog).findByText("3 records will be deleted.")).toBeVisible();
+    expect(within(dialog).getByText("4 relation references will be removed.")).toBeVisible();
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("Review the updated impact");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete collection" }));
+    await waitFor(() => expect(deletionBodies).toHaveLength(2));
+    expect(deletionBodies).toEqual([
+      { confirmed: true, impactToken: "old-impact", collectionIds: [collection.id] },
+      { confirmed: true, impactToken: "new-impact", collectionIds: [collection.id] },
+    ]);
+  });
+
+  it("keeps filtered arrow navigation bounded to rendered rows", async () => {
+    const hiddenRecord = { id: "66666666-6666-4666-8666-666666666667", position: 2,
+      values: { [titleId]: "Hidden", [statusId]: "later" } };
+    const filteredCollection = { ...collection, records: [...collection.records, hiddenRecord] };
+    const filtered = { ...view, definition: { ...view.definition, filters: [{ propertyId: statusId, operator: "equals" as const, value: "ready" }] } };
+    const fetcher = vi.fn(async () => Response.json({ workspaceId: collection.workspaceId, collections: [], availableCollections: [filteredCollection],
+      availableCollectionNotes: { [collection.id]: "Research note" }, availableNotes: [], views: [filtered] })) as typeof fetch;
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    renderWorkspace(fetcher);
+    const region = await screen.findByRole("region", { name: "Research lens" });
+    const cell = within(region).getByRole("textbox", { name: "Idea, Map constraints" });
+    cell.focus(); focus.mockClear();
+
+    fireEvent.keyDown(cell, { key: "ArrowDown" });
+
+    expect(focus).toHaveBeenCalledTimes(1);
+    expect(focus.mock.instances[0]).toBe(cell);
+    focus.mockRestore();
   });
 
   it("names cross-Note reuse explicitly and restores focus after move and delete impact review", async () => {
@@ -271,9 +398,7 @@ describe("Collection workspace", () => {
     const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => { const path = String(input); requests.push({ path, init });
       if (path.endsWith("/properties") && init?.method === "POST") { propertyAttempts += 1;
         if (propertyAttempts === 1) return Response.json({ message: "Connection lost while adding Status." }, { status: 503 });
-        const property = JSON.parse(String(init.body)); current = { ...current, properties: [...current.properties, property], records: current.records.map((record) => ({
-          ...record, values: { ...record.values, [property.id]: "not-started" },
-        })) };
+        const property = JSON.parse(String(init.body)); current = { ...current, properties: [...current.properties, property] };
         return Response.json({ property }, { status: 201 }); }
       if (path.endsWith(`/records/${recordId}`) && init?.method === "PATCH") { moveAttempts += 1;
         if (moveAttempts === 1) return Response.json({ message: "Move could not be saved." }, { status: 503 });
@@ -289,6 +414,7 @@ describe("Collection workspace", () => {
     fireEvent.click(within(region).getByRole("button", { name: "Try again" }));
     expect(await within(region).findByRole("region", { name: "Research board" })).toBeVisible();
 
+    expect(within(region).getByRole("heading", { name: "No value" })).toBeVisible();
     fireEvent.click(within(region).getByRole("button", { name: "Move Map constraints to Done" }));
     expect(await within(region).findByRole("alert")).toHaveTextContent("Move not saved");
     fireEvent.click(within(region).getByRole("button", { name: "Try again" }));

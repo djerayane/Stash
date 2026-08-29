@@ -57,9 +57,10 @@ export function updateBoardGroup(collection: Collection, definition: ViewDefinit
     throw new Error("board_group_unavailable");
   const current = property.type === "multi_select" && Array.isArray(record.values[property.id])
     ? record.values[property.id] as readonly string[] : [];
-  const destination = String(destinationGroupValue);
+  const destination = destinationGroupValue === null || destinationGroupValue === undefined || destinationGroupValue === ""
+    ? null : String(destinationGroupValue);
   const value = property.type === "multi_select"
-    ? [...current.filter((optionId) => optionId !== String(sourceGroupValue) && optionId !== destination), destination]
+    ? [...current.filter((optionId) => optionId !== String(sourceGroupValue) && optionId !== destination), ...(destination ? [destination] : [])]
     : property.type === "checkbox" ? destinationGroupValue === true || destinationGroupValue === "true" : destinationGroupValue;
   return { recordId, values: { [definition.groupBy]: value } };
 }

@@ -81,10 +81,11 @@ export function collectionRoutes(service: CollectionService, access: MemberAcces
           else if (result.status === "found") json(response, 200, "impact" in result ? { impact: result.impact }
             : { workspaceId: result.workspaceId, collections: result.collections,
               availableCollections: result.availableCollections, availableCollectionNotes: result.availableCollectionNotes,
-              availableNotes: result.availableNotes, views: result.views });
+              availableNotes: result.availableNotes, selectionOptions: result.selectionOptions, views: result.views });
           else if (result.status === "relocated" || result.status === "deleted") json(response, 200, result);
           else if (result.status === "impact_changed" || result.status === "collection_conflict") json(response, 409,
-            { error: result.status, message: "The Collection impact changed. Review it again before continuing." });
+            { error: result.status, ...(result.status === "impact_changed" ? { impact: result.impact } : {}),
+              message: "The Collection impact changed. Review it again before continuing." });
           else json(response, 404, { error: result.status, message: "This Note or Collection is unavailable." });
           return true;
         }

@@ -8,6 +8,10 @@ const textProperty: CollectionProperty = { id: "11111111-1111-4111-8111-11111111
 const selectProperty: CollectionProperty = { id: "22222222-2222-4222-8222-222222222222", name: "Status", type: "single_select", position: 2,
   options: [{ id: "open", name: "Open" }, { id: "done", name: "Done" }] };
 const dateProperty: CollectionProperty = { id: "33333333-3333-4333-8333-333333333333", name: "When", type: "date_time", position: 3 };
+const personProperty: CollectionProperty = { id: "44444444-4444-4444-8444-444444444444", name: "People", type: "person", position: 4 };
+const attachmentProperty: CollectionProperty = { id: "55555555-5555-4555-8555-555555555555", name: "Files", type: "attachment", position: 5 };
+const relationProperty: CollectionProperty = { id: "66666666-6666-4666-8666-666666666666", name: "Related", type: "relation", position: 6,
+  target: { kind: "notes" } };
 
 describe("Collection cell editing", () => {
   it("round-trips date-only values and timed instants without applying the timezone twice", () => {
@@ -81,5 +85,27 @@ describe("Collection cell editing", () => {
     expect(includeTime).not.toBeChecked();
     expect(screen.getByLabelText("When, Milestone")).toHaveAttribute("type", "date");
     expect(screen.getByLabelText("When, Milestone")).toHaveValue("2026-08-28");
+  });
+
+  it("uses readable member, attachment, and relation selectors while storing stable identities", () => {
+    const changePerson = vi.fn(); const changeFile = vi.fn(); const changeRelation = vi.fn();
+    render(<><CollectionDraftControl property={personProperty} value={[]} label="People" options={[
+      { id: "77777777-7777-4777-8777-777777777777", label: "Ada Lovelace" },
+    ]} onChange={changePerson} />
+    <CollectionDraftControl property={attachmentProperty} value={[]} label="Files" options={[
+      { id: "88888888-8888-4888-8888-888888888888", label: "roadmap.pdf" },
+    ]} onChange={changeFile} />
+    <CollectionDraftControl property={relationProperty} value={[]} label="Related" options={[
+      { id: "99999999-9999-4999-8999-999999999999", label: "Launch note" },
+    ]} onChange={changeRelation} /></>);
+
+    expect(screen.getByRole("option", { name: "Ada Lovelace" })).toHaveValue("77777777-7777-4777-8777-777777777777");
+    expect(screen.getByRole("option", { name: "roadmap.pdf" })).toHaveValue("88888888-8888-4888-8888-888888888888");
+    expect(screen.getByRole("option", { name: "Launch note" })).toHaveValue("99999999-9999-4999-8999-999999999999");
+    expect(screen.queryByPlaceholderText(/Identity/i)).not.toBeInTheDocument();
+
+    const people = screen.getByRole("listbox", { name: "People" });
+    const ada = screen.getByRole("option", { name: "Ada Lovelace" }) as HTMLOptionElement; ada.selected = true; fireEvent.change(people);
+    expect(changePerson).toHaveBeenLastCalledWith(["77777777-7777-4777-8777-777777777777"]);
   });
 });

@@ -1,10 +1,10 @@
 import { createMobileProtocolClient } from "@stash/api-client";
 import type {
-  IncomingShareDelivery, MobileCapture, MobileCaptureOptions, MobileCapturePairing, MobileSyncMutation,
+  CollectionPropertyValue, IncomingShareDelivery, MobileCapture, MobileCaptureOptions, MobileCapturePairing, MobileSyncMutation,
   MobileSyncResult, NoteEditOperation, TaskPlanningUpdate,
   MobileWorkspaceSnapshot,
 } from "@stash/domain-types";
-import { normalizeMobileWorkspaceSnapshot } from "@stash/domain-types";
+import { normalizeCollection, normalizeMobileWorkspaceSnapshot } from "@stash/domain-types";
 import { canonicalUuid, isUuid, validMobilePairingOrigin, validPortableFilename } from "@stash/validation";
 
 export type {
@@ -20,6 +20,7 @@ export interface EncryptedMobileCaptureStore {
   removeCapture(id: string): Promise<void>;
   listMutations(): Promise<MobileSyncMutation[]>;
   saveMutation(mutation: MobileSyncMutation): Promise<void>;
+  replaceMutation(previous: Pick<MobileSyncMutation, "id" | "origin">, mutation: MobileSyncMutation): Promise<void>;
   removeMutation(mutation: Pick<MobileSyncMutation, "id" | "origin">): Promise<void>;
   loadOptions(scope: string): Promise<MobileCaptureOptions>;
   saveOptions(scope: string, options: MobileCaptureOptions): Promise<void>;
@@ -46,6 +47,7 @@ export class MobileCaptureClient {
   #syncController: AbortController | undefined;
   #refreshControllers = new Set<AbortController>();
   #inFlightSync: Promise<MobileSyncResult> | undefined;
+  #taskMutationBarrier: Promise<void> = Promise.resolve();
   #legacyExportAcknowledged = false;
 
   constructor(store: EncryptedMobileCaptureStore, fetchImplementation: Fetch, options: { allowInsecureInstanceForTest?: boolean; now?: () => number } = {}) {
@@ -248,15 +250,60 @@ export class MobileCaptureClient {
     return mutation;
   }
 
-  async queueCanonicalTaskEdit(taskId: string, baseRevision: number, changes: TaskPlanningUpdate,
+  queueCanonicalTaskEdit(taskId: string, baseRevision: number, changes: TaskPlanningUpdate,
     mutationId = crypto.randomUUID()) {
+    const pending = this.#taskMutationBarrier.then(() => this.#queueCanonicalTaskEdit(taskId, baseRevision, changes, mutationId));
+    this.#taskMutationBarrier = pending.then(() => undefined, () => undefined);
+    return pending;
+  }
+
+  async #queueCanonicalTaskEdit(taskId: string, baseRevision: number, changes: TaskPlanningUpdate, mutationId: string) {
     if (!isUuid(taskId) || !Number.isSafeInteger(baseRevision) || baseRevision < 1 || !changes || typeof changes !== "object"
       || Array.isArray(changes) || !Object.keys(changes).length) throw new Error("A mobile Task edit requires a valid canonical Task, revision, and changes.");
     const pairing = await this.#pairingForCapture();
-    const mutation: MobileSyncMutation = { id: canonicalUuid(requireUuid(mutationId)), kind: "canonical_task_edit",
-      taskId: canonicalUuid(taskId), baseRevision, changes: canonicalTaskChanges(changes), attempts: 0,
-      origin: pairingOrigin(pairing) };
+    const taskIdentity = canonicalUuid(taskId); const origin = pairingOrigin(pairing);
+    const existing = (await this.#store.listMutations()).find((mutation): mutation is Extract<MobileSyncMutation,
+      { kind: "canonical_task_edit" }> => mutation.kind === "canonical_task_edit" && mutation.taskId === taskIdentity
+      && samePairingIdentity(mutation.origin, pairing));
+    if (existing?.conflict) throw new Error("Resolve the pending Task conflict before changing this Task again.");
+    const mutation: MobileSyncMutation = existing
+      ? { ...existing, changes: canonicalTaskChanges({ ...existing.changes, ...changes }) }
+      : { id: canonicalUuid(requireUuid(mutationId)), kind: "canonical_task_edit", taskId: taskIdentity,
+        baseRevision, changes: canonicalTaskChanges(changes), attempts: 0, origin };
+    if (existing) await this.#store.replaceMutation(existing, mutation); else await this.#store.saveMutation(mutation);
+    return mutation;
+  }
+
+  async queueCollectionRecordEdit(collectionId: string, recordId: string,
+    values: Readonly<Record<string, CollectionPropertyValue>>, mutationId = crypto.randomUUID()) {
+    if (!isUuid(collectionId) || !isUuid(recordId) || !values || typeof values !== "object" || Array.isArray(values)
+      || !Object.keys(values).length || Object.keys(values).some((propertyId) => !isUuid(propertyId)))
+      throw new Error("A mobile Collection edit requires a cached record and valid property values.");
+    const pairing = await this.#pairingForCapture();
+    if (!this.#store.loadWorkspaceSnapshot) throw new Error("This store does not support offline Collection edits.");
+    const snapshot = await this.#store.loadWorkspaceSnapshot(pairingScope(pairing));
+    const collection = snapshot?.collections.find(({ id }) => id === canonicalUuid(collectionId));
+    const record = collection?.records.find(({ id }) => id === canonicalUuid(recordId));
+    if (!collection || !record) throw new Error("Synchronize this Collection before editing its records offline.");
+    const normalized = normalizeCollection({ ...collection, records: collection.records.map((entry) => entry.id === record.id
+      ? { ...entry, values: { ...entry.values, ...values } } : entry) });
+    const next = normalized.records.find(({ id }) => id === record.id)!;
+    const canonicalValues = Object.fromEntries(Object.keys(values).map((propertyId) => [propertyId, next.values[propertyId]!])) as
+      Readonly<Record<string, CollectionPropertyValue>>;
+    const mutation: MobileSyncMutation = { id: canonicalUuid(requireUuid(mutationId)), kind: "collection_record_edit",
+      collectionId: canonicalUuid(collectionId), recordId: canonicalUuid(recordId), values: canonicalValues,
+      attempts: 0, origin: pairingOrigin(pairing) };
     await this.#store.saveMutation(mutation); return mutation;
+  }
+
+  async discardCanonicalTaskEdit(taskId: string) {
+    if (!isUuid(taskId)) throw new Error("A canonical Task id is required.");
+    const pairing = await this.#pairingForCapture();
+    const pending = (await this.#store.listMutations()).filter((mutation): mutation is Extract<MobileSyncMutation,
+      { kind: "canonical_task_edit" }> => mutation.kind === "canonical_task_edit" && mutation.taskId === canonicalUuid(taskId)
+      && samePairingIdentity(mutation.origin, pairing));
+    for (const mutation of pending) await this.#store.removeMutation(mutation);
+    return pending.length;
   }
 
   async cachedWorkspace(): Promise<MobileWorkspaceSnapshot | undefined> {
@@ -265,16 +312,21 @@ export class MobileCaptureClient {
     const snapshot = await this.#store.loadWorkspaceSnapshot(pairingScope(pairing));
     if (!snapshot) return undefined;
     const normalized = normalizeMobileWorkspaceSnapshot(snapshot);
-    const pending = (await this.#store.listMutations()).filter((mutation): mutation is Extract<MobileSyncMutation,
-      { kind: "canonical_task_edit" }> => mutation.kind === "canonical_task_edit" && samePairingIdentity(mutation.origin, pairing));
-    return pending.reduce((current, mutation) => ({ ...current, tasks: current.tasks.map((task) => {
-      if (task.id !== mutation.taskId) return task;
-      const status = mutation.changes.statusId
-        ? current.workflow.statuses.find(({ id }) => id === mutation.changes.statusId) ?? task.status : task.status;
-      return { ...task, status,
-        ...(mutation.changes.title !== undefined ? { title: mutation.changes.title } : {}),
-        ...(mutation.changes.assigneeIds !== undefined ? { assigneeIds: [...mutation.changes.assigneeIds] } : {}) };
-    }) }), normalized);
+    const pending = (await this.#store.listMutations()).filter((mutation) => samePairingIdentity(mutation.origin, pairing));
+    return pending.reduce((current, mutation) => mutation.kind === "canonical_task_edit"
+      ? { ...current, tasks: current.tasks.map((task) => {
+        if (task.id !== mutation.taskId) return task;
+        const status = mutation.changes.statusId
+          ? current.workflow.statuses.find(({ id }) => id === mutation.changes.statusId) ?? task.status : task.status;
+        return { ...task, status,
+          ...(mutation.changes.title !== undefined ? { title: mutation.changes.title } : {}),
+          ...(mutation.changes.assigneeIds !== undefined ? { assigneeIds: [...mutation.changes.assigneeIds] } : {}) };
+      }) }
+      : mutation.kind === "collection_record_edit"
+        ? { ...current, collections: current.collections.map((collection) => collection.id !== mutation.collectionId ? collection
+          : { ...collection, records: collection.records.map((record) => record.id !== mutation.recordId ? record
+            : { ...record, values: { ...record.values, ...mutation.values } }) }) }
+        : current, normalized);
   }
 
   async refreshWorkspace(signal?: AbortSignal): Promise<MobileWorkspaceSnapshot> {
@@ -413,17 +465,21 @@ export class MobileCaptureClient {
           : mutation.kind === "canonical_task_edit"
             ? await protocol.applyCanonicalTaskEdit(mutation.taskId,
               { operationId: mutation.id, baseRevision: mutation.baseRevision, changes: mutation.changes }, controller.signal)
-          : await protocol.applyTaskEdit(mutation.projectId, mutation.taskKey,
-            { operationId: mutation.id, baseRevision: mutation.baseRevision, changes: mutation.changes }, controller.signal);
+            : mutation.kind === "collection_record_edit"
+              ? await protocol.applyCollectionRecordEdit(mutation.collectionId, mutation.recordId,
+                { values: mutation.values }, controller.signal)
+              : await protocol.applyTaskEdit(mutation.projectId, mutation.taskKey,
+                { operationId: mutation.id, baseRevision: mutation.baseRevision, changes: mutation.changes }, controller.signal);
       } catch {
         if (controller.signal.aborted) return { status: "cancelled", count };
         if (attentionError) return { status: "attention_required", count, error: attentionError, retryPending: true };
         return { status: "offline", count };
       }
-      const body = await response.json().catch(() => ({})) as { error?: string; message?: string };
-      const preservedConflict = mutation.kind !== "canonical_task_edit" && response.status === 409
+      const body = await response.json().catch(() => ({})) as { error?: string; message?: string; task?: unknown; record?: unknown };
+      const preservedConflict = (mutation.kind === "note_edit" || mutation.kind === "task_edit") && response.status === 409
         && (body.error === "revision_conflict" || body.error === "task_edit_conflict");
       if (response.ok || preservedConflict) {
+        if (response.ok) await this.#applySuccessfulMutation(pairing, mutation, body);
         await this.#store.removeMutation(mutation);
         count += 1;
         if (preservedConflict) attentionError ??= "conflicts_preserved";
@@ -433,6 +489,7 @@ export class MobileCaptureClient {
       const retriable = response.status >= 500 || response.status === 429;
       const { nextRetryAt: _staleRetryAt, ...mutationWithoutRetry } = mutation;
       await this.#store.saveMutation({ ...mutationWithoutRetry, attempts, lastError: body.message ?? "Synchronization failed.",
+        ...(mutation.kind === "canonical_task_edit" && response.status === 409 && body.error === "revision_conflict" ? { conflict: true } : {}),
         ...(retriable ? { nextRetryAt: new Date(this.#now()
           + retryDelay(response.headers.get("retry-after"), attempts, this.#now())).toISOString() } : {}) });
       if (retriable) retryPending = true; else attentionError ??= body.error ?? "sync_rejected";
@@ -440,6 +497,43 @@ export class MobileCaptureClient {
     return attentionError ? { status: "attention_required", count, error: attentionError,
       ...(retryPending ? { retryPending: true } : {}) }
       : retryPending ? { status: "retry_pending", count } : { status: "synced", count };
+  }
+
+  async #applySuccessfulMutation(pairing: MobileCapturePairing, mutation: MobileSyncMutation,
+    body: { task?: unknown; record?: unknown }) {
+    if (!this.#store.loadWorkspaceSnapshot || !this.#store.saveWorkspaceSnapshot
+      || mutation.kind !== "canonical_task_edit" && mutation.kind !== "collection_record_edit") return;
+    const scope = pairingScope(pairing); const stored = await this.#store.loadWorkspaceSnapshot(scope);
+    if (!stored) return;
+    const snapshot = normalizeMobileWorkspaceSnapshot(stored);
+    if (mutation.kind === "canonical_task_edit") {
+      const local = { ...snapshot, tasks: snapshot.tasks.map((task) => {
+        if (task.id !== mutation.taskId) return task;
+        const status = mutation.changes.statusId
+          ? snapshot.workflow.statuses.find(({ id }) => id === mutation.changes.statusId) ?? task.status : task.status;
+        return { ...task, status, revision: Math.max(task.revision ?? 1, mutation.baseRevision) + 1,
+          ...(mutation.changes.title !== undefined ? { title: mutation.changes.title } : {}),
+          ...(mutation.changes.assigneeIds !== undefined ? { assigneeIds: [...mutation.changes.assigneeIds] } : {}) };
+      }) };
+      const remoteTask = body.task && typeof body.task === "object" && !Array.isArray(body.task)
+        && (body.task as { id?: unknown }).id === mutation.taskId ? body.task : undefined;
+      const candidate = remoteTask ? { ...snapshot, tasks: snapshot.tasks.map((task) => task.id === mutation.taskId ? remoteTask : task) } : local;
+      let normalized: MobileWorkspaceSnapshot;
+      try { normalized = normalizeMobileWorkspaceSnapshot(candidate); }
+      catch { normalized = normalizeMobileWorkspaceSnapshot(local); }
+      await this.#store.saveWorkspaceSnapshot(scope, normalized); return;
+    }
+    const local = { ...snapshot, collections: snapshot.collections.map((collection) => collection.id !== mutation.collectionId ? collection
+      : { ...collection, records: collection.records.map((record) => record.id !== mutation.recordId ? record
+        : { ...record, values: { ...record.values, ...mutation.values } }) }) };
+    const remoteRecord = body.record && typeof body.record === "object" && !Array.isArray(body.record)
+      && (body.record as { id?: unknown }).id === mutation.recordId ? body.record : undefined;
+    const candidate = remoteRecord ? { ...snapshot, collections: snapshot.collections.map((collection) => collection.id !== mutation.collectionId
+      ? collection : { ...collection, records: collection.records.map((record) => record.id === mutation.recordId ? remoteRecord : record) }) } : local;
+    let normalized: MobileWorkspaceSnapshot;
+    try { normalized = normalizeMobileWorkspaceSnapshot(candidate); }
+    catch { normalized = normalizeMobileWorkspaceSnapshot(local); }
+    await this.#store.saveWorkspaceSnapshot(scope, normalized);
   }
 
   #controller(externalSignal?: AbortSignal): AbortController {

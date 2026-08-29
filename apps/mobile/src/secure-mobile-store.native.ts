@@ -17,4 +17,6 @@ class PlatformBackedAesCipher implements MobileCipher {
   async encrypt(value: string) { return (await aesEncryptAsync(new TextEncoder().encode(value), await this.#loadKey())).combined("base64") as Promise<string>; }
   async decrypt(value: string) { return new TextDecoder().decode(await aesDecryptAsync(AESSealedData.fromCombined(decodeBase64(value)), await this.#loadKey()) as Uint8Array); }
 }
-export class SecureMobileCaptureStore extends EncryptedStateMobileCaptureStore { constructor() { super(new SQLiteCiphertextRepository(), new PlatformBackedAesCipher()); } }
+const processRepository = new SQLiteCiphertextRepository();
+const processCipher = new PlatformBackedAesCipher();
+export class SecureMobileCaptureStore extends EncryptedStateMobileCaptureStore { constructor() { super(processRepository, processCipher); } }

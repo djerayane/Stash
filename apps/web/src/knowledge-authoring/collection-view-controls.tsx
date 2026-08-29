@@ -1,7 +1,9 @@
 import { useState } from "react";
-import type { Collection, CollectionPropertyType, ViewDefinition, ViewPresentation } from "@stash/domain-types";
+import type { Collection, CollectionPropertyType, CollectionPropertyValue, ViewDefinition, ViewPresentation } from "@stash/domain-types";
 
 import { Button, Field } from "../ui/control";
+import { emptyCollectionSelectionOptions, relationSelectionValue, selectionIds, selectionOptionsForProperty,
+  type CollectionSelectionOptions } from "./collection-selection-options";
 import { presentationRequirement } from "./views/view-model";
 import styles from "./collection-editor.module.css";
 
@@ -9,8 +11,10 @@ const presentations: Array<{ value: ViewPresentation; label: string }> = [
   { value: "table", label: "Table" }, { value: "board", label: "Board" }, { value: "list", label: "List" }, { value: "calendar", label: "Calendar" },
 ];
 
-export function CollectionViewControls({ collection, definition, editable, onChange, onAddRequiredProperty }: {
+export function CollectionViewControls({ collection, availableCollections = [], selectionOptions = emptyCollectionSelectionOptions,
+  definition, editable, onChange, onAddRequiredProperty }: {
   collection: Collection; definition: ViewDefinition; editable: boolean;
+  availableCollections?: readonly Collection[]; selectionOptions?: CollectionSelectionOptions;
   onChange(definition: ViewDefinition): void;
   onAddRequiredProperty(type: CollectionPropertyType, presentation: ViewPresentation): Promise<void>;
 }) {
@@ -29,16 +33,24 @@ export function CollectionViewControls({ collection, definition, editable, onCha
   const filter = definition.filters[0]; const visible = Array.isArray(definition.layout.visiblePropertyIds)
     ? definition.layout.visiblePropertyIds as string[] : collection.properties.map(({ id }) => id);
   const filterProperty = collection.properties.find(({ id }) => id === filter?.propertyId);
+  const filterOptions = filterProperty ? selectionOptionsForProperty(filterProperty, selectionOptions, availableCollections) : [];
   const updateFilter = (next: Partial<NonNullable<typeof filter>>) => {
     if (!filter) return; const candidate = { ...filter, ...next };
     onChange({ ...definition, filters: [candidate] });
   };
-  const active = definition.filters.length + definition.sorts.length + (definition.groupBy ? 1 : 0)
-    + (visible.length !== collection.properties.length ? 1 : 0) + (definition.layout.density === "compact" ? 1 : 0);
+  const summaries = [definition.filters.length ? "Filtered" : "", definition.sorts.length ? "Sorted" : "", definition.groupBy ? "Grouped" : "",
+    visible.length !== collection.properties.length ? "Fields hidden" : "", definition.layout.density === "compact" ? "Compact" : ""].filter(Boolean);
+  const fullSummary = [definition.filters.length ? `${definition.filters.length} active filter${definition.filters.length === 1 ? "" : "s"}` : "",
+    definition.sorts.length ? `${definition.sorts.length} active sort${definition.sorts.length === 1 ? "" : "s"}` : "",
+    definition.groupBy ? `grouped by ${collection.properties.find(({ id }) => id === definition.groupBy)?.name ?? "a property"}` : "",
+    visible.length !== collection.properties.length ? `${collection.properties.length - visible.length} hidden propert${collection.properties.length - visible.length === 1 ? "y" : "ies"}` : "",
+    definition.layout.density === "compact" ? "compact density" : ""].filter(Boolean).join(", ");
   return <div className={styles.viewArea}><div className={styles.presentation} role="group" aria-label="Collection presentation">
     {presentations.map((entry) => <button type="button" key={entry.value} aria-pressed={definition.presentation === entry.value}
       disabled={!editable} onClick={() => choose(entry.value)}>{entry.label}</button>)}
-    <button type="button" disabled={!editable} aria-expanded={viewOpen} onClick={() => setViewOpen((open) => !open)}>View{active ? ` · ${active}` : ""}</button>
+    <button type="button" disabled={!editable} aria-expanded={viewOpen}
+      aria-label={fullSummary ? `View settings · ${summaries.join(" · ")}. ${fullSummary}` : "View settings"}
+      onClick={() => setViewOpen((open) => !open)}>View{summaries.length ? ` · ${summaries.join(" · ")}` : ""}</button>
   </div>{requirement && requested ? <div className={styles.requirement} role="status"><p>{requested === "calendar"
     ? "Calendar needs a date property." : "Board needs a select property."}</p><Button pending={pending} type="button" onClick={() => void addRequired()}>{requirement.actionLabel}</Button>
     <Button type="button" variant="secondary" onClick={() => setRequested(undefined)}>Not now</Button></div> : null}
@@ -52,11 +64,22 @@ export function CollectionViewControls({ collection, definition, editable, onCha
         updateFilter(["is_empty", "is_not_empty"].includes(operator) ? { operator, value: undefined } : { operator, value: filter.value ?? "" });
       }}><option value="contains">Contains</option><option value="equals">Equals</option><option value="not_equals">Does not equal</option>
         <option value="is_empty">Is empty</option><option value="is_not_empty">Is not empty</option></select></Field>
-      {filter.operator !== "is_empty" && filter.operator !== "is_not_empty" ? <Field label="Filter value"><input aria-label="Filter value"
-        disabled={!editable} type={filterProperty?.type === "number" ? "number" : filterProperty?.type === "date_time" ? "date" : "text"}
-        value={typeof filter.value === "string" || typeof filter.value === "number" ? String(filter.value) : ""}
-        onChange={(event) => updateFilter({ value: filterProperty?.type === "number" && event.target.value
-          ? Number(event.target.value) : event.target.value })} /></Field> : null}</> : null}
+      {filter.operator !== "is_empty" && filter.operator !== "is_not_empty" ? <Field label="Filter value">{
+        filterProperty?.type === "single_select" ? <select aria-label="Filter value" disabled={!editable}
+          value={typeof filter.value === "string" ? filter.value : ""} onChange={(event) => updateFilter({ value: event.target.value || null })}>
+          <option value="">No value</option>{filterOptions.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select>
+          : filterProperty?.type === "checkbox" ? <select aria-label="Filter value" disabled={!editable}
+            value={typeof filter.value === "boolean" ? String(filter.value) : ""} onChange={(event) => updateFilter({ value: event.target.value === "" ? null : event.target.value === "true" })}>
+            <option value="">No value</option><option value="true">Checked</option><option value="false">Not checked</option></select>
+            : filterProperty && ["multi_select", "person", "attachment", "relation"].includes(filterProperty.type) ? <select multiple
+              aria-label="Filter value" disabled={!editable} value={selectionIds(filter.value)} onChange={(event) => { const ids = Array.from(event.target.selectedOptions).map(({ value }) => value);
+                const value: CollectionPropertyValue = filterProperty.type === "relation" ? relationSelectionValue(ids, filterOptions) : ids; updateFilter({ value }); }}>
+              {filterOptions.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select>
+              : <input aria-label="Filter value" disabled={!editable}
+                type={filterProperty?.type === "number" ? "number" : filterProperty?.type === "date_time" ? "date" : "text"}
+                value={typeof filter.value === "string" || typeof filter.value === "number" ? String(filter.value) : ""}
+                onChange={(event) => updateFilter({ value: filterProperty?.type === "number" && event.target.value
+                  ? Number(event.target.value) : event.target.value })} />}</Field> : null}</> : null}
       <Field label="Sort by"><select disabled={!editable} aria-label="Sort by" value={definition.sorts[0]?.propertyId ?? ""} onChange={(event) => onChange({ ...definition,
         sorts: event.target.value ? [{ propertyId: event.target.value, direction: "ascending" }] : [] })}><option value="">Record order</option>
         {collection.properties.map((property) => <option key={property.id} value={property.id}>{property.name}</option>)}</select></Field>

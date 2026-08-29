@@ -317,7 +317,8 @@ describe("Collection contracts", () => {
       if (impact.status === "found") {
         assert.deepEqual(impact.impact.collections.map(({ id, recordCount }) => ({ id, recordCount })), [{ id: collection.id, recordCount: 1 }]);
         assert.deepEqual(impact.impact.viewBlocks.map(({ id }) => id), [view.id]);
-        assert.ok(impact.impact.token.length > 10);
+        assert.match(impact.impact.token, /^sha256:[A-Za-z0-9_-]{43}$/);
+        assert.ok(Buffer.byteLength(impact.impact.token, "utf8") <= 100);
       }
       const noteTree = new NoteTreeService(store.database.noteTreeRepository(), store.database.tutorialContributionRepository());
       assert.equal((await noteTree.remove(ownerId, noteResult.node.id, "archived")).status, "updated");
@@ -372,21 +373,76 @@ describe("Collection contracts", () => {
       assert.equal(preview.status, "found"); if (preview.status !== "found") return;
       assert.equal(preview.impact.collections[0]?.recordCount, 1); assert.equal(preview.impact.relations[0]?.referenceCount, 1);
       assert.deepEqual(preview.impact.viewBlocks.map(({ id }) => id), [view.id]);
-      assert.equal((await service.delete(ownerId, ownerNote.node.id,
-        { confirmed: true, impactToken: `${preview.impact.token}-stale`, collectionIds: [targetId] })).status, "impact_changed");
+      const changed = await service.delete(ownerId, ownerNote.node.id,
+        { confirmed: true, impactToken: `${preview.impact.token}-stale`, collectionIds: [targetId] });
+      assert.equal(changed.status, "impact_changed");
+      if (changed.status === "impact_changed") assert.equal(changed.impact.token, preview.impact.token);
 
-      const deleted = await service.delete(ownerId, ownerNote.node.id,
-        { confirmed: true, impactToken: preview.impact.token, collectionIds: [targetId] });
+      const [concurrentWrite, deleted] = await Promise.all([
+        service.updateRecord(ownerId, relationCollectionId, relationRecordId,
+          { values: { [relationPropertyId]: [{ id: targetRecordId, fallback: "Concurrent target" }] } }),
+        service.delete(ownerId, ownerNote.node.id,
+          { confirmed: true, impactToken: preview.impact.token, collectionIds: [targetId] }),
+      ]);
 
       assert.deepEqual(deleted, { status: "deleted", collectionIds: [targetId] });
+      assert.ok(concurrentWrite.status === "updated" || concurrentWrite.status === "invalid_record");
       assert.deepEqual(await service.read(ownerId, targetId), { status: "collection_not_found" });
       assert.deepEqual(await service.readView(ownerId, view.id), { status: "view_not_found" });
       const repaired = await service.read(ownerId, relationCollectionId); assert.equal(repaired.status, "found");
       if (repaired.status === "found") assert.deepEqual(repaired.collection.records[0]?.values[relationPropertyId], []);
+      assert.deepEqual(await service.updateRecord(ownerId, relationCollectionId, relationRecordId,
+        { values: { [relationPropertyId]: [{ id: targetRecordId, fallback: "Deleted target" }] } }), { status: "invalid_record" },
+      "a stale relation writer must revalidate the target after target deletion");
+      const afterStaleWrite = await service.read(ownerId, relationCollectionId); assert.equal(afterStaleWrite.status, "found");
+      if (afterStaleWrite.status === "found") assert.deepEqual(afterStaleWrite.collection.records[0]?.values[relationPropertyId], []);
       const staleProjections = await store.upgradeDatabase.query<{ count: number }>(`SELECT count(*)::int count FROM stash_portable_projection_outbox
         WHERE (object_kind='Collection' AND object_id=$1) OR (object_kind='ViewBlock' AND object_id=$2)`, [targetId, view.id]);
       assert.equal(staleProjections.rows[0]?.count, 0);
       assert.equal((await notes.remove(ownerId, ownerNote.node.id, "trashed")).status, "updated");
+    } finally { await store.close(); }
+  });
+
+  test("allocates concurrent property and record appends under the Collection lock", async () => {
+    const store = await EmbeddedInstanceStore.open(await temporaryTestDirectory("stash-collection-appends-"),
+      createAuthenticationSecretCodec(randomBytes(32).toString("base64")));
+    try {
+      const ownerId = "41414141-4141-4141-8141-414141414141";
+      await store.database.createFirstOrganizationOwner({ organizationId: "42424242-4242-4242-8242-424242424242",
+        organizationName: "Studio", ownerId, ownerName: "Ada", ownerEmail: "appends@example.test", passwordHash: "test-only", role: "Owner" });
+      const workspace = await new WorkspaceProjectService(store.database.identityAccessRepositories()).createWorkspace(ownerId,
+        { name: "Notebook", owner: { type: "personal" } });
+      assert.equal(workspace.status, "created"); if (workspace.status !== "created") return;
+      const note = await new NoteTreeService(store.database.noteTreeRepository(), new EmptyCollectionImpactInspector())
+        .create(ownerId, workspace.workspace.id, { title: "Research" });
+      assert.equal(note.status, "created"); if (note.status !== "created") return;
+      const collectionId = "43434343-4343-4343-8343-434343434343";
+      const nameId = "44444444-4444-4444-8444-444444444444";
+      const service = new CollectionService(store.database.collectionRepository());
+      assert.equal((await service.create(ownerId, note.node.id, { schema: "stash.collection.v1", id: collectionId,
+        workspaceId: workspace.workspace.id, ownerNoteId: note.node.id, title: "Concurrent appends",
+        properties: [{ id: nameId, name: "Name", type: "text", position: 1 }], records: [] })).status, "created");
+
+      const propertyResults = await Promise.all([
+        service.createProperty(ownerId, collectionId,
+          { id: "45454545-4545-4545-8545-454545454545", name: "Owner", type: "person", position: 2 }),
+        service.createProperty(ownerId, collectionId,
+          { id: "46464646-4646-4646-8646-464646464646", name: "Due", type: "date_time", position: 2 }),
+      ]);
+      assert.deepEqual(propertyResults.map(({ status }) => status), ["created", "created"]);
+
+      const recordResults = await Promise.all([
+        service.createRecord(ownerId, collectionId, { id: "47474747-4747-4747-8747-474747474747", position: 1,
+          values: { [nameId]: "First" } }),
+        service.createRecord(ownerId, collectionId, { id: "48484848-4848-4848-8848-484848484848", position: 1,
+          values: { [nameId]: "Second" } }),
+      ]);
+      assert.deepEqual(recordResults.map(({ status }) => status), ["created", "created"]);
+      const current = await service.read(ownerId, collectionId); assert.equal(current.status, "found");
+      if (current.status === "found") {
+        assert.deepEqual(current.collection.properties.map(({ position }) => position), [1, 2, 3]);
+        assert.deepEqual(current.collection.records.map(({ position }) => position), [1, 2]);
+      }
     } finally { await store.close(); }
   });
 
@@ -420,6 +476,14 @@ describe("Collection contracts", () => {
       const guest = await service.read(guestId, collectionId); assert.equal(guest.status, "found");
       if (guest.status === "found") assert.deepEqual(guest.collection.records[0]?.values[relationPropertyId], [{ id: visible.node.id, fallback: "Visible" }]);
       assert.doesNotMatch(JSON.stringify(guest), new RegExp(`Private roadmap|${hidden.node.id}`));
+      const guestWorkspace = await service.listForNote(guestId, visible.node.id); assert.equal(guestWorkspace.status, "found");
+      if (guestWorkspace.status === "found") {
+        assert.deepEqual(guestWorkspace.selectionOptions.members, [{ id: guestId, label: "Guest" }]);
+        assert.deepEqual(guestWorkspace.selectionOptions.notes, [{ id: visible.node.id, label: "Visible" }]);
+        assert.deepEqual(guestWorkspace.selectionOptions.projects, [{ id: project.project.id, label: "Shared" }]);
+        assert.deepEqual(guestWorkspace.selectionOptions.attachments, []);
+        assert.doesNotMatch(JSON.stringify(guestWorkspace.selectionOptions), new RegExp(`Private roadmap|${hidden.node.id}|Ada`));
+      }
     } finally { await store.close(); }
   });
 });

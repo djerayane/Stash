@@ -76,6 +76,88 @@ test("requests presentation requirements in context and keeps advanced controls 
   await expect(collection.getByRole("combobox", { name: "Density" })).toBeVisible();
 });
 
+test("renames, reorders, and deletes a property from its header", async ({ page }) => {
+  const collectionId = "51515151-5151-4151-8151-515151515151";
+  const nameId = "52525252-5252-4252-8252-525252525252";
+  const statusId = "53535353-5353-4353-8353-535353535353";
+  const detailsId = "54545454-5454-4454-8454-545454545454";
+  await createCollection(page, { schema: "stash.collection.v1", id: collectionId, workspaceId, ownerNoteId: noteId,
+    title: "Property journey", properties: [
+      { id: nameId, name: "Name", type: "text", position: 1 },
+      { id: statusId, name: "Status", type: "single_select", position: 2, options: [{ id: "open", name: "Open" }] },
+      { id: detailsId, name: "Details", type: "text", position: 3 },
+    ], records: [{ id: "55555555-5555-4555-8555-555555555555", position: 1,
+      values: { [nameId]: "First", [statusId]: "open", [detailsId]: "Evidence" } }] });
+  await page.goto(`/app/notes/${noteId}`);
+  const collection = page.getByRole("region", { name: "Property journey" });
+
+  await collection.getByRole("button", { name: "Edit Status property" }).press("Enter");
+  const rename = page.waitForResponse((response) => response.url().endsWith(`/api/collections/${collectionId}/properties/${statusId}`)
+    && response.request().method() === "PATCH");
+  await page.getByRole("textbox", { name: "Property name" }).fill("Stage");
+  await page.getByRole("button", { name: "Save property" }).press("Enter");
+  expect((await rename).status()).toBe(200);
+  await expect(collection.getByRole("columnheader", { name: "Stage" })).toBeVisible();
+
+  await collection.getByRole("button", { name: "Edit Stage property" }).press("Enter");
+  const reorder = page.waitForResponse((response) => response.url().endsWith(`/api/collections/${collectionId}/properties/order`)
+    && response.request().method() === "PATCH");
+  await page.getByRole("button", { name: "Move right" }).press("Enter");
+  expect((await reorder).status()).toBe(200);
+  await expect.poll(() => collection.locator("thead th").allTextContents()).toEqual(["Name", "Details", "Stage", "Add property"]);
+
+  await collection.getByRole("button", { name: "Edit Stage property" }).press("Enter");
+  await page.getByRole("button", { name: "Delete property" }).press("Enter");
+  const dialog = page.getByRole("dialog", { name: "Delete Stage property?" });
+  await expect(dialog.getByText("1 saved value will be removed.")).toBeVisible();
+  const deleted = page.waitForResponse((response) => response.url().endsWith(`/api/collections/${collectionId}/properties/${statusId}`)
+    && response.request().method() === "DELETE");
+  await dialog.getByRole("button", { name: "Delete property" }).press("Enter");
+  expect((await deleted).status()).toBe(200);
+  await expect(collection.getByRole("columnheader", { name: "Stage" })).toHaveCount(0);
+});
+
+test("preserves a record draft through save, access, and synchronization failures", async ({ page }) => {
+  const collectionId = "56565656-5656-4656-8656-565656565656";
+  const propertyId = "57575757-5757-4757-8757-575757575757";
+  const recordId = "58585858-5858-4858-8858-585858585858";
+  await createCollection(page, { schema: "stash.collection.v1", id: collectionId, workspaceId, ownerNoteId: noteId,
+    title: "Recovery journey", properties: [{ id: propertyId, name: "Name", type: "text", position: 1 }],
+    records: [{ id: recordId, position: 1, values: { [propertyId]: "Original draft" } }] });
+  let attempt = 0;
+  await page.route(`**/api/collections/${collectionId}/records/${recordId}`, async (route) => {
+    if (route.request().method() !== "PATCH") { await route.continue(); return; }
+    attempt += 1;
+    if (attempt === 1) { await route.fulfill({ status: 503, contentType: "application/json",
+      body: JSON.stringify({ message: "Synchronization temporarily unavailable." }) }); return; }
+    if (attempt === 2) { await route.fulfill({ status: 403, contentType: "application/json",
+      body: JSON.stringify({ message: "Access to this Collection changed." }) }); return; }
+    if (attempt === 3) { await route.abort("failed"); return; }
+    await route.continue();
+  });
+  await page.goto(`/app/notes/${noteId}`);
+  const collection = page.getByRole("region", { name: "Recovery journey" });
+  const value = collection.getByRole("textbox", { name: "Name, Original draft" });
+  await value.fill("Work that must survive"); await value.press("Enter");
+  await expect(collection.getByRole("alert")).toContainText("Value not saved");
+  await expect(value).toHaveValue("Work that must survive");
+
+  for (const expectedAttempt of [2, 3]) {
+    await collection.getByRole("button", { name: "Retry Name" }).press("Enter");
+    await expect.poll(() => attempt).toBe(expectedAttempt);
+    await expect(value).toHaveValue("Work that must survive");
+    await expect(collection.getByRole("alert")).toContainText("Value not saved");
+  }
+  const recovered = page.waitForResponse((response) => response.url().endsWith(`/api/collections/${collectionId}/records/${recordId}`)
+    && response.request().method() === "PATCH" && response.status() === 200);
+  await collection.getByRole("button", { name: "Retry Name" }).press("Enter");
+  await recovered;
+  await expect(collection.getByRole("alert")).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByRole("region", { name: "Recovery journey" })
+    .getByRole("textbox", { name: "Name, Work that must survive" })).toHaveValue("Work that must survive");
+});
+
 test("inserts a canonical view from another Note and reviews deletion impact", async ({ page }) => {
   const collectionId = "31313131-3131-4131-8131-313131313131";
   const propertyId = "32323232-3232-4232-8232-323232323232";
@@ -94,7 +176,12 @@ test("inserts a canonical view from another Note and reviews deletion impact", a
   await expect(reused).toBeVisible();
   await expect(reused.getByText(/View of Cross-note source · From /)).toBeVisible();
   await expect(reused.getByRole("button", { name: "Collection actions" })).toHaveCount(0);
+  await reused.getByRole("button", { name: "Edit Name, Portable record" }).press("Enter");
+  const disclosure = page.getByRole("dialog", { name: "Edit this canonical record?" });
+  await expect(disclosure.getByText(/one shared source of truth/)).toBeVisible();
+  await disclosure.getByRole("button", { name: "Continue editing" }).press("Enter");
   const canonicalCell = reused.getByRole("textbox", { name: "Name, Portable record" });
+  await expect(canonicalCell).toBeFocused();
   const canonicalSave = page.waitForResponse((response) => response.url().endsWith(`/api/collections/${collectionId}/records/${recordId}`)
     && response.request().method() === "PATCH");
   await canonicalCell.fill("Portable record updated");
@@ -138,6 +225,39 @@ test("keeps keyboard focus and multi-select Board moves within one saved View", 
   expect(saved.request().postDataJSON()).toEqual({ values: { [statusId]: ["blocked", "done"] } });
 });
 
+test("moves and then deletes a Collection through complete impact previews", async ({ page }) => {
+  const collectionId = "59595959-5959-4959-8959-595959595959";
+  const propertyId = "60606060-6060-4060-8060-606060606060";
+  await createCollection(page, { schema: "stash.collection.v1", id: collectionId, workspaceId, ownerNoteId: noteId,
+    title: "Consequential journey", properties: [{ id: propertyId, name: "Name", type: "text", position: 1 }],
+    records: [{ id: "61616161-6161-4161-8161-616161616161", position: 1, values: { [propertyId]: "Carry me" } }] });
+  await page.goto(`/app/notes/${noteId}`);
+  let collection = page.getByRole("region", { name: "Consequential journey" });
+  await collection.getByRole("button", { name: "Collection actions" }).press("Enter");
+  await collection.getByRole("button", { name: "Move to another Note" }).press("Enter");
+  const moveDialog = page.getByRole("dialog", { name: "Move Consequential journey collection?" });
+  await expect(moveDialog.getByText("1 record will move with this Collection.")).toBeVisible();
+  await moveDialog.getByRole("combobox", { name: "Destination Note" }).selectOption(secondNoteId);
+  const moved = page.waitForResponse((response) => response.url().endsWith(`/api/notes/${noteId}/collections/relocate`)
+    && response.request().method() === "POST");
+  await moveDialog.getByRole("button", { name: "Move collection" }).press("Enter");
+  expect((await moved).status()).toBe(200);
+  await expect(collection).toHaveCount(0);
+
+  await page.goto(`/app/notes/${secondNoteId}`);
+  collection = page.getByRole("region", { name: "Consequential journey" });
+  await expect(collection.getByRole("textbox", { name: "Name, Carry me" })).toHaveValue("Carry me");
+  await collection.getByRole("button", { name: "Collection actions" }).press("Enter");
+  await collection.getByRole("button", { name: "Delete collection" }).press("Enter");
+  const deleteDialog = page.getByRole("dialog", { name: "Delete Consequential journey collection?" });
+  await expect(deleteDialog.getByText("1 record will be deleted.")).toBeVisible();
+  const deleted = page.waitForResponse((response) => response.url().endsWith(`/api/notes/${secondNoteId}/collections/delete`)
+    && response.request().method() === "POST");
+  await deleteDialog.getByRole("button", { name: "Delete collection" }).press("Enter");
+  expect((await deleted).status()).toBe(200);
+  await expect(collection).toHaveCount(0);
+});
+
 test("keeps direct Collection controls keyboard-ready, narrow, reduced-motion, and axe-clean @a11y", async ({ page }) => {
   const collectionId = "36363636-3636-4636-8636-363636363636"; const titleId = "37373737-3737-4737-8737-373737373737";
   await createCollection(page, { schema: "stash.collection.v1", id: collectionId, workspaceId, ownerNoteId: noteId,
@@ -146,12 +266,24 @@ test("keeps direct Collection controls keyboard-ready, narrow, reduced-motion, a
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.setViewportSize({ width: 320, height: 760 });
   await page.goto(`/app/notes/${noteId}`);
-  await page.addStyleTag({ content: "html { font-size: 200% !important; }" });
   const collection = page.getByRole("region", { name: "Accessible authoring" });
+  const targets = [collection.getByRole("button", { name: "Table" }), collection.getByRole("button", { name: "New record" }),
+    collection.getByRole("button", { name: "Collection actions" })];
+  for (const target of targets) { const box = await target.boundingBox(); expect(box?.width).toBeGreaterThanOrEqual(44); expect(box?.height).toBeGreaterThanOrEqual(44); }
+  const motion = await collection.getByRole("button", { name: "New record" }).evaluate((element) => {
+    const style = getComputedStyle(element); return { transition: style.transitionDuration, animation: style.animationDuration };
+  });
+  expect(motion).toEqual({ transition: "0s", animation: "0s" });
+  await page.addStyleTag({ content: "html { font-size: 200% !important; }" });
   await collection.getByRole("button", { name: "New record" }).press("Enter");
   await expect(collection.getByRole("textbox", { name: "Name, new record" })).toBeFocused();
   const bounds = await collection.evaluate((element) => { const rectangle = element.getBoundingClientRect();
     return { left: rectangle.left, right: rectangle.right, viewport: window.innerWidth }; });
   expect(bounds.left).toBeGreaterThanOrEqual(-1); expect(bounds.right).toBeLessThanOrEqual(bounds.viewport + 1);
   expect((await new AxeBuilder({ page }).include('[aria-labelledby="collections-heading"]').analyze()).violations).toEqual([]);
+  await page.setViewportSize({ width: 1280, height: 800 }); await page.goto("/app/notes");
+  for (const target of [page.getByRole("button", { name: "Create root Note" }).first(),
+    page.getByRole("button", { name: "Collapse Release collaboration plan" }).first()]) {
+    const box = await target.boundingBox(); expect(box?.width).toBeGreaterThanOrEqual(44); expect(box?.height).toBeGreaterThanOrEqual(44);
+  }
 });

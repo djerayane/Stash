@@ -1,3 +1,11 @@
+@font-face {
+  font-family: "Stash Editorial";
+  src: url("./fonts/stix-two-text.ttf") format("truetype");
+  font-display: swap;
+  font-style: normal;
+  font-weight: 400 700;
+}
+
 :root {
   color-scheme: light;
   --stash-color-canvas: #f4f1e9;
@@ -44,7 +52,7 @@
   --stash-duration-standard: 220ms;
   --stash-ease-standard: cubic-bezier(.2, .8, .2, 1);
   --stash-font-sans: Geist, ui-sans-serif, system-ui, sans-serif;
-  --stash-font-display: Geist, ui-sans-serif, system-ui, sans-serif;
+  --stash-font-display: "Stash Editorial", Georgia, "Times New Roman", serif;
   --stash-type-caption: 0.75rem;
   --stash-type-body: 1rem;
   --stash-type-title: clamp(2.4rem, 5vw, 5.2rem);

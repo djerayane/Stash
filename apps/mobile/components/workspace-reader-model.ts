@@ -16,6 +16,7 @@ export function displayReadableValue(value: unknown): string {
   if (typeof value === "boolean") return value ? "Yes" : "No";
   if (typeof value === "string" || typeof value === "number") return String(value);
   if (Array.isArray(value)) return value.map((entry) => typeof entry === "object" && entry && "fallback" in entry ? String(entry.fallback) : String(entry)).join(", ");
+  if (typeof value === "object" && "fallback" in value) return String(value.fallback);
   if (typeof value === "object" && "start" in value) return String(value.start);
   return "";
 }
@@ -67,17 +68,24 @@ export function groupReadableRecords(records: readonly CollectionRecord[], defin
       }
       return left.position - right.position;
     });
-  if (!definition.groupBy) return [{ label: undefined, items: visible }];
+  if (!definition.groupBy) return [{ key: undefined, label: undefined, items: visible }];
   const groupProperty = properties.find(({ id }) => id === definition.groupBy);
-  const groups = new Map<string, CollectionRecord[]>();
+  const groups = new Map<string, { label: string; items: CollectionRecord[] }>();
   for (const record of visible) {
-    const raw = groupProperty
-      ? displayCollectionPropertyValue(groupProperty, record.values[definition.groupBy])
-      : displayReadableValue(record.values[definition.groupBy]);
-    const label = raw ? raw.replaceAll("_", " ").replace(/^./, (letter) => letter.toLocaleUpperCase()) : "No value";
-    groups.set(label, [...(groups.get(label) ?? []), record]);
+    const stored = record.values[definition.groupBy];
+    const values = Array.isArray(stored) ? stored.length ? stored : [undefined] : [stored];
+    for (const value of values) {
+      const raw = groupProperty
+        ? displayCollectionPropertyValue(groupProperty, value)
+        : displayReadableValue(value);
+      const label = raw ? raw.replaceAll("_", " ").replace(/^./, (letter) => letter.toLocaleUpperCase()) : "No value";
+      const key = value === undefined || value === null || value === ""
+        ? "no-value" : typeof value === "object" && "fallback" in value ? String(value.fallback) : JSON.stringify(value);
+      const group = groups.get(key);
+      groups.set(key, { label, items: [...(group?.items ?? []), record] });
+    }
   }
-  return [...groups].map(([label, items]) => ({ label, items }));
+  return [...groups].map(([key, group]) => ({ key, ...group }));
 }
 
 export function readableTaskGroup(task: MobileCanonicalTask, propertyId: TaskViewPropertyId,

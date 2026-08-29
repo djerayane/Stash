@@ -57,6 +57,12 @@ class MemoryEncryptedStore implements EncryptedMobileCaptureStore {
     if (existing && contribution(existing) !== contribution(mutation)) throw new Error("operation identity conflict");
     this.mutations = [...this.mutations.filter((item) => mutationIdentity(item) !== key), structuredClone(mutation)];
   }
+  async replaceMutation(previous: Pick<MobileSyncMutation, "id" | "origin">, mutation: MobileSyncMutation) {
+    const previousKey = mutationIdentity(previous); const nextKey = mutationIdentity(mutation);
+    this.mutations = [...this.mutations.filter((item) => {
+      const key = mutationIdentity(item); return key !== previousKey && key !== nextKey;
+    }), structuredClone(mutation)];
+  }
   async removeMutation(mutation: Pick<MobileSyncMutation, "id" | "origin">) {
     this.mutations = this.mutations.filter((item) => mutationIdentity(item) !== mutationIdentity(mutation));
   }

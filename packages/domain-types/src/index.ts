@@ -1,6 +1,6 @@
 export * from "./visualizations.js";
 export * from "./collections.js";
-import { normalizeCollection, normalizeViewBlock, type Collection, type ViewBlock } from "./collections.js";
+import { normalizeCollection, normalizeViewBlock, type Collection, type CollectionPropertyValue, type ViewBlock } from "./collections.js";
 
 export type EntityId = string;
 
@@ -170,12 +170,15 @@ export interface MobileSyncMutationBase {
   attempts: number;
   nextRetryAt?: string;
   lastError?: string;
+  conflict?: boolean;
 }
 
 export type MobileSyncMutation = MobileSyncMutationBase & (
   | { kind: "note_edit"; noteId: string; baseRevision: number; operations: NoteEditOperation[] }
   | { kind: "task_edit"; projectId: string; taskKey: string; baseRevision: number; changes: TaskPlanningUpdate }
   | { kind: "canonical_task_edit"; taskId: string; baseRevision: number; changes: TaskPlanningUpdate }
+  | { kind: "collection_record_edit"; collectionId: string; recordId: string;
+    values: Readonly<Record<string, CollectionPropertyValue>> }
 );
 
 export interface MobileNoteTreeNode {
