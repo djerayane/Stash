@@ -1,39 +1,37 @@
-# Final exact re-review — `3f233a1..cad9ba8`
+# Final exact re-review — `8dd56ba..0ce16b9`
 
 ## Verdict
 
-- **Spec compliance: FAIL** — 0 Critical, 1 Important, 0 Minor.
-- **Code quality: FAIL** — 0 Critical, 1 Important, 0 Minor.
-- **Combined unique count:** 0 Critical, 1 Important, 0 Minor.
+- **Spec compliance: PASS** — 0 Critical, 0 Important, 0 Minor.
+- **Code quality: PASS** — 0 Critical, 0 Important, 0 Minor.
+- **Combined unique count:** 0 Critical, 0 Important, 0 Minor.
 
-The exact diff resolves four of the five Important closure findings: cross-Note record creation now uses the shared disclosure gate while preserving the staged draft and focus; historical Collection receipts cannot replace a higher cached revision; `permanentFailure` is mutable encrypted-outbox metadata; and conflict/permanent entries are terminal to ordinary synchronization. The legacy pre-revision edit is safely prevented from being sent automatically, but its explicit reconcile path still cannot establish an authoritative concurrency base.
+The one Important finding from the prior exact review is resolved. No Critical or Important finding remains in this scoped closure.
 
 ## Scope and method
 
-Reviewed the immutable range `3f233a19b5261d3ceb303adc32ae1119bd420a37..cad9ba8` against the five Important findings in `closure-rereview.md`. The repository-required `gpt-taste` and `frontend-design` skills were read before review. Spec compliance and code quality were assessed separately.
+Reviewed the immutable range `8dd56ba..0ce16b9` against the single remaining Important finding recorded in the prior version of this report. The repository-required `gpt-taste` and `frontend-design` skills were read before review. Spec compliance and code quality were assessed separately.
 
-Per instruction, tests were not rerun and source was not modified. This report is the only review artifact added.
+Per instruction, tests were not rerun and source was not modified. This report is the only review artifact changed.
 
-## Actionable finding
+## Resolution evidence
 
-### [Important] [Spec + Quality] Legacy Collection reconciliation still invents its new base from a potentially stale cache
+The sync loop no longer labels a pre-revision Collection edit as reconcilable. It records the entry as `permanentFailure`, explains that its server base cannot be verified, and directs the user to discard it safely (`packages/sync/src/index.ts:508-515`). Because terminal Collection entries are skipped before dispatch (`packages/sync/src/index.ts:501-506`), neither the legacy operation nor a synthesized replacement can reach the server.
 
-The sync loop now correctly stops a pre-revision Collection mutation, marks it conflicted, and does not send it (`packages/sync/src/index.ts:508-514`). However, the user-facing recovery action calls `reconcileCollectionRecordEdit` directly and then synchronizes (`apps/mobile/app/workspace.tsx:154-158`). `reconcileCollectionRecordEdit` reads the existing local workspace snapshot and assigns `record.revision ?? 1` as the new operation's `baseRevision` (`packages/sync/src/index.ts:323-330`); it does not refresh the Collection from the server first or otherwise prove that this revision is the current canonical base.
+The focused regression exercises the complete safe recovery contract: the initial sync makes no network request, the entry is retained with `permanentFailure`, `reconcileCollectionRecordEdit` rejects it because it is not a conflict with an authoritative server record, explicit discard removes it, and no request is sent (`packages/sync/src/mobile-workspace.test.ts:162-181`).
 
-That leaves the original divergent-history case open after one tap: an old queued edit and its cached record may both normalize to revision 1, while deployment also labels an independently changed server row revision 1. The first ordinary sync now preserves the edit, but “reconcile” immediately recreates it with the same unproven base 1 and the following sync can silently overwrite the intervening server edit. The new regression only asserts that the first sync makes no request and sets `conflict`; it does not exercise the actual reconcile action against divergent server state (`packages/sync/src/mobile-workspace.test.ts:162-177`).
+This removes the prior silent-overwrite path. The unprovable local contribution remains durable until the user explicitly discards it, and it is never assigned a guessed concurrency base.
 
-**Required:** before converting a legacy conflicted edit into a new operation, fetch and persist the authoritative canonical Collection record (or require an already refreshed snapshot with verifiable provenance), then use that server revision as the new base while preserving the local values. If the refresh cannot complete, leave the legacy edit terminal and unchanged. Add a regression that performs the reconcile action with cached revision 1 and a divergent server revision/value, and proves the new operation uses the refreshed server revision.
+## Separate review axes
 
-## Five-finding closure matrix
+### Spec compliance — PASS
 
-| Prior finding | Result | Evidence |
-| --- | --- | --- |
-| R2 cross-Note record creation bypass | **Resolved** | Both Save and field confirmation route through `requestCanonicalRecordMutation`; cancellation retains `newValues` and restores the Save trigger. |
-| R6 unprovable legacy base | **Partial** | Ordinary sync no longer sends it, but explicit reconcile still assigns a base from the unverified cached record. |
-| R6 historical receipt cache rollback | **Resolved** | `#applySuccessfulMutation` refuses a remote record whose revision is below the cached record revision; success and conflict receipt tests cover the monotonic projection. |
-| R7 encrypted-store permanent marker rejection | **Resolved** | `mutationContribution` excludes `permanentFailure`, with a real encrypted-store metadata update regression. |
-| R7 terminal entries resent | **Resolved** | The scheduler skips conflicted and permanently rejected Collection entries before network dispatch; consecutive-sync regressions cover both states. |
+0 Critical, 0 Important, 0 Minor. The implementation preserves the legacy contribution for explicit safe recovery and prevents it from overwriting an intervening canonical edit, satisfying the ADR-0008 closure obligation.
 
-## Closure condition
+### Code quality — PASS
 
-Do not accept the final closure at `cad9ba8`. Make legacy reconciliation establish an authoritative server base, add the focused divergent-state regression, rerun the affected gates, and perform one final exact-head Spec and Quality review.
+0 Critical, 0 Important, 0 Minor. The terminal-state model is consistent with the existing permanent-rejection scheduler behavior, and the regression covers dispatch exclusion, reconciliation exclusion, and explicit removal.
+
+## Closure
+
+The five Important findings originally reported in `closure-rereview.md` are now resolved on static exact-diff inspection. This scoped exact review is clean.
