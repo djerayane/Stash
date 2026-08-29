@@ -159,7 +159,7 @@ describe("mobile workspace synchronization", () => {
     expect(state.mutations).toEqual([]);
   });
 
-  it("preserves a queued pre-revision Collection edit for explicit reconcile or discard", async () => {
+  it("keeps a queued pre-revision Collection edit discard-only because no authoritative base exists", async () => {
     const legacy = { id: "abababab-abab-4bab-8bab-abababababab", kind: "collection_record_edit",
       collectionId, recordId, values: { [propertyId]: "Queued before revisions" }, attempts: 0,
       origin: { instanceUrl: "https://stash.example", workspaceId, memberId } } as unknown as MobileSyncMutation;
@@ -173,7 +173,12 @@ describe("mobile workspace synchronization", () => {
 
     await expect(client.sync()).resolves.toMatchObject({ status: "attention_required", count: 0 });
     expect(request).not.toHaveBeenCalled();
-    await expect(client.pendingMutations()).resolves.toMatchObject([{ id: legacy.id, conflict: true }]);
+    await expect(client.pendingMutations()).resolves.toMatchObject([{ id: legacy.id, permanentFailure: true,
+      lastError: expect.stringContaining("Use the server Collection version") }]);
+    await expect(client.reconcileCollectionRecordEdit(collectionId, recordId)).rejects.toThrow("Only a conflicted Collection edit");
+    expect(request).not.toHaveBeenCalled();
+    await expect(client.discardCollectionRecordEdit(collectionId, recordId)).resolves.toBe(1);
+    await expect(client.pendingMutations()).resolves.toEqual([]);
   });
 
   it("refuses to enqueue a Collection edit without cached edit access", async () => {

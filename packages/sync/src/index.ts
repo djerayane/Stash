@@ -508,9 +508,10 @@ export class MobileCaptureClient {
       const storedBaseRevision = (mutation as { baseRevision?: unknown }).baseRevision;
       if (mutation.kind === "collection_record_edit"
         && (!Number.isSafeInteger(storedBaseRevision) || Number(storedBaseRevision) < 1)) {
-        mutation = { ...mutation, conflict: true, lastError: "This offline edit predates revision tracking. Reconcile it with the server version or discard it." };
+        mutation = { ...mutation, permanentFailure: true,
+          lastError: "This offline edit predates revision tracking, so its server base cannot be verified. Use the server Collection version to discard it safely." };
         await this.#store.saveMutation(mutation);
-        attentionError ??= "revision_conflict";
+        attentionError ??= "sync_rejected";
         continue;
       }
       if (mutation.nextRetryAt && Date.parse(mutation.nextRetryAt) > this.#now()) { retryPending = true; continue; }
