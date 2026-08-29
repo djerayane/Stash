@@ -159,7 +159,7 @@ describe("mobile workspace synchronization", () => {
     expect(state.mutations).toEqual([]);
   });
 
-  it("upgrades a queued pre-revision Collection edit from the cached canonical record", async () => {
+  it("preserves a queued pre-revision Collection edit for explicit reconcile or discard", async () => {
     const legacy = { id: "abababab-abab-4bab-8bab-abababababab", kind: "collection_record_edit",
       collectionId, recordId, values: { [propertyId]: "Queued before revisions" }, attempts: 0,
       origin: { instanceUrl: "https://stash.example", workspaceId, memberId } } as unknown as MobileSyncMutation;
@@ -171,10 +171,9 @@ describe("mobile workspace synchronization", () => {
     } }));
     const client = new MobileCaptureClient(store(state), request);
 
-    await expect(client.sync()).resolves.toEqual({ status: "synced", count: 1 });
-    expect(JSON.parse(String(request.mock.calls[0]?.[1]?.body))).toEqual({
-      operationId: legacy.id, baseRevision: 1, values: { [propertyId]: "Queued before revisions" },
-    });
+    await expect(client.sync()).resolves.toMatchObject({ status: "attention_required", count: 0 });
+    expect(request).not.toHaveBeenCalled();
+    await expect(client.pendingMutations()).resolves.toMatchObject([{ id: legacy.id, conflict: true }]);
   });
 
   it("refuses to enqueue a Collection edit without cached edit access", async () => {
@@ -233,8 +232,40 @@ describe("mobile workspace synchronization", () => {
 
     await expect(client.sync()).resolves.toMatchObject({ status: "attention_required", error: "collection_not_found" });
     await expect(client.pendingMutations()).resolves.toMatchObject([{ kind: "collection_record_edit", permanentFailure: true }]);
+    await expect(client.sync()).resolves.toMatchObject({ status: "attention_required", count: 0 });
     await client.discardCollectionRecordEdit(collectionId, recordId);
     await expect(client.cachedWorkspace()).resolves.toMatchObject({ collections: [{ records: [{ values: { [propertyId]: "Draft" } }] }] });
+  });
+
+  it("does not resend a conflicted Collection edit during a later ordinary sync", async () => {
+    const state: { snapshot?: MobileWorkspaceSnapshot; mutations: MobileSyncMutation[] } = { snapshot: mobileSnapshot(), mutations: [] };
+    const request = vi.fn<typeof globalThis.fetch>(async () => Response.json({ error: "revision_conflict", message: "Changed.",
+      record: { id: recordId, position: 1, revision: 2, values: { [propertyId]: "Server" } } }, { status: 409 }));
+    const client = new MobileCaptureClient(store(state), request);
+    await client.queueCollectionRecordEdit(collectionId, recordId, { [propertyId]: "Offline" });
+    await client.sync();
+    await client.sync();
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a newer cached Collection record when stable success and conflict receipts are historical", async () => {
+    for (const response of [
+      Response.json({ status: "updated", record: { id: recordId, position: 1, revision: 2, values: { [propertyId]: "Receipt" } } }),
+      Response.json({ error: "revision_conflict", message: "Changed.", record: { id: recordId, position: 1, revision: 2,
+        values: { [propertyId]: "Old conflict" } } }, { status: 409 }),
+    ]) {
+      const base = mobileSnapshot(); const snapshot: MobileWorkspaceSnapshot = { ...base, collections: base.collections.map((collection) => ({
+        ...collection, records: collection.records.map((record) => record.id === recordId ? { ...record, revision: 3,
+          values: { [propertyId]: "Newest" } } : record),
+      })) };
+      const mutation = { id: crypto.randomUUID(), kind: "collection_record_edit" as const, collectionId, recordId,
+        baseRevision: 1, values: { [propertyId]: "Offline" }, attempts: 0,
+        origin: { instanceUrl: "https://stash.example", workspaceId, memberId } };
+      const state = { snapshot, mutations: [mutation] as MobileSyncMutation[] };
+      const client = new MobileCaptureClient(store(state), async () => response.clone());
+      await client.sync();
+      expect(state.snapshot.collections[0]!.records[0]).toMatchObject({ revision: 3, values: { [propertyId]: "Newest" } });
+    }
   });
 
   it("coordinates separate live clients so a slower failure cannot resurrect an applied operation", async () => {

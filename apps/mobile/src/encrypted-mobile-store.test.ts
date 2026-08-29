@@ -60,4 +60,18 @@ describe("encrypted mobile state write serialization", () => {
 
     await expect(second.listMutations()).resolves.toEqual([secondMutation]);
   });
+
+  it("persists permanent Collection rejection as mutable recovery metadata", async () => {
+    const repository = new DelayedSharedRepository();
+    const store = new EncryptedStateMobileCaptureStore(repository, identityCipher);
+    const mutation: MobileSyncMutation = { id: "77777777-7777-4777-8777-777777777777", kind: "collection_record_edit",
+      collectionId: "88888888-8888-4888-8888-888888888888", recordId: "99999999-9999-4999-8999-999999999999",
+      baseRevision: 1, values: { "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa": "Draft" }, attempts: 0, origin };
+    await store.saveMutation(mutation);
+    await expect(store.saveMutation({ ...mutation, attempts: 1, permanentFailure: true,
+      lastError: "This record is unavailable." })).resolves.toBeUndefined();
+    await expect(store.listMutations()).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: mutation.id, permanentFailure: true, attempts: 1 }),
+    ]));
+  });
 });

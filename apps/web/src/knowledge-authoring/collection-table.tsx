@@ -194,8 +194,11 @@ export function CollectionTable({ collection, view: persistedView, sourceNoteTit
       {editable ? newRecord ? <tr className={styles.newRecord}>{tableProperties.map((property) => <td key={property.id}>
         <CollectionDraftControl property={property} options={selectionOptionsForProperty(property, selectionOptions, availableCollections)}
           label={`${property.name}, new record`} autoFocus={property.id === primaryProperty?.id} value={newValues[property.id] ?? collectionValueDraft(property)}
-          onChange={(value) => setNewValues((current) => ({ ...current, [property.id]: value }))} onConfirm={() => void createRecord()}
-          onCancel={() => { setNewRecord(false); setNewValues({}); }} /></td>)}<td><Button type="button" pending={pending} onClick={() => void createRecord()}>Save record</Button></td></tr>
+          onChange={(value) => setNewValues((current) => ({ ...current, [property.id]: value }))}
+          onConfirm={() => { const trigger = collectionRoot.current?.querySelector<HTMLButtonElement>("[data-save-record]");
+            if (trigger) void requestCanonicalRecordMutation(trigger, createRecord); }}
+          onCancel={() => { setNewRecord(false); setNewValues({}); }} /></td>)}<td><Button type="button" data-save-record pending={pending}
+            onClick={(event) => void requestCanonicalRecordMutation(event.currentTarget, createRecord)}>Save record</Button></td></tr>
         : <tr className={styles.newRecordAction}><td colSpan={tableProperties.length + 1}><button type="button" onClick={() => setNewRecord(true)}>New record</button></td></tr> : null}
     </tbody></table></div>
       : definition.presentation === "board" ? <BoardView title={sectionTitle} collection={collection} records={evaluated.records} definition={definition}

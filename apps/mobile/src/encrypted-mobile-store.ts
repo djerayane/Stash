@@ -105,7 +105,7 @@ function mutationKey(mutation: Pick<MobileSyncMutation, "id" | "origin">) {
 }
 
 function mutationContribution(mutation: MobileSyncMutation) {
-  const { attempts: _, nextRetryAt: __, lastError: ___, conflict: ____, ...contribution } = mutation;
+  const { attempts: _, nextRetryAt: __, lastError: ___, conflict: ____, permanentFailure: _____, ...contribution } = mutation;
   const canonical = contribution.kind === "note_edit" ? { ...contribution, id: canonicalUuid(contribution.id),
     noteId: canonicalUuid(contribution.noteId), operations: contribution.operations.map((operation) => {
       const normalized = { ...operation, id: canonicalUuid(operation.id), blockKey: canonicalUuid(operation.blockKey) };

@@ -253,6 +253,34 @@ describe("Collection workspace", () => {
     expect(screen.queryByRole("dialog", { name: "Edit this canonical record?" })).not.toBeInTheDocument();
   });
 
+  it("preserves a staged cross-Note record until confirmation and restores the Save record trigger on cancel", async () => {
+    const crossNote = { ...view, ownerNoteId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" };
+    const requests: Array<{ path: string; init?: RequestInit }> = [];
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({ path: String(input), init });
+      if (init?.method === "POST") return Response.json({ status: "created" });
+      return Response.json({ workspaceId: collection.workspaceId, collections: [], availableCollections: [collection],
+        availableCollectionNotes: { [collection.id]: "Research note" }, availableNotes: [], views: [crossNote] });
+    }) as typeof fetch;
+    renderWorkspace(fetcher, crossNote.ownerNoteId);
+    const region = await screen.findByRole("region", { name: "Research lens" });
+    fireEvent.click(within(region).getByRole("button", { name: "New record" }));
+    fireEvent.change(within(region).getByRole("textbox", { name: "Idea, new record" }), { target: { value: "Staged idea" } });
+    const save = within(region).getByRole("button", { name: "Save record" });
+
+    fireEvent.click(save);
+    let dialog = await screen.findByRole("dialog", { name: "Edit this canonical record?" });
+    expect(requests.filter(({ init }) => init?.method === "POST")).toHaveLength(0);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(save).toHaveFocus());
+    expect(within(region).getByRole("textbox", { name: "Idea, new record" })).toHaveValue("Staged idea");
+
+    fireEvent.click(save);
+    dialog = await screen.findByRole("dialog", { name: "Edit this canonical record?" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Continue editing" }));
+    await waitFor(() => expect(requests.filter(({ init }) => init?.method === "POST")).toHaveLength(1));
+  });
+
   it("gates a cross-Note Board move before mutating its canonical record and restores focus on cancel", async () => {
     const crossNoteBoard = { ...view, ownerNoteId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
       definition: { ...view.definition, presentation: "board" as const, groupBy: statusId } };

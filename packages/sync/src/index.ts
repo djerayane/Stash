@@ -501,20 +501,17 @@ export class MobileCaptureClient {
     for (const storedMutation of await this.#store.listMutations()) {
       let mutation = storedMutation;
       if (!samePairingIdentity(mutation.origin, pairing)) continue;
+      if (mutation.kind === "collection_record_edit" && (mutation.conflict || mutation.permanentFailure)) {
+        attentionError ??= mutation.conflict ? "revision_conflict" : "sync_rejected";
+        continue;
+      }
       const storedBaseRevision = (mutation as { baseRevision?: unknown }).baseRevision;
       if (mutation.kind === "collection_record_edit"
-        && (!Number.isSafeInteger(storedBaseRevision) || Number(storedBaseRevision) < 1)
-        && this.#store.loadWorkspaceSnapshot) {
-        const collectionMutation = mutation;
-        try {
-          const snapshot = await this.#store.loadWorkspaceSnapshot(pairingScope(pairing));
-          const record = snapshot?.collections.find(({ id }) => id === collectionMutation.collectionId)?.records
-            .find(({ id }) => id === collectionMutation.recordId);
-          if (record) {
-            mutation = { ...collectionMutation, baseRevision: record.revision ?? 1 };
-            await this.#store.replaceMutation(storedMutation, mutation);
-          }
-        } catch { /* Leave an unreadable legacy entry intact for explicit recovery instead of dropping it. */ }
+        && (!Number.isSafeInteger(storedBaseRevision) || Number(storedBaseRevision) < 1)) {
+        mutation = { ...mutation, conflict: true, lastError: "This offline edit predates revision tracking. Reconcile it with the server version or discard it." };
+        await this.#store.saveMutation(mutation);
+        attentionError ??= "revision_conflict";
+        continue;
       }
       if (mutation.nextRetryAt && Date.parse(mutation.nextRetryAt) > this.#now()) { retryPending = true; continue; }
       let response: Response;
@@ -593,7 +590,11 @@ export class MobileCaptureClient {
         : { ...record, values: { ...record.values, ...mutation.values } }) }) };
     const remoteRecord = body.record && typeof body.record === "object" && !Array.isArray(body.record)
       && (body.record as { id?: unknown }).id === mutation.recordId ? body.record : undefined;
-    const candidate = remoteRecord ? { ...snapshot, collections: snapshot.collections.map((collection) => collection.id !== mutation.collectionId
+    const cachedRecord = snapshot.collections.find(({ id }) => id === mutation.collectionId)?.records.find(({ id }) => id === mutation.recordId);
+    const remoteRevision = remoteRecord && Number((remoteRecord as { revision?: unknown }).revision);
+    const historicalReceipt = remoteRecord && cachedRecord && typeof remoteRevision === "number" && Number.isSafeInteger(remoteRevision)
+      && remoteRevision < (cachedRecord.revision ?? 1);
+    const candidate = historicalReceipt ? snapshot : remoteRecord ? { ...snapshot, collections: snapshot.collections.map((collection) => collection.id !== mutation.collectionId
       ? collection : { ...collection, records: collection.records.map((record) => record.id === mutation.recordId ? remoteRecord : record) }) } : local;
     let normalized: MobileWorkspaceSnapshot;
     try { normalized = normalizeMobileWorkspaceSnapshot(candidate); }
