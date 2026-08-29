@@ -1,19 +1,32 @@
+import { useState } from "react";
 import type { Collection, CollectionPropertyValue, CollectionRecord, ViewDefinition } from "@stash/domain-types";
 import { recordTitle } from "./table-view";
 
-export function BoardView({ title, collection, records, definition, onMove, onFocus }: { title: string; collection: Collection;
+export function BoardView({ title, collection, records, definition, editable, onMove, onFocus }: { title: string; collection: Collection;
   records: readonly CollectionRecord[]; definition: ViewDefinition;
-  onMove: (recordId: string, value: CollectionPropertyValue) => void; onFocus: (recordId: string) => void }) {
+  editable: boolean; onMove: (recordId: string, source: CollectionPropertyValue, destination: CollectionPropertyValue,
+    trigger: HTMLButtonElement) => Promise<boolean>;
+  onFocus: (recordId: string) => void }) {
+  const [failedMove, setFailedMove] = useState<{ recordId: string; source: CollectionPropertyValue; destination: CollectionPropertyValue }>();
+  const move = async (recordId: string, source: CollectionPropertyValue, destination: CollectionPropertyValue, trigger: HTMLButtonElement) => {
+    try { if (await onMove(recordId, source, destination, trigger)) setFailedMove(undefined); }
+    catch { setFailedMove({ recordId, source, destination }); }
+  };
   const property = collection.properties.find(({ id }) => id === definition.groupBy);
-  const options = property?.type === "single_select" || property?.type === "multi_select" ? property.options
+  const options: ReadonlyArray<{ id: string | null; name: string }> = property?.type === "single_select" || property?.type === "multi_select" ? [...property.options, { id: null, name: "No value" }]
     : property?.type === "checkbox" ? [{ id: "false", name: "Not checked" }, { id: "true", name: "Checked" }] : [];
   return <section aria-label={`${title} board`} className="collection-board">{options.length ? options.map((option) => {
-    const groupRecords = records.filter((record) => property?.type === "multi_select" ? (record.values[property.id] as readonly string[] | undefined)?.includes(option.id)
-      : String(record.values[property!.id] ?? "false") === option.id);
-    return <section key={option.id} aria-labelledby={`collection-group-${property!.id}-${option.id}`}><h4 id={`collection-group-${property!.id}-${option.id}`}>{option.name}</h4>
-      <ul>{groupRecords.map((record) => <li key={record.id}><button type="button" className="collection-card" onClick={() => onFocus(record.id)}>{recordTitle(collection, record)}</button>
-        <div aria-label={`Move ${recordTitle(collection, record)}`}>{options.filter(({ id }) => id !== option.id).map((destination) => <button key={destination.id}
-          type="button" onClick={() => onMove(record.id, property?.type === "checkbox" ? destination.id === "true" : destination.id)}
-          aria-label={`Move ${recordTitle(collection, record)} to ${destination.name}`}>Move to {destination.name}</button>)}</div></li>)}</ul></section>;
+    const groupRecords = records.filter((record) => { const value = record.values[property!.id];
+      if (option.id === null) return value === undefined || value === null || value === "" || Array.isArray(value) && value.length === 0;
+      return property?.type === "multi_select" ? Array.isArray(value) && value.map(String).includes(option.id) : String(value ?? "false") === option.id; });
+    const groupId = option.id ?? "no-value";
+    return <section key={groupId} aria-labelledby={`collection-group-${property!.id}-${groupId}`}><h4 id={`collection-group-${property!.id}-${groupId}`}>{option.name}</h4>
+      {groupRecords.length ? <ul>{groupRecords.map((record) => <li key={record.id}><button type="button" disabled={!editable} className="collection-card" onClick={() => onFocus(record.id)}>{recordTitle(collection, record)}</button>
+        {editable ? <div aria-label={`Move ${recordTitle(collection, record)}`}>{options.filter(({ id }) => id !== option.id).map((destination) => <button key={destination.id ?? "no-value"}
+          type="button" onClick={(event) => void move(record.id, option.id, destination.id, event.currentTarget)}
+          aria-label={`Move ${recordTitle(collection, record)} to ${destination.name}`}>Move to {destination.name}</button>)}</div> : null}
+        {failedMove?.recordId === record.id && failedMove.source === option.id ? <p role="alert">Move not saved. <button type="button"
+          onClick={(event) => void move(record.id, failedMove.source, failedMove.destination, event.currentTarget)}>Try again</button></p> : null}</li>)}</ul>
+        : <p role="note">No records in this group.</p>}</section>;
   }) : <p role="note">Choose a checkbox or select property under Group by to arrange this board.</p>}</section>;
 }

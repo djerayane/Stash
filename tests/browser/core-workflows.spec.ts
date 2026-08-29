@@ -47,6 +47,12 @@ test("keeps topbar actions visible and keyboard focus distinct at a narrow viewp
 test("navigates canonical Tasks, Notes, Boards, Discussions, notifications, and Activity through the running Instance", async ({ page }) => {
   await authenticate(page);
   await page.goto("/app/tasks"); await expect(page.getByRole("heading", { name: "Tasks", exact: true })).toBeVisible();
+  const taskFilters = page.getByRole("group", { name: "Filters" });
+  const taskFilterSummary = taskFilters.getByText("Filters", { exact: true });
+  await expect(taskFilters).toHaveAttribute("open", "");
+  await taskFilterSummary.focus(); await expect(taskFilterSummary).toBeFocused();
+  await taskFilterSummary.press("Enter"); await expect(taskFilters).not.toHaveAttribute("open");
+  await taskFilterSummary.press("Space"); await expect(taskFilters).toHaveAttribute("open", "");
   await page.getByRole("button", { name: "Board" }).press("Enter"); await expect(page.getByRole("region", { name: "board Task view" })).toBeVisible();
   await page.goto("/app/notes");
   await expect(page.getByRole("heading", { name: "Note Tree" }).last()).toBeVisible();
@@ -74,8 +80,10 @@ test("navigates canonical Tasks, Notes, Boards, Discussions, notifications, and 
 });
 
 test("@a11y searches Notes and Tasks with URL-backed filters and canonical deep links", async ({ page }) => {
-  await page.emulateMedia({ reducedMotion: "reduce" }); await authenticate(page);
+  await page.setViewportSize({ width: 320, height: 760 }); await page.emulateMedia({ reducedMotion: "reduce" }); await authenticate(page);
   await page.goto("/app/search?q=task&object=task&status=Ready");
+  await expect(page.getByRole("heading", { level: 1 })).toHaveCount(1);
+  const filters = page.getByText("Filters", { exact: true }); await filters.focus(); await page.keyboard.press("Enter"); await page.keyboard.press("Enter");
   await expect(page.getByRole("combobox", { name: "Object type" })).toHaveValue("task");
   await expect(page.getByRole("textbox", { name: "Status" })).toHaveValue("Ready");
   const task = page.getByRole("link", { name: /STASH-32/ });
@@ -85,6 +93,7 @@ test("@a11y searches Notes and Tasks with URL-backed filters and canonical deep 
   await page.getByRole("button", { name: "Clear filters" }).focus(); await page.keyboard.press("Enter");
   await expect(page).toHaveURL(/\/app\/search\?q=task$/);
   await expect(page.getByRole("combobox", { name: "Object type" })).toHaveValue("");
+  expect(await page.locator("body").evaluate((body) => body.scrollWidth <= body.clientWidth)).toBe(true);
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 });
 

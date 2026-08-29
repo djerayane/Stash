@@ -15,6 +15,11 @@ describe("native mobile capture entry points", () => {
     assert.deepEqual(sharing?.[1].android.singleShareMimeTypes, ["text/*", "image/*", "audio/*", "application/*"]);
   });
 
+  it("routes the native sharing handoff into the capture inbox drain", async () => {
+    const route = await readFile(new URL("../../apps/mobile/app/expo-sharing.tsx", import.meta.url), "utf8");
+    assert.match(route, /<Redirect href="\/"\s*\/>/);
+  });
+
   it("ships iOS and Android widget providers that invoke the validated capture boundary", async () => {
     const swift = await readFile(new URL("../../apps/mobile/targets/capture-widget/StashCaptureWidget.swift", import.meta.url), "utf8");
     const plugin = await readFile(new URL("../../apps/mobile/plugins/with-android-capture-widget.js", import.meta.url), "utf8");

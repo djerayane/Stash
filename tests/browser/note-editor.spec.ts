@@ -49,6 +49,29 @@ test("offers link, callout, and Workspace Attachment authoring controls", async 
   await expect(page.getByRole("link", { name: "Design brief" })).toHaveAttribute("href", "./attachments/attachment-id/design.pdf");
 });
 
+test("keeps visible toolbar command labels inside their controls", async ({ page }) => {
+  await page.goto(`/app/notes/${noteId}`);
+  const toolbar = page.getByRole("toolbar", { name: "Text formatting" });
+  await expect(toolbar.getByRole("button", { name: "Insert Workspace Attachment" })).toBeVisible();
+  const overflowing = await toolbar.getByRole("button").evaluateAll((buttons) => buttons
+    .filter((button) => button.scrollWidth > button.clientWidth)
+    .map((button) => ({ name: button.getAttribute("aria-label") ?? button.textContent?.trim() ?? "unnamed", clientWidth: button.clientWidth, scrollWidth: button.scrollWidth, width: getComputedStyle(button).width })));
+  expect(overflowing).toEqual([]);
+});
+
+test("keeps an arbitrary Note title within three lines at narrow width", async ({ page }) => {
+  const longTitle = "Release collaboration strategy for every regional launch team and every carefully preserved decision";
+  await page.route((url) => url.pathname === `/api/notes/${noteId}`, (route) => route.fulfill({ json: {
+    id: noteId, revision: 1, content: longTitle, document: { type: "doc", blocks: [{ type: "paragraph", blockKey: "title-wrap-seed", content: [{ text: "Body" }] }] },
+  } }));
+  await page.setViewportSize({ width: 320, height: 740 });
+  await page.goto(`/app/notes/${noteId}`);
+  const heading = page.getByRole("heading", { name: longTitle });
+  await expect(heading).toBeVisible();
+  const renderedLines = await heading.evaluate((title) => Math.round(title.clientHeight / Number.parseFloat(getComputedStyle(title).lineHeight)));
+  expect(renderedLines).toBeLessThanOrEqual(3);
+});
+
 test("preserves every checklist item and callout paragraph with stable identities", async ({ page }) => {
   await page.goto(`/app/notes/${richNoteId}`);
   const editor = page.getByRole("textbox", { name: "Note content" });
@@ -240,7 +263,7 @@ test("a read-only Guest gets an axe-clean non-editable Note without local retrie
   await page.goto(`/app/notes/${noteId}`);
   const editor = page.getByRole("textbox", { name: "Note content" });
   await expect(editor).toHaveAttribute("contenteditable", "false");
-  await expect(page.getByRole("status")).toHaveText("Read-only Note");
+  await expect(page.locator('[role="status"]').filter({ hasText: "Read-only Note" })).toHaveText("Read-only Note");
   for (const control of await page.getByRole("toolbar", { name: "Text formatting" }).getByRole("button").all()) await expect(control).toBeDisabled();
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 });
@@ -253,7 +276,7 @@ test("initial collaboration errors preserve landmarks and recover accessibly @a1
   });
   await page.goto(`/app/notes/${noteId}`);
   await expect(page.getByRole("main")).toBeVisible();
-  const alert = page.getByRole("alert"); await expect(alert).toBeFocused({ timeout: 15_000 });
+  const alert = page.getByRole("alert").filter({ hasText: "The Note editor is unavailable." }); await expect(alert).toBeFocused({ timeout: 15_000 });
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
   await page.keyboard.press("Tab"); const retry = page.getByRole("button", { name: "Try again" }); await expect(retry).toBeFocused();
   unavailable = false; await page.keyboard.press("Enter");

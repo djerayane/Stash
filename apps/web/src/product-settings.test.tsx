@@ -7,9 +7,16 @@ import gsap from "gsap";
 import { MemberSettingsPage, OrganizationSettingsPage, WorkspaceDataPage } from "./product-settings";
 
 function view(node: ReactNode) { return render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter>{node}</MemoryRouter></QueryClientProvider>); }
+const organizationAdministration = { organizationId: "org-1", organizationName: "Acme", members: [{ id: "member-1", name: "Ada", email: "ada@example.com", role: "Owner" as const }] };
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe("remaining product settings", () => {
+  it("keeps the Organization heading when administration is unavailable", () => {
+    view(<OrganizationSettingsPage token="admin-token" administrations={[]} />);
+    expect(screen.getByRole("heading", { name: "Organization settings" })).toBeVisible();
+    expect(screen.getByRole("alert")).toHaveTextContent("No administrative state was changed");
+  });
+
   it("loads and saves localization while respecting reduced motion", async () => {
     const requests: Array<{ path: string; init?: RequestInit }> = []; vi.spyOn(gsap, "from");
     vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true, addEventListener() {}, removeEventListener() {} })));
@@ -20,6 +27,11 @@ describe("remaining product settings", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save regional settings" }));
     await waitFor(() => expect(requests.some(({ path, init }) => path === "/api/member/localization" && init?.method === "PUT" && String(init.body).includes('"locale":"fr-FR"'))).toBe(true));
     expect(gsap.from).not.toHaveBeenCalled();
+    expect(screen.getByRole("heading", { name: "Personal settings" })).toBeInTheDocument();
+    expect(screen.queryByText("Personal settings", { selector: "p" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save regional settings" })).toHaveAttribute("data-variant", "secondary");
+    expect(within(locale.closest("label")!).getByText("Locale", { selector: "span" })).toBeVisible();
+    for (const button of screen.getAllByRole("button")) expect(button, button.textContent || "unnamed button").toHaveAttribute("data-variant");
   });
 
   it("keeps import input intact after a recoverable server failure", async () => {
@@ -28,6 +40,41 @@ describe("remaining product settings", () => {
     const file = new File(["archive"], "workspace.zip", { type: "application/zip" }); const archive = screen.getByLabelText("ZIP archive"); fireEvent.change(archive, { target: { files: [file] } }); await waitFor(() => expect((archive as HTMLInputElement).files?.[0]).toBe(file));
     fireEvent.submit(screen.getByRole("button", { name: "Validate and import" }).closest("form")!);
     expect(await screen.findByRole("alert")).toHaveTextContent("Nothing was imported");
+    expect(screen.getByRole("alert")).toHaveTextContent("Your selected archive and import settings are preserved");
+  });
+
+  it("preserves password fields and provides an explicit retry direction", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (path: string) => path === "/api/member/localization"
+      ? Response.json({ locale: "en", timeZone: "UTC", dateFormat: "medium", weekStartsOn: "monday" })
+      : new Response(JSON.stringify({ message: "Password service unavailable." }), { status: 503 })));
+    view(<MemberSettingsPage token="member-token" />);
+    const current = await screen.findByLabelText("Current password");
+    const next = screen.getByLabelText("New password");
+    fireEvent.change(current, { target: { value: "current-password" } });
+    fireEvent.change(next, { target: { value: "replacement-password" } });
+    fireEvent.click(screen.getByRole("button", { name: "Update password" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Your password fields are preserved. Review the message and try again.");
+    expect(current).toHaveValue("current-password");
+    expect(next).toHaveValue("replacement-password");
+  });
+
+  it("makes failed Organization reads recoverable without changing administrative state", async () => {
+    let roleReads = 0; let connectionReads = 0;
+    vi.stubGlobal("fetch", vi.fn(async (path: string) => {
+      if (path === "/api/agent-grant-options") return Response.json({ organizations: [] });
+      if (path.endsWith("/roles")) return ++roleReads === 1
+        ? new Response(JSON.stringify({ message: "Roles unavailable." }), { status: 503 }) : Response.json({ roles: [] });
+      if (path.endsWith("/repository-connections")) return ++connectionReads === 1
+        ? new Response(JSON.stringify({ message: "Connections unavailable." }), { status: 503 }) : Response.json({ repositoryConnections: [] });
+      return Response.json({});
+    }));
+    view(<OrganizationSettingsPage token="admin-token" administrations={[organizationAdministration]} />);
+    expect(await screen.findByRole("alert", { name: "Roles unavailable" })).toHaveTextContent("Existing Roles and assignments are unchanged");
+    expect(screen.getByRole("alert", { name: "Repository Connections unavailable" })).toHaveTextContent("Existing Repository Connections are unchanged");
+    fireEvent.click(screen.getByRole("button", { name: "Try loading Roles again" }));
+    fireEvent.click(screen.getByRole("button", { name: "Try loading Repository Connections again" }));
+    await waitFor(() => { expect(roleReads).toBe(2); expect(connectionReads).toBe(2); });
   });
 
   it("submits an Obsidian vault through the dedicated client boundary and presents its report",async()=>{
@@ -58,6 +105,8 @@ describe("remaining product settings", () => {
       if (path.includes("/roles")) return Response.json({ updated: true });
       return Response.json({ repositoryConnections: [{ id: "connection-1", repositoryUrl: "https://github.com/acme/stash", projectIds: [], ownership: "organization", state: "active" }] }); }));
     view(<OrganizationSettingsPage token="admin-token" activeOrganizationId="org-1" administrations={[{ organizationId: "org-1", organizationName: "Acme", members: [{ id: "member-1", name: "Ada", email: "ada@example.com", role: "Owner" }] }]} />);
+    expect(screen.getByRole("heading", { name: "Organization settings" })).toBeVisible();
+    expect(screen.queryByText("Organization administration", { selector: "p" })).not.toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "Roles and Members" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "Custom Roles" })).toBeVisible();
     fireEvent.change(screen.getAllByRole("textbox", { name: "Role name" })[0]!, { target: { value: "Delivery lead" } });
@@ -66,6 +115,8 @@ describe("remaining product settings", () => {
     await waitFor(() => expect(requests.some(({ path, init }) => path.endsWith("/roles") && init?.method === "POST"
       && String(init.body).includes('"create_project"'))).toBe(true));
     const customRole = screen.getAllByRole("textbox", { name: "Role name" })[1]!.closest("article")!;
+    expect(within(customRole).getAllByText("Role name", { selector: "span" })).not.toHaveLength(0);
+    expect(within(customRole).getByText("Add Organization Member", { selector: "span" })).toBeVisible();
     fireEvent.change(within(customRole).getByRole("textbox", { name: "Role name" }), { target: { value: "Project captain" } });
     fireEvent.click(within(customRole).getByRole("button", { name: "Save Role" }));
     await waitFor(() => expect(requests.some(({ path, init }) => path.endsWith("/roles/role-1") && init?.method === "PUT"
@@ -79,5 +130,6 @@ describe("remaining product settings", () => {
     fireEvent.change(await screen.findByRole("combobox", { name: "Project for https://github.com/acme/stash" }), { target: { value: "project-1" } });
     fireEvent.click(screen.getByRole("button", { name: "Attach" }));
     await waitFor(() => expect(requests.some(({ path, init }) => path.endsWith("/repository-connections/connection-1/projects/project-1") && init?.method === "POST")).toBe(true));
+    for (const button of screen.getAllByRole("button")) expect(button, button.textContent || "unnamed button").toHaveAttribute("data-variant");
   });
 });

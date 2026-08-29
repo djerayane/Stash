@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useState } from "react";
 import { MemoryRouter, useLocation } from "react-router";
@@ -65,26 +65,39 @@ test("routes an empty Instance into browser-guided setup before sign-in", () => 
 test("renders authenticated navigation and deep-linkable route content", async () => {
   renderShell("/app/tasks");
   expect(await screen.findByRole("heading", { name: "Tasks" })).toBeInTheDocument();
-  expect(screen.getByRole("navigation", { name: "Workspace" })).toBeInTheDocument();
-  expect(screen.getByRole("link", { name: "Tasks" })).toHaveAttribute("aria-current", "page");
-  expect(screen.getByRole("link", { name: "Note Tree" })).toBeInTheDocument();
-  expect(screen.getByRole("link", { name: "Search" })).toBeInTheDocument();
-  expect(screen.getByRole("link", { name: "Projects" })).toHaveAttribute("href", "/app/projects");
+  const navigation = screen.getByRole("navigation", { name: "Workspace" });
+  expect(navigation).toBeInTheDocument();
+  expect(within(navigation).getAllByRole("link").filter((link) => link.getAttribute("aria-current") === "page")).toHaveLength(1);
+  expect(within(navigation).getByRole("link", { name: "Tasks" })).toHaveAttribute("aria-current", "page");
+  expect(within(navigation).getByRole("link", { name: "Note Tree" })).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Search Workspace" })).toHaveAttribute("href", "/app/search");
+  expect(within(navigation).getByRole("link", { name: "Projects" })).toHaveAttribute("href", "/app/projects");
   expect(screen.queryByText("Engine Room")).not.toBeInTheDocument();
   expect(screen.getByText("AL")).toBeInTheDocument();
 });
 
 test("keeps Organization administration out of ordinary Member navigation", () => {
   renderShell("/app/settings");
-  expect(screen.getByRole("link", { name: "Settings" })).toBeInTheDocument();
+  const navigation = screen.getByRole("navigation", { name: "Workspace" });
+  expect(within(navigation).getByRole("link", { name: "Settings" })).toBeInTheDocument();
   expect(screen.queryByRole("link", { name: "Organization" })).not.toBeInTheDocument();
   expect(screen.queryByRole("link", { name: "Imported identities" })).not.toBeInTheDocument();
 });
 
 test("reveals Organization administration only from server-provided scope", () => {
   renderShell("/app", { ...member, organizationAdministrations: [{ organizationId: "org-1", organizationName: "Acme", members: [] }] });
-  expect(screen.getByRole("link", { name: "Organization" })).toHaveAttribute("href", "/app/settings/organization");
-  expect(screen.getByRole("link", { name: "Imported identities" })).toBeInTheDocument();
+  const navigation = screen.getByRole("navigation", { name: "Workspace" });
+  expect(within(navigation).getByRole("link", { name: "Organization" })).toHaveAttribute("href", "/app/settings/organization");
+  expect(within(navigation).getByRole("link", { name: "Imported identities" })).toBeInTheDocument();
+});
+
+test("marks only the nested administration destination as current", async () => {
+  renderShell("/app/settings/organization", { ...member, organizationAdministrations: [{ organizationId: "org-1", organizationName: "Acme", members: [] }] });
+  expect(await screen.findByRole("heading", { name: "Organization settings" })).toBeInTheDocument();
+  const navigation = screen.getByRole("navigation", { name: "Workspace" });
+  const current = within(navigation).getAllByRole("link").filter((link) => link.getAttribute("aria-current") === "page");
+  expect(current).toHaveLength(1);
+  expect(current[0]).toHaveAccessibleName("Organization");
 });
 
 test("derives identity labels and initials with explicit fallbacks", () => {
@@ -147,6 +160,17 @@ test("exposes the implemented search, capture, and notification actions", async 
   expect(screen.getByRole("searchbox", { name: "Search Workspace" })).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "Notifications" })).toHaveAttribute("href", "/app/notifications");
   expect(screen.getByRole("link", { name: "Capture" })).toHaveAttribute("href", "/app/inbox");
+  const globalActions = screen.getByRole("banner", { name: "Global actions" });
+  expect(within(globalActions).getByRole("searchbox", { name: "Search Workspace" })).toBeInTheDocument();
+  expect(within(globalActions).getByRole("link", { name: "Notifications" })).toBeInTheDocument();
+  expect(within(globalActions).getByRole("link", { name: "Capture" })).toBeInTheDocument();
+  expect(within(globalActions).queryByRole("button", { name: /Note context|Archive Note|trash/i })).not.toBeInTheDocument();
+  expect(within(globalActions).queryByRole("link", { name: /history/i })).not.toBeInTheDocument();
+  expect(within(globalActions).queryByRole("link", { name: "Stash" })).not.toBeInTheDocument();
+  expect(within(globalActions).queryByRole("button", { name: "More" })).not.toBeInTheDocument();
+  const mobileNavigation = screen.getByRole("navigation", { name: "Mobile Workspace" });
+  expect(within(mobileNavigation).getByRole("link", { name: "Stash" })).toHaveAttribute("href", "/app");
+  expect(within(mobileNavigation).getByText("More", { selector: "summary" })).toBeInTheDocument();
 });
 
 test("offers password, passkey, recovery code, email recovery, and OIDC sign-in", async () => {

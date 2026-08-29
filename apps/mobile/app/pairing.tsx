@@ -1,12 +1,14 @@
 import { router } from "expo-router";
+import type { ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ScrollView, Share, Text, TextInput, useColorScheme } from "react-native";
+import { Share, Text, TextInput, View, useColorScheme } from "react-native";
 
 import { LegacyRecoveryRequired, MobileCaptureClient } from "@stash/sync";
 import { SecureMobileCaptureStore } from "../src/secure-mobile-store";
 import { NativeActionButton } from "@/components/native-controls";
-import { StatusFeedback } from "@/components/status-feedback";
-import { colors } from "@/theme/colors";
+import { MobileStatusNotice } from "@/components/mobile-status-notice";
+import { Screen } from "@/components/screen";
+import { stashTheme } from "@/theme/theme";
 
 export default function PairingScreen() {
   useColorScheme();
@@ -57,24 +59,32 @@ export default function PairingScreen() {
     }
   };
   useEffect(() => () => { mounted.current = false; controller.abort(); client.cancelRequests(); }, [client, controller]);
-  return <ScrollView contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled"
-    contentContainerStyle={{ padding: 20, gap: 18 }}>
-    <Text selectable style={{ color: colors.secondaryLabel, fontSize: 15, lineHeight: 21 }}>
+  return <Screen bottomAction={<NativeActionButton label="Pair Instance" onPress={pair} />}>
+    <Text selectable style={{ color: stashTheme.colors.secondaryInk, fontSize: 15, lineHeight: 21 }}>
       Connect directly to your HTTPS Stash Instance. Credentials stay protected on this device.
     </Text>
-    <TextInput accessibilityLabel="Instance HTTPS URL" autoCapitalize="none" autoCorrect={false}
-      keyboardType="url" placeholder="https://stash.example.com" value={instanceUrl} onChangeText={setInstanceUrl}
-      style={fieldStyle} />
-    <TextInput accessibilityLabel="Member token" autoCapitalize="none" autoCorrect={false} secureTextEntry
-      placeholder="Member token" value={memberToken} onChangeText={setMemberToken} style={fieldStyle} />
-    <TextInput accessibilityLabel="Workspace ID" autoCapitalize="none" autoCorrect={false}
-      placeholder="Workspace UUID" value={workspaceId} onChangeText={setWorkspaceId} style={fieldStyle} />
-    {error ? <StatusFeedback message={error} /> : null}
-    {legacyRecovery ? <NativeActionButton label="Export legacy captures" onPress={exportLegacy} /> : null}
+    <PairingField label="Instance HTTPS URL"><TextInput accessibilityLabel="Instance HTTPS URL" autoCapitalize="none" autoCorrect={false}
+      keyboardType="url" placeholder="https://stash.example.com" placeholderTextColor={stashTheme.colors.secondaryInk}
+      value={instanceUrl} onChangeText={setInstanceUrl} style={fieldStyle} /></PairingField>
+    <PairingField label="Member token"><TextInput accessibilityLabel="Member token" autoCapitalize="none" autoCorrect={false} secureTextEntry
+      placeholder="Enter member token" placeholderTextColor={stashTheme.colors.secondaryInk}
+      value={memberToken} onChangeText={setMemberToken} style={fieldStyle} /></PairingField>
+    <PairingField label="Workspace ID"><TextInput accessibilityLabel="Workspace ID" autoCapitalize="none" autoCorrect={false}
+      placeholder="Enter Workspace ID" placeholderTextColor={stashTheme.colors.secondaryInk}
+      value={workspaceId} onChangeText={setWorkspaceId} style={fieldStyle} /></PairingField>
+    {error ? <MobileStatusNotice variant={legacyRecovery ? "attention" : "error"} message={error} /> : null}
+    {legacyRecovery ? <NativeActionButton variant="secondary" label="Export legacy captures" onPress={exportLegacy} /> : null}
     {legacyRecovery && legacyExported ? <NativeActionButton label="Continue with new pairing" onPress={continuePairing} /> : null}
-    <NativeActionButton label="Pair Instance" onPress={pair} />
-  </ScrollView>;
+  </Screen>;
 }
 
-const fieldStyle = { minHeight: 52, borderWidth: 1, borderColor: colors.separator, color: colors.label,
-  backgroundColor: colors.background, borderRadius: 14 as const, borderCurve: "continuous" as const, paddingHorizontal: 14, fontSize: 16 };
+function PairingField({ label, children }: { label: string; children: ReactNode }) {
+  return <View style={{ gap: stashTheme.spacing.sm }}>
+    <Text selectable style={{ color: stashTheme.colors.ink, fontSize: stashTheme.type.caption, fontWeight: "600" }}>{label}</Text>
+    {children}
+  </View>;
+}
+
+const fieldStyle = { minHeight: stashTheme.controlHeight, borderWidth: 1, borderColor: stashTheme.colors.rule,
+  color: stashTheme.colors.ink, backgroundColor: stashTheme.colors.surface, borderRadius: stashTheme.radius.control,
+  borderCurve: "continuous" as const, paddingHorizontal: stashTheme.spacing.md, fontSize: stashTheme.type.body };

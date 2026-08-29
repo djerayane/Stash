@@ -49,6 +49,7 @@ export interface MobileProtocolClient {
   applyNoteEdit(noteId: string, body: unknown, signal: AbortSignal): Promise<Response>;
   applyTaskEdit(projectId: string, taskKey: string, body: unknown, signal: AbortSignal): Promise<Response>;
   applyCanonicalTaskEdit(taskId: string, body: unknown, signal: AbortSignal): Promise<Response>;
+  applyCollectionRecordEdit(collectionId: string, recordId: string, body: unknown, signal: AbortSignal): Promise<Response>;
   noteTree(workspaceId: string, signal: AbortSignal): Promise<Response>;
   note(noteId: string, signal: AbortSignal): Promise<Response>;
   canonicalTasks(workspaceId: string, signal: AbortSignal): Promise<Response>;
@@ -170,6 +171,10 @@ export function createMobileProtocolClient(options: MobileProtocolClientOptions)
     applyCanonicalTaskEdit: (taskId, body, signal) => send(`/api/canonical-tasks/${encodeURIComponent(taskId)}`, {
       method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal,
     }),
+    applyCollectionRecordEdit: (collectionId, recordId, body, signal) => send(
+      `/api/collections/${encodeURIComponent(collectionId)}/records/${encodeURIComponent(recordId)}`,
+      { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal },
+    ),
     applyNoteEdit: (noteId, body, signal) => send(`/api/notes/${encodeURIComponent(noteId)}`, {
       method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal,
     }),

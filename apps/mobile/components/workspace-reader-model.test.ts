@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { groupReadableRecords, visibleNoteTree } from "./workspace-reader-model";
+import {
+  displayCollectionPropertyValue,
+  groupReadableRecords,
+  readablePresentationName,
+  visibleNoteTree,
+} from "./workspace-reader-model";
 
 describe("mobile Workspace reader model", () => {
   it("hides descendants when a Note branch is collapsed", () => {
@@ -21,9 +26,85 @@ describe("mobile Workspace reader model", () => {
     const groups = groupReadableRecords(records, {
       filters: [{ propertyId: "title", operator: "not_equals", value: "Archive" }],
       sorts: [{ propertyId: "title", direction: "descending" }], groupBy: "status",
-    });
+    }, [{ id: "status", name: "Status", position: 2, type: "single_select",
+      options: [{ id: "doing", name: "In progress" }, { id: "todo", name: "Not started" }] }]);
     expect(groups.map(({ label, items }) => [label, items.map(({ id }) => id)])).toEqual([
-      ["Doing", ["second"]], ["Todo", ["first"]],
+      ["In progress", ["second"]], ["Not started", ["first"]],
     ]);
+  });
+
+  it("places a multi-value Collection record in every matching readable group", () => {
+    const records = [
+      { id: "both", position: 1, values: { tags: ["research", "writing"] } },
+      { id: "empty", position: 2, values: { tags: [] } },
+    ];
+    const groups = groupReadableRecords(records, { filters: [], sorts: [], groupBy: "tags" }, [{
+      id: "tags", name: "Tags", position: 1, type: "multi_select",
+      options: [{ id: "research", name: "Research" }, { id: "writing", name: "Writing" }],
+    }]);
+
+    expect(groups.map(({ label, items }) => [label, items.map(({ id }) => id)])).toEqual([
+      ["Research", ["both"]],
+      ["Writing", ["both"]],
+      ["No value", ["empty"]],
+    ]);
+  });
+
+  it("uses each relation fallback as a readable group without exposing relation IDs", () => {
+    const groups = groupReadableRecords([{ id: "related", position: 1, values: { related: [
+      { id: "11111111-1111-4111-8111-111111111111", fallback: "Design brief" },
+      { id: "22222222-2222-4222-8222-222222222222", fallback: "Research notes" },
+    ] } }], { filters: [], sorts: [], groupBy: "related" }, [{
+      id: "related", name: "Related", position: 1, type: "relation", target: { kind: "notes" },
+    }]);
+
+    expect(groups.map(({ label }) => label)).toEqual(["Design brief", "Research notes"]);
+  });
+
+  it("matches web grouping when different relation identities share one fallback", () => {
+    const groups = groupReadableRecords([
+      { id: "first", position: 1, values: { related: [{ id: "11111111-1111-4111-8111-111111111111", fallback: "Unavailable note" }] } },
+      { id: "second", position: 2, values: { related: [{ id: "22222222-2222-4222-8222-222222222222", fallback: "Unavailable note" }] } },
+    ], { filters: [], sorts: [], groupBy: "related" }, [{
+      id: "related", name: "Related", position: 1, type: "relation", target: { kind: "notes" },
+    }]);
+
+    expect(groups.map(({ label, items }) => [label, items.map(({ id }) => id)])).toEqual([
+      ["Unavailable note", ["first", "second"]],
+    ]);
+  });
+
+  it("limits a focused Collection view to its canonical record", () => {
+    const records = [
+      { id: "first", position: 1, values: { title: "Alpha" } },
+      { id: "second", position: 2, values: { title: "Beta" } },
+    ];
+    expect(groupReadableRecords(records, {
+      filters: [], sorts: [], focused: { recordId: "second" },
+    }).flatMap(({ items }) => items.map(({ id }) => id))).toEqual(["second"]);
+  });
+
+  it("uses readable presentation and typed property values", () => {
+    expect(readablePresentationName("table")).toBe("Table");
+    expect(displayCollectionPropertyValue({
+      id: "status", name: "Status", position: 2, type: "single_select",
+      options: [{ id: "doing", name: "In progress" }],
+    }, "doing")).toBe("In progress");
+  });
+
+  it("uses permission-filtered Member and file labels without exposing stored identities", () => {
+    const memberId = "11111111-1111-4111-8111-111111111111";
+    const fileId = "22222222-2222-4222-8222-222222222222";
+    const hiddenId = "33333333-3333-4333-8333-333333333333";
+    const display = { members: [{ id: memberId, label: "Ada Lovelace" }], attachments: [{ id: fileId, label: "brief.pdf" }] };
+
+    expect(displayCollectionPropertyValue({ id: memberId, name: "Owner", position: 1, type: "person" }, [memberId, hiddenId], display))
+      .toBe("Ada Lovelace, Unavailable Member");
+    expect(displayCollectionPropertyValue({ id: fileId, name: "Files", position: 2, type: "attachment" }, [fileId, hiddenId], display))
+      .toBe("brief.pdf, Unavailable file");
+    expect(JSON.stringify([
+      displayCollectionPropertyValue({ id: memberId, name: "Owner", position: 1, type: "person" }, [memberId, hiddenId], display),
+      displayCollectionPropertyValue({ id: fileId, name: "Files", position: 2, type: "attachment" }, [fileId, hiddenId], display),
+    ])).not.toContain(hiddenId);
   });
 });

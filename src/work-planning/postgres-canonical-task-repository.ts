@@ -239,6 +239,10 @@ export class PostgresCanonicalTaskRepository implements CanonicalTaskRepository 
         WHERE task.workspace_id=$1 AND ($3::boolean OR EXISTS(SELECT 1 FROM stash_task_projects association
           JOIN stash_project_guests guest ON guest.project_id=association.project_id WHERE association.task_id=task.id AND guest.account_id=$2))
         ORDER BY task.created_at,task.id`, [workspaceId, memberId, permission.full_member]);
-      return { status: "found" as const, tasks: await Promise.all(rows.rows.map((row: any) => this.canonical(client, row.id, memberId))), workflow }; });
+      const tasks = await Promise.all(rows.rows.map((row: any) => this.canonical(client, row.id, memberId)));
+      const assigneeIds = [...new Set(tasks.flatMap(({ assigneeIds }) => assigneeIds))];
+      const members = assigneeIds.length ? (await client.query<{ id: string; name: string }>(
+        "SELECT id,name FROM stash_accounts WHERE id=ANY($1::uuid[]) ORDER BY id", [assigneeIds])).rows : [];
+      return { status: "found" as const, tasks, workflow, members }; });
   }
 }

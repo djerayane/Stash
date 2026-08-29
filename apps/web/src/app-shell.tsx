@@ -1,7 +1,5 @@
 import * as NavigationMenu from "@radix-ui/react-navigation-menu";
-import { useGSAP } from "@gsap/react";
 import { useMutation } from "@tanstack/react-query";
-import gsap from "gsap";
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router";
 import styles from "./app-shell.module.css";
@@ -18,6 +16,7 @@ import { SetupPage } from "./identity-access/setup-page";
 import type { InstanceSetupState } from "./identity-access/setup-state";
 import { workPlanningWebCapability } from "./work-planning/web-capability";
 import { createWebCapabilityRegistry, navigationFromCapabilities, routesFromWebCapabilities } from "./capability-registry";
+import { Button } from "./ui/control";
 
 export type SessionState =
   | { readonly status: "loading" }
@@ -110,10 +109,9 @@ function StateScreen({ state }: { readonly state: Extract<SessionState, { status
       tabIndex={loading ? undefined : -1}
     >
       <span className={loading ? styles.loader : styles.errorMark} aria-hidden="true" />
-      <p className={styles.kicker}>{loading ? "Stash" : "Connection interrupted"}</p>
       <h1>{loading ? "Opening your workspace" : "Workspace unavailable"}</h1>
       <p>{loading ? "Restoring the context you left behind." : state.message}</p>
-      {!loading && state.retry ? <button className={styles.primaryButton} type="button" onClick={state.retry}>Try again</button> : null}
+      {!loading && state.retry ? <Button className={styles.primaryButton} type="button" onClick={state.retry}>Try again</Button> : null}
     </div>
   </main>;
 }
@@ -142,10 +140,10 @@ function SignIn({ returnTo }: { readonly returnTo: string }) {
   return <main className={styles.signIn}>
     <div className={styles.signInBrand}><span aria-hidden="true" className={styles.brandMark}><span /><span /></span><span>Stash</span></div>
     <section className={styles.signInPanel} aria-labelledby="sign-in-title">
-      <p className={styles.kicker}>Welcome back</p><h1 id="sign-in-title">Sign in to Stash</h1>
+      <h1 id="sign-in-title">Sign in to Stash</h1>
       <p>Your Instance manages access. Use the authentication method configured by your administrator.</p>
-      <div className={styles.authMethods} role="group" aria-label="Authentication method">{(["password", "passkey", "recovery", "email", "emailToken", "oidc"] as const).map((item) => <button aria-pressed={method === item} key={item} onClick={() => setMethod(item)} type="button">{item === "recovery" ? "Recovery code" : item === "email" ? "Email recovery" : item === "emailToken" ? "Recovery link" : item === "oidc" ? "OpenID Connect" : item[0]!.toUpperCase() + item.slice(1)}</button>)}</div>
-      <form className={styles.signInForm} onSubmit={(event) => { event.preventDefault(); signIn.mutate(); }}>{method !== "oidc" && method !== "emailToken" ? <label>Email<input autoComplete="email" required type="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label> : method === "oidc" ? <label>Organization ID<input required value={organizationId} onChange={(event) => setOrganizationId(event.target.value)} /></label> : null}{method === "password" ? <label>Password<input autoComplete="current-password" minLength={12} required type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label> : method === "recovery" ? <label>Recovery code<input autoComplete="one-time-code" required value={code} onChange={(event) => setCode(event.target.value)} /></label> : method === "emailToken" ? <label>Email recovery token<input autoComplete="one-time-code" required value={code} onChange={(event) => setCode(event.target.value)} /></label> : null}<button className={styles.primaryButton} disabled={signIn.isPending} type="submit">{signIn.isPending ? "Working…" : method === "email" ? "Send recovery email" : method === "oidc" ? "Continue with OpenID Connect" : "Sign in"}</button>{method === "email" && signIn.isSuccess ? <AuthenticationNotice role="status">If the account exists, recovery instructions have been queued.</AuthenticationNotice> : null}{signIn.isError ? <AuthenticationNotice role="alert">{signIn.error.message}</AuthenticationNotice> : null}</form>
+      <div className={styles.authMethods} role="group" aria-label="Authentication method">{(["password", "passkey", "recovery", "email", "emailToken", "oidc"] as const).map((item) => <Button aria-pressed={method === item} key={item} onClick={() => setMethod(item)} type="button" variant="secondary">{item === "recovery" ? "Recovery code" : item === "email" ? "Email recovery" : item === "emailToken" ? "Recovery link" : item === "oidc" ? "OpenID Connect" : item[0]!.toUpperCase() + item.slice(1)}</Button>)}</div>
+      <form className={styles.signInForm} onSubmit={(event) => { event.preventDefault(); signIn.mutate(); }}>{method !== "oidc" && method !== "emailToken" ? <label>Email<input autoComplete="email" required type="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label> : method === "oidc" ? <label>Organization ID<input required value={organizationId} onChange={(event) => setOrganizationId(event.target.value)} /></label> : null}{method === "password" ? <label>Password<input autoComplete="current-password" minLength={12} required type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label> : method === "recovery" ? <label>Recovery code<input autoComplete="one-time-code" required value={code} onChange={(event) => setCode(event.target.value)} /></label> : method === "emailToken" ? <label>Email recovery token<input autoComplete="one-time-code" required value={code} onChange={(event) => setCode(event.target.value)} /></label> : null}<Button className={styles.primaryButton} pending={signIn.isPending} pendingLabel="Working" type="submit">{method === "email" ? "Send recovery email" : method === "oidc" ? "Continue with OpenID Connect" : "Sign in"}</Button>{method === "email" && signIn.isSuccess ? <AuthenticationNotice role="status">If the account exists, recovery instructions have been queued.</AuthenticationNotice> : null}{signIn.isError ? <AuthenticationNotice role="alert">{signIn.error.message}</AuthenticationNotice> : null}</form>
       <p className={styles.authSwitch}>New to this Instance? <Link className={styles.textLink} to={`/sign-up?returnTo=${encodeURIComponent(returnTo)}`}>Create an account</Link></p>
     </section>
   </main>;
@@ -166,14 +164,14 @@ function SignUp({ returnTo }: { readonly returnTo: string }) {
   return <main className={styles.signIn}>
     <div className={styles.signInBrand}><span className={styles.brandMark}>S</span><span>Stash</span></div>
     <section className={styles.signInPanel} aria-labelledby="sign-up-title">
-      <p className={styles.kicker}>Your own place to think</p><h1 id="sign-up-title">Create an account</h1>
+      <h1 id="sign-up-title">Create an account</h1>
       <p>Start with a personal Workspace on this Instance. Your information remains portable.</p>
       {enabled === false ? <p className={styles.authenticationNotice} role="status">Account registration is closed on this Instance. Ask an Instance Administrator for access.</p> : <form className={styles.signInForm} onSubmit={(event) => { event.preventDefault(); registration.mutate(); }}>
         <label>Name<input autoComplete="name" required value={name} onChange={(event) => setName(event.target.value)} /></label>
         <label>Email<input autoComplete="email" required type="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label>
         <label>Password<input autoComplete="new-password" minLength={12} required type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
         <label>Confirm password<input autoComplete="new-password" minLength={12} required type="password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></label>
-        <button className={styles.primaryButton} disabled={registration.isPending || enabled === undefined} type="submit">{registration.isPending ? "Creating account…" : "Create account"}</button>
+        <Button className={styles.primaryButton} disabled={enabled === undefined} pending={registration.isPending} pendingLabel="Creating account" type="submit">Create account</Button>
         {registration.isError ? <AuthenticationNotice role="alert">{registration.error.message}</AuthenticationNotice> : null}
       </form>}
       <p className={styles.authSwitch}>Already have an account? <Link className={styles.textLink} to={`/sign-in?returnTo=${encodeURIComponent(returnTo)}`}>Sign in</Link></p>
@@ -196,26 +194,26 @@ function OidcCallback() {
       setError(cause instanceof Error ? cause.message : "OpenID Connect sign-in could not be completed.");
     }
   }, []);
-  return <main className={styles.stateScreen}><div aria-live="assertive" role={error ? "alert" : "status"}><p className={styles.kicker}>OpenID Connect</p><h1>{error ? "Sign-in interrupted" : "Completing sign-in"}</h1><p>{error || "Restoring your Workspace."}</p>{error ? <Link className={styles.primaryButton} to="/sign-in">Return to sign in</Link> : null}</div></main>;
+  return <main className={styles.stateScreen}><div aria-live="assertive" role={error ? "alert" : "status"}><h1>{error ? "Sign-in interrupted" : "Completing sign-in"}</h1><p>{error || "Restoring your Workspace."}</p>{error ? <Link className={styles.primaryButton} to="/sign-in">Return to sign in</Link> : null}</div></main>;
 }
 
 function EmptyHome() {
   return <div className={styles.page}>
     <header className={styles.pageHeader}>
-      <div><p className={styles.kicker}>Today</p><h1>Good morning.</h1><p className={styles.lede}>A quiet workspace is room to think clearly.</p></div>
+      <div><h1>Good morning.</h1><p className={styles.lede}>A quiet workspace is room to think clearly.</p></div>
       <Link className={styles.primaryButton} to="/app/notes/new"><Icon name="plus" />Capture a note</Link>
     </header>
     <section className={styles.emptyState} aria-labelledby="empty-title">
       <div className={styles.emptyGraphic} aria-hidden="true"><span /><span /><span /></div>
       <div><h2 id="empty-title">Nothing needs your attention</h2><p>Capture an idea now, or return when new work reaches your Workspace.</p><Link className={styles.textLink} to="/app/notes/new">Capture a note <span aria-hidden="true">→</span></Link></div>
     </section>
-    <aside className={styles.quietNote} aria-label="Workspace philosophy"><span>Quiet by design</span><p>Stash keeps planning close to the work without manufacturing urgency.</p></aside>
+    <p className={styles.quietNote}>Stash keeps planning close to the work without manufacturing urgency.</p>
   </div>;
 }
 
-function PlaceholderPage({ workspaceName, title, description, action, actionTo }: { readonly workspaceName: string; readonly title: string; readonly description: string; readonly action: string; readonly actionTo?: string }) {
+function PlaceholderPage({ title, description, action, actionTo }: { readonly title: string; readonly description: string; readonly action: string; readonly actionTo?: string }) {
   return <div className={styles.page}>
-    <header className={styles.pageHeader}><div><p className={styles.kicker}>{workspaceName}</p><h1>{title}</h1><p className={styles.lede}>{description}</p></div>{actionTo ? <Link className={styles.primaryButton} to={actionTo}><Icon name="plus" />{action}</Link> : <span className={styles.actionHint}><Icon name="plus" />{action}</span>}</header>
+    <header className={styles.pageHeader}><div><h1>{title}</h1><p className={styles.lede}>{description}</p></div>{actionTo ? <Link className={styles.primaryButton} to={actionTo}><Icon name="plus" />{action}</Link> : <span className={styles.actionHint}><Icon name="plus" />{action}</span>}</header>
     <section className={styles.placeholder} aria-label={`${title} empty state`}><span className={styles.placeholderRule} /><h2>{title}</h2><p>{description}</p></section>
   </div>;
 }
@@ -225,7 +223,6 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
   const [activeWorkspace,setActiveWorkspace]=useState(session.workspace);
-  const shellRef = useRef<HTMLDivElement>(null);
   const mainRef = useRef<HTMLElement>(null);
   const workspaceName = displayLabel(activeWorkspace.name, "Personal workspace");
   const memberName = displayLabel(session.member.name, displayLabel(session.member.email, "Member"));
@@ -239,31 +236,22 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
   });
   const activeNoteId = /^\/app\/notes\/[^/]+$/.test(location.pathname) && location.pathname !== "/app/notes/new"
     ? decodeURIComponent(location.pathname.split("/")[3]!) : undefined;
-  useGSAP(() => {
-    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
-    gsap.from(`.${styles.sidebar} > *, .${styles.topbar} > *`, { opacity: 0, y: 8, duration: 0.45, stagger: 0.06, ease: "power2.out", clearProps: "all" });
-  }, { scope: shellRef });
-  useGSAP(() => {
-    const content = mainRef.current?.firstElementChild;
-    if (!content || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
-    gsap.fromTo(content, { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.38, ease: "power2.out", clearProps: "all" });
-  }, { scope: shellRef, dependencies: [location.pathname] });
   useEffect(() => { mainRef.current?.focus(); }, [location.pathname]);
   useEffect(() => {
     if (!activeWorkspace.id || !isRestorableContext(`${location.pathname}${location.search}`) || location.pathname === "/app") return;
     try { localStorage.setItem(lastActiveContextKey(activeWorkspace.id), `${location.pathname}${location.search}`); } catch { /* Browsing still works when local storage is unavailable. */ }
   }, [activeWorkspace.id, location.pathname, location.search]);
-  return <div className={styles.shell} ref={shellRef}>
+  return <div className={styles.shell}>
     <a className={styles.skipLink} href="#workspace-content">Skip to content</a>
     <aside className={styles.sidebar} aria-label="Application navigation">
       <Link className={styles.brand} to="/app" aria-label="Stash home"><span aria-hidden="true" className={styles.brandMark}><span /><span /></span><span>Stash</span></Link>
       <NavigationMenu.Root className={styles.navigationRoot} orientation="vertical" aria-label="Workspace"><NavigationMenu.List className={styles.navigation}>
-        {primaryNavigation.map((item) => <NavigationMenu.Item key={item.to}><NavigationMenu.Link asChild><NavLink className={styles.navLink}
+        {primaryNavigation.filter((item) => item.to !== "/app/search").map((item) => <NavigationMenu.Item key={item.to}><NavigationMenu.Link asChild><NavLink className={styles.navLink}
           end={item.to === "/app/inbox" || item.to === "/app/search"} to={item.to}><Icon name={item.icon} />{item.label}</NavLink></NavigationMenu.Link></NavigationMenu.Item>)}
         <NavigationMenu.Item className={styles.contextualDivider} aria-hidden="true" />
         {contextualNavigation.map((item) => <NavigationMenu.Item className={styles.mobileSecondary} key={item.to}><NavigationMenu.Link asChild><NavLink className={`${styles.navLink} ${styles.contextualNavLink}`}
           to={item.to}><Icon name={item.icon} />{item.label}</NavLink></NavigationMenu.Link></NavigationMenu.Item>)}
-        <NavigationMenu.Item className={styles.mobileSettings}><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings"><Icon name="settings" />Settings</NavLink></NavigationMenu.Link></NavigationMenu.Item>
+        <NavigationMenu.Item className={styles.mobileSettings}><NavigationMenu.Link asChild><NavLink className={styles.navLink} end to="/app/settings"><Icon name="settings" />Settings</NavLink></NavigationMenu.Link></NavigationMenu.Item>
         {session.activeOrganizationId ? <NavigationMenu.Item className={styles.mobileSecondary}><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/agents"><Icon name="agents" />Agents</NavLink></NavigationMenu.Link></NavigationMenu.Item> : null}
         {session.organizationAdministrations?.length ? <><NavigationMenu.Item className={styles.mobileSecondary}><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/organization"><Icon name="settings" />Organization</NavLink></NavigationMenu.Link></NavigationMenu.Item><NavigationMenu.Item className={styles.mobileSecondary}><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/members"><Icon name="members" />Members</NavLink></NavigationMenu.Link></NavigationMenu.Item><NavigationMenu.Item className={styles.mobileSecondary}><NavigationMenu.Link asChild><NavLink className={styles.navLink} to="/app/settings/imported-identities"><Icon name="import" />Imported identities</NavLink></NavigationMenu.Link></NavigationMenu.Item></> : null}
       </NavigationMenu.List></NavigationMenu.Root>
@@ -271,7 +259,13 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
       <div className={styles.sidebarFooter}><span className={styles.avatar} aria-hidden="true">{initials(memberName, "M")}</span><span><strong>{memberName}</strong><small>{memberEmail}</small></span></div>
     </aside>
     <div className={styles.workspace}>
-      <header className={styles.topbar}><Link className={styles.mobileIdentity} to={activeNoteId ? "/app/notes" : "/app"}>{activeNoteId ? <><span aria-hidden="true">←</span><strong>Note Tree</strong></> : <><span aria-hidden="true" className={styles.brandMark}><span /><span /></span><strong>Stash</strong></>}</Link><details className={styles.mobileMenu}><summary>More</summary><nav aria-label="More Workspace destinations" onClick={(event) => { if ((event.target as Element).closest("a")) event.currentTarget.closest("details")?.removeAttribute("open"); }}>{contextualNavigation.map((item) => <NavLink key={item.to} to={item.to}>{item.label}</NavLink>)}<NavLink to="/app/settings">Settings</NavLink>{session.activeOrganizationId ? <NavLink to="/app/settings/agents">Agents</NavLink> : null}{session.organizationAdministrations?.length ? <><NavLink to="/app/settings/organization">Organization</NavLink><NavLink to="/app/settings/members">Members</NavLink><NavLink to="/app/settings/imported-identities">Imported identities</NavLink></> : null}</nav></details><Link aria-label="Search Workspace" className={styles.mobileSearchLink} to="/app/search"><Icon name="search" /></Link><form className={styles.searchPreview} role="search" onSubmit={(event: FormEvent) => { event.preventDefault(); if (search.trim()) navigate(`/app/search?q=${encodeURIComponent(search.trim())}`); }}><Icon name="search" /><input aria-label="Search Workspace" type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search Notes" /></form><Link aria-label="Notifications" className={styles.notificationLink} to="/app/notifications"><Icon name="bell" /><span>Notifications</span></Link><Link className={styles.compactCreate} to="/app/inbox"><Icon name="plus" /><span>Capture</span></Link></header>
+      <div className={styles.topChrome}>
+        <nav aria-label="Mobile Workspace" className={styles.mobileNavigation}>
+          <Link className={styles.mobileIdentity} to={activeNoteId ? "/app/notes" : "/app"}>{activeNoteId ? <><span aria-hidden="true">←</span><strong>Note Tree</strong></> : <><span aria-hidden="true" className={styles.brandMark}><span /><span /></span><strong>Stash</strong></>}</Link>
+          <details className={styles.mobileMenu}><summary>More</summary><div aria-label="More Workspace destinations" role="group" onClick={(event) => { if ((event.target as Element).closest("a")) event.currentTarget.closest("details")?.removeAttribute("open"); }}>{contextualNavigation.map((item) => <NavLink key={item.to} to={item.to}>{item.label}</NavLink>)}<NavLink end to="/app/settings">Settings</NavLink>{session.activeOrganizationId ? <NavLink to="/app/settings/agents">Agents</NavLink> : null}{session.organizationAdministrations?.length ? <><NavLink to="/app/settings/organization">Organization</NavLink><NavLink to="/app/settings/members">Members</NavLink><NavLink to="/app/settings/imported-identities">Imported identities</NavLink></> : null}</div></details>
+        </nav>
+        <header aria-label="Global actions" className={styles.topbar}><Link aria-label="Search Workspace" className={styles.mobileSearchLink} to="/app/search"><Icon name="search" /></Link><form className={styles.searchPreview} role="search" onSubmit={(event: FormEvent) => { event.preventDefault(); if (search.trim()) navigate(`/app/search?q=${encodeURIComponent(search.trim())}`); }}><Icon name="search" /><input aria-label="Search Workspace" type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search Notes" /></form><Link aria-label="Notifications" className={styles.notificationLink} to="/app/notifications"><Icon name="bell" /><span>Notifications</span></Link><Link className={styles.compactCreate} to="/app/inbox"><Icon name="plus" /><span>Capture</span></Link></header>
+      </div>
       {activeNoteId
         ? <NoteWorkspace noteId={activeNoteId} token={session.token ?? ""}><NoteEditor contextVisible={false} noteId={activeNoteId} memberId={session.member.id} token={session.token ?? ""} /></NoteWorkspace>
         : <main id="workspace-content" className={styles.content} ref={mainRef} tabIndex={-1}>
@@ -286,7 +280,7 @@ function WorkspaceShell({ session }: { readonly session: Extract<SessionState, {
           <Route path="/app/settings/organization" element={session.organizationAdministrations?.length ? <OrganizationSettingsPage token={session.token ?? ""} administrations={session.organizationAdministrations} activeOrganizationId={session.activeOrganizationId} /> : <Navigate replace to="/app/settings" />} />
           <Route path="/app/settings/imported-identities" element={<ImportedIdentitiesPage administrations={session.organizationAdministrations} currentMember={session.member} token={session.token} />} />
           <Route path="/app/settings/agents" element={<AgentGrantsPage organizationId={session.activeOrganizationId} token={session.token} />} />
-          <Route path="*" element={<PlaceholderPage workspaceName={workspaceName} title="Not found" description="This Workspace route does not exist." action="Go home" actionTo="/app" />} />
+          <Route path="*" element={<PlaceholderPage title="Not found" description="This Workspace route does not exist." action="Go home" actionTo="/app" />} />
         </Routes>
       </main>}
     </div>

@@ -45,6 +45,13 @@ test("@a11y @stable-knowledge-journey carries a fresh personal Instance through 
   await expect(page.getByRole("heading", { name: "Task View · First moves" })).toBeVisible();
   await expect(page.getByText("Shape your first idea").last()).toBeVisible();
   await expect(page.getByText("Ready")).toHaveCount(2);
+  const collaborationStatus = await page.evaluate(async (noteId) => {
+    const token = JSON.parse(localStorage.getItem("stash.member-session")!).token;
+    return (await fetch(`/api/notes/${noteId}/collaboration`, { headers: { authorization: `Bearer ${token}` } })).status;
+  }, starterNoteId);
+  expect(collaborationStatus).toBe(200);
+  await expect(page.getByRole("textbox", { name: "Note content" })).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
   await page.getByRole("textbox", { name: "Collection title" }).fill("Questions worth keeping");
   await page.getByRole("textbox", { name: "Idea" }).fill("Shape a durable question");
   await page.getByRole("button", { name: "Save Collection" }).press("Enter");
@@ -379,7 +386,7 @@ test("uses the responsive bottom navigation at a true narrow viewport", async ({
   await installMemberSession(page);
   await page.goto("/app");
 
-  const navigation = page.getByRole("navigation", { name: "Workspace" });
+  const navigation = page.getByRole("navigation", { name: "Workspace", exact: true });
   await expect(navigation).toBeVisible();
   await expect(page.getByRole("link", { name: "Stash home" })).toBeHidden();
   const sidebar = navigation.locator("xpath=ancestor::aside");

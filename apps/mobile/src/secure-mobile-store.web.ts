@@ -12,4 +12,6 @@ class SessionCipher implements MobileCipher {
   async encrypt(value: string) { return (await aesEncryptAsync(new TextEncoder().encode(value), await sessionKey)).combined("base64") as Promise<string>; }
   async decrypt(value: string) { return new TextDecoder().decode(await aesDecryptAsync(AESSealedData.fromCombined(value), await sessionKey) as Uint8Array); }
 }
-export class SecureMobileCaptureStore extends EncryptedStateMobileCaptureStore { constructor() { super(new SessionRepository(), new SessionCipher()); } }
+const processRepository = new SessionRepository();
+const processCipher = new SessionCipher();
+export class SecureMobileCaptureStore extends EncryptedStateMobileCaptureStore { constructor() { super(processRepository, processCipher); } }

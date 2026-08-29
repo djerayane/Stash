@@ -1,19 +1,41 @@
-import { isTaskViewPropertyId, type MobileCanonicalTask, type MobileWorkspaceSnapshot, type TaskViewPropertyId, type ViewBlock } from "@stash/domain-types";
-import { useMemo, useState } from "react";
+import { isTaskViewPropertyId, type Collection, type CollectionPropertyValue, type MobileCanonicalTask,
+  type MobileWorkspaceSnapshot, type TaskViewPropertyId, type ViewBlock } from "@stash/domain-types";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 
-import { colors } from "@/theme/colors";
-import { displayReadableValue, groupReadableRecords, matchesReadableFilter, visibleNoteTree } from "./workspace-reader-model";
+import { stashTheme } from "@/theme/theme";
+import {
+  displayCollectionPropertyValue,
+  displayReadableValue,
+  groupReadableRecords,
+  matchesReadableFilter,
+  readablePresentationName,
+  readableTaskGroup,
+  visibleNoteTree,
+} from "./workspace-reader-model";
 
 type Section = "notes" | "tasks" | "search" | "views";
+
+const colors = {
+  label: stashTheme.colors.ink,
+  secondaryLabel: stashTheme.colors.secondaryInk,
+  separator: stashTheme.colors.rule,
+  background: stashTheme.colors.surface,
+  accent: stashTheme.colors.accent,
+  buttonText: stashTheme.colors.accentContrast,
+};
 
 export interface WorkspaceReaderProps {
   snapshot: MobileWorkspaceSnapshot;
   pendingTaskIds: ReadonlySet<string>;
   onUpdateTaskStatus(task: MobileCanonicalTask, statusId: string): Promise<void>;
+  pendingCollectionRecordIds?: ReadonlySet<string>;
+  onUpdateCollectionRecord?(collectionId: string, recordId: string,
+    values: Readonly<Record<string, CollectionPropertyValue>>): Promise<void>;
 }
 
-export function WorkspaceReader({ snapshot, pendingTaskIds, onUpdateTaskStatus }: WorkspaceReaderProps) {
+export function WorkspaceReader({ snapshot, pendingTaskIds, onUpdateTaskStatus,
+  pendingCollectionRecordIds = new Set(), onUpdateCollectionRecord = async () => undefined }: WorkspaceReaderProps) {
   const [section, setSection] = useState<Section>("notes");
   const [query, setQuery] = useState("");
   const results = useMemo(() => {
@@ -21,22 +43,27 @@ export function WorkspaceReader({ snapshot, pendingTaskIds, onUpdateTaskStatus }
     return needle ? snapshot.search.filter(({ title, excerpt }) => `${title} ${excerpt ?? ""}`.toLocaleLowerCase().includes(needle)) : [];
   }, [query, snapshot.search]);
 
-  return <View style={{ gap: 18 }}>
-    <View accessibilityRole="tablist" style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-      {(["notes", "tasks", "search", "views"] as const).map((value) => <Pressable key={value}
-        accessibilityRole="tab" accessibilityState={{ selected: section === value }} onPress={() => setSection(value)}
-        style={{ minHeight: 44, justifyContent: "center", paddingHorizontal: 14, borderRadius: 22, borderCurve: "continuous",
-          backgroundColor: section === value ? colors.label : colors.background }}>
-        <Text style={{ color: section === value ? colors.background : colors.label, fontWeight: "600", textTransform: "capitalize" }}>{value}</Text>
-      </Pressable>)}
+  return <View style={{ gap: stashTheme.spacing.lg }}>
+    <View accessibilityRole="tablist" accessibilityLabel="Workspace navigation"
+      style={{ flexDirection: "row", flexWrap: "wrap", gap: stashTheme.spacing.xs }}>
+      {(["notes", "tasks", "search", "views"] as const).map((value) => {
+        const label = value.replace(/^./, (letter) => letter.toLocaleUpperCase());
+        return <Pressable key={value}
+        accessibilityRole="tab" accessibilityLabel={label} accessibilityState={{ selected: section === value }} onPress={() => setSection(value)}
+        style={{ minWidth: 64, minHeight: stashTheme.controlHeight, justifyContent: "center", paddingHorizontal: stashTheme.spacing.md,
+          borderRadius: 999, backgroundColor: section === value ? colors.accent : colors.background, flexGrow: 1, flexShrink: 0, alignItems: "center" }}>
+        <Text style={{ color: section === value ? colors.buttonText : colors.label, fontWeight: "600" }}>{label}</Text>
+      </Pressable>; })}
     </View>
 
     {section === "notes" ? <NoteTree snapshot={snapshot} /> : null}
     {section === "tasks" ? <TaskList snapshot={snapshot} pendingTaskIds={pendingTaskIds} onUpdateTaskStatus={onUpdateTaskStatus} /> : null}
-    {section === "search" ? <View style={{ gap: 12 }}>
+    {section === "search" ? <View style={{ gap: stashTheme.spacing.md }}>
       <TextInput accessibilityLabel="Search cached Workspace" value={query} onChangeText={setQuery}
-        placeholder="Search Notes, Tasks, and Collections" style={{ minHeight: 48, borderWidth: 1, borderColor: colors.separator,
-          color: colors.label, backgroundColor: colors.background, borderRadius: 14, borderCurve: "continuous", paddingHorizontal: 14, fontSize: 16 }} />
+        placeholder="Search Notes, Tasks, and Collections" placeholderTextColor={colors.secondaryLabel}
+        style={{ minHeight: stashTheme.controlHeight, borderWidth: 1, borderColor: colors.separator,
+          color: colors.label, backgroundColor: colors.background, borderRadius: stashTheme.radius.control,
+          borderCurve: "continuous", paddingHorizontal: stashTheme.spacing.md, fontSize: stashTheme.type.body }} />
       {!query.trim() ? <Empty text="Search the Workspace cached on this device." /> : results.length
         ? results.map((result) => <View key={`${result.kind}-${result.id}`} style={cardStyle}>
           <Text selectable style={{ color: colors.secondaryLabel, textTransform: "capitalize" }}>{result.kind}</Text>
@@ -44,7 +71,11 @@ export function WorkspaceReader({ snapshot, pendingTaskIds, onUpdateTaskStatus }
           {result.excerpt ? <Text selectable style={{ color: colors.secondaryLabel, lineHeight: 21 }}>{result.excerpt}</Text> : null}
         </View>) : <Empty text="No cached results match this search." />}
     </View> : null}
-    {section === "views" ? <ReadableViews views={snapshot.viewBlocks} snapshot={snapshot} /> : null}
+    {section === "views" ? <View style={{ gap: stashTheme.spacing.xl }}>
+      <DirectCollections snapshot={snapshot} pendingRecordIds={pendingCollectionRecordIds}
+        onUpdateCollectionRecord={onUpdateCollectionRecord} />
+      <ReadableViews views={snapshot.viewBlocks} snapshot={snapshot} />
+    </View> : null}
   </View>;
 }
 
@@ -53,20 +84,21 @@ function NoteTree({ snapshot }: { snapshot: MobileWorkspaceSnapshot }) {
   const [activeId, setActiveId] = useState(snapshot.noteTree[0]?.id);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
   const active = activeId ? notes.get(activeId) : undefined;
-  return <View style={{ gap: 10 }}>
+  return <View style={{ gap: stashTheme.spacing.sm }}>
     {snapshot.noteTree.length ? visibleNoteTree(snapshot.noteTree, collapsed).map((node) => {
       const depth = ancestors(node.id, snapshot).length;
       const isCollapsed = collapsed.has(node.id);
-      return <View key={node.id} style={{ flexDirection: "row", gap: 8, marginLeft: Math.min(depth, 3) * 14 }}>
+      return <View key={node.id} style={{ flexDirection: "row", gap: stashTheme.spacing.sm, marginLeft: Math.min(depth, 3) * stashTheme.spacing.md }}>
         {node.childCount ? <Pressable accessibilityRole="button" accessibilityLabel={`${isCollapsed ? "Expand" : "Collapse"} ${node.title}`}
           accessibilityState={{ expanded: !isCollapsed }} onPress={() => setCollapsed((current) => {
             const next = new Set(current); if (next.has(node.id)) next.delete(node.id); else next.add(node.id); return next;
-          })} style={{ minWidth: 44, minHeight: 44, alignItems: "center", justifyContent: "center" }}>
+          })} style={{ minWidth: stashTheme.controlHeight, minHeight: stashTheme.controlHeight, alignItems: "center", justifyContent: "center" }}>
           <Text style={{ color: colors.accent, fontSize: 18 }}>{isCollapsed ? "+" : "−"}</Text>
-        </Pressable> : <View style={{ width: 44 }} />}
+        </Pressable> : <View style={{ width: stashTheme.controlHeight }} />}
         <Pressable accessibilityRole="button" accessibilityLabel={`Open Note ${node.title}`} accessibilityState={{ selected: activeId === node.id }}
-          onPress={() => setActiveId(node.id)} style={{ flex: 1, minHeight: 44, justifyContent: "center", paddingHorizontal: 12,
-            borderRadius: 12, borderCurve: "continuous", backgroundColor: activeId === node.id ? colors.background : "transparent" }}>
+          onPress={() => setActiveId(node.id)} style={{ flex: 1, minHeight: stashTheme.controlHeight, justifyContent: "center",
+            paddingHorizontal: stashTheme.spacing.md, borderRadius: stashTheme.radius.control, borderCurve: "continuous",
+            backgroundColor: activeId === node.id ? colors.background : "transparent" }}>
           <Text selectable style={{ color: colors.label, fontSize: 17, fontWeight: activeId === node.id ? "700" : "500" }}>{node.title}</Text>
         </Pressable>
       </View>;
@@ -79,19 +111,20 @@ function NoteTree({ snapshot }: { snapshot: MobileWorkspaceSnapshot }) {
 }
 
 function TaskList({ snapshot, pendingTaskIds, onUpdateTaskStatus }: WorkspaceReaderProps) {
-  return <View style={{ gap: 12 }}>
+  return <View style={{ gap: stashTheme.spacing.md }}>
     {snapshot.tasks.length ? snapshot.tasks.map((task) => <View key={task.id} style={cardStyle}>
-      <View style={{ gap: 5 }}>
+      <View style={{ gap: stashTheme.spacing.xs }}>
         <Text selectable accessibilityRole="header" style={{ color: colors.label, fontSize: 18, fontWeight: "700" }}>{task.title}</Text>
         <Text selectable style={{ color: colors.secondaryLabel }}>{task.status.name}{pendingTaskIds.has(task.id) ? " · waiting to synchronize" : ""}</Text>
         {task.projectKeys.length ? <Text selectable style={{ color: colors.secondaryLabel }}>{task.projectKeys.map(({ key }) => key).join(" · ")}</Text> : null}
         {task.description ? <Text selectable style={{ color: colors.label, lineHeight: 21 }}>{task.description}</Text> : null}
       </View>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: stashTheme.spacing.sm }}>
         {snapshot.workflow.statuses.map((status) => <Pressable key={status.id} accessibilityRole="button"
-          accessibilityLabel={`Set ${task.title} status to ${status.name}`} disabled={status.id === task.status.id}
-          onPress={() => void onUpdateTaskStatus(task, status.id)} style={{ minHeight: 44, justifyContent: "center", paddingHorizontal: 13,
-            borderRadius: 12, borderCurve: "continuous", borderWidth: 1, borderColor: status.id === task.status.id ? colors.accent : colors.separator,
+          accessibilityLabel={`Set ${task.title} status to ${status.name}`} disabled={pendingTaskIds.has(task.id) || status.id === task.status.id}
+          onPress={() => void onUpdateTaskStatus(task, status.id)} style={{ minHeight: stashTheme.controlHeight, justifyContent: "center",
+            paddingHorizontal: stashTheme.spacing.md, borderRadius: stashTheme.radius.control, borderCurve: "continuous",
+            borderWidth: 1, borderColor: status.id === task.status.id ? colors.accent : colors.separator,
             backgroundColor: colors.background }}>
           <Text style={{ color: colors.label, fontWeight: status.id === task.status.id ? "700" : "500" }}>{status.name}</Text>
         </Pressable>)}
@@ -100,11 +133,107 @@ function TaskList({ snapshot, pendingTaskIds, onUpdateTaskStatus }: WorkspaceRea
   </View>;
 }
 
+function DirectCollections({ snapshot, pendingRecordIds, onUpdateCollectionRecord }: {
+  snapshot: MobileWorkspaceSnapshot;
+  pendingRecordIds: ReadonlySet<string>;
+  onUpdateCollectionRecord(collectionId: string, recordId: string,
+    values: Readonly<Record<string, CollectionPropertyValue>>): Promise<void>;
+}) {
+  const [activeCollectionId, setActiveCollectionId] = useState<string>();
+  const [activeRecordId, setActiveRecordId] = useState<string>();
+  const [draft, setDraft] = useState("");
+  const collection = snapshot.collections.find(({ id }) => id === activeCollectionId);
+  const record = collection?.records.find(({ id }) => id === activeRecordId);
+  const properties = collection ? [...collection.properties].sort((left, right) => left.position - right.position) : [];
+  const primary = properties.find(({ type }) => type === "text") ?? properties[0];
+  const display = collection ? snapshot.collectionDisplay[collection.id] : undefined;
+  const editable = Boolean(collection && snapshot.collectionAccess[collection.id]?.edit);
+  const primaryValue = record && primary ? displayCollectionPropertyValue(primary, record.values[primary.id], display) : "";
+  const previousCanonicalDraft = useRef<{ recordId?: string; value: string }>({ value: "" });
+  useEffect(() => {
+    const previous = previousCanonicalDraft.current;
+    setDraft((current) => previous.recordId !== record?.id || current === previous.value || current === primaryValue
+      ? primaryValue : current);
+    previousCanonicalDraft.current = { recordId: record?.id, value: primaryValue };
+  }, [primaryValue, record?.id]);
+  const sourceNote = collection ? snapshot.notes.find(({ id }) => id === collection.ownerNoteId) : undefined;
+  const pending = Boolean(record && pendingRecordIds.has(record.id));
+  const openRecord = (nextCollection: Collection, nextRecordId: string) => {
+    const nextRecord = nextCollection.records.find(({ id }) => id === nextRecordId);
+    const nextPrimary = [...nextCollection.properties].sort((left, right) => left.position - right.position)
+      .find(({ type }) => type === "text") ?? nextCollection.properties[0];
+    setActiveRecordId(nextRecordId);
+    setDraft(nextRecord && nextPrimary ? displayCollectionPropertyValue(nextPrimary, nextRecord.values[nextPrimary.id],
+      snapshot.collectionDisplay[nextCollection.id]) : "");
+  };
+
+  return <View style={{ gap: stashTheme.spacing.md }}>
+    <View style={{ gap: stashTheme.spacing.xs }}>
+      <Text selectable accessibilityRole="header" style={{ color: colors.label, fontSize: 22, fontWeight: "700" }}>Collections</Text>
+      <Text selectable style={{ color: colors.secondaryLabel, lineHeight: 21 }}>
+        Inspect cached records here. Build properties and advanced Views on desktop.
+      </Text>
+    </View>
+    {snapshot.collections.length ? snapshot.collections.map((entry) => <Pressable key={entry.id} accessibilityRole="button"
+      accessibilityLabel={`Open Collection ${entry.title}`} accessibilityState={{ selected: entry.id === collection?.id }}
+      onPress={() => { setActiveCollectionId(entry.id); setActiveRecordId(undefined); }}
+      style={{ ...cardStyle, minHeight: stashTheme.controlHeight, justifyContent: "center" }}>
+      <Text selectable style={{ color: colors.label, fontSize: 18, fontWeight: "700" }}>{entry.title}</Text>
+      <Text selectable style={{ color: colors.secondaryLabel }}>{entry.records.length} record{entry.records.length === 1 ? "" : "s"}</Text>
+    </Pressable>) : <Empty text="No Collections are cached yet." />}
+    {collection ? <View style={{ ...cardStyle, gap: stashTheme.spacing.md }}>
+      <View style={{ gap: stashTheme.spacing.xs }}>
+        <Text selectable accessibilityRole="header" style={{ color: colors.label, fontSize: 20, fontWeight: "700" }}>{collection.title}</Text>
+        <Text selectable style={{ color: colors.secondaryLabel }}>Owned by {sourceNote?.title ?? "a cached Note"}</Text>
+      </View>
+      {collection.records.length ? collection.records.map((entry) => {
+        const entryPrimary = primary;
+        const label = entryPrimary ? displayCollectionPropertyValue(entryPrimary, entry.values[entryPrimary.id], display) : "";
+        return <Pressable key={entry.id} accessibilityRole="button" accessibilityLabel={`Open record ${label || "Untitled record"}`}
+          accessibilityState={{ selected: entry.id === record?.id }} onPress={() => openRecord(collection, entry.id)}
+          style={{ minHeight: stashTheme.controlHeight, justifyContent: "center", paddingHorizontal: stashTheme.spacing.md,
+            borderWidth: 1, borderColor: entry.id === record?.id ? colors.accent : colors.separator,
+            borderRadius: stashTheme.radius.control, borderCurve: "continuous", backgroundColor: colors.background }}>
+          <Text selectable style={{ color: colors.label, fontWeight: "600" }}>{label || "Untitled record"}</Text>
+        </Pressable>;
+      }) : <Empty text="This Collection has no records yet." />}
+      {record ? <View style={{ gap: stashTheme.spacing.md }}>
+        {properties.map((property) => {
+          const value = displayCollectionPropertyValue(property, record.values[property.id], display) || "—";
+          return <View key={property.id} accessible accessibilityLabel={`${property.name}: ${value}`}
+            style={{ flexDirection: "row", gap: stashTheme.spacing.md, paddingTop: stashTheme.spacing.sm,
+              borderTopWidth: 1, borderTopColor: colors.separator }}>
+            <Text selectable style={{ width: "34%", color: colors.secondaryLabel, fontWeight: "600" }}>{property.name}</Text>
+            <Text selectable style={{ flex: 1, color: colors.label }}>{value}</Text>
+          </View>;
+        })}
+        {primary?.type === "text" && editable ? <>
+          <TextInput accessibilityLabel={`Edit ${primary.name} for ${primaryValue || "Untitled record"}`} value={draft}
+            editable={!pending} onChangeText={setDraft} placeholder={`Edit ${primary.name}`} placeholderTextColor={colors.secondaryLabel}
+            style={{ minHeight: stashTheme.controlHeight, borderWidth: 1, borderColor: colors.separator, color: colors.label,
+              backgroundColor: colors.background, borderRadius: stashTheme.radius.control, borderCurve: "continuous",
+              paddingHorizontal: stashTheme.spacing.md, fontSize: stashTheme.type.body }} />
+          <Pressable accessibilityRole="button" accessibilityLabel={`Save ${primaryValue || "Untitled record"}`} disabled={pending || draft === primaryValue}
+            onPress={() => void onUpdateCollectionRecord(collection.id, record.id, { [primary.id]: draft })}
+            style={{ minHeight: stashTheme.controlHeight, alignItems: "center", justifyContent: "center",
+              paddingHorizontal: stashTheme.spacing.md, borderRadius: stashTheme.radius.control, borderCurve: "continuous",
+              backgroundColor: colors.accent, opacity: pending || draft === primaryValue ? 0.55 : 1 }}>
+            <Text style={{ color: colors.buttonText, fontWeight: "700" }}>{pending ? "Waiting to synchronize" : "Save record"}</Text>
+          </Pressable>
+        </> : <Text selectable style={{ color: colors.secondaryLabel }}>
+          {editable ? "Edit this record’s primary text field on desktop." : "You have read-only access to this Collection."}
+        </Text>}
+      </View> : null}
+    </View> : null}
+  </View>;
+}
+
 function ReadableViews({ views, snapshot }: { views: ViewBlock[]; snapshot: MobileWorkspaceSnapshot }) {
-  return <View style={{ gap: 12 }}>
+  return <View style={{ gap: stashTheme.spacing.md }}>
     {views.length ? views.map((view) => {
       const source = view.definition.source;
       const collection = source.kind === "collection" ? snapshot.collections.find(({ id }) => id === source.collectionId) : undefined;
+      const sourceNote = collection ? snapshot.notes.find(({ id }) => id === collection.ownerNoteId) : undefined;
       const tasks = source.kind === "tasks" ? snapshot.tasks.filter((task) => view.definition.filters.every((filter) =>
         matchesReadableFilter(taskValue(task, filter.propertyId), filter.operator, filter.value))).sort((left, right) => {
           for (const sort of view.definition.sorts) {
@@ -113,32 +242,77 @@ function ReadableViews({ views, snapshot }: { views: ViewBlock[]; snapshot: Mobi
           }
           return left.title.localeCompare(right.title);
         }) : [];
-      const recordGroups = collection ? groupReadableRecords(collection.records, view.definition) : [];
+      const taskGroups = groupTasksForReading(tasks, view.definition.groupBy, snapshot);
+      const display = collection ? snapshot.collectionDisplay[collection.id] : undefined;
+      const recordGroups = collection ? groupReadableRecords(collection.records, view.definition, collection.properties, display) : [];
       const records = recordGroups.flatMap(({ items }) => items);
-      const count = source.kind === "tasks" ? tasks.length : records.length;
-      return <View key={view.id} style={cardStyle}>
-        <Text selectable accessibilityRole="header" style={{ color: colors.label, fontSize: 17, fontWeight: "700" }}>{view.title}</Text>
-        <Text selectable style={{ color: colors.secondaryLabel }}>{view.definition.presentation} view · {count} item{count === 1 ? "" : "s"}</Text>
-        {tasks.map((task) => <View key={task.id} style={{ gap: 3, paddingVertical: 7 }}>
-          {view.definition.groupBy ? <Text selectable style={{ color: colors.secondaryLabel, fontWeight: "600" }}>
-            {displayReadableValue(taskValue(task, view.definition.groupBy)) || "No value"}
-          </Text> : null}
-          <Text selectable style={{ color: colors.label, fontWeight: "600" }}>{task.title}</Text>
-          <Text selectable style={{ color: colors.secondaryLabel }}>{task.status.name} · {task.projectKeys.map(({ key }) => key).join(" · ") || "No Project"}</Text>
-        </View>)}
-        {collection && recordGroups.map((group, index) => <View key={group.label ?? `all-${index}`} accessibilityRole="summary" style={{ gap: 5 }}>
-          {group.label ? <Text selectable accessibilityRole="header" style={{ color: colors.secondaryLabel, fontWeight: "700" }}>{group.label}</Text> : null}
-          {group.items.map((record) => <View key={record.id} style={{ gap: 3, paddingVertical: 7 }}>
-            {collection.properties.map((property) => <Text selectable key={property.id} style={{ color: colors.label }}>
-              <Text style={{ fontWeight: "600" }}>{property.name}: </Text>{displayReadableValue(record.values[property.id]) || "—"}
-            </Text>)}
+      const count = source.kind === "tasks" ? tasks.length : new Set(records.map(({ id }) => id)).size;
+      const presentation = readablePresentationName(view.definition.presentation);
+      const sourceDescription = collection
+        ? `${presentation} from ${collection.title}${sourceNote ? ` in ${sourceNote.title}` : ""}`
+        : `${presentation} from Workspace Tasks`;
+      const itemName = source.kind === "tasks" ? "Task" : "record";
+      return <View key={view.id} style={{ gap: stashTheme.spacing.md }}>
+        <View style={{ gap: stashTheme.spacing.xs }}>
+          <Text selectable accessibilityRole="header" style={{ color: colors.label, fontSize: 20, fontWeight: "700" }}>{view.title}</Text>
+          <Text selectable style={{ color: colors.secondaryLabel }}>{sourceDescription}</Text>
+          <Text selectable style={{ color: colors.secondaryLabel }}>{count} {itemName}{count === 1 ? "" : "s"}{view.definition.focused ? " · Focused record" : ""}</Text>
+        </View>
+        {taskGroups.map((group, index) => <View key={group.key ?? `tasks-${index}`} style={{ gap: stashTheme.spacing.sm }}>
+          {group.label ? <Text selectable accessibilityRole="header"
+            style={{ color: colors.secondaryLabel, fontWeight: "700" }}>{group.label}</Text> : null}
+          {group.items.map((task) => <View key={task.id} style={recordStyle}>
+            <Text selectable accessibilityRole="header" style={{ color: colors.label, fontSize: 17, fontWeight: "700" }}>{task.title}</Text>
+            <Text selectable style={{ color: colors.secondaryLabel }}>{task.status.name} · {task.projectKeys.map(({ key }) => key).join(" · ") || "No Project"}</Text>
           </View>)}
         </View>)}
+        {collection && recordGroups.map((group, index) => <View key={group.label ?? `all-${index}`} accessibilityRole="summary" style={{ gap: stashTheme.spacing.sm }}>
+          {group.label ? <Text selectable accessibilityRole="header" style={{ color: colors.secondaryLabel, fontWeight: "700" }}>{group.label}</Text> : null}
+          {group.items.map((record) => {
+            const properties = [...collection.properties].sort((left, right) => left.position - right.position);
+            const primary = properties.find(({ type }) => type === "text") ?? properties[0];
+            const primaryValue = primary ? displayCollectionPropertyValue(primary, record.values[primary.id], display) : "";
+            return <View key={record.id} style={recordStyle}>
+              <Text selectable accessibilityRole="header" style={{ color: colors.label, fontSize: 17, fontWeight: "700" }}>
+                {primaryValue || "Untitled record"}
+              </Text>
+              {properties.map((property) => {
+                const value = displayCollectionPropertyValue(property, record.values[property.id], display) || "—";
+                return <View key={property.id} accessible accessibilityLabel={`${property.name}: ${value}`}
+                  style={{ flexDirection: "row", gap: stashTheme.spacing.md, paddingTop: stashTheme.spacing.sm,
+                    borderTopWidth: 1, borderTopColor: colors.separator }}>
+                  <Text selectable style={{ width: "34%", color: colors.secondaryLabel, fontWeight: "600" }}>{property.name}</Text>
+                  <Text selectable style={{ flex: 1, color: colors.label }}>{value}</Text>
+                </View>;
+              })}
+            </View>;
+          })}
+        </View>)}
         {!count ? <Text selectable style={{ color: colors.secondaryLabel }}>No items match this saved view.</Text> : null}
-        <Text selectable style={{ color: colors.secondaryLabel, lineHeight: 21 }}>Layout authoring remains on desktop.</Text>
+        <Text selectable style={{ color: colors.secondaryLabel, lineHeight: 21 }}>Change this layout on desktop. Record values stay canonical everywhere.</Text>
       </View>;
     }) : <Empty text="No desktop-authored views are cached yet." />}
   </View>;
+}
+
+function groupTasksForReading(tasks: MobileCanonicalTask[], groupBy: string | undefined, snapshot: MobileWorkspaceSnapshot) {
+  if (!groupBy || !isTaskViewPropertyId(groupBy)) return [{ key: undefined, label: undefined, items: tasks }];
+  const groups = new Map<string, { key: string; label: string; items: MobileCanonicalTask[] }>();
+  for (const task of tasks) {
+    const presentation = readableTaskGroup(task, groupBy, snapshot.workflow.statuses, snapshot.members);
+    const group = groups.get(presentation.key);
+    groups.set(presentation.key, { key: presentation.key, label: presentation.label, items: [...(group?.items ?? []), task] });
+  }
+  const grouped = [...groups.values()];
+  if (groupBy !== "task:assignee") return grouped;
+  const totals = new Map<string, number>();
+  for (const group of grouped) totals.set(group.label, (totals.get(group.label) ?? 0) + 1);
+  const hasDuplicateLabels = grouped.some(({ label }) => (totals.get(label) ?? 1) > 1);
+  if (!hasDuplicateLabels) return grouped;
+  return grouped.map((group, index) => ({
+    ...group,
+    label: `Group ${index + 1} of ${grouped.length} · ${group.label}`,
+  }));
 }
 
 function taskValue(task: MobileCanonicalTask, propertyId: string): unknown {
@@ -168,5 +342,6 @@ function Empty({ text }: { text: string }) {
   return <Text selectable style={{ color: colors.secondaryLabel, lineHeight: 22 }}>{text}</Text>;
 }
 
-const cardStyle = { gap: 10, padding: 16, borderRadius: 18, borderCurve: "continuous" as const,
-  backgroundColor: colors.background, borderWidth: 1, borderColor: colors.separator };
+const cardStyle = { gap: stashTheme.spacing.sm, padding: stashTheme.spacing.md, borderRadius: stashTheme.radius.surface,
+  borderCurve: "continuous" as const, backgroundColor: colors.background, borderWidth: 1, borderColor: colors.separator };
+const recordStyle = cardStyle;

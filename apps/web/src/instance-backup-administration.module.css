@@ -4,10 +4,10 @@
 .navigation button { padding: .55rem .8rem; color: var(--stash-color-ink); background: transparent; border: 1px solid var(--stash-border-strong); border-radius: var(--stash-radius-sm); }
 .header { display: grid; grid-template-columns: minmax(0, 7fr) minmax(18rem, 5fr); gap: clamp(2rem, 6vw, 6rem); align-items: end; padding: clamp(4rem, 10vw, 9rem) 0 clamp(3rem, 8vw, 7rem); }
 .kicker { margin: 0 0 var(--stash-space-4); color: var(--stash-color-accent); font-size: .74rem; font-weight: 780; letter-spacing: .11em; text-transform: uppercase; }
-.header h1 { max-width: 72rem; margin: 0; font-family: var(--stash-font-display); font-size: clamp(3rem, 7vw, 6.5rem); font-weight: 470; letter-spacing: -.065em; line-height: .9; text-wrap: balance; }
+.header h1 { max-width: 72rem; margin: 0; font-family: var(--stash-font-sans); font-size: clamp(3rem, 7vw, 6.5rem); font-weight: 470; letter-spacing: -.065em; line-height: .9; text-wrap: balance; }
 .header > p, .safety p, .inventoryHeading p, .backup p, .empty p, .signIn p { color: var(--stash-color-muted); line-height: 1.65; }
 .safety { display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); gap: clamp(2rem, 6vw, 6rem); padding: clamp(1.5rem, 4vw, 3.5rem); color: var(--stash-color-sidebar-ink); background: var(--stash-color-sidebar); }
-.safety h2, .inventory h2, .empty h2 { margin: 0; font-family: var(--stash-font-display); font-size: clamp(1.8rem, 3vw, 3rem); font-weight: 520; letter-spacing: -.04em; }
+.safety h2, .inventory h2, .empty h2 { margin: 0; font-family: var(--stash-font-sans); font-size: clamp(1.8rem, 3vw, 3rem); font-weight: 520; letter-spacing: -.04em; }
 .safety p { max-width: 42rem; color: var(--stash-color-sidebar-muted); }
 .safety dl { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; margin: 0; background: var(--stash-color-sidebar-border); }
 .safety dl div { display: grid; align-content: center; gap: .4rem; min-height: 7rem; padding: var(--stash-space-4); background: var(--stash-color-sidebar-hover); }

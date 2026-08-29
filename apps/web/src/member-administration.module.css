@@ -1,25 +1,23 @@
 .page { width: min(100%, 76rem); margin: 0 auto; padding: clamp(2.5rem, 7vw, 6rem) clamp(1.25rem, 4vw, 4rem); }
 .header { max-width: 72rem; }
-.kicker { margin: 0 0 var(--stash-space-3); color: var(--stash-color-accent); font-size: .72rem; font-weight: 750; letter-spacing: .1em; text-transform: uppercase; }
-.header h1 { max-width: 72rem; margin: 0; font-family: var(--stash-font-display); font-size: clamp(2.4rem, 5vw, 5.2rem); font-weight: 480; letter-spacing: -.055em; line-height: .98; text-wrap: balance; }
+.header h1 { max-width: 72rem; margin: 0; font-family: var(--stash-font-sans); font-size: clamp(2.4rem, 5vw, 5.2rem); font-weight: 480; letter-spacing: -.055em; line-height: .98; text-wrap: balance; }
 .header > p:last-child, .roster > div p, .confirmation > p, .completion p { max-width: 42rem; color: var(--stash-color-muted); line-height: 1.65; }
 .organizationPicker { display: grid; gap: var(--stash-space-2); max-width: 24rem; margin-top: var(--stash-space-8); font-weight: 700; }
 .organizationPicker select { min-height: 2.75rem; padding: 0 var(--stash-space-3); color: var(--stash-color-ink); background: var(--stash-color-surface); border: 1px solid var(--stash-border-strong); border-radius: var(--stash-radius-sm); font: inherit; }
 .organizationPicker select:focus-visible { outline: 3px solid var(--stash-color-accent); outline-offset: 2px; }
 .roster, .completion { display: grid; grid-template-columns: minmax(12rem, .65fr) minmax(18rem, 1.35fr); gap: clamp(2rem, 7vw, 7rem); margin-top: clamp(3rem, 8vw, 7rem); padding: clamp(1.5rem, 4vw, 3rem); background: var(--stash-color-surface); border: 1px solid var(--stash-border-subtle); }
-.roster h2, .confirmation h2, .completion h2 { margin: 0; font-family: var(--stash-font-display); font-size: clamp(1.6rem, 3vw, 2.5rem); font-weight: 500; letter-spacing: -.04em; }
+.roster h2, .confirmation h2, .completion h2 { margin: 0; font-family: var(--stash-font-sans); font-size: clamp(1.6rem, 3vw, 2.5rem); font-weight: 500; letter-spacing: -.04em; }
 .roster ul { display: grid; gap: var(--stash-space-3); margin: 0; padding: 0; list-style: none; }
 .roster li { display: flex; align-items: center; justify-content: space-between; gap: var(--stash-space-4); padding: var(--stash-space-4); border-bottom: 1px solid var(--stash-border-subtle); }
 .roster li span { display: grid; gap: .25rem; }
 .roster small { color: var(--stash-color-muted); }
-.roster button, .actions button, .taskLink { min-height: 2.65rem; padding: .65rem 1rem; color: var(--stash-color-ink); background: transparent; border: 1px solid var(--stash-border-strong); border-radius: var(--stash-radius-sm); font: 650 .82rem/1 var(--stash-font-sans); cursor: pointer; text-decoration: none; }
+.taskLink { min-height: 2.65rem; padding: .65rem 1rem; color: var(--stash-color-ink); background: transparent; border: 1px solid var(--stash-border-strong); border-radius: var(--stash-radius-sm); font: 650 .82rem/1 var(--stash-font-sans); cursor: pointer; text-decoration: none; }
 .confirmation { margin-top: var(--stash-space-8); padding: clamp(1.5rem, 4vw, 3rem); color: var(--stash-color-ink); border: 1px solid var(--stash-color-accent); background: var(--stash-color-canvas-deep); outline: none; }
 .confirmation > p { color: var(--stash-color-ink); }
 .actions { display: flex; flex-wrap: wrap; gap: var(--stash-space-3); margin-top: var(--stash-space-6); }
-.actions .danger, .taskLink { color: var(--stash-color-accent-contrast); background: var(--stash-color-accent); border-color: var(--stash-color-accent); }
+.taskLink { color: var(--stash-color-accent-contrast); background: var(--stash-color-accent); border-color: var(--stash-color-accent); }
 .actions button:disabled { cursor: wait; opacity: .65; }
 .completion { align-items: center; background: var(--stash-color-canvas-deep); }
 .taskLink { justify-self: end; display: inline-flex; align-items: center; }
-.error { padding: var(--stash-space-4); color: var(--stash-color-ink); background: var(--stash-color-error-soft); border-left: 3px solid var(--stash-color-accent); }
 @media (max-width: 760px) { .roster, .completion { grid-template-columns: 1fr; } .roster li { align-items: stretch; flex-direction: column; } .roster button, .taskLink { width: 100%; text-align: center; } .taskLink { justify-self: stretch; justify-content: center; } }
 @media (prefers-reduced-motion: reduce) { .roster button, .actions button, .taskLink { transition-duration: .01ms !important; } }

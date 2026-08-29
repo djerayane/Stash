@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { Collection, ViewDefinition } from "@stash/domain-types";
-import { evaluateCollectionView, updateBoardGroup } from "./view-model";
+import { evaluateCollectionView, presentationRequirement, updateBoardGroup } from "./view-model";
 
 const titleId = "11111111-1111-4111-8111-111111111111";
 const statusId = "22222222-2222-4222-8222-222222222222";
@@ -31,9 +31,26 @@ describe("Collection view model", () => {
   });
 
   it("produces the same canonical value patch for drag and keyboard board movement", () => {
-    expect(updateBoardGroup(collection, definition, "77777777-7777-4777-8777-777777777777", "later"))
+    expect(updateBoardGroup(collection, definition, "77777777-7777-4777-8777-777777777777", "ready", "later"))
       .toEqual({ recordId: "77777777-7777-4777-8777-777777777777", values: { [statusId]: "later" } });
-    expect(() => updateBoardGroup(collection, { ...definition, groupBy: undefined }, collection.records[0]!.id, "later"))
+    expect(() => updateBoardGroup(collection, { ...definition, groupBy: undefined }, collection.records[0]!.id, "ready", "later"))
       .toThrow(/board_group_unavailable/);
+    const multi: Collection = { ...collection, properties: collection.properties.map((property) => property.id === statusId
+      ? { id: property.id, name: property.name, position: property.position, type: "multi_select" as const,
+        options: [{ id: "ready", name: "Ready" }, { id: "blocked", name: "Blocked" }, { id: "done", name: "Done" }] } : property),
+      records: collection.records.map((record, index) => index === 0
+        ? { ...record, values: { ...record.values, [statusId]: ["ready", "blocked"] } } : record) };
+    expect(updateBoardGroup(multi, definition, multi.records[0]!.id, "ready", "done"))
+      .toEqual({ recordId: multi.records[0]!.id, values: { [statusId]: ["blocked", "done"] } });
   });
+
+  it("requests presentation prerequisites in context", () => {
+    const textOnly = { ...collection, properties: collection.properties.slice(0, 1) };
+
+    expect(presentationRequirement(textOnly, "calendar")).toEqual({ propertyType: "date_time", actionLabel: "Add date property" });
+    expect(presentationRequirement(textOnly, "board")).toEqual({ propertyType: "single_select", actionLabel: "Add select property" });
+    expect(presentationRequirement(collection, "calendar")).toBeUndefined();
+    expect(presentationRequirement(collection, "board")).toBeUndefined();
+  });
+
 });

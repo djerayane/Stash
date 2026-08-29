@@ -97,9 +97,6 @@ export type { DevelopmentIntegrationPostgresRepositories } from "./development-i
 // First 31 bits of SHA-256("stash:authentication-key-check:v1"); reserved in Stash's
 // PostgreSQL advisory-lock ID domain for serializing only the authentication key-check transaction.
 const authenticationKeyCheckLockId = 795_541_992;
-const portableProjectionObjectKinds = ["Workspace", "Project", "Workflow", "WorkspaceWorkflow", "Collection", "ViewBlock", "Board", "Note", "NoteLocation", "NoteLink", "Task", "GuestProjectAccess", "RepositoryConnection", "Attachment", "Discussion", "DiscussionWorkLink", "Activity",
-  ...PostgresVisualizationBlockRepository.portableObjectKinds] as const;
-const portableProjectionObjectKindSql = portableProjectionObjectKinds.map((kind) => `'${kind}'`).join(", ");
 const repositoryConnectionSelect = `SELECT connection.id, connection.organization_id, connection.provider, connection.installation_id,
   connection.repository_id, connection.repository_url, connection.created_by_account_id, connection.created_by_attribution,
   connection.ownership, connection.state,

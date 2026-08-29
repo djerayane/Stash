@@ -1,6 +1,6 @@
 export * from "./visualizations.js";
 export * from "./collections.js";
-import { normalizeCollection, normalizeViewBlock, type Collection, type ViewBlock } from "./collections.js";
+import { normalizeCollection, normalizeViewBlock, type Collection, type CollectionPropertyValue, type ViewBlock } from "./collections.js";
 
 export type EntityId = string;
 
@@ -170,12 +170,16 @@ export interface MobileSyncMutationBase {
   attempts: number;
   nextRetryAt?: string;
   lastError?: string;
+  conflict?: boolean;
+  permanentFailure?: boolean;
 }
 
 export type MobileSyncMutation = MobileSyncMutationBase & (
   | { kind: "note_edit"; noteId: string; baseRevision: number; operations: NoteEditOperation[] }
   | { kind: "task_edit"; projectId: string; taskKey: string; baseRevision: number; changes: TaskPlanningUpdate }
   | { kind: "canonical_task_edit"; taskId: string; baseRevision: number; changes: TaskPlanningUpdate }
+  | { kind: "collection_record_edit"; collectionId: string; recordId: string; baseRevision: number;
+    values: Readonly<Record<string, CollectionPropertyValue>> }
 );
 
 export interface MobileNoteTreeNode {
@@ -196,10 +200,18 @@ export interface MobileWorkspaceWorkflow {
 export interface MobileSearchEntry {
   id: string; kind: "note" | "task" | "collection"; title: string; excerpt?: string;
 }
+export interface MobileWorkspaceMember { id: string; name: string }
+export interface MobileCollectionAccess { read: boolean; edit: boolean }
+export interface MobileCollectionDisplayMetadata {
+  members: Array<{ id: string; label: string }>;
+  attachments: Array<{ id: string; label: string }>;
+}
 export interface MobileWorkspaceSnapshot {
   schema: "stash.mobile-workspace.v1"; workspaceId: string; refreshedAt: string;
   noteTree: MobileNoteTreeNode[]; notes: MobileNoteReadModel[]; tasks: MobileCanonicalTask[];
-  workflow: MobileWorkspaceWorkflow; collections: Collection[]; viewBlocks: ViewBlock[]; search: MobileSearchEntry[];
+  workflow: MobileWorkspaceWorkflow; members: MobileWorkspaceMember[];
+  collections: Collection[]; collectionAccess: Record<string, MobileCollectionAccess>;
+  collectionDisplay: Record<string, MobileCollectionDisplayMetadata>; viewBlocks: ViewBlock[]; search: MobileSearchEntry[];
 }
 
 const mobileUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -215,9 +227,11 @@ function mobileString(value: unknown, maximum = 20_000) {
 function mobileIdentity(value: unknown) { if (typeof value !== "string" || !mobileUuid.test(value)) invalidMobileSnapshot(); return value.toLowerCase(); }
 
 export function normalizeMobileWorkspaceSnapshot(value: unknown): MobileWorkspaceSnapshot {
-  if (!mobileObject(value) || !mobileExact(value, ["schema", "workspaceId", "refreshedAt", "noteTree", "notes", "tasks", "workflow", "collections", "viewBlocks", "search"])
+  if (!mobileObject(value) || !mobileExact(value, ["schema", "workspaceId", "refreshedAt", "noteTree", "notes", "tasks", "workflow", "collections", "viewBlocks", "search"],
+    ["members", "collectionAccess", "collectionDisplay"])
     || value.schema !== "stash.mobile-workspace.v1" || !Array.isArray(value.noteTree) || !Array.isArray(value.notes)
     || !Array.isArray(value.tasks) || !Array.isArray(value.collections) || !Array.isArray(value.viewBlocks) || !Array.isArray(value.search)
+    || value.members !== undefined && !Array.isArray(value.members)
     || typeof value.refreshedAt !== "string" || !Number.isFinite(Date.parse(value.refreshedAt))) invalidMobileSnapshot();
   const workspaceId = mobileIdentity(value.workspaceId);
   const noteTree = value.noteTree.map((entry): MobileNoteTreeNode => {
@@ -253,16 +267,44 @@ export function normalizeMobileWorkspaceSnapshot(value: unknown): MobileWorkspac
       assigneeIds: task.assigneeIds.map(mobileIdentity), projectKeys, sourceNoteIds: task.sourceNoteIds.map(mobileIdentity),
       ...(task.revision === undefined ? {} : { revision: Number(task.revision) }) };
   });
+  const members = (value.members ?? []).map((member): MobileWorkspaceMember => {
+    if (!mobileObject(member) || !mobileExact(member, ["id", "name"])) invalidMobileSnapshot();
+    return { id: mobileIdentity(member.id), name: mobileString(member.name, 240) };
+  });
+  if (new Set(members.map(({ id }) => id)).size !== members.length) invalidMobileSnapshot();
   let collections: Collection[]; let viewBlocks: ViewBlock[];
   try { collections = value.collections.map(normalizeCollection); viewBlocks = value.viewBlocks.map(normalizeViewBlock); } catch { invalidMobileSnapshot(); }
   if (collections.some((entry) => entry.workspaceId !== workspaceId) || viewBlocks.some((entry) => entry.workspaceId !== workspaceId)) invalidMobileSnapshot();
+  const rawAccess = value.collectionAccess ?? {}; const rawDisplay = value.collectionDisplay ?? {};
+  if (!mobileObject(rawAccess) || !mobileObject(rawDisplay)
+    || Object.keys(rawAccess).some((id) => !collections.some((collection) => collection.id === id))
+    || Object.keys(rawDisplay).some((id) => !collections.some((collection) => collection.id === id))) invalidMobileSnapshot();
+  const collectionAccess = Object.fromEntries(collections.map((collection) => {
+    const entry = rawAccess[collection.id];
+    if (entry !== undefined && (!mobileObject(entry) || !mobileExact(entry, ["read", "edit"])
+      || typeof entry.read !== "boolean" || typeof entry.edit !== "boolean" || entry.edit && !entry.read)) invalidMobileSnapshot();
+    return [collection.id, entry ? { read: entry.read as boolean, edit: entry.edit as boolean } : { read: true, edit: false }];
+  }));
+  const collectionDisplay = Object.fromEntries(collections.map((collection) => {
+    const entry = rawDisplay[collection.id];
+    if (entry !== undefined && (!mobileObject(entry) || !mobileExact(entry, ["members", "attachments"])
+      || !Array.isArray(entry.members) || !Array.isArray(entry.attachments))) invalidMobileSnapshot();
+    const normalizeLabels = (labels: unknown[], maximum: number) => labels.map((label) => {
+      if (!mobileObject(label) || !mobileExact(label, ["id", "label"]) || typeof label.label !== "string"
+        || !label.label.trim() || label.label.trim().length > maximum) invalidMobileSnapshot();
+      return { id: mobileIdentity(label.id), label: label.label.trim() };
+    });
+    const metadata = entry as { members?: unknown[]; attachments?: unknown[] } | undefined;
+    return [collection.id, { members: normalizeLabels(metadata?.members ?? [], 240),
+      attachments: normalizeLabels(metadata?.attachments ?? [], 500) }];
+  }));
   const search = value.search.map((entry): MobileSearchEntry => {
     if (!mobileObject(entry) || !mobileExact(entry, ["id", "kind", "title"], ["excerpt"]) || !["note", "task", "collection"].includes(String(entry.kind))) invalidMobileSnapshot();
     return { id: mobileIdentity(entry.id), kind: entry.kind as MobileSearchEntry["kind"], title: mobileString(entry.title, 500),
       ...(entry.excerpt === undefined ? {} : { excerpt: mobileString(entry.excerpt, 240) }) };
   });
   return { schema: "stash.mobile-workspace.v1", workspaceId, refreshedAt: new Date(value.refreshedAt).toISOString(), noteTree, notes, tasks,
-    workflow: { schema: "stash.workspace-workflow.v1", workspaceId, statuses }, collections, viewBlocks, search };
+    workflow: { schema: "stash.workspace-workflow.v1", workspaceId, statuses }, members, collections, collectionAccess, collectionDisplay, viewBlocks, search };
 }
 
 export interface IncomingShareDelivery {

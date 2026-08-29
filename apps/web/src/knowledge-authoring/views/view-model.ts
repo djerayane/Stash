@@ -1,4 +1,4 @@
-import type { Collection, CollectionPropertyValue, CollectionRecord, ViewDefinition } from "@stash/domain-types";
+import type { Collection, CollectionPropertyType, CollectionPropertyValue, CollectionRecord, ViewDefinition, ViewPresentation } from "@stash/domain-types";
 
 export interface EvaluatedCollectionView {
   readonly records: readonly CollectionRecord[];
@@ -48,9 +48,28 @@ export function evaluateCollectionView(collection: Collection, definition: ViewD
   return { records, groups: [...grouped].map(([key, recordIds]) => ({ key, label: key === "ungrouped" ? "No value" : key, recordIds })) };
 }
 
-export function updateBoardGroup(collection: Collection, definition: ViewDefinition, recordId: string, groupValue: CollectionPropertyValue) {
+export function updateBoardGroup(collection: Collection, definition: ViewDefinition, recordId: string,
+  sourceGroupValue: CollectionPropertyValue, destinationGroupValue: CollectionPropertyValue) {
   if (!definition.groupBy) throw new Error("board_group_unavailable");
-  if (!collection.records.some(({ id }) => id === recordId) || !collection.properties.some(({ id }) => id === definition.groupBy))
+  const property = collection.properties.find(({ id }) => id === definition.groupBy);
+  const record = collection.records.find(({ id }) => id === recordId);
+  if (!record || !property)
     throw new Error("board_group_unavailable");
-  return { recordId, values: { [definition.groupBy]: groupValue } };
+  const current = property.type === "multi_select" && Array.isArray(record.values[property.id])
+    ? record.values[property.id] as readonly string[] : [];
+  const destination = destinationGroupValue === null || destinationGroupValue === undefined || destinationGroupValue === ""
+    ? null : String(destinationGroupValue);
+  const value = property.type === "multi_select"
+    ? [...current.filter((optionId) => optionId !== String(sourceGroupValue) && optionId !== destination), ...(destination ? [destination] : [])]
+    : property.type === "checkbox" ? destinationGroupValue === true || destinationGroupValue === "true" : destinationGroupValue;
+  return { recordId, values: { [definition.groupBy]: value } };
+}
+
+export function presentationRequirement(collection: Collection, presentation: ViewPresentation):
+  { propertyType: CollectionPropertyType; actionLabel: string } | undefined {
+  if (presentation === "calendar" && !collection.properties.some(({ type }) => type === "date_time"))
+    return { propertyType: "date_time", actionLabel: "Add date property" };
+  if (presentation === "board" && !collection.properties.some(({ type }) => type === "single_select" || type === "multi_select" || type === "checkbox"))
+    return { propertyType: "single_select", actionLabel: "Add select property" };
+  return undefined;
 }

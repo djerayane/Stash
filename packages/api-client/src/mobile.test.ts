@@ -27,6 +27,7 @@ describe("mobile protocol client", () => {
     await client.noteCollections("note/id", signal);
     await client.search("workspace/id", "release & notes", signal);
     await client.applyCanonicalTaskEdit("task/id", { title: "Done" }, signal);
+    await client.applyCollectionRecordEdit("collection/id", "record/id", { values: { title: "Done" } }, signal);
     expect(request.mock.calls.map(([url]) => url)).toEqual([
       "https://stash.example/api/workspaces/workspace%2Fid/note-tree",
       "https://stash.example/api/notes/note%2Fid",
@@ -34,6 +35,7 @@ describe("mobile protocol client", () => {
       "https://stash.example/api/notes/note%2Fid/collections",
       "https://stash.example/api/workspaces/workspace%2Fid/search?q=release%20%26%20notes",
       "https://stash.example/api/canonical-tasks/task%2Fid",
+      "https://stash.example/api/collections/collection%2Fid/records/record%2Fid",
     ]);
     expect(request).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({
       method: "PATCH", headers: { authorization: "Bearer secret", "content-type": "application/json" },

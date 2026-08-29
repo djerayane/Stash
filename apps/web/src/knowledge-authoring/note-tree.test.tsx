@@ -18,6 +18,17 @@ function wrapper(children: React.ReactNode) {
 
 function LocationProbe() { return <div data-testid="location">{useLocation().pathname}</div>; }
 
+it("names every compact tree action without decorative hierarchy labels", async () => {
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ nodes: [] }));
+  render(wrapper(<NoteTree fetcher={fetcher} token="member" variant="page" workspaceId={workspaceId} />));
+
+  expect(await screen.findByRole("heading", { name: "Note Tree" })).toBeVisible();
+  expect(screen.queryByText("Knowledge")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Create root Note" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Show archived and trashed branches" })).toBeVisible();
+  for (const action of screen.getAllByRole("button")) expect(action).toHaveAccessibleName();
+});
+
 it("creates children and offers keyboard and pointer alternatives for moving Notes", async () => {
   const nodes = [
     { id: roadmapId, workspaceId, title: "Roadmap", position: "1", childCount: 1 },
@@ -41,6 +52,9 @@ it("creates children and offers keyboard and pointer alternatives for moving Not
   render(wrapper(<NoteTree activeNoteId={evidenceId} fetcher={fetcher} token="member" workspaceId={workspaceId} />));
   expect(await screen.findByRole("tree", { name: "Note Tree" })).toBeInTheDocument();
   expect(screen.getByRole("treeitem", { name: "Evidence" })).toHaveAttribute("aria-current", "page");
+  const researchActions = within(screen.getByRole("treeitem", { name: "Research" }));
+  expect(researchActions.getByRole("button", { name: "Add child to Research" })).toBeInTheDocument();
+  expect(researchActions.getByText("More actions for Research", { selector: "summary" })).toBeInTheDocument();
 
   const roadmapItem = screen.getByRole("treeitem", { name: "Roadmap" });
   const evidenceItem = screen.getByRole("treeitem", { name: "Evidence" });

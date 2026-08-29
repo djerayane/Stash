@@ -4,6 +4,7 @@ import { useNavigate } from "react-router";
 
 import styles from "./note-tree.module.css";
 import { branchImpactConfirmation, type BranchImpact } from "./branch-impact";
+import { Button, Field, IconButton } from "../ui/control";
 
 export interface NoteTreeNode {
   id: string;
@@ -117,13 +118,13 @@ export function NoteTree({ workspaceId, token, activeNoteId, fetcher = globalThi
 
   const TreeHeading = variant === "page" ? "h1" : "h2";
   return <section className={`${styles.treePanel} ${variant === "page" ? styles.treePage : ""}`} aria-label={variant === "page" ? "Note Tree workspace" : "Note Tree sidebar"}>
-    <div className={styles.treeHeader}><div><p>Knowledge</p><TreeHeading id={titleId}>Note Tree</TreeHeading></div><div className={styles.headerActions}>
-      <button aria-expanded={showRecovery} aria-label={`${showRecovery ? "Hide" : "Show"} archived and trashed branches`} type="button"
-        onClick={() => setShowRecovery((current) => !current)}>↺</button>
-      <button aria-label="Create root Note" type="button" onClick={() => { setSiblingOf(undefined); setChildOf(childOf === "root" ? undefined : "root"); }}>+</button></div></div>
+    <div className={styles.treeHeader}><TreeHeading id={titleId}>Note Tree</TreeHeading><div className={styles.headerActions}>
+      <IconButton aria-expanded={showRecovery} label={`${showRecovery ? "Hide" : "Show"} archived and trashed branches`}
+        onClick={() => setShowRecovery((current) => !current)}><span aria-hidden="true">↺</span></IconButton>
+      <IconButton label="Create root Note" onClick={() => { setSiblingOf(undefined); setChildOf(childOf === "root" ? undefined : "root"); }}><span aria-hidden="true">+</span></IconButton></div></div>
     {childOf === "root" ? <form className={styles.quickCreate} onSubmit={(event: FormEvent) => { event.preventDefault(); if (rootTitle.trim()) create.mutate({ title: rootTitle.trim() }); }}>
-      <label>Root Note title<input autoFocus value={rootTitle} onChange={(event) => setRootTitle(event.target.value)} /></label>
-      <button disabled={create.isPending} type="submit">Create root Note</button></form> : null}
+      <Field label="Root Note title"><input autoFocus value={rootTitle} onChange={(event) => setRootTitle(event.target.value)} /></Field>
+      <Button disabled={create.isPending} type="submit">Create root Note</Button></form> : null}
     {tree.isPending ? <p className={styles.feedback}>Opening your Notes…</p> : tree.isError ? <p aria-live="polite" className={styles.feedback}>{tree.error.message}</p>
       : nodes.length ? <div className={styles.tree} role="tree" aria-label="Note Tree">{visible.map((node) => {
         const previous = siblingBefore(node); const isCollapsed = collapsed.has(node.id);
@@ -135,30 +136,35 @@ export function NoteTree({ workspaceId, token, activeNoteId, fetcher = globalThi
           onClick={() => navigate(`/app/notes/${encodeURIComponent(node.id)}`)} onKeyDown={(event) => keyboard(event, node)}
           onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/stash-note-id", node.id); }}
           onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; }} onDrop={(event) => drop(event, node)}>
-          <button className={styles.disclosure} aria-label={`${isCollapsed ? "Expand" : "Collapse"} ${node.title}`} disabled={!node.childCount}
-            type="button" onClick={(event) => { event.stopPropagation(); setCollapsed((current) => { const next = new Set(current); isCollapsed ? next.delete(node.id) : next.add(node.id); return next; }); }}>{node.childCount ? (isCollapsed ? "+" : "−") : "·"}</button>
+          <IconButton className={styles.disclosure} label={`${isCollapsed ? "Expand" : "Collapse"} ${node.title}`} disabled={!node.childCount}
+            onClick={(event) => { event.stopPropagation(); setCollapsed((current) => { const next = new Set(current); isCollapsed ? next.delete(node.id) : next.add(node.id); return next; }); }}><span aria-hidden="true">{node.childCount ? (isCollapsed ? "+" : "−") : "·"}</span></IconButton>
           <span className={styles.noteTitle}>{node.title}</span>
           <span className={styles.itemActions}>
-            <button aria-label={`Add child to ${node.title}`} type="button" onClick={(event) => { event.stopPropagation(); setSiblingOf(undefined); setChildOf(node.id); setChildTitle(""); }}>+</button>
-            <button aria-label={`Add sibling to ${node.title}`} type="button" onClick={(event) => { event.stopPropagation(); setChildOf(undefined); setSiblingOf(node.id); setSiblingTitle(""); }}>＋</button>
-            {node.parentId ? <button aria-label={`Move ${node.title} to root`} type="button" onClick={(event) => { event.stopPropagation(); move.mutate({ noteId: node.id, destination: {} }); }}>↖</button> : null}
-            {previous ? <button aria-label={`Move ${node.title} before ${previous.title}`} type="button" onClick={(event) => { event.stopPropagation(); move.mutate({ noteId: node.id, destination: { ...(node.parentId ? { parentId: node.parentId } : {}), beforeId: previous.id } }); }}>↑</button> : null}
-            {previous ? <button aria-label={`Nest ${node.title} under ${previous.title}`} type="button" onClick={(event) => { event.stopPropagation(); move.mutate({ noteId: node.id, destination: { parentId: previous.id } }); }}>→</button> : null}
-            {siblingsOf(node).at(-1)?.id !== node.id ? <button aria-label={`Move ${node.title} down`} type="button" onClick={(event) => { event.stopPropagation(); move.mutate({ noteId: node.id, destination: destinationAfter(node) }); }}>↓</button> : null}
+            <IconButton label={`Add child to ${node.title}`} onClick={(event) => { event.stopPropagation(); setSiblingOf(undefined); setChildOf(node.id); setChildTitle(""); }}><span aria-hidden="true">+</span></IconButton>
+            <details className={styles.actionMenu} onClick={(event) => event.stopPropagation()}>
+              <summary>More actions for {node.title}</summary>
+              <div aria-label={`More actions for ${node.title}`} role="group">
+                <IconButton label={`Add sibling to ${node.title}`} onClick={(event) => { event.stopPropagation(); setChildOf(undefined); setSiblingOf(node.id); setSiblingTitle(""); }}><span aria-hidden="true">＋</span></IconButton>
+                {node.parentId ? <IconButton label={`Move ${node.title} to root`} onClick={(event) => { event.stopPropagation(); move.mutate({ noteId: node.id, destination: {} }); }}><span aria-hidden="true">↖</span></IconButton> : null}
+                {previous ? <IconButton label={`Move ${node.title} before ${previous.title}`} onClick={(event) => { event.stopPropagation(); move.mutate({ noteId: node.id, destination: { ...(node.parentId ? { parentId: node.parentId } : {}), beforeId: previous.id } }); }}><span aria-hidden="true">↑</span></IconButton> : null}
+                {previous ? <IconButton label={`Nest ${node.title} under ${previous.title}`} onClick={(event) => { event.stopPropagation(); move.mutate({ noteId: node.id, destination: { parentId: previous.id } }); }}><span aria-hidden="true">→</span></IconButton> : null}
+                {siblingsOf(node).at(-1)?.id !== node.id ? <IconButton label={`Move ${node.title} down`} onClick={(event) => { event.stopPropagation(); move.mutate({ noteId: node.id, destination: destinationAfter(node) }); }}><span aria-hidden="true">↓</span></IconButton> : null}
+              </div>
+            </details>
           </span>
           {childOf === node.id ? <form className={styles.inlineCreate} onSubmit={(event) => { event.preventDefault(); event.stopPropagation(); if (childTitle.trim()) create.mutate({ title: childTitle.trim(), parentId: node.id }); }} onClick={(event) => event.stopPropagation()}>
-            <label>Child Note title<input autoFocus value={childTitle} onChange={(event) => setChildTitle(event.target.value)} /></label>
-            <button disabled={create.isPending} type="submit">Create child Note</button></form> : null}
+            <Field label="Child Note title"><input autoFocus value={childTitle} onChange={(event) => setChildTitle(event.target.value)} /></Field>
+            <Button disabled={create.isPending} type="submit">Create child Note</Button></form> : null}
           {siblingOf === node.id ? <form className={styles.inlineCreate} onSubmit={(event) => { event.preventDefault(); event.stopPropagation();
             if (siblingTitle.trim()) create.mutate({ title: siblingTitle.trim(), ...(node.parentId ? { parentId: node.parentId } : {}) }); }} onClick={(event) => event.stopPropagation()}>
-            <label>Sibling Note title<input autoFocus value={siblingTitle} onChange={(event) => setSiblingTitle(event.target.value)} /></label>
-            <button disabled={create.isPending} type="submit">Create sibling Note</button></form> : null}
+            <Field label="Sibling Note title"><input autoFocus value={siblingTitle} onChange={(event) => setSiblingTitle(event.target.value)} /></Field>
+            <Button disabled={create.isPending} type="submit">Create sibling Note</Button></form> : null}
         </div>;
       })}</div> : <p className={styles.feedback}>Create a root Note to begin shaping this Workspace.</p>}
     {showRecovery ? <section className={styles.recovery} aria-label="Archived and trashed branches"><h3>Recovery</h3>
       {removed.isPending ? <p>Opening removed branches…</p> : removed.isError ? <p role="alert">{removed.error.message}</p>
         : removed.data?.branches.length ? <ul>{removed.data.branches.map((branch) => <li key={branch.id}><span><strong>{branch.title}</strong><small>{branch.state}</small></span>
-          <button aria-label={`Restore ${branch.title}`} disabled={restore.isPending} type="button" onClick={() => restore.mutate(branch)}>Restore</button></li>)}</ul>
+          <Button aria-label={`Restore ${branch.title}`} disabled={restore.isPending} type="button" variant="secondary" onClick={() => restore.mutate(branch)}>Restore</Button></li>)}</ul>
           : <p>No archived or trashed branches.</p>}</section> : null}
     {status ? <p className={styles.srStatus} role="status">{status}</p> : null}
   </section>;

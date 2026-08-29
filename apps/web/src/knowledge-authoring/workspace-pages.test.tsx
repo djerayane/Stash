@@ -33,6 +33,22 @@ describe("core React workflows", () => {
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Object type" })).toHaveValue(""));
   });
 
+  it("uses the common disclosed filter language and one Search heading", () => {
+    const fetcher = vi.fn(async () => Response.json({ results: [], total: 0, facets: { kinds: [], projects: [], statuses: [] } }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { container } = render(<QueryClientProvider client={client}><MemoryRouter initialEntries={["/app/search"]}><SearchPage workspaceId="workspace-1" token="member" fetcher={fetcher as typeof fetch} /></MemoryRouter></QueryClientProvider>);
+
+    expect(screen.getByRole("heading", { name: "Search" })).toBeInTheDocument();
+    expect(container.querySelectorAll("h1")).toHaveLength(1);
+    expect(screen.getByRole("group", { name: "Filters" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Clear filters" })).toHaveAttribute("data-variant", "secondary");
+    const query = screen.getByRole("searchbox", { name: "Search this view" });
+    expect(query.closest("label")?.querySelector("span")).toHaveTextContent("Search this view");
+    for (const label of ["Project", "Object type", "Author", "Assignee", "Status", "From", "To"]) {
+      expect(screen.getByLabelText(label).closest("label")?.querySelector("span")).toHaveTextContent(label);
+    }
+  });
+
   it("does not animate search results when reduced motion is requested", async () => {
     const motion = vi.spyOn(gsap, "from");
     vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true, addEventListener() {}, removeEventListener() {} })));
@@ -53,6 +69,7 @@ describe("core React workflows", () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<QueryClientProvider client={client}><MemoryRouter initialEntries={["/app/search?q=release&status=Ready"]}><SearchPage workspaceId="workspace-1" token="member" fetcher={fetcher as typeof fetch} /></MemoryRouter></QueryClientProvider>);
     const alert = await screen.findByRole("alert"); await waitFor(() => expect(alert).toHaveFocus());
+    expect(alert).toHaveTextContent("Your search and filters are preserved");
     expect(screen.getByRole("textbox", { name: "Status" })).toHaveValue("Ready");
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(await screen.findByText("No permitted matches")).toBeVisible();
@@ -71,6 +88,9 @@ describe("core React workflows", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Capture$/ }));
     expect(await screen.findByRole("heading", { name: "Plan the release" })).toBeVisible();
     expect(fetcher).toHaveBeenCalledWith("/api/workspaces/workspace-1/notes", expect.objectContaining({ method: "POST" }));
+    fireEvent.click(screen.getByRole("button", { name: "Triage" }));
+    const project = screen.getByRole("textbox", { name: "Project ID" });
+    expect(project.closest("label")?.querySelector("span")).toHaveTextContent("Project ID");
   });
 
   it("replies, resolves, and creates work from selected Discussion messages", async () => {
@@ -129,6 +149,20 @@ describe("core React workflows", () => {
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(await screen.findByText("You are caught up")).toBeVisible();
     expect(attempts).toBe(2);
+  });
+
+  it("explains preservation and retry for every retriable Discussion and Activity read", async () => {
+    const failing = vi.fn(async () => new Response(JSON.stringify({ message: "Temporarily unavailable" }), { status: 503 }));
+    const discussion = renderWorkflow(<DiscussionsPage targetKind="note" fetcher={failing as typeof fetch} token="member" />);
+    const discussionAlert = await screen.findByRole("alert");
+    expect(discussionAlert).toHaveTextContent("No Discussion state changed. Try loading this view again.");
+    expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
+    discussion.unmount();
+
+    renderWorkflow(<ActivityPage fetcher={failing as typeof fetch} token="member" workspaceId="workspace" />);
+    const activityAlert = await screen.findByRole("alert");
+    expect(activityAlert).toHaveTextContent("No Activity state changed. Try loading this view again.");
+    expect(screen.getByRole("button", { name: "Try again" })).toBeVisible();
   });
 
   it("renders canonical Activity and Notification meaning instead of invented DTO fields", async () => {

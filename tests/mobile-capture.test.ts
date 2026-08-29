@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
+import type { MobileWorkspaceSnapshot } from "@stash/domain-types";
 
 import { startInstance, type DatabaseProbe, type RunningInstance } from "./support/start-test-instance.js";
 import { AttachmentService, type AttachmentRecord, type AttachmentRepository, type AttachmentStorage, type PortableAttachmentProjection } from "../src/attachments.js";
@@ -55,6 +56,12 @@ class MemoryEncryptedStore implements EncryptedMobileCaptureStore {
     const contribution = ({ attempts: _, nextRetryAt: __, lastError: ___, ...value }: MobileSyncMutation) => JSON.stringify(value);
     if (existing && contribution(existing) !== contribution(mutation)) throw new Error("operation identity conflict");
     this.mutations = [...this.mutations.filter((item) => mutationIdentity(item) !== key), structuredClone(mutation)];
+  }
+  async replaceMutation(previous: Pick<MobileSyncMutation, "id" | "origin">, mutation: MobileSyncMutation) {
+    const previousKey = mutationIdentity(previous); const nextKey = mutationIdentity(mutation);
+    this.mutations = [...this.mutations.filter((item) => {
+      const key = mutationIdentity(item); return key !== previousKey && key !== nextKey;
+    }), structuredClone(mutation)];
   }
   async removeMutation(mutation: Pick<MobileSyncMutation, "id" | "origin">) {
     this.mutations = this.mutations.filter((item) => mutationIdentity(item) !== mutationIdentity(mutation));
@@ -314,6 +321,22 @@ describe("offline mobile capture synchronization", () => {
     assert.doesNotMatch([...repository.ciphertext.values()].join(" "), /Private offline plan|WEB-12/);
     const restartedStore = new EncryptedStateMobileCaptureStore(repository, testCipher);
     assert.deepEqual(await restartedStore.listMutations(), [mutation]);
+  });
+
+  it("encrypts the offline Workspace snapshot and restores it after restart", async () => {
+    const repository = new RecordingCiphertextRepository();
+    const firstStore = new EncryptedStateMobileCaptureStore(repository, testCipher);
+    const snapshot: MobileWorkspaceSnapshot = {
+      schema: "stash.mobile-workspace.v1", workspaceId, refreshedAt: "2026-08-28T10:00:00.000Z",
+      noteTree: [], notes: [], tasks: [], members: [], collections: [], collectionAccess: {}, collectionDisplay: {}, viewBlocks: [], search: [],
+      workflow: { schema: "stash.workspace-workflow.v1", workspaceId, statuses: [] },
+    };
+
+    await firstStore.saveWorkspaceSnapshot("paired-scope", snapshot);
+
+    assert.doesNotMatch([...repository.ciphertext.values()].join(" "), /stash\.mobile-workspace\.v1/);
+    const restartedStore = new EncryptedStateMobileCaptureStore(repository, testCipher);
+    assert.deepEqual(await restartedStore.loadWorkspaceSnapshot("paired-scope"), snapshot);
   });
 
   it("scopes mutation identities to normalized pairing coordinates", async () => {
@@ -925,7 +948,7 @@ describe("offline mobile capture synchronization", () => {
     assert.equal(database.notes.size, 1);
     assert.deepEqual((await client.outbox()).map(({ id }) => id), [rejected.id]);
     assert.match((await client.outbox())[0]!.lastError!, /cannot capture/i);
-    assert.match(presentMobileSyncResult(result, await client.outbox()), /cannot capture/i);
+    assert.match(presentMobileSyncResult(result, await client.outbox()).message, /cannot capture/i);
   });
 
   it("backs off a retriable first capture while synchronizing later eligible captures", async () => {
@@ -1099,7 +1122,7 @@ describe("offline mobile capture synchronization", () => {
     const secondPass = await client.sync();
     const reordered = await client.outbox();
     assert.equal(reordered[0]?.content, "Transient rejection");
-    assert.match(presentMobileSyncResult(secondPass, reordered), /cannot capture/i);
+    assert.match(presentMobileSyncResult(secondPass, reordered).message, /cannot capture/i);
   });
 
   it("keeps permanent attention visible when a later request loses the network", async () => {
@@ -1220,7 +1243,7 @@ describe("offline mobile capture synchronization", () => {
 
     assert.deepEqual(await client.sync(), { status: "attention_required", count: 2, error: "conflicts_preserved" });
     assert.deepEqual(await client.pendingMutations(), []);
-    assert.match(presentMobileSyncResult({ status: "attention_required", count: 2, error: "conflicts_preserved" }, []),
+    assert.match(presentMobileSyncResult({ status: "attention_required", count: 2, error: "conflicts_preserved" }, []).message,
       /Every conflicting contribution was preserved/);
   });
 

@@ -38,6 +38,7 @@ function permissionFilteredDefinition(definition: VisualizationDefinition, visib
 
 export class PostgresVisualizationBlockRepository implements VisualizationBlockRepository, PostgresPortableProjectionContributor {
   static readonly portableObjectKinds = ["VisualizationBlock"] as const;
+  readonly portableObjectKinds = PostgresVisualizationBlockRepository.portableObjectKinds;
   constructor(private readonly kernel: PostgresKernel, private readonly prepareNotes: PrepareNotes) {}
   async prepare(client: PostgresQueryable): Promise<void> {
     await this.prepareNotes(client);

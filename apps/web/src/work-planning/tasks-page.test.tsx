@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { expect, test, vi } from "vitest";
 import { TasksPage } from "./tasks-page";
@@ -31,4 +31,32 @@ test("creates Projectless Tasks and changes canonical status with keyboard-opera
   await waitFor(() => expect(fetcher).toHaveBeenCalledWith("/api/workspaces/workspace/canonical-tasks", expect.objectContaining({
     method: "POST", body: JSON.stringify({ title: "Projectless work" }),
   })));
+});
+
+test("uses the shared page, primary-action, and filter language", async () => {
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ tasks: [], workflow }));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const { container } = render(<QueryClientProvider client={client}><TasksPage fetcher={fetcher} memberId="member" token="token" workspaceId="workspace" /></QueryClientProvider>);
+
+  await screen.findByRole("heading", { name: "Tasks" });
+  expect(container.querySelectorAll("h1")).toHaveLength(1);
+  expect(screen.queryByText("Workspace work")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Create Task" })).toHaveAttribute("data-variant", "primary");
+  const filters = screen.getByText("Filters", { selector: "summary" });
+  const disclosure = filters.closest("details");
+  expect(disclosure).toHaveAttribute("open");
+  fireEvent.click(filters);
+  expect(disclosure).not.toHaveAttribute("open");
+  fireEvent.click(filters);
+  expect(disclosure).toHaveAttribute("open");
+  expect(screen.getByRole("group", { name: "View" })).toBeInTheDocument();
+});
+
+test("explains that failed Task loading preserves the current view and draft", async () => {
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ message: "Tasks are temporarily unavailable." }), { status: 503 }));
+  show(fetcher);
+
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("Your Task view and draft are preserved");
+  expect(within(alert).getByRole("button", { name: "Try again" })).toBeInTheDocument();
 });
